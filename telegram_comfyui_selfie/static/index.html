@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ComfyUI Selfie Console</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">CS</div>
+        <div>
+          <h1>Selfie Console</h1>
+          <p>Telegram + ComfyUI</p>
+        </div>
+      </div>
+      <nav>
+        <button class="nav active" data-view="overview">总览</button>
+        <button class="nav" data-view="settings">设置</button>
+        <button class="nav" data-view="sessions">会话</button>
+        <button class="nav" data-view="actions">操作</button>
+      </nav>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <h2 id="view-title">总览</h2>
+          <p id="view-subtitle">服务状态、连接测试和快捷入口</p>
+        </div>
+        <div class="top-actions">
+          <button id="refresh-btn" class="icon-btn" title="刷新">↻</button>
+          <button id="bot-toggle-btn" class="primary">启动机器人</button>
+        </div>
+      </header>
+
+      <section id="toast" class="toast" hidden></section>
+
+      <section class="view active" id="view-overview">
+        <div class="status-grid">
+          <div class="metric">
+            <span>机器人</span>
+            <strong id="metric-bot">-</strong>
+          </div>
+          <div class="metric">
+            <span>会话</span>
+            <strong id="metric-sessions">-</strong>
+          </div>
+          <div class="metric">
+            <span>生图</span>
+            <strong id="metric-generate">-</strong>
+          </div>
+          <div class="metric">
+            <span>LLM</span>
+            <strong id="metric-llm">-</strong>
+          </div>
+        </div>
+
+        <div class="split">
+          <section class="panel">
+            <div class="panel-head">
+              <h3>连接</h3>
+              <span id="bot-name" class="muted">-</span>
+            </div>
+            <dl class="kv">
+              <dt>控制台</dt><dd id="status-web-url">-</dd>
+              <dt>配置文件</dt><dd id="status-config-path">-</dd>
+              <dt>状态文件</dt><dd id="status-state-path">-</dd>
+              <dt>ComfyUI</dt><dd id="status-comfyui">-</dd>
+              <dt>聊天模型</dt><dd id="status-chat-llm-model">-</dd>
+              <dt>生图辅助模型</dt><dd id="status-image-llm-model">-</dd>
+            </dl>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h3>检查</h3>
+            </div>
+            <div class="button-row">
+              <button data-action="test-comfyui">测试 ComfyUI</button>
+              <button data-action="test-chat-llm">测试聊天模型</button>
+              <button data-action="test-image-llm">测试生图辅助模型</button>
+            </div>
+            <pre id="test-output" class="logbox"></pre>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" id="view-settings">
+        <form id="config-form" class="settings-form"></form>
+      </section>
+
+      <section class="view" id="view-sessions">
+        <div class="session-layout">
+          <section class="panel">
+            <div class="panel-head">
+              <h3>会话列表</h3>
+              <button id="reload-sessions" class="icon-btn" title="刷新会话">↻</button>
+            </div>
+            <div id="session-list" class="session-list"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <h3>会话设置</h3>
+              <span id="selected-session-label" class="muted">未选择</span>
+            </div>
+            <form id="session-form" class="session-form"></form>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" id="view-actions">
+        <div class="split">
+          <section class="panel">
+            <div class="panel-head"><h3>发送命令</h3></div>
+            <form id="command-form" class="action-form">
+              <label>Chat ID<input name="chat_id" autocomplete="off"></label>
+              <label>命令<select name="command"></select></label>
+              <label>参数<textarea name="arg" rows="4"></textarea></label>
+              <button class="primary" type="submit">执行</button>
+            </form>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>发送文字</h3></div>
+            <form id="message-form" class="action-form">
+              <label>Chat ID<input name="chat_id" autocomplete="off"></label>
+              <label>内容<textarea name="text" rows="6"></textarea></label>
+              <button type="submit">发送</button>
+            </form>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
