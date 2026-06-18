@@ -4,12 +4,18 @@ const state = {
   secretPresent: {},
   sessions: [],
   selectedSession: null,
+  selectedWorldSession: null,
+  worldPreview: null,
+  logs: [],
+  selectedLog: null,
 };
 
 const viewMeta = {
   overview: ["总览", "服务状态、连接测试和快捷入口"],
   settings: ["设置", "连接、模型、生图和推送参数"],
   sessions: ["会话", "每个 Telegram 会话的角色与推送状态"],
+  world: ["动线", "按用户查看角色每日动线、城市地点和用户位置"],
+  logs: ["日志", "按用户查看活动日志"],
   actions: ["操作", "向指定 Chat ID 发送命令或文字"],
 };
 
@@ -24,6 +30,7 @@ const configSections = [
     ["chat_llm_api_key", "API Key", "secret"],
     ["chat_llm_model", "模型名", "text"],
     ["chat_llm_temperature", "回复温度", "text"],
+    ["chat_reply_length", "回复长度", "select:,简短,适中,详细"],
     ["chat_llm_max_tokens", "Max Tokens", "number"],
     ["chat_llm_disable_thinking", "关闭 Thinking", "bool"],
   ]],
@@ -82,12 +89,20 @@ const configSections = [
     ["daily_selfie_limit", "每日随机推送", "number"],
     ["location", "默认城市", "text"],
     ["timezone_offset", "时区偏移", "text"],
+    ["world_runtime_enabled", "启用自动动线", "bool"],
+    ["world_city_places_enabled", "城市地点增强", "bool"],
+    ["world_city_places_ttl_days", "城市地点缓存天数", "number"],
+    ["world_user_place_ttl_hours", "用户地点记忆小时", "number"],
+    ["world_holiday_dates", "节假日日期 YYYY-MM-DD", "textarea"],
+    ["world_workday_dates", "调休工作日 YYYY-MM-DD", "textarea"],
     ["default_purity", "默认纯良度", "text"],
     ["allow_llm_change_appearance", "允许模型改外型", "bool"],
     ["long_memory_enabled", "启用长期记忆注入", "bool"],
     ["long_memory_extract_enabled", "自动提取长期记忆", "bool"],
     ["long_memory_context_limit", "长期记忆注入条数", "number"],
     ["long_memory_db_path", "长期记忆数据库", "text"],
+    ["user_log_enabled", "分用户活动日志", "bool"],
+    ["user_log_dir", "日志目录（留空=data/logs）", "text"],
     ["short_context_history_limit", "短期场景历史条数", "number"],
     ["short_context_reset_gap_hours", "短期场景超时小时", "text"],
     ["web_enabled", "启用控制台", "bool"],
@@ -114,7 +129,31 @@ const sessionFields = [
   ["custom_allow_llm_change_appearance", "模型改外型", "select:,true,false"],
 ];
 
-const commands = ["菜单", "自拍", "天气", "天气设置", "画风", "角色", "外型", "人格", "纯良度", "新场景", "记忆", "记住", "忘记", "推送频率", "调度", "测试推送", "测试生图", "提示词", "生图状态", "管理", "turbo"];
+const commands = ["菜单", "帮助", "自拍", "天气", "天气设置", "画风", "角色", "外型", "人格", "纯良度", "新场景", "记忆", "记住", "忘记", "推送频率", "调度", "测试推送", "测试生图", "提示词", "生图状态", "管理", "turbo"];
+const commandHelp = {
+  "菜单": ["打开快速菜单或某个详细分区。", "设置 / 角色 / 生图 / 记忆 / 推送 / 动线 / 上下文 / 调试 / 全部"],
+  "帮助": ["等同于 /菜单。", ""],
+  "自拍": ["按当前会话和聊天情境生成一张图。", ""],
+  "天气": ["查看城市天气；留空时使用当前会话城市。", "上海"],
+  "天气设置": ["设置当前会话的城市、时区和天气来源；也会用于每日动线和城市地点增强。", "上海"],
+  "画风": ["查看、添加、删除或切换画风池。", "查看 / 添加 @artist / 删除 @artist / 切换 @artist"],
+  "角色": ["设定角色，或管理角色档案。", "天童爱丽丝 / list / load 名称 / delete 名称 / clearup / reset"],
+  "外型": ["查看或修改穿搭、物种特征、发型瞳色。", "black dress, glasses"],
+  "人格": ["直接改角色性格、语气和习惯。", "温柔、黏人、说话简短一点"],
+  "纯良度": ["查看或设置角色边界；数字越高越保守。", "0~10 / auto"],
+  "新场景": ["开启新的短期场景，避免上一轮话题继续串进来。", ""],
+  "记忆": ["查看、搜索、删除或清空当前角色长期记忆。", "查看 / 搜索 关键词 / 删除 ID / 清空 确认"],
+  "记住": ["手动写入一条当前角色长期记忆。", "我喜欢你用温柔一点的语气"],
+  "忘记": ["删除指定长期记忆，关键词会先列候选。", "ID / 关键词"],
+  "推送频率": ["设置每天主动发图次数，0 为关闭。", "3"],
+  "调度": ["查看今日主动推送计划。", ""],
+  "测试推送": ["强制触发一次主动推送。", "normal / morning / ntr"],
+  "测试生图": ["直接用文本测试 ComfyUI 生图链路。", "坐在窗边看雨"],
+  "提示词": ["查看最终提示词拼接示例。", ""],
+  "生图状态": ["查看 ComfyUI 连通性、模型和参数。", ""],
+  "管理": ["打开管理入口。", "角色池 / 会话 / 位置"],
+  "turbo": ["切换 Turbo 加速。", "on / off"],
+};
 
 function $(selector) { return document.querySelector(selector); }
 function $all(selector) { return [...document.querySelectorAll(selector)]; }
@@ -145,11 +184,27 @@ function setBusy(button, busy) {
   button.disabled = busy;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[ch]));
+}
+
+function delay(ms) {
+  return new Promise(resolve => window.setTimeout(resolve, ms));
+}
+
 function switchView(name) {
   $all(".nav").forEach(btn => btn.classList.toggle("active", btn.dataset.view === name));
   $all(".view").forEach(view => view.classList.toggle("active", view.id === `view-${name}`));
   $("#view-title").textContent = viewMeta[name][0];
   $("#view-subtitle").textContent = viewMeta[name][1];
+  if (name === "world") loadWorldSessions();
+  if (name === "logs") loadLogs();
 }
 
 async function loadAll() {
@@ -165,6 +220,7 @@ async function loadAll() {
   renderStatus();
   renderConfig();
   renderSessions();
+  renderWorldSessionList();
 }
 
 function renderStatus() {
@@ -181,6 +237,7 @@ function renderStatus() {
   $("#status-web-url").textContent = s.web_url;
   $("#status-config-path").textContent = s.config_path;
   $("#status-state-path").textContent = s.state_path;
+  $("#status-process").textContent = s.process_id ? `PID ${s.process_id}` : "-";
   $("#status-comfyui").textContent = s.comfyui_url || "-";
   $("#status-chat-llm-model").textContent = s.chat_llm_model ? `${s.chat_llm_model} @ ${s.chat_llm_api_base}` : "-";
   $("#status-image-llm-model").textContent = s.image_llm_model ? `${s.image_llm_model} @ ${s.image_llm_api_base}` : "-";
@@ -291,15 +348,293 @@ function renderSessionForm(sessionState, summary) {
   };
 }
 
+function worldSessionTitle(item) {
+  return item.character ? `${item.character} · ${item.chat_id}` : String(item.chat_id || item.session_id || "");
+}
+
+function renderWorldSessionList() {
+  const list = $("#world-session-list");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!state.sessions.length) {
+    list.innerHTML = `<div class="empty-state">暂无用户。机器人收到 Telegram 消息后会自动出现在这里。</div>`;
+    return;
+  }
+  state.sessions.forEach(item => {
+    const btn = document.createElement("button");
+    btn.className = "session-item";
+    btn.dataset.sid = item.session_id;
+    btn.innerHTML = `<div class="session-title">${escapeHtml(item.character || item.chat_id)}</div><div class="session-meta">${escapeHtml(item.location || "未设置城市")} · UTC${escapeHtml(item.timezone || "-")} · 推送 ${escapeHtml(item.daily_push || "-")}</div>`;
+    btn.onclick = () => selectWorldSession(item.session_id);
+    list.appendChild(btn);
+  });
+  if (state.selectedWorldSession) {
+    $all("#world-session-list .session-item").forEach(btn => btn.classList.toggle("active", btn.dataset.sid === state.selectedWorldSession));
+  }
+}
+
+async function loadWorldSessions() {
+  try {
+    const data = await api("/api/sessions");
+    state.sessions = data.sessions || [];
+    renderWorldSessionList();
+    if (!state.sessions.length) {
+      state.selectedWorldSession = null;
+      state.worldPreview = null;
+      $("#world-title").textContent = "每日动线";
+      $("#world-subtitle").textContent = "暂无用户";
+      $("#world-content").innerHTML = `<div class="empty-state">暂无用户。机器人收到 Telegram 消息后会自动出现在这里。</div>`;
+      return;
+    }
+    const exists = state.sessions.some(item => item.session_id === state.selectedWorldSession);
+    if (!state.selectedWorldSession || !exists) state.selectedWorldSession = state.sessions[0].session_id;
+    await loadWorldRoute();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+async function selectWorldSession(sessionId) {
+  state.selectedWorldSession = sessionId;
+  renderWorldSessionList();
+  await loadWorldRoute();
+}
+
+async function loadWorldRoute({ refreshPlaces = false } = {}) {
+  if (!state.selectedWorldSession) return;
+  const box = $("#world-content");
+  box.innerHTML = `<div class="empty-state">正在读取动线...</div>`;
+  try {
+    const sid = encodeURIComponent(state.selectedWorldSession);
+    const data = await api(refreshPlaces ? `/api/world/${sid}/places/refresh` : `/api/world/${sid}`, refreshPlaces ? { method: "POST" } : {});
+    state.worldPreview = data.world;
+    renderWorldRoute(data.world);
+  } catch (err) {
+    box.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
+    toast(err.message, "error");
+  } finally {
+    renderWorldSessionList();
+  }
+}
+
+function placeText(place) {
+  if (!place) return "未知";
+  const name = place.name ? ` · ${place.name}` : "";
+  return `${place.label || place.key || "未知"}${name}`;
+}
+
+function placeTags(place) {
+  if (!place) return "";
+  const tags = [place.indoor ? "室内" : "室外", place.public ? "公开场合" : "私密场合"];
+  if (place.views?.length) tags.push(`视角 ${place.views.join(" / ")}`);
+  return tags.map(tag => `<span>${escapeHtml(tag)}</span>`).join("");
+}
+
+function renderCandidateChips(items = []) {
+  if (!items.length) return `<span class="muted">无候选地点</span>`;
+  return items.map(item => `<span class="place-chip">${escapeHtml(placeText(item))}<small>${Number(item.score || 0).toFixed(1)}</small></span>`).join("");
+}
+
+function renderCatalog(catalog = {}) {
+  if (!catalog.enabled) return `<div class="empty-state">城市地点增强已关闭，当前使用基础场所目录。</div>`;
+  if (!catalog.has_catalog) return `<div class="empty-state">还没有城市地点目录。可以点右上角“刷新城市地点”，或通过 /天气设置 城市 生成。</div>`;
+  const rows = (catalog.items || []).map(item => `
+    <div class="catalog-row">
+      <strong>${escapeHtml(item.label || item.key)}</strong>
+      <span>${escapeHtml((item.places || []).join("、"))}</span>
+    </div>
+  `).join("");
+  const updated = catalog.updated_ago ? ` · ${escapeHtml(catalog.updated_ago)}` : "";
+  return `<div class="catalog-list"><div class="catalog-head">城市地点目录${updated}</div>${rows}</div>`;
+}
+
+function renderTimeline(timeline = []) {
+  if (!timeline.length) return `<div class="empty-state">没有可显示的动线。</div>`;
+  return `<div class="timeline-list">${timeline.map(item => {
+    const place = item.character_place || {};
+    const classes = item.is_current_slot ? "timeline-item now" : "timeline-item";
+    return `
+      <article class="${classes}">
+        <time>${escapeHtml(item.slot_label || "")}</time>
+        <div>
+          <strong>${escapeHtml(placeText(place))}</strong>
+          <p>${escapeHtml(item.time_period || "")} · ${escapeHtml(item.day_type || "")} · ${escapeHtml(item.weather || "天气未知")}</p>
+          <div class="tag-row">${placeTags(place)}</div>
+        </div>
+      </article>
+    `;
+  }).join("")}</div>`;
+}
+
+function renderWorldRoute(world) {
+  const box = $("#world-content");
+  if (!world) {
+    box.innerHTML = `<div class="empty-state">没有动线数据。</div>`;
+    return;
+  }
+  const session = world.session || {};
+  $("#world-title").textContent = worldSessionTitle(session) || "每日动线";
+  $("#world-subtitle").textContent = `${world.city || "未设置城市"} · UTC${world.timezone || "-"} · ${world.weather || "天气未知"}`;
+  if (!world.enabled) {
+    box.innerHTML = `<div class="empty-state">自动动线已关闭。可在“设置 → 推送与本地控制台 → 启用自动动线”打开。</div>`;
+    return;
+  }
+  const current = world.current || {};
+  const currentPlace = current.character_place || {};
+  const userPlace = current.user_place ? `${current.user_place.label}${current.user_place.text ? ` · ${current.user_place.text}` : ""}${current.user_place.updated_ago ? ` · ${current.user_place.updated_ago}` : ""}` : "未知";
+  const constraints = (current.constraints || []).map(item => `<li>${escapeHtml(item)}</li>`).join("");
+  const override = current.spatial_override ? `<div class="note-line"><strong>额外空间关系</strong><span>${escapeHtml(current.spatial_override)}</span></div>` : "";
+
+  box.innerHTML = `
+    <div class="world-summary">
+      <div><span>角色当前</span><strong>${escapeHtml(placeText(currentPlace))}</strong><div class="tag-row">${placeTags(currentPlace)}</div></div>
+      <div><span>用户位置</span><strong>${escapeHtml(userPlace)}</strong></div>
+      <div><span>地点来源</span><strong>${escapeHtml(current.catalog_source || "-")}</strong></div>
+      <div><span>天气</span><strong>${escapeHtml(current.weather || world.weather || "未知")}</strong></div>
+    </div>
+    <section class="world-block">
+      <h4>空间判断</h4>
+      <p>${escapeHtml(current.relation || "暂无判断")}</p>
+      ${override}
+    </section>
+    <section class="world-block">
+      <h4>候选地点</h4>
+      <div class="chip-row">${renderCandidateChips(current.character_candidates || [])}</div>
+    </section>
+    <section class="world-block">
+      <h4>场景约束</h4>
+      <ul class="constraint-list">${constraints || "<li>暂无额外约束</li>"}</ul>
+    </section>
+    <section class="world-block">
+      <h4>今日预览</h4>
+      ${renderTimeline(world.timeline || [])}
+    </section>
+    <section class="world-block">
+      <h4>城市地点</h4>
+      ${renderCatalog(world.catalog || {})}
+    </section>
+  `;
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+async function loadLogs() {
+  try {
+    const data = await api("/api/logs");
+    state.logs = data.logs || [];
+    renderLogList(data);
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+function renderLogList(meta) {
+  const list = $("#log-list");
+  list.innerHTML = "";
+  if (meta && meta.enabled === false) {
+    list.innerHTML = `<div class="empty-state">分用户日志已关闭，可在「设置 → 推送与本地控制台」开启。</div>`;
+    return;
+  }
+  if (!state.logs.length) {
+    list.innerHTML = `<div class="empty-state">暂无日志。用户与机器人交互后会自动生成。</div>`;
+    return;
+  }
+  state.logs.forEach(item => {
+    const btn = document.createElement("button");
+    btn.className = "session-item";
+    btn.dataset.chat = item.chat_id;
+    btn.innerHTML = `<div class="session-title">${item.character || item.chat_id}</div><div class="session-meta">${item.chat_id} · ${item.mtime_ago} · ${formatBytes(item.size)}</div>`;
+    btn.onclick = () => selectLog(item.chat_id);
+    list.appendChild(btn);
+  });
+  if (state.selectedLog) {
+    $all("#log-list .session-item").forEach(btn => btn.classList.toggle("active", btn.dataset.chat === state.selectedLog));
+  }
+}
+
+async function selectLog(chatId) {
+  state.selectedLog = chatId;
+  $("#log-title").textContent = `日志 · ${chatId}`;
+  $all("#log-list .session-item").forEach(btn => btn.classList.toggle("active", btn.dataset.chat === chatId));
+  try {
+    const data = await api(`/api/logs/${encodeURIComponent(chatId)}?tail=1000`);
+    const box = $("#log-content");
+    box.textContent = data.content || "（空）";
+    box.scrollTop = box.scrollHeight;
+  } catch (err) {
+    $("#log-content").textContent = err.message;
+  }
+}
+
 function fillCommandSelect() {
   const sel = document.querySelector("#command-form select[name=command]");
   sel.innerHTML = commands.map(cmd => `<option value="${cmd}">/${cmd}</option>`).join("");
+  sel.onchange = updateCommandHelp;
+  updateCommandHelp();
+}
+
+function updateCommandHelp() {
+  const sel = document.querySelector("#command-form select[name=command]");
+  const help = $("#command-help");
+  const arg = document.querySelector("#command-form textarea[name=arg]");
+  const [text, placeholder] = commandHelp[sel.value] || ["", ""];
+  if (help) help.textContent = text;
+  if (arg) arg.placeholder = placeholder || "";
 }
 
 async function initEvents() {
   $all(".nav").forEach(btn => btn.onclick = () => switchView(btn.dataset.view));
   $("#refresh-btn").onclick = () => loadAll().then(() => toast("已刷新"));
   $("#reload-sessions").onclick = () => loadAll().then(() => toast("会话已刷新"));
+  $("#reload-world-sessions").onclick = () => loadWorldSessions().then(() => toast("动线用户已刷新"));
+  $("#world-refresh").onclick = () => loadWorldRoute().then(() => toast("动线已刷新"));
+  $("#world-refresh-places").onclick = async (event) => {
+    if (!state.selectedWorldSession) return;
+    const btn = event.currentTarget;
+    setBusy(btn, true);
+    try {
+      await loadWorldRoute({ refreshPlaces: true });
+      toast("城市地点已刷新");
+    } finally {
+      setBusy(btn, false);
+    }
+  };
+  $("#reload-logs").onclick = () => loadLogs().then(() => toast("日志列表已刷新"));
+  $("#log-refresh").onclick = () => { if (state.selectedLog) selectLog(state.selectedLog); };
+  $("#log-clear").onclick = async () => {
+    if (!state.selectedLog) return;
+    try {
+      await api(`/api/logs/${encodeURIComponent(state.selectedLog)}`, { method: "DELETE" });
+      $("#log-content").textContent = "（已清空）";
+      toast("日志已清空");
+      await loadLogs();
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  };
+
+  $("#service-restart-btn").onclick = async (event) => {
+    if (!window.confirm("这会重启整个 Python 服务进程，当前 Web 控制台会短暂断开。继续吗？")) return;
+    const btn = event.currentTarget;
+    const oldPid = state.status?.process_id;
+    setBusy(btn, true);
+    setBusy($("#bot-toggle-btn"), true);
+    try {
+      const data = await api("/api/service/restart", { method: "POST" });
+      const restart = data.restart || {};
+      toast("正在重启服务，控制台会自动重新连接...");
+      await waitForServiceRestart(restart.old_pid || oldPid);
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+      setBusy($("#bot-toggle-btn"), false);
+    }
+  };
 
   $("#bot-toggle-btn").onclick = async (event) => {
     const btn = event.currentTarget;
@@ -383,6 +718,25 @@ async function initEvents() {
       setBusy(btn, false);
     }
   };
+}
+
+async function waitForServiceRestart(oldPid) {
+  const deadline = Date.now() + 35000;
+  while (Date.now() < deadline) {
+    await delay(1200);
+    try {
+      const data = await api(`/api/status?t=${Date.now()}`);
+      const pid = data.status?.process_id;
+      if (!oldPid || (pid && pid !== oldPid)) {
+        await loadAll();
+        toast(pid ? `服务已重启，新进程 PID ${pid}` : "服务已重启");
+        return;
+      }
+    } catch (err) {
+      // During restart the control port is expected to disappear briefly.
+    }
+  }
+  toast("重启请求已发出，但控制台暂时还没连回。稍后手动刷新页面即可。", "error");
 }
 
 async function runTest(path, body = undefined) {

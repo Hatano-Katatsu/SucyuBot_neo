@@ -1,0 +1,300 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import random
+import re
+import time
+import urllib.parse
+from datetime import datetime
+from typing import Any
+
+import aiohttp
+
+from .defaults import DEFAULT_CONFIG, WEEKDAY_NAMES
+from .image_planning import VALID_VIEWS, normalize_scene_visual_subject, scene_implies_mirror_selfie
+
+logger = logging.getLogger(__name__)
+
+
+class SchedulerRuntimeMixin:
+    def _get_recent_chat_history(self, state: dict[str, Any], session_id: str = "") -> str | None:
+        recent = []
+        now_ts = time.time()
+        for msg in state.get("recent_message_history", []):
+            if now_ts - msg.get("time", 0) < 3 * 3600:
+                dt = datetime.fromtimestamp(msg["time"], self._session_tz(session_id))
+                recent.append(f"[{dt.strftime('%H:%M')}] 用户: {msg.get('text', '')}")
+        return "\n".join(recent) if recent else None
+
+    async def _llm_write_scene(self, mode, weather, weekday, time_period, recent_chat=None, session_id=""):
+        if not self.has_llm_config("image"):
+            return None, None, None, None
+        persona = self._get_effective_persona(session_id)
+        spatial = self._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])
+        bot_name = self._get_session_cfg(session_id, "bot_name", "蕾伊")
+        bot_self_name = self._get_session_cfg(session_id, "bot_self_name", "我")
+        role_name = self._get_session_cfg(session_id, "role_name", "魅魔")
+        state = self._get_session_state(session_id)
+        dynamic = state.get("dynamic_appearance") or self.config.get("dynamic_appearance", "")
+        purity = self._get_purity(session_id)
+        safety = self._get_effective_safety(session_id)
+        quirk = self._get_session_cfg(session_id, "character_quirk_rule", "")
+        world_context = ""
+        if hasattr(self, "_format_world_context"):
+            try:
+                world_context = self._format_world_context(session_id, "", weather=weather, mode=mode)
+            except Exception:
+                logger.debug("world context build failed for scheduler scene", exc_info=True)
+
+        system = (
+            f"{persona}\n\n"
+            f"角色身份: 角色名参考「{bot_name}」，角色类型「{role_name}」，优先使用「{bot_self_name}」作为自称。\n"
+            f"当前附加外貌: {dynamic or '无'}\n"
+            f"角色性观念: {self._purity_directive(purity)}\n"
+            f"当前场合: {time_period}, {weekday}, {safety.get('context', '')}。\n"
+            "你只需要构思发送给用户的画面，输出简短中文画面描述 scene 和一句中文台词 caption，不要输出英文画图标签。\n"
+            "户外、办公室等公开场景必须穿着得体；深夜和私密场合可更放松。"
+        )
+        if world_context:
+            system += (
+                f"\n{world_context}\n"
+                "主动推送时优先遵守当前世界状态：把画面写成角色日常动线里的一个自然片段，不要无理由瞬移到用户身边。"
+            )
+        if quirk:
+            system += f"\n角色专属画面修补规则: {quirk}"
+        system += (
+            "\n画面主体规则: 图片主体默认必须是角色，不要把“你/用户”写成画面中被观看的主角。"
+            "用户只能作为视角来源、互动对象或少量局部元素出现；只有用户明确要求双人同框时，才允许用户作为第二主体。"
+            "如果草案写成“你坐着/你躺着/你穿着”，必须改写为“角色坐着/她躺着/角色穿着”。"
+            "角色名只用于台词称呼；默认或原创角色不要把名字当作画面标签，画面描述应依靠角色类型和外貌特征。既有作品角色可以保留角色名和作品名。"
+        )
+        system += (
+            "\n模式要求:\n"
+            "morning: 必须使用 pov，刚睡醒、厨房或卧室早安场景。\n"
+            f"normal: 根据默认物理空间设定（{spatial}）和近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror。\n"
+            f"ntr: 用户超过 {self._compute_ntr_threshold(purity)} 天没有互动时的冷落惩罚推送，强烈 NTR 危机感，通常 selfie 或分屏。\n"
+            "自拍物理规则: view=selfie 是前摄自拍，画面中不得出现手机、相机、镜子或拿手机的手；"
+            "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。\n"
+            "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。\n"
+            "必须输出严格 JSON: {\"scene\":\"...\",\"caption\":\"...\",\"view\":\"selfie|mirror|pov|third\"}。"
+        )
+        prompt = f"当前时段: {time_period}，星期: {weekday}，天气: {weather}，推送模式: {mode}。"
+        if recent_chat:
+            prompt += f"\n近期对话:\n{recent_chat}\n请呼应这些上下文。"
+        proactive = self._allow_llm_change_appearance(session_id) and random.random() < 0.15
+        if proactive:
+            prompt += "\n本次可以惊喜换造型，并添加 new_appearance_tags 字段，英文标签，逗号分隔。"
+        try:
+            text = await self._call_llm(system, prompt, temp=float(self._get_llm_value("image", "temperature_scene", "0.95")), tag="scene", purpose="image")
+            parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
+            view = (parsed.get("view") or "").strip().lower()
+            if view not in VALID_VIEWS:
+                view = "pov" if mode == "morning" else "selfie"
+            scene = normalize_scene_visual_subject(parsed.get("scene") or "")
+            if scene_implies_mirror_selfie(scene):
+                view = "mirror"
+            return scene, parsed.get("caption") or "", parsed.get("new_appearance_tags"), view
+        except Exception as exc:
+            logger.error("LLM scene generation failed: %s", exc)
+            return None, None, None, None
+
+    # ---------------------------------------------------------------------
+    # Weather / scheduler
+    # ---------------------------------------------------------------------
+    async def _fetch_weather(self, location: str = "", session_id: str = ""):
+        if not location:
+            now = time.time()
+            loc = self._get_session_cfg(session_id, "location", self.config.get("location", "上海"))
+            key = session_id or "__default__"
+            cached = self._weather_caches.get(key)
+            if cached and now - cached["ts"] < 1800:
+                return cached["data"]
+            location = loc
+            cache_key = key
+        else:
+            cache_key = None
+        try:
+            encoded = urllib.parse.quote(location.strip())
+            async with aiohttp.ClientSession(trust_env=True, timeout=aiohttp.ClientTimeout(total=10)) as s:
+                async with s.get(f"https://wttr.in/{encoded}?format=j1&lang=zh-cn", headers={"User-Agent": "curl/7.81.0"}) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.json(content_type=None)
+            cur = data.get("current_condition", [{}])[0]
+            desc = ""
+            for key in ("lang_zh-cn", "lang_zh", "lang_zh_cn"):
+                items = cur.get(key, [])
+                if items:
+                    desc = items[0].get("value", "")
+                    break
+            if not desc:
+                desc = cur.get("weatherDesc", [{}])[0].get("value", "")
+            nearest = data.get("nearest_area", [])
+            city, lon = location, None
+            if nearest:
+                names = nearest[0].get("areaName", [])
+                if names:
+                    city = names[0].get("value", location)
+                lon = nearest[0].get("longitude")
+            weather = {"desc": desc, "code": cur.get("weatherCode", "0"), "temp": cur.get("temp_C", "?"), "city": city, "lon": lon}
+            if cache_key:
+                self._weather_caches[cache_key] = {"data": weather, "ts": time.time()}
+            return weather
+        except Exception as exc:
+            logger.warning("weather fetch failed: %s", exc)
+            return None
+
+    @staticmethod
+    def _is_bad_weather(w) -> bool:
+        return bool(w and w.get("code", "0") in {"200", "299", "300", "399", "500", "599", "600", "699", "700", "799"})
+
+    async def scheduler_loop(self):
+        await asyncio.sleep(10)
+        while True:
+            try:
+                for session_id in list(self.sessions.keys()):
+                    state = self._get_session_state(session_id)
+                    if self._is_recently_active(state):
+                        continue
+                    now = self._session_now(session_id)
+                    today = now.strftime("%Y-%m-%d")
+                    time_str = now.strftime("%H:%M")
+                    if state.get("daily_trigger_date") != today:
+                        try:
+                            limit = int(str(self._get_session_cfg(session_id, "daily_selfie_limit", "3")).strip())
+                        except ValueError:
+                            limit = 3
+                        times = []
+                        if limit > 0:
+                            start, end = 8 * 60 + 30, 23 * 60 + 50
+                            slot = (end - start) / limit
+                            for i in range(limit):
+                                minute = random.randint(int(start + i * slot), int(start + (i + 1) * slot))
+                                times.append(f"{minute // 60:02d}:{minute % 60:02d}")
+                        state["daily_trigger_times"] = sorted(times)
+                        state["daily_trigger_date"] = today
+                        state["daily_triggered_times"] = []
+                        self._mark_dirty(session_id)
+
+                    if now.hour == 8 and now.minute < 5 and state.get("last_morning_greet_date") != today:
+                        state["last_morning_greet_date"] = today
+                        self._mark_dirty(session_id)
+                        if not self._check_goodnight_inhibition(state) and session_id not in self._active_pushes:
+                            asyncio.create_task(self._sched_fire(session_id, now, mode_override="morning"))
+
+                    triggered = state.get("daily_triggered_times", [])
+                    for t in state.get("daily_trigger_times", []):
+                        if t <= time_str and t not in triggered:
+                            triggered.append(t)
+                            state["daily_triggered_times"] = triggered
+                            self._mark_dirty(session_id)
+                            t_min = int(t.split(":")[0]) * 60 + int(t.split(":")[1])
+                            now_min = now.hour * 60 + now.minute
+                            if now_min - t_min <= 5 and not self._check_goodnight_inhibition(state) and session_id not in self._active_pushes:
+                                asyncio.create_task(self._sched_fire(session_id, now, mode_override="normal"))
+
+                    await self._check_ntr_stage(session_id, state)
+                self._flush_sessions(force=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("scheduler error: %s", exc, exc_info=True)
+            await asyncio.sleep(60)
+
+    async def _check_ntr_stage(self, session_id: str, state: dict[str, Any]):
+        last = state.get("last_interaction", 0)
+        if not last:
+            return
+        days = (time.time() - last) / 86400
+        threshold = self._compute_ntr_threshold(self._get_purity(session_id))
+        current = self._compute_ntr_stage(days, threshold)
+        reached = state.get("ntr_stage_reached", 0)
+        if current <= reached:
+            return
+        for stage in range(reached + 1, current + 1):
+            if stage <= 3:
+                asyncio.create_task(self._fire_ntr_stage_message(session_id, stage, int(days)))
+            elif stage == 4:
+                state["ntr_affection_reset"] = True
+                state["ntr_reconcile_count"] = 0
+            elif stage == 5:
+                logger.info("session %s reached NTR stage 5", session_id)
+        state["ntr_stage_reached"] = current
+        self._mark_dirty(session_id)
+
+    async def _sched_fire(self, session_id: str, local_dt: datetime, mode_override=None, skip_active_check=False):
+        if not session_id or (not skip_active_check and session_id in self._active_pushes):
+            return
+        self._active_pushes.add(session_id)
+        chat_id = self.chat_id_from_session(session_id)
+        try:
+            state = self._get_session_state(session_id)
+            if self._check_goodnight_inhibition(state):
+                return
+            if not skip_active_check and self._is_recently_active(state):
+                return
+            last = state.get("last_interaction", 0)
+            purity = self._get_purity(session_id)
+            mode = mode_override or "normal"
+            if last and time.time() - last > self._compute_ntr_threshold(purity) * 86400:
+                mode = "ntr"
+            if mode == "normal" and purity <= 0 and random.random() < 0.4:
+                mode = "ntr"
+            self._ulog(session_id, "PUSH", f"触发 mode={mode}")
+            w = await self._fetch_weather(session_id=session_id)
+            weather = f"{w['desc']} {w['temp']} C" if w else "未知"
+            recent = self._get_recent_chat_history(state, session_id)
+            time_period = self._get_time_period(local_dt.hour)
+            scene, caption, new_app, view = await self._llm_write_scene(mode, weather, WEEKDAY_NAMES[local_dt.weekday()], time_period, recent, session_id)
+            if not scene:
+                return
+            if new_app and self._allow_llm_change_appearance(session_id):
+                state["dynamic_appearance"] = new_app
+                self._save_session_state(session_id, state)
+            english = await self._translate_to_tags(scene, session_id=session_id, view=view)
+            ok, imgs, err = await self._do_generate(english, is_ntr=(mode == "ntr"), session_id=session_id)
+            if ok and imgs:
+                await self.send_photo(chat_id, imgs[0], caption or "")
+                source = self._format_image_source_description(
+                    intent=f"{mode} 模式自动推送，时段: {time_period}，天气: {weather}",
+                    prompt=recent or "",
+                )
+                self._record_sent_photo(session_id, scene, caption or "", view=view, source_description=source)
+            else:
+                self._ulog(session_id, "PUSH", f"生图失败 mode={mode}: {err}")
+                logger.error("scheduled generate failed: %s", err)
+        finally:
+            self._active_pushes.discard(session_id)
+
+    def _check_goodnight_inhibition(self, state: dict[str, Any]) -> bool:
+        text = (state.get("last_message_text") or "").lower()
+        ts = state.get("last_message_time", 0)
+        return time.time() - ts < 3600 and any(word in text for word in ("晚安", "睡觉", "睡了", "去睡", "good night", "sleep"))
+
+    @staticmethod
+    def _is_recently_active(state: dict[str, Any]) -> bool:
+        last = state.get("last_interaction", 0)
+        return last > 0 and time.time() - last < 30 * 60
+
+    async def _fire_ntr_stage_message(self, session_id: str, stage: int, days: int):
+        persona = self._get_effective_persona(session_id)
+        desc = {
+            1: ("不安", "角色感到孤独和不安，开始担心用户是不是不在乎自己。"),
+            2: ("难受", "角色越来越难受，开始怀疑自己的魅力。"),
+            3: ("幽怨", "角色充满幽怨和不满，开始考虑是否放下。"),
+        }.get(stage, ("不安", "角色感到不安。"))
+        try:
+            msg = await self._call_llm(
+                f"你正在扮演以下角色:\n{persona}\n\n用户已经 {days} 天没有互动。现在状态: {desc[0]}。{desc[1]}",
+                "用第一人称写 30-60 字角色台词，不要解释。",
+                temp=float(self._get_llm_value("image", "temperature_scene", "0.95")),
+                tag="ntr-stage",
+                purpose="image",
+            )
+        except Exception:
+            msg = {1: "已经好几天没和我说过话了……是不是我哪里做得不好？", 2: "又是没等到你的一天。你是不是已经忘了这里还有一个我。", 3: "如果你真的不在乎我，那我也该学着不等了。"}[stage]
+        self._ulog(session_id, "NTR", f"stage={stage} 冷落{days}天: {msg}")
+        await self.send_message(self.chat_id_from_session(session_id), msg)
+

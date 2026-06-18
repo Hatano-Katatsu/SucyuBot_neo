@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from pathlib import Path
 from typing import Any
 
 from aiohttp import web
 
+from .world_runtime import PLACE_TYPES
+
 
 SECRET_KEYS = {"telegram_bot_token", "llm_api_key", "chat_llm_api_key", "image_llm_api_key"}
+WORLD_TIMELINE_HOURS = (6, 8, 11, 13, 16, 18, 20, 23)
 
 
 def create_web_app(service) -> web.Application:
@@ -25,8 +29,14 @@ def create_web_app(service) -> web.Application:
     app.router.add_get("/api/sessions/{session_id:.+}", api_session_detail)
     app.router.add_patch("/api/sessions/{session_id:.+}", api_update_session)
     app.router.add_delete("/api/sessions/{session_id:.+}", api_delete_session)
+    app.router.add_post("/api/world/{session_id:.+}/places/refresh", api_world_refresh_places)
+    app.router.add_get("/api/world/{session_id:.+}", api_world_route)
     app.router.add_post("/api/bot/start", api_bot_start)
     app.router.add_post("/api/bot/stop", api_bot_stop)
+    app.router.add_post("/api/service/restart", api_service_restart)
+    app.router.add_get("/api/logs", api_logs)
+    app.router.add_get("/api/logs/{chat_id:.+}", api_log_detail)
+    app.router.add_delete("/api/logs/{chat_id:.+}", api_log_clear)
     app.router.add_post("/api/actions/test-comfyui", api_test_comfyui)
     app.router.add_post("/api/actions/test-llm", api_test_llm)
     app.router.add_post("/api/actions/send-message", api_send_message)
@@ -119,6 +129,116 @@ def human_ago(seconds: float) -> str:
     return f"{int(seconds // 86400)} 天前"
 
 
+def serialize_place(place: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not place:
+        return None
+    return {
+        "key": place.get("key", ""),
+        "label": place.get("label", ""),
+        "name": place.get("name", ""),
+        "score": round(float(place.get("score", 0) or 0), 2),
+        "public": bool(place.get("public")),
+        "indoor": bool(place.get("indoor")),
+        "views": list(place.get("views") or []),
+        "activities": list(place.get("activities") or []),
+    }
+
+
+def serialize_user_place(user_place: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not user_place:
+        return None
+    updated = float(user_place.get("updated_at", 0) or 0)
+    return {
+        "key": user_place.get("key", ""),
+        "label": user_place.get("label", ""),
+        "text": user_place.get("text", ""),
+        "updated_at": updated,
+        "updated_ago": human_ago(time.time() - updated) if updated else "",
+    }
+
+
+def serialize_world_state(world: dict[str, Any]) -> dict[str, Any]:
+    if not world:
+        return {}
+    now = world.get("now")
+    return {
+        "city": world.get("city", ""),
+        "now": now.strftime("%Y-%m-%d %H:%M") if now else "",
+        "weekday": world.get("weekday", ""),
+        "day_type": world.get("day_type", ""),
+        "time_period": world.get("time_period", ""),
+        "weather": world.get("weather", ""),
+        "weather_is_bad": bool(world.get("weather_is_bad")),
+        "character_place": serialize_place(world.get("character_place")),
+        "character_candidates": [serialize_place(item) for item in world.get("character_candidates", [])],
+        "user_place": serialize_user_place(world.get("user_place")),
+        "relation": world.get("relation", ""),
+        "constraints": list(world.get("constraints") or []),
+        "spatial_override": world.get("spatial_override", ""),
+        "catalog_source": world.get("catalog_source", ""),
+    }
+
+
+def build_catalog_preview(service, city: str) -> dict[str, Any]:
+    key = service._city_catalog_key(city) if hasattr(service, "_city_catalog_key") else ""
+    catalog = getattr(service, "city_place_catalogs", {}).get(key, {}) if key else {}
+    places = catalog.get("places") if isinstance(catalog, dict) else {}
+    places = places if isinstance(places, dict) else {}
+    updated = float(catalog.get("updated_at", 0) or 0) if isinstance(catalog, dict) else 0
+    items = []
+    for place_key, values in sorted(places.items()):
+        meta = PLACE_TYPES.get(place_key, {})
+        items.append({
+            "key": place_key,
+            "label": meta.get("label", place_key),
+            "places": [str(item) for item in values if str(item).strip()],
+        })
+    enabled = service._world_city_places_enabled() if hasattr(service, "_world_city_places_enabled") else bool(service.config.get("world_city_places_enabled", True))
+    return {
+        "city": city,
+        "enabled": enabled,
+        "has_catalog": bool(items),
+        "updated_at": updated,
+        "updated_ago": human_ago(time.time() - updated) if updated else "",
+        "items": items,
+    }
+
+
+def build_world_route_preview(service, session_id: str, weather: Any = None) -> dict[str, Any]:
+    state = service._get_session_state(session_id)
+    summary = session_summary(service, session_id, state)
+    enabled = service._world_runtime_enabled() if hasattr(service, "_world_runtime_enabled") else False
+    city = service._get_session_cfg(session_id, "location", service.config.get("location", ""))
+    now = service._session_now(session_id)
+    catalog = build_catalog_preview(service, city)
+    payload = {
+        "enabled": enabled,
+        "session": summary,
+        "city": city,
+        "timezone": service._get_session_cfg(session_id, "timezone_offset", ""),
+        "weather": service._weather_text(weather) if hasattr(service, "_weather_text") else (weather or ""),
+        "catalog": catalog,
+        "current": {},
+        "timeline": [],
+    }
+    if not enabled or not hasattr(service, "build_world_state"):
+        return payload
+
+    current_world = service.build_world_state(session_id, weather=weather, now=now, mode="chat")
+    payload["current"] = serialize_world_state(current_world)
+
+    timeline = []
+    for index, hour in enumerate(WORLD_TIMELINE_HOURS):
+        slot_now = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+        next_hour = WORLD_TIMELINE_HOURS[index + 1] if index + 1 < len(WORLD_TIMELINE_HOURS) else 24
+        item = serialize_world_state(service.build_world_state(session_id, weather=weather, now=slot_now, mode="chat"))
+        item["slot_label"] = f"{hour:02d}:00"
+        item["is_current_slot"] = hour <= now.hour < next_hour
+        timeline.append(item)
+    payload["timeline"] = timeline
+    return payload
+
+
 async def api_status(request: web.Request):
     service = service_from(request)
     config = service.config
@@ -126,6 +246,8 @@ async def api_status(request: web.Request):
     data = {
         "bot_running": service.is_bot_running,
         "bot_username": service._bot_username,
+        "process_id": os.getpid(),
+        "process_started_at": service.process_started_at,
         "web_url": f"http://{config.get('web_host', '127.0.0.1')}:{config.get('web_port', 8787)}",
         "config_path": str(service.config_path),
         "state_path": str(service.state_path),
@@ -221,6 +343,35 @@ async def api_delete_session(request: web.Request):
     return json_ok()
 
 
+async def api_world_route(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if sid not in service.sessions:
+        return json_error("会话不存在", status=404)
+    try:
+        weather = await service._fetch_weather("", sid)
+    except Exception:
+        weather = None
+    return json_ok({"world": build_world_route_preview(service, sid, weather=weather)})
+
+
+async def api_world_refresh_places(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if sid not in service.sessions:
+        return json_error("会话不存在", status=404)
+    city = service._get_session_cfg(sid, "location", service.config.get("location", ""))
+    try:
+        catalog = await service._ensure_city_place_catalog(city, force=True)
+    except Exception as exc:
+        return json_error(str(exc), status=502)
+    try:
+        weather = await service._fetch_weather("", sid)
+    except Exception:
+        weather = None
+    return json_ok({"catalog": catalog, "world": build_world_route_preview(service, sid, weather=weather)})
+
+
 async def api_bot_start(request: web.Request):
     service = service_from(request)
     try:
@@ -233,6 +384,72 @@ async def api_bot_start(request: web.Request):
 async def api_bot_stop(request: web.Request):
     service = service_from(request)
     await service.stop_bot()
+    return json_ok()
+
+
+async def api_service_restart(request: web.Request):
+    service = service_from(request)
+    try:
+        restart = service.prepare_process_restart()
+    except Exception as exc:
+        return json_error(f"无法准备重启: {exc}", status=500)
+    asyncio.create_task(service.shutdown_for_process_restart())
+    return json_ok({"restart": restart})
+
+
+async def api_logs(request: web.Request):
+    service = service_from(request)
+    log_dir = service._user_log_dir()
+    items = []
+    if log_dir.exists():
+        for path in log_dir.glob("telegram_*.log"):
+            chat_id = path.stem[len("telegram_"):]
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            sid = service.session_id_for_chat(chat_id)
+            state = service.sessions.get(sid, {})
+            items.append({
+                "chat_id": chat_id,
+                "session_id": sid,
+                "character": state.get("custom_character") or "",
+                "size": stat.st_size,
+                "mtime": stat.st_mtime,
+                "mtime_ago": human_ago(time.time() - stat.st_mtime),
+            })
+    items.sort(key=lambda item: item["mtime"], reverse=True)
+    return json_ok({"logs": items, "enabled": service._user_log_enabled(), "dir": str(log_dir)})
+
+
+async def api_log_detail(request: web.Request):
+    service = service_from(request)
+    chat_id = request.match_info["chat_id"]
+    path = service._user_log_path(service.session_id_for_chat(chat_id))
+    if not path.exists():
+        return json_error("日志不存在", status=404)
+    try:
+        tail = max(1, min(5000, int(request.query.get("tail", "500"))))
+    except ValueError:
+        tail = 500
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return json_ok({
+        "chat_id": chat_id,
+        "total_lines": len(lines),
+        "shown_lines": min(tail, len(lines)),
+        "content": "\n".join(lines[-tail:]),
+    })
+
+
+async def api_log_clear(request: web.Request):
+    service = service_from(request)
+    chat_id = request.match_info["chat_id"]
+    path = service._user_log_path(service.session_id_for_chat(chat_id))
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError as exc:
+        return json_error(str(exc), status=500)
     return json_ok()
 
 

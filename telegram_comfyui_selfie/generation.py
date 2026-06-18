@@ -16,18 +16,192 @@ from .defaults import DEFAULT_CONFIG
 logger = logging.getLogger(__name__)
 
 
+PHONE_TERMS = ("phone", "smartphone", "cellphone", "mobile phone", "手机")
+MIRROR_TERMS = ("mirror", "mirror reflection", "mirror selfie", "镜子", "对镜")
+
+
+def _append_negatives(negative: str, *terms: str) -> str:
+    seen = {item.strip().lower() for item in negative.split(",") if item.strip()}
+    additions = []
+    for term in terms:
+        key = term.strip().lower()
+        if key and key not in seen:
+            additions.append(term.strip())
+            seen.add(key)
+    if additions:
+        negative = f"{negative}, {', '.join(additions)}" if negative else ", ".join(additions)
+    return negative
+
+
+def _remove_negatives(negative: str, *terms: str) -> str:
+    banned = {term.strip().lower() for term in terms if term.strip()}
+    kept = []
+    for item in [part.strip() for part in negative.split(",") if part.strip()]:
+        if item.lower() not in banned:
+            kept.append(item)
+    return ", ".join(kept)
+
+
+def _infer_prompt_view(scene_desc: str) -> str:
+    text = scene_desc.strip().lower()
+    if "mirror reflection" in text or "mirror selfie" in text:
+        return "mirror"
+    if text.startswith("a front-camera selfie") or text.startswith("a selfie of"):
+        return "selfie"
+    if text.startswith("first-person pov"):
+        return "pov"
+    return ""
+
+
+def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
+    lowered = text.lower()
+    return any(term in lowered for term in terms)
+
+
+def _strip_non_mirror_camera_artifacts(scene_desc: str) -> str:
+    text = scene_desc
+    phrase_patterns = [
+        r"\b(?:while\s+)?(?:the\s+)?(?:other|another|one)\s+(?:hand\s+)?(?:is\s+)?(?:idly\s+|casually\s+)?(?:holds?|holding|grips?|gripping|checks?|checking|scrolls?\s+through|scrolling\s+through|plays?\s+with|using)\s+(?:a\s+|an\s+|one\s+|her\s+|his\s+|the\s+)?(?:smartphone|phone|cellphone|mobile phone)\b",
+        r"\b(?:one|another|the other)\s+hand\s+(?:is\s+)?(?:on|near|around)\s+(?:a\s+|one\s+|her\s+|his\s+|the\s+)?(?:smartphone|phone|cellphone|mobile phone)\b",
+        r"\bholding\s+(?:a\s+|one\s+|her\s+)?(?:smartphone|phone|cellphone|mobile phone)\b",
+        r"\b(?:smartphone|phone|cellphone|mobile phone)\s+in\s+(?:her\s+)?hand\b",
+        r"\bvisible\s+(?:smartphone|phone|cellphone|mobile phone)\b",
+        r"\b(?:smartphone|phone|cellphone|mobile phone)\s+screen\b",
+        r"\bwith\s+(?:a\s+|one\s+|her\s+)?(?:smartphone|phone|cellphone|mobile phone)\b",
+        r"\bmirror\s+selfie\b",
+        r"\bmirror\s+reflection\b",
+        r"\bin\s+(?:a\s+)?mirror\b",
+    ]
+    for pattern in phrase_patterns:
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:smartphone|phone|cellphone|mobile phone)\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bmirror\b", "", text, flags=re.IGNORECASE)
+    text = text.replace("手机", "").replace("镜子", "").replace("对镜", "")
+    text = re.sub(
+        r"\b(?:while\s+)?(?:the\s+)?(?:other|another|one)\s+(?:hand\s+)?(?:is\s+)?(?:idly\s+|casually\s+)?(?:holds?|holding|grips?|gripping|checks?|checking|scrolls?\s+through|scrolling\s+through|plays?\s+with|using)\s+(?:a|an|one|her|his|the)?\s*(?=[,.;]|$)",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\b(?:with|holding|holds?|using|uses?|gripping|grips?)\s+(?:a|an|one|her|his|the)\s*(?=[,.;]|$)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*,\s*,+", ", ", text)
+    text = re.sub(r"\s+([,.;])", r"\1", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    text = re.sub(r"(^|,\s*)(?:and\s*)?(?=,|$)", "", text, flags=re.IGNORECASE)
+    return text.strip(" ,")
+
+
+SECOND_PERSON_VISUAL_SUBJECT_RE = re.compile(
+    r"^(?P<prefix>\s*(?:(?:first-person\s+pov|pov)[^,]*,\s*)?"
+    r"(?:looking\s+at\s+a\s+(?:woman|girl|man|boy),\s*)?"
+    r"(?:solo,\s*)?)(?:you|user)\b",
+    re.IGNORECASE,
+)
+
+SECOND_PERSON_SUBJECT_ACTION_RE = re.compile(
+    r"\b(?:you|user)\s+(?=(?:are|lounge|sit|stand|lie|lean|kneel|crouch|wear|curl|rest|pose|look|wait|hold|twirl|play|smile|sleep)\b)",
+    re.IGNORECASE,
+)
+
+
+def _normalize_second_person_visual_subject(scene_desc: str) -> str:
+    text = (scene_desc or "").strip()
+    if not text:
+        return text
+
+    text = SECOND_PERSON_VISUAL_SUBJECT_RE.sub(lambda m: f"{m.group('prefix')}The character", text, count=1)
+    text = SECOND_PERSON_SUBJECT_ACTION_RE.sub("the character ", text)
+    text = re.sub(
+        r"\byour\s+(hair|face|body|shoulder|shoulders|chest|waist|leg|legs|shirt|dress|clothes|outfit|hand|hands|arm|arms|eyes|mouth)\b",
+        r"the character's \1",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    verb_fixes = {
+        "are": "is",
+        "lounge": "lounges",
+        "sit": "sits",
+        "stand": "stands",
+        "lie": "lies",
+        "lean": "leans",
+        "kneel": "kneels",
+        "crouch": "crouches",
+        "wear": "wears",
+        "curl": "curls",
+        "rest": "rests",
+        "pose": "poses",
+        "look": "looks",
+        "wait": "waits",
+        "hold": "holds",
+        "twirl": "twirls",
+        "play": "plays",
+        "smile": "smiles",
+        "sleep": "sleeps",
+    }
+    for base, fixed in verb_fixes.items():
+        text = re.sub(rf"\b(The character|the character)\s+{base}\b", rf"\1 {fixed}", text, flags=re.IGNORECASE)
+    return text
+
+
+def _visual_character_identity(state: dict[str, Any]) -> tuple[str, str]:
+    character = (state.get("custom_character") or "").strip()
+    series = (state.get("custom_series") or "").strip()
+    if character and series:
+        return character, series
+    return "", ""
+
+
+def _strip_non_visual_role_names(service: Any, state: dict[str, Any], session_id: str, scene_desc: str) -> str:
+    character, series = _visual_character_identity(state)
+    if character and series:
+        return scene_desc
+
+    names = {
+        (state.get("custom_character") or "").strip(),
+        (service.config.get("bot_name") or "").strip(),
+    }
+    if session_id:
+        names.add((service._get_session_cfg(session_id, "bot_name", "") or "").strip())
+    names.discard("")
+
+    aliases: set[str] = set()
+    default_role_name = "\u857e\u4f0a"
+    if default_role_name in names:
+        aliases.update({"Rey", "Rei", "Lei"})
+
+    text = scene_desc
+    for name in sorted(names, key=len, reverse=True):
+        if not name:
+            continue
+        if name.isascii():
+            aliases.add(name)
+        else:
+            text = text.replace(f"{name}\u7684", "\u89d2\u8272\u7684")
+            text = text.replace(name, "\u89d2\u8272")
+
+    for alias in sorted(aliases, key=len, reverse=True):
+        escaped = re.escape(alias)
+        text = re.sub(rf"\b{escaped}'s\b", "the character's", text, flags=re.IGNORECASE)
+        text = re.sub(rf"\b{escaped}\b", "the character", text, flags=re.IGNORECASE)
+    return text
+
+
 def view_opener(view: str, gender: str = "girl") -> str:
     subj = "man" if gender == "boy" else "woman"
     count = "1boy" if gender == "boy" else "1girl"
     return {
-        "selfie": f"A selfie of a {subj}, solo, arm outstretched toward the camera, looking at viewer",
-        "mirror": f"A mirror reflection of a {subj}, solo, only mirror reflection is visible, no foreground person, holding a smartphone, mirror reflection, looking at viewer through the mirror",
+        "selfie": f"A front-camera selfie of a {subj}, solo, upper body framing, looking at viewer",
+        "mirror": f"A mirror reflection of a {subj}, solo, single reflected body, only mirror reflection is visible, no foreground person, holding one smartphone with one hand, looking at viewer through the mirror",
         "pov": f"First-person POV, looking at a {subj}, solo, eye contact with the viewer",
         "third": f"{count}, solo",
     }.get(view, "")
 
 
 def build_prompt(service: Any, scene_desc: str, is_ntr: bool = False, session_id: str = "") -> tuple[str, str]:
+    state = service._get_session_state(session_id) if session_id else {}
+    scene_desc = _normalize_second_person_visual_subject(scene_desc)
+    scene_desc = _strip_non_visual_role_names(service, state, session_id, scene_desc)
     scene_lower = scene_desc.lower()
     sex_keywords = ["sex", "make love", "penetration", "vaginal", "missionary", "doggystyle", "cowgirl", "naked together"]
     is_sex_scene = any(k in scene_lower for k in sex_keywords)
@@ -36,7 +210,6 @@ def build_prompt(service: Any, scene_desc: str, is_ntr: bool = False, session_id
     purity = service._get_purity(session_id) if session_id else 1
     safety = service._get_effective_safety(session_id) if session_id else {"tag": None, "level": 1}
     current_style = service._get_current_style(session_id)
-    state = service._get_session_state(session_id) if session_id else {}
     if service._is_character_set(session_id):
         # 兜底：角色态但身体特征被清空（半重置残留）时回退全局 positive_prefix。
         char = state.get("custom_positive_prefix", "") or service.config.get("positive_prefix", "")
@@ -51,12 +224,16 @@ def build_prompt(service: Any, scene_desc: str, is_ntr: bool = False, session_id
     count = "1boy, solo" if male else "1girl, solo"
     if is_ntr:
         count = re.sub(r"\bsolo\b,?\s*", "", count).strip(", ")
-    character = state.get("custom_character", "")
-    series = state.get("custom_series", "")
+    character, series = _visual_character_identity(state)
     artist = current_style if current_style.startswith("@") else ""
     style_general = current_style if current_style and not current_style.startswith("@") else ""
 
     neg = service.config.get("negative_prompt", DEFAULT_CONFIG["negative_prompt"])
+    neg = _append_negatives(
+        neg,
+        "extra hands", "three hands", "three arms", "extra arms", "duplicate hands", "duplicate arms",
+        "malformed hands", "poorly drawn hands", "extra digits", "duplicated limbs",
+    )
     if state.get("custom_positive_prefix"):
         strip = {"clothes", "clothing"}
         if male:
@@ -69,20 +246,28 @@ def build_prompt(service: Any, scene_desc: str, is_ntr: bool = False, session_id
     elif not male and "male" not in neg.lower():
         neg += ", male, boy, man"
 
+    prompt_view = _infer_prompt_view(scene_desc)
     if is_sex_scene and not is_ntr_scene:
         for tag in ["selfie", "pov", "holding phone", "arm extended", "mirror selfie", "phone"]:
             scene_desc = re.sub(r"\b" + re.escape(tag) + r"\b", "", scene_desc, flags=re.IGNORECASE)
         scene_desc += ", third-person perspective, medium shot, side view"
-        neg += ", selfie, pov, holding phone, phone, cellphone, mobile phone, arm extended"
+        neg = _append_negatives(neg, "selfie", "pov", "holding phone", "phone", "cellphone", "mobile phone", "smartphone", "arm extended")
     else:
-        has_phone = any(k in scene_lower for k in ["phone", "smartphone", "cellphone", "mobile phone"])
-        has_mirror = "mirror" in scene_lower
-        if has_phone and not has_mirror:
-            scene_desc += ", holding phone, mirror selfie, mirror reflection, only mirror reflection is visible, no foreground person"
+        has_phone = _contains_any(scene_desc, PHONE_TERMS)
+        has_mirror = _contains_any(scene_desc, MIRROR_TERMS)
+        if prompt_view == "mirror" or ("mirror selfie" in scene_desc.lower() and has_phone):
+            neg = _remove_negatives(neg, "holding phone", "phone", "cellphone", "mobile phone", "smartphone", "visible phone", "phone in hand")
+            scene_desc += ", mirror reflection, single reflected body, only mirror reflection is visible, no foreground person"
+            neg = _append_negatives(neg, "foreground person", "person outside mirror", "second body", "duplicate body", "multiple reflections", "two phones", "multiple phones")
+        elif prompt_view in {"selfie", "pov"}:
+            scene_desc = _strip_non_mirror_camera_artifacts(scene_desc)
+            neg = _append_negatives(
+                neg,
+                "holding phone", "phone", "cellphone", "mobile phone", "smartphone", "visible phone",
+                "phone in hand", "mirror", "mirror reflection", "mirror selfie",
+            )
         elif not has_phone and not has_mirror and not is_ntr_scene:
-            neg += ", holding phone, phone, cellphone, mobile phone"
-        if "mirror" in scene_desc.lower():
-            scene_desc += ", mirror reflection, only mirror reflection is visible, no foreground person"
+            neg = _append_negatives(neg, "holding phone", "phone", "cellphone", "mobile phone", "smartphone", "visible phone")
 
     effective = safety.get("level", purity)
     if purity <= 2:
@@ -182,6 +367,12 @@ async def do_generate_locked(service: Any, scene_desc: str, is_ntr: bool = False
     ensure_comfy_session(service)
     positive, negative = build_prompt(service, scene_desc, is_ntr, session_id)
     seed = random.randint(0, 2**63 - 1)
+    if session_id and hasattr(service, "_ulog"):
+        service._ulog(
+            session_id,
+            "PROMPT",
+            f"seed={seed} scene={scene_desc} positive={positive} negative={negative}",
+        )
     workflow = build_workflow(service, positive, negative, seed)
     try:
         async with service.comfy_session.post(f"{service.comfyui_url}/prompt", json={"prompt": workflow}) as resp:

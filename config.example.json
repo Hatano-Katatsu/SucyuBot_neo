@@ -61,5 +61,11 @@
   "selfie_frequency": "频繁",
   "daily_selfie_limit": "3",
   "location": "上海",
-  "timezone_offset": "8.0"
+  "timezone_offset": "8.0",
+  "world_runtime_enabled": true,
+  "world_city_places_enabled": true,
+  "world_city_places_ttl_days": "30",
+  "world_user_place_ttl_hours": "4",
+  "world_holiday_dates": "",
+  "world_workday_dates": ""
 }
