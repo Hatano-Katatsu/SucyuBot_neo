@@ -14,6 +14,7 @@ import aiohttp
 
 from . import appearance as appearance_rules
 from . import generation as image_generation
+from . import prompt_intake
 from .defaults import DEFAULT_CONFIG
 from .image_planning import VALID_VIEWS, plan_roleplay_image
 from .memory import LongTermMemoryStore
@@ -23,6 +24,7 @@ from .memory_policy import MemoryPolicyMixin
 from .process_restart import ProcessRestartMixin
 from .scheduler_runtime import SchedulerRuntimeMixin
 from .telegram_io import TelegramIOMixin
+from .time_context import build_time_context, format_light_guard, format_time_context, rough_time_period
 from .world_runtime import WorldRuntimeMixin
 
 logger = logging.getLogger(__name__)
@@ -39,6 +41,35 @@ CHAT_VISUAL_NOISE_TAGS = {
     "masterpiece", "best quality", "absurdres", "highres", "detailed illustration", "anime coloring",
     "clean lineart", "soft cel shading", "score_9", "score_8", "score_7", "safe", "sensitive",
     "1girl", "1boy", "girl", "boy", "woman", "man", "solo",
+}
+
+VISUAL_IDENTITY_OVERRIDES = {
+    ("天童爱丽丝", "碧蓝档案"): ("aris (blue archive)", "Blue Archive"),
+    ("天童爱丽丝", "蔚蓝档案"): ("aris (blue archive)", "Blue Archive"),
+    ("天童アリス", "ブルーアーカイブ"): ("aris (blue archive)", "Blue Archive"),
+    ("Arisu Tendou", "Blue Archive"): ("aris (blue archive)", "Blue Archive"),
+    ("Tendou Alice", "Blue Archive"): ("aris (blue archive)", "Blue Archive"),
+    ("和泉紗霧", "エロマンガ先生"): ("izumi sagiri", "Eromanga Sensei"),
+    ("和泉纱雾", "埃罗芒阿老师"): ("izumi sagiri", "Eromanga Sensei"),
+    ("Kirito", "Sword Art Online"): ("kirito", "Sword Art Online"),
+    ("Serika Kuromi", "Blue Archive"): ("kuromi serika", "Blue Archive"),
+    ("Kuromi Serika", "Blue Archive"): ("kuromi serika", "Blue Archive"),
+    ("Yukikaze", "Azur Lane"): ("yukikaze (azur lane)", "Azur Lane"),
+    ("Jeanne d'Arc", "Fate/Grand Order"): ("jeanne d'arc (fate)", "Fate/Grand Order"),
+    ("雷军", "小米公司"): ("Lei Jun", "Xiaomi"),
+    ("姬野星奏", "想要传达给你的爱恋"): ("Himeno Sena", "Koi x Shin Ai Kanojo"),
+    ("姫野星奏", "恋×シンアイ彼女"): ("Himeno Sena", "Koi x Shin Ai Kanojo"),
+}
+
+SERIES_CANONICAL_NAMES = {
+    "blue archive": "Blue Archive",
+    "azur lane": "Azur Lane",
+    "fate/grand order": "Fate/Grand Order",
+    "sword art online": "Sword Art Online",
+    "eromanga sensei": "Eromanga Sensei",
+    "eromanga-sensei": "Eromanga Sensei",
+    "koi x shin ai kanojo": "Koi x Shin Ai Kanojo",
+    "xiaomi": "Xiaomi",
 }
 
 
@@ -330,13 +361,22 @@ class TelegramComfyUIService(
             "user_place_text": "",
             "user_place_updated_at": 0,
             "user_place_confidence": 0,
+            "custom_count": "",
             "custom_positive_prefix": "",
             "custom_default_hair": "",
             "custom_default_eyes": "",
             "custom_current_style": "",
+            "custom_scene_preference": "",
+            "custom_selfie_preference": "",
+            "custom_raw_profile_text": "",
+            "custom_prompt_intake": {},
             "custom_allow_llm_change_appearance": None,
             "custom_character": "",
             "custom_series": "",
+            "custom_visual_character": "",
+            "custom_visual_series": "",
+            "custom_character_age_stage": "",
+            "custom_character_day_anchor": "",
             "persona_user_set": False,
             "saved_characters": {},
             "purity": None,
@@ -435,7 +475,7 @@ class TelegramComfyUIService(
     def _get_effective_safety(self, session_id: str) -> dict[str, Any]:
         purity = self._get_purity(session_id)
         now = self._session_now(session_id)
-        period = self._get_time_period(now.hour)
+        period = self._get_time_context(session_id, now=now).get("period") or self._get_time_period(now.hour)
         effective = purity
         context = ""
         if period == "深夜":
@@ -502,11 +542,8 @@ class TelegramComfyUIService(
         if session_id:
             state = self._get_session_state(session_id)
             custom = str(state.get("custom_current_style", "")).strip()
-            if custom in pool:
-                return custom
             if custom:
-                state["custom_current_style"] = ""
-                self._mark_dirty(session_id)
+                return custom
         current = str(self.config.get("current_style", "")).strip()
         return current if current in pool else pool[0]
 
@@ -539,13 +576,21 @@ class TelegramComfyUIService(
 
     @staticmethod
     def _get_time_period(hour: int) -> str:
-        if 5 <= hour < 11:
-            return "早晨"
-        if 11 <= hour < 17:
-            return "下午"
-        if 17 <= hour < 21:
-            return "傍晚"
-        return "深夜"
+        return rough_time_period(hour)
+
+    def _get_time_context(self, session_id: str = "", now: datetime | None = None, weather: Any = None) -> dict[str, Any]:
+        now = now or self._session_now(session_id)
+        if weather is None:
+            cached = getattr(self, "_weather_caches", {}).get(session_id or "__default__")
+            if isinstance(cached, dict):
+                weather = cached.get("data")
+        return build_time_context(now, weather)
+
+    def _format_time_context(self, session_id: str = "", now: datetime | None = None, weather: Any = None) -> str:
+        return format_time_context(self._get_time_context(session_id, now=now, weather=weather))
+
+    def _format_light_guard(self, session_id: str = "", now: datetime | None = None, weather: Any = None) -> str:
+        return format_light_guard(self._get_time_context(session_id, now=now, weather=weather))
 
     def _tick_ntr_reconcile(self, state: dict[str, Any]) -> bool:
         if not state.get("ntr_affection_reset"):
@@ -591,11 +636,17 @@ class TelegramComfyUIService(
         state = self._get_session_state(session_id)
         history = state.get("sent_photos_history", [])
         source_description = (source_description or "").strip()
+        appearance_snapshot = (appearance or "").strip()
+        if not appearance_snapshot:
+            try:
+                appearance_snapshot = self._effective_visual_prompt_tags(session_id)
+            except Exception:
+                appearance_snapshot = state.get("dynamic_appearance", "")
         history.append({
             "timestamp": time.time(),
             "scene": scene,
             "caption": caption,
-            "appearance": appearance if appearance is not None else state.get("dynamic_appearance", ""),
+            "appearance": appearance_snapshot,
             "view": (view or "").strip().lower(),
             "source_description": source_description,
         })
@@ -617,6 +668,309 @@ class TelegramComfyUIService(
             if state.get("saved_characters"):
                 registry[sid] = state["saved_characters"]
         return registry
+
+    @staticmethod
+    def _identity_key(value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+    @staticmethod
+    def _canon_visual_series(value: str) -> str:
+        cleaned = image_generation._clean_visual_identity_tag(value)
+        return SERIES_CANONICAL_NAMES.get(cleaned.lower(), cleaned)
+
+    def _known_visual_identity(self, character: Any, series: Any) -> tuple[str, str]:
+        key = (self._identity_key(character), self._identity_key(series))
+        for (known_character, known_series), visual in VISUAL_IDENTITY_OVERRIDES.items():
+            if key == (self._identity_key(known_character), self._identity_key(known_series)):
+                return visual
+        return "", ""
+
+    def _resolve_migrated_visual_identity(self, character: Any, series: Any, *sources: Any) -> tuple[str, str]:
+        series_key = self._identity_key(series)
+        if series_key in image_generation.ORIGINAL_SERIES_MARKERS:
+            return "", ""
+        mapped = self._known_visual_identity(character, series)
+        if mapped[0] and mapped[1]:
+            return mapped
+        fallback_source = ", ".join(str(source or "") for source in sources if source)
+        fallback_character, fallback_series = image_generation._appearance_identity_fallback(fallback_source)
+        if fallback_character and fallback_series:
+            return fallback_character, self._canon_visual_series(fallback_series)
+        clean_character = image_generation._clean_visual_identity_tag(character)
+        clean_series = self._canon_visual_series(str(series or ""))
+        if clean_character and clean_series:
+            return clean_character, clean_series
+        return "", ""
+
+    def migrate_visual_identity_tags(self, *, create_backup: bool = True) -> dict[str, Any]:
+        updates: list[str] = []
+
+        def update_pair(container: dict[str, Any], char_key: str, series_key: str, visual_char_key: str, visual_series_key: str, *sources: Any) -> bool:
+            character = container.get(char_key, "")
+            series = container.get(series_key, "")
+            if not character and not series:
+                container.setdefault(visual_char_key, "")
+                container.setdefault(visual_series_key, "")
+                return False
+            target_character, target_series = self._resolve_migrated_visual_identity(character, series, *sources)
+            current_character = container.get(visual_char_key) or ""
+            current_series = container.get(visual_series_key) or ""
+            missing_keys = visual_char_key not in container or visual_series_key not in container
+            if not missing_keys and (current_character, current_series) == (target_character, target_series):
+                return False
+            container[visual_char_key] = target_character
+            container[visual_series_key] = target_series
+            return True
+
+        sessions_updated = 0
+        saved_updated = 0
+        for sid in list(self.sessions.keys()):
+            state = self._get_session_state(sid)
+            if update_pair(
+                state,
+                "custom_character",
+                "custom_series",
+                "custom_visual_character",
+                "custom_visual_series",
+                state.get("custom_positive_prefix", ""),
+                state.get("dynamic_appearance", ""),
+            ):
+                sessions_updated += 1
+                updates.append(f"{sid}: {state.get('custom_character') or '-'} -> {state.get('custom_visual_character') or '(blank)'} / {state.get('custom_visual_series') or '(blank)'}")
+            saved = state.get("saved_characters") or {}
+            for key, data in saved.items():
+                if not isinstance(data, dict):
+                    continue
+                if update_pair(
+                    data,
+                    "character",
+                    "series",
+                    "visual_character",
+                    "visual_series",
+                    data.get("appearance", ""),
+                ):
+                    saved_updated += 1
+                    updates.append(f"{sid} saved:{key}: {data.get('visual_character') or '(blank)'} / {data.get('visual_series') or '(blank)'}")
+
+        backup_path = ""
+        if (sessions_updated or saved_updated) and create_backup and self.state_path.exists():
+            backup = self.state_path.with_name(f"{self.state_path.stem}.visual-tags-backup-{int(time.time())}{self.state_path.suffix}")
+            backup.write_bytes(self.state_path.read_bytes())
+            backup_path = str(backup)
+        if sessions_updated or saved_updated:
+            self._write_state()
+            self._dirty_sessions.clear()
+        return {
+            "sessions_updated": sessions_updated,
+            "saved_characters_updated": saved_updated,
+            "backup_path": backup_path,
+            "updates": updates,
+        }
+
+    @staticmethod
+    def _preview_style_pool(raw: Any) -> list[str]:
+        if isinstance(raw, str):
+            parts = re.split(r"[\n;；]+", raw)
+        elif isinstance(raw, list):
+            parts = raw
+        else:
+            parts = []
+        pool: list[str] = []
+        seen: set[str] = set()
+        for item in parts:
+            style = str(item or "").strip()
+            key = style.lower()
+            if style and key not in seen:
+                pool.append(style)
+                seen.add(key)
+        return pool or ["@00 gx4"]
+
+    def _preview_current_style(self, state: dict[str, Any] | None = None, saved: dict[str, Any] | None = None) -> str:
+        if saved and str(saved.get("style") or "").strip():
+            return str(saved.get("style") or "").strip()
+        if state and str(state.get("custom_current_style") or "").strip():
+            return str(state.get("custom_current_style") or "").strip()
+        current = str(self.config.get("current_style") or "").strip()
+        if current:
+            return current
+        return self._preview_style_pool(self.config.get("style_pool") or self.config.get("style_prefix"))[0]
+
+    @staticmethod
+    def _combine_prompt_styles(*styles: str) -> str:
+        tags: list[str] = []
+        for style in styles:
+            tags.extend(image_generation._split_tags(style))
+        return image_generation._join_unique_tags(tags)
+
+    @staticmethod
+    def _clean_prompt_prefix_value(value: Any) -> dict[str, str] | None:
+        before = str(value or "").strip()
+        if not before:
+            return None
+        parts = image_generation._split_prompt_prefix(before)
+        if not parts.quality and not parts.style and not parts.count:
+            return None
+        after = parts.base
+        if after == before and not parts.style:
+            return None
+        return {
+            "before": before,
+            "after": after,
+            "removed_quality": parts.quality,
+            "removed_count": parts.count,
+            "moved_style": parts.style,
+        }
+
+    def _add_style_pool_entry(self, style: str):
+        style = (style or "").strip()
+        if not style:
+            return
+        pool = self._normalize_style_pool()
+        if style not in pool:
+            pool.append(style)
+            self.config["style_pool"] = "\n".join(pool)
+        self.config["current_style"] = style
+
+    def cleanup_prompt_prefix_slots(self, *, apply: bool = False, create_backup: bool = True) -> dict[str, Any]:
+        """清理老数据中混进 positive_prefix 的质量词和风格词，并将人数词迁移到 custom_count 槽。
+
+        默认只预览，不改配置/状态。执行时会先备份，再把质量词和人数词从存储中删掉，并把风格词合并到
+        current_style/custom_current_style/saved_character.style。人数词迁移到 custom_count 字段。
+        """
+        changes: list[dict[str, Any]] = []
+
+        config_clean = self._clean_prompt_prefix_value(self.config.get("positive_prefix", ""))
+        if config_clean:
+            style_before = self._preview_current_style()
+            style_after = self._combine_prompt_styles(style_before, config_clean["moved_style"])
+            changes.append({
+                "scope": "config",
+                "label": "config.positive_prefix",
+                "session_id": "",
+                "character": "",
+                "field": "positive_prefix",
+                "style_field": "current_style",
+                "style_before": style_before,
+                "style_after": style_after,
+                **config_clean,
+            })
+
+        for sid in list(self.sessions.keys()):
+            state = self._get_session_state(sid)
+            state_clean = self._clean_prompt_prefix_value(state.get("custom_positive_prefix", ""))
+            if state_clean:
+                style_before = self._preview_current_style(state)
+                style_after = self._combine_prompt_styles(style_before, state_clean["moved_style"])
+                changes.append({
+                    "scope": "session",
+                    "label": f"{sid}.custom_positive_prefix",
+                    "session_id": sid,
+                    "character": state.get("custom_character") or "",
+                    "field": "custom_positive_prefix",
+                    "style_field": "custom_current_style",
+                    "style_before": style_before,
+                    "style_after": style_after,
+                    **state_clean,
+                })
+
+            saved = state.get("saved_characters") or {}
+            if not isinstance(saved, dict):
+                continue
+            for key, data in saved.items():
+                if not isinstance(data, dict):
+                    continue
+                saved_clean = self._clean_prompt_prefix_value(data.get("appearance", ""))
+                if not saved_clean:
+                    continue
+                style_before = self._preview_current_style(state, data)
+                style_after = self._combine_prompt_styles(style_before, saved_clean["moved_style"])
+                changes.append({
+                    "scope": "saved_character",
+                    "label": f"{sid}.saved_characters.{key}.appearance",
+                    "session_id": sid,
+                    "saved_key": str(key),
+                    "character": data.get("character") or str(key),
+                    "field": "appearance",
+                    "style_field": "style",
+                    "style_before": style_before,
+                    "style_after": style_after,
+                    **saved_clean,
+                })
+
+        result: dict[str, Any] = {
+            "applied": bool(apply),
+            "config_updated": 0,
+            "sessions_updated": 0,
+            "saved_characters_updated": 0,
+            "count_migrated": 0,
+            "backup_paths": [],
+            "changes": changes,
+        }
+        if not apply or not changes:
+            return result
+
+        config_changed = any(change["scope"] == "config" for change in changes)
+        state_changed = any(change["scope"] in {"session", "saved_character"} for change in changes)
+        stamp = int(time.time())
+        if create_backup and config_changed and self.config_path.exists():
+            backup = self.config_path.with_name(f"{self.config_path.stem}.prompt-prefix-backup-{stamp}{self.config_path.suffix}")
+            backup.write_bytes(self.config_path.read_bytes())
+            result["backup_paths"].append(str(backup))
+        if create_backup and state_changed and self.state_path.exists():
+            backup = self.state_path.with_name(f"{self.state_path.stem}.prompt-prefix-backup-{stamp}{self.state_path.suffix}")
+            backup.write_bytes(self.state_path.read_bytes())
+            result["backup_paths"].append(str(backup))
+
+        touched_sessions: set[str] = set()
+        touched_saved = 0
+        count_migrated = 0
+        for change in changes:
+            scope = change["scope"]
+            if scope == "config":
+                self.config["positive_prefix"] = change["after"]
+                if change["moved_style"]:
+                    self._add_style_pool_entry(change["style_after"])
+                result["config_updated"] = 1
+                continue
+            sid = change["session_id"]
+            state = self._get_session_state(sid)
+            removed_count = (change.get("removed_count") or "").strip()
+            if scope == "session":
+                state["custom_positive_prefix"] = change["after"]
+                if change["moved_style"]:
+                    state["custom_current_style"] = change["style_after"]
+                if removed_count and not state.get("custom_count"):
+                    state["custom_count"] = removed_count
+                    count_migrated += 1
+                touched_sessions.add(sid)
+            elif scope == "saved_character":
+                saved = state.get("saved_characters") or {}
+                data = saved.get(change.get("saved_key", ""))
+                if not isinstance(data, dict):
+                    for item in saved.values():
+                        if isinstance(item, dict) and item.get("character") == change["character"]:
+                            data = item
+                            break
+                if not isinstance(data, dict):
+                    continue
+                data["appearance"] = change["after"]
+                if change["moved_style"]:
+                    data["style"] = change["style_after"]
+                if removed_count and not data.get("count"):
+                    data["count"] = removed_count
+                    count_migrated += 1
+                touched_sessions.add(sid)
+                touched_saved += 1
+
+        if config_changed:
+            self.save_config()
+        if touched_sessions:
+            self._write_state()
+            self._dirty_sessions.clear()
+        result["sessions_updated"] = len(touched_sessions)
+        result["saved_characters_updated"] = touched_saved
+        result["count_migrated"] = count_migrated
+        return result
 
     def _build_location_registry(self) -> dict[str, Any]:
         registry = {}
@@ -735,8 +1089,36 @@ class TelegramComfyUIService(
     def _view_opener(view: str, gender: str = "girl") -> str:
         return image_generation.view_opener(view, gender)
 
-    def _build_prompt(self, scene_desc: str, is_ntr: bool = False, session_id: str = "") -> tuple[str, str]:
-        return image_generation.build_prompt(self, scene_desc, is_ntr, session_id)
+    def _build_prompt(
+        self,
+        scene_desc: str,
+        is_ntr: bool = False,
+        session_id: str = "",
+        one_shot_appearance: str = "",
+        is_intimate: bool = False,
+    ) -> tuple[str, str]:
+        return image_generation.build_prompt(self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance, is_intimate=is_intimate)
+
+    def _format_last_prompt_slots(self, session_id: str = "") -> str:
+        slots = None
+        if session_id:
+            cache = getattr(self, "_last_prompt_slots_by_session", {})
+            if isinstance(cache, dict):
+                slots = cache.get(session_id)
+        slots = slots or getattr(self, "_last_prompt_slots", None)
+        if hasattr(slots, "pretty"):
+            return slots.pretty()
+        return ""
+
+    def _prompt_scene_preferences(self, session_id: str) -> dict[str, str]:
+        state = self._get_session_state(session_id)
+        intake = state.get("custom_prompt_intake") if isinstance(state.get("custom_prompt_intake"), dict) else {}
+        scene_preference = state.get("custom_scene_preference") or intake.get("scene_preference") or ""
+        selfie_preference = state.get("custom_selfie_preference") or intake.get("selfie_preference") or ""
+        return {
+            "scene_preference": str(scene_preference).strip(),
+            "selfie_preference": str(selfie_preference).strip(),
+        }
 
     def _build_workflow(self, positive: str, negative: str, seed: int) -> dict[str, Any]:
         return image_generation.build_workflow(self, positive, negative, seed)
@@ -826,14 +1208,18 @@ class TelegramComfyUIService(
         if view not in VALID_VIEWS:
             view = ""
         char_prefix = self._get_session_cfg(session_id, "positive_prefix", "")
-        opener = self._view_opener(view, self._infer_gender_from_prefix(char_prefix)) if view else ""
+        state = self._get_session_state(session_id) if session_id else {}
+        persisted_count = (state.get("custom_count") or "").strip()
+        gender = appearance_rules.infer_gender_from_count(persisted_count) if persisted_count else self._infer_gender_from_prefix(char_prefix)
+        opener = self._view_opener(view, gender) if view else ""
+        light_guard = self._format_light_guard(session_id)
         if view:
             if view == "mirror":
                 view_rule = "固定视角是 mirror 对镜自拍；系统会添加镜子和一部手机，你不要重复输出 mirror/phone/smartphone。"
             elif view == "selfie":
-                view_rule = "固定视角是 selfie 前摄自拍；画面中不得出现手机、相机、镜子、拿手机的手。"
+                view_rule = "固定视角是 selfie 前摄自拍；画面中不得出现手机、相机、镜子、拿手机的手、手机屏幕、消息界面、倒计时界面。"
             elif view == "pov":
-                view_rule = "固定视角是 POV；画面中不得出现自拍手机、镜子或拿手机的手。"
+                view_rule = "固定视角是 POV；画面中不得出现自拍手机、镜子、拿手机的手、手机屏幕、消息界面、倒计时界面。"
             else:
                 view_rule = "固定视角是 third 第三人称；不要把画面写成自拍或对镜自拍。"
             system = (
@@ -845,6 +1231,8 @@ class TelegramComfyUIService(
                 "Visual subject rule: the image subject is the character, not the user. "
                 "For default or original characters, do not turn role names into English names or visual tags; describe appearance and action instead. "
                 "Only keep a character name when it is paired with its published series. "
+                "Stable appearance is injected later; do not invent or restate stable hair, eye, body, species, or accessory traits unless the source explicitly asks for a one-shot change. "
+                f"{light_guard}"
                 "自然语言句子尽量不要使用逗号；重点保留动作、表情、姿态、服装、环境光线、空间关系和氛围。"
                 "避免复杂手势和多手互动；除非原文强制要求，尽量不强调手部。"
                 "输出格式: English visual sentence. key tag, key tag, key tag"
@@ -854,6 +1242,8 @@ class TelegramComfyUIService(
                 "Visual subject rule: the image subject is the character, not the user. "
                 "For default or original characters, do not turn role names into English names or visual tags; describe appearance and action instead. "
                 "Only keep a character name when it is paired with its published series. "
+                "Stable appearance is injected later; do not invent or restate stable hair, eye, body, species, or accessory traits unless the source explicitly asks for a one-shot change. "
+                f"{light_guard}"
                 "你是专业的 Anima3 提示词工程师。Anima3 支持英文自然语言与 danbooru 标签混编。"
                 "将中文场景描述重构为一句英文自然语言画面描述，后接少量 danbooru 补强标签。"
                 "直接输出英文提示词，不要 JSON、不要解释，不要压缩成纯标签列表。"
@@ -881,12 +1271,47 @@ class TelegramComfyUIService(
     async def _llm_classify_character(self, user_text: str) -> dict[str, Any]:
         system = (
             "你是角色设定助手。判断用户描述属于既有作品角色或外观体貌特征，只输出 JSON。\n"
-            "既有作品角色输出 {\"type\":\"character\",\"name\":\"角色名\",\"series\":\"作品名\",\"persona\":\"中文人设\",\"appearance\":\"英文prompt标签\",\"purity\":0到10整数}。\n"
+            "既有作品角色输出 {\"type\":\"character\",\"name\":\"用户可读角色名\",\"series\":\"用户可读作品名\","
+            "\"prompt_name\":\"Anima/danbooru可识别的英文或罗马音角色tag\",\"prompt_series\":\"Anima/danbooru可识别的英文或罗马音作品tag\","
+            "\"persona\":\"中文人设\",\"appearance\":\"英文prompt标签\",\"purity\":0到10整数}。\n"
             "外观描述输出 {\"type\":\"appearance\",\"tags\":\"英文prompt标签\"}。\n"
-            "appearance 必须包含性别标签开头，例如 1girl 或 1boy。"
+            "name/series 可以保留中文或日文方便用户识别；prompt_name/prompt_series 必须使用英文、罗马音或官方英文名，不要输出中文、日文假名或汉字。"
+            "例如：天童爱丽丝 => prompt_name 写 aris (blue archive)，prompt_series 写 Blue Archive；和泉纱雾 => prompt_name 写 Sagiri Izumi，prompt_series 写 Eromanga Sensei。\n"
+            "appearance 只写【稳定的身体身份特征】：性别、发色、发长、瞳色、肤色、体型，以及兽耳/兽角/伤疤/纹身等永久性标志；必须以 1girl 或 1boy 开头。\n"
+            "appearance 绝对不要包含：服装、盔甲、制服、披风、武器、旗帜、持有物、配饰、姿势、表情、场景、灯光——这些会随每张图的剧情变化，由场景单独决定，写进身份特征会导致换装时和场景服装冲突。"
         )
         text = await self._call_llm(system, user_text, temp=float(self._get_llm_value("image", "temperature_classify", "0.1")), tag="classify", purpose="image")
         return json.loads(text)
+
+    async def _normalize_prompt_intake(self, user_text: str, context: str = "oc") -> dict[str, str]:
+        local = prompt_intake.heuristic_intake(user_text)
+        if not self.has_llm_config("image"):
+            return local
+        system = (
+            "你是提示词槽位归档器，只输出 JSON。用户会自然描述角色、外观、穿搭、画风、场景偏好或关系。"
+            "不要扩写，不要润色，不要替用户新增设定，只把原文按用途归档。"
+            "字段固定为: name, role, age, anchor, persona, base_appearance, dynamic_appearance, relationship, city, style, scene_preference, selfie_preference, unclassified。"
+            "base_appearance 只放稳定身体身份特征：性别、发色、发型、瞳色、肤色、体型、物种特征、伤疤、纹身等永久标志。"
+            "dynamic_appearance 只放当前/默认穿搭、配饰、临时发型瞳色、持有物；不要放场景、姿势、灯光。"
+            "style 只放画风、artist tag、渲染风格；不要放质量词。"
+            "scene_preference 只放地点、时间、自拍习惯、常去场所等偏好，不要放稳定外貌。"
+            "质量词如 masterpiece/best quality/absurdres/score_9 不得进入任何外观字段。"
+            "age 只允许 minor/adult/空；anchor 可用 company/school/factory/farm/construction/medical/retail/delivery/driver/home/flexible/空。"
+            "如果不确定，放 unclassified。所有字段值都用简短原文或标签字符串，不能使用数组。"
+        )
+        try:
+            text = await self._call_llm(
+                system,
+                user_text,
+                temp=float(self._get_llm_value("image", "temperature_classify", "0.1")),
+                tag=f"prompt-intake-{context}",
+                purpose="image",
+            )
+            llm = prompt_intake.parse_llm_json(text, user_text)
+            return prompt_intake.merge_intake(llm, local, user_text)
+        except Exception as exc:
+            logger.warning("prompt intake normalization failed: %s", exc)
+            return local
 
     async def _llm_infer_timezone(self, city: str):
         if not city or not self.has_llm_config("image"):
@@ -909,11 +1334,25 @@ class TelegramComfyUIService(
     def _ensure_comfy_session(self):
         image_generation.ensure_comfy_session(self)
 
-    async def _do_generate(self, scene_desc: str, is_ntr: bool = False, session_id: str = "") -> tuple[bool, list[bytes], str]:
-        return await image_generation.do_generate(self, scene_desc, is_ntr, session_id)
+    async def _do_generate(
+        self,
+        scene_desc: str,
+        is_ntr: bool = False,
+        session_id: str = "",
+        one_shot_appearance: str = "",
+        is_intimate: bool = False,
+    ) -> tuple[bool, list[bytes], str]:
+        return await image_generation.do_generate(self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance, is_intimate=is_intimate)
 
-    async def _do_generate_locked(self, scene_desc: str, is_ntr: bool = False, session_id: str = "") -> tuple[bool, list[bytes], str]:
-        return await image_generation.do_generate_locked(self, scene_desc, is_ntr, session_id)
+    async def _do_generate_locked(
+        self,
+        scene_desc: str,
+        is_ntr: bool = False,
+        session_id: str = "",
+        one_shot_appearance: str = "",
+        is_intimate: bool = False,
+    ) -> tuple[bool, list[bytes], str]:
+        return await image_generation.do_generate_locked(self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance, is_intimate=is_intimate)
 
     # ---------------------------------------------------------------------
     # Tools
@@ -949,35 +1388,28 @@ class TelegramComfyUIService(
         scene = (plan.get("scene") or "").strip()
         if not scene:
             return "缺少图片意图"
-        caption = (plan.get("caption") or "").strip()
         final_view = (plan.get("view") or "").strip()
         new_app = (plan.get("new_appearance_tags") or "").strip()
+        is_intimate = bool(plan.get("is_intimate"))
         state = self._get_session_state(session_id)
-        if new_app and self._allow_llm_change_appearance(session_id):
-            state["dynamic_appearance"] = new_app
-            self._save_session_state(session_id, state)
         english = await self._translate_to_tags(scene, session_id=session_id, view=final_view)
-        ok, imgs, err = await self._do_generate(english, session_id=session_id)
+        if new_app:
+            english = f"{english}, {new_app}" if english else new_app
+        ok, imgs, err = await self._do_generate(english, session_id=session_id, one_shot_appearance=new_app or "", is_intimate=is_intimate)
         if not ok or not imgs:
             self._ulog(session_id, "ERROR", f"工具生图失败: {err}")
             return f"生图失败: {err}"
-        await self.send_photo(chat_id, imgs[0], caption)
+        # 聊天途中的配图不带配文：聊天模型已经在文字回复里说话了，再加配文会重复。
+        await self.send_photo(chat_id, imgs[0], "")
         self._record_sent_photo(
             session_id,
             scene,
-            caption,
-            appearance=state.get("dynamic_appearance", ""),
+            "",
+            appearance=new_app or state.get("dynamic_appearance", ""),
             view=final_view,
             source_description=source_description,
         )
-        detail = f"图片已生成并发送。画面: {scene}"
-        if caption:
-            detail += f"；配文: {caption}"
-        return detail
-
-    async def tool_generate_selfie(self, chat_id, session_id: str) -> str:
-        await self.cmd_selfie(chat_id, session_id, "")
-        return "自拍已发送"
+        return f"图片已生成并发送。画面: {scene}"
 
     async def tool_change_appearance(self, session_id: str, description: str = "", mode: str = "merge") -> str:
         state = self._get_session_state(session_id)

@@ -52,6 +52,12 @@ class ChatContextMixin:
 
     async def run_roleplay_chat(self, chat_id: int | str, session_id: str, user_text: str) -> str:
         state = self._get_session_state(session_id)
+        if hasattr(self, "_ensure_life_profile"):
+            # 角色生活档案（年龄段/白天职场）按人设推断并缓存：命中缓存时无开销，仅人设变动才重算。
+            try:
+                await self._ensure_life_profile(session_id)
+            except Exception:
+                logger.debug("ensure life profile failed", exc_info=True)
         messages = self._build_chat_messages(session_id, user_text)
         tools = self._chat_tools_schema()
         try:
@@ -75,7 +81,7 @@ class ChatContextMixin:
             messages.append(assistant)
             for call in tool_calls:
                 tool_result = await self._execute_tool_call(chat_id, session_id, call)
-                if (call.get("function") or {}).get("name") in ("generate_roleplay_image", "roleplay_selfie"):
+                if (call.get("function") or {}).get("name") == "generate_roleplay_image":
                     image_emitted = True
                 messages.append({
                     "role": "tool",
@@ -104,18 +110,11 @@ class ChatContextMixin:
         else:
             content = self._strip_photo_memory_echo(content)
 
-        # 模型没主动配图时，用独立的"配图时机判断器"按对话内容决定是否补一张——
-        # 内容驱动、时机浮动，而不是固定轮次硬发。
+        # 模型没主动配图时，用独立的"配图时机判断器"按对话内容决定是否补一张。
+        # 只先做判断；真正发图放到本轮对话入库之后，避免图片规划看不到刚才的用户/角色文本。
+        judge_decision = None
         if not image_emitted:
-            decision = await self._judge_image_moment(session_id, user_text, content)
-            if decision:
-                self._ulog(session_id, "JUDGE", f"配图时机=发 intent={decision.get('intent','')[:60]}")
-                asyncio.create_task(self.tool_generate_image(
-                    chat_id, session_id,
-                    intent=decision.get("intent", ""),
-                    mood=decision.get("mood", ""),
-                    view=decision.get("view", ""),
-                ))
+            judge_decision = await self._judge_image_moment(session_id, user_text, content)
 
         history = state.get("chat_history", [])
         history.append({"role": "user", "content": user_text})
@@ -123,6 +122,15 @@ class ChatContextMixin:
             history.append({"role": "assistant", "content": content})
         state["chat_history"] = history[-50:]
         self._save_session_state(session_id, state)
+        if judge_decision:
+            self._ulog(session_id, "JUDGE", f"配图时机=发 intent={judge_decision.get('intent','')[:60]}")
+            asyncio.create_task(self.tool_generate_image(
+                chat_id, session_id,
+                intent=judge_decision.get("intent", ""),
+                mood=judge_decision.get("mood", ""),
+                prompt=content,
+                view=judge_decision.get("view", ""),
+            ))
         self._queue_long_memory_extraction(session_id, user_text, content)
         return content
 
@@ -130,7 +138,10 @@ class ChatContextMixin:
         state = self._get_session_state(session_id)
         now = self._session_now(session_id)
         weekday = WEEKDAY_NAMES[now.weekday()]
-        time_period = self._get_time_period(now.hour)
+        time_ctx = self._get_time_context(session_id, now=now)
+        time_period = time_ctx.get("period") or self._get_time_period(now.hour)
+        time_light = self._format_time_context(session_id, now=now)
+        light_guard = self._format_light_guard(session_id, now=now)
         persona = self._get_effective_persona(session_id)
         role_name = self._get_session_cfg(session_id, "role_name", "魅魔")
         bot_name = self._get_session_cfg(session_id, "bot_name", "蕾伊")
@@ -156,6 +167,8 @@ class ChatContextMixin:
             f"你正在与用户进行{role_name}角色扮演。角色名参考是「{bot_name}」，不要强行把角色名当自称；"
             f"对话中优先使用「{bot_self_name}」作为自称。\n"
             f"当前时间: {now.strftime('%H:%M')} ({weekday}) {time_period}。\n"
+            f"季节与自然光: {time_light}。\n"
+            f"{light_guard}\n"
             f"纯度指令: {self._purity_directive(self._get_purity(session_id))}\n"
             f"外貌修改权限: {'允许' if self._allow_llm_change_appearance(session_id) else '禁止'}。\n"
             f"发图频率: {freq_inst}\n"
@@ -178,11 +191,26 @@ class ChatContextMixin:
             system += (
                 "\n\n"
                 f"{world_context}\n"
-                "聊天时优先遵守这个世界状态：不要让角色无理由瞬移；如果用户和角色不在同一地点，优先用消息、自拍、电话或约定见面推进。"
+                "聊天时优先遵守这个世界状态：你清楚自己此刻所在的地点，也知道今天接下来一个时间段大概会去哪里，"
+                "在相关时可以自然地提到（例如“我现在在公司”“等会儿要去逛商场”），但不要机械地报地点。"
+                "不要让角色无理由瞬移；如果用户和角色不在同一地点，优先用消息、自拍、电话或约定见面推进。"
             )
         if state.get("replying_to_selfie"):
-            source = state.get("last_sent_selfie_source_description") or state.get("last_sent_selfie_caption", "")
-            system += f"\n用户这句话是在回应你刚才发出的画面，上一张图片的原始描述是: {source}"
+            photos = state.get("sent_photos_history", [])
+            last_photo = photos[-1] if photos else {}
+            scene = (last_photo.get("scene") or "").strip()
+            caption = (last_photo.get("caption") or "").strip()
+            parts = []
+            if scene:
+                parts.append(f"画面: {scene}")
+            if caption:
+                parts.append(f"你给这张图配的台词: {caption}")
+            if parts:
+                system += f"\n你刚向用户发了一张图。{'；'.join(parts)}。用户现在说:"
+            else:
+                fallback = state.get("last_sent_selfie_source_description") or ""
+                if fallback:
+                    system += f"\n你刚向用户发了一张图，描述: {fallback}。用户现在说:"
             state["replying_to_selfie"] = False
         if state.get("short_context_start", 0):
             system += (
@@ -220,18 +248,10 @@ class ChatContextMixin:
                         },
                         "required": ["intent"],
                     },
-                },
             },
-            {
-                "type": "function",
-                "function": {
-                    "name": "roleplay_selfie",
-                    "description": "生成一张随机自拍并带台词发送。",
-                    "parameters": {"type": "object", "properties": {}},
-                },
-            },
-            {
-                "type": "function",
+        },
+        {
+            "type": "function",
                 "function": {
                     "name": "change_appearance",
                     "description": "持续修改角色外貌、穿搭或配饰。",
@@ -264,8 +284,6 @@ class ChatContextMixin:
                 mood=args.get("mood", ""),
                 must_include=args.get("must_include", ""),
             )
-        if fn == "roleplay_selfie":
-            return await self.tool_generate_selfie(chat_id, session_id)
         if fn == "change_appearance":
             return await self.tool_change_appearance(session_id, args.get("description", ""), args.get("mode", "merge"))
         return f"未知工具: {fn}"
@@ -326,10 +344,14 @@ class ChatContextMixin:
             "偶尔": "门槛较高：只在特别有画面感、或用户明显想看时才发。",
         }.get(freq, "门槛中等。")
         recent = self._recent_dialog_for_judge(state)
+        now = self._session_now(session_id)
+        light_guard = self._format_light_guard(session_id, now=now)
         system = (
             "你是角色扮演配图时机判断器。判断“此刻给用户发一张角色的自拍/场景图”是否自然且加分。\n"
             "适合发：用户想看角色、聊到穿搭/外貌/场景、画面感强、调情或推进氛围的时刻。\n"
-            "不适合发：纯逻辑问答、简单寒暄确认、话题与画面无关、或刚刚才发过图。\n"
+            "不适合发：纯逻辑问答、简单寒暄确认、话题与画面无关、角色刚回复没有可拍的动作/地点/穿搭、或刚刚才发过图。\n"
+            "若决定发图，intent 必须严格贴合“角色刚回复”的地点、动作、情绪和用户刚说的话；不要另起一个新场景，不要改写成角色刚才没提到的地点。\n"
+            f"{light_guard}\n"
             f"发图门槛: {tendency}\n"
             + ("已经较久没有配图了，如有合适时机可适当倾向于发。\n" if overdue else "")
             + "只输出严格 JSON: {\"send\": true/false, \"intent\": \"这张图要回应的对话意图(中文,具体)\", "
@@ -412,8 +434,11 @@ class ChatContextMixin:
             if scene and scene in existing:
                 continue
             content = f"*（你最近一次出现在用户眼前的样子：{scene}）*"
+            caption = (photo.get("caption") or "").strip()
+            if caption and caption != scene:
+                content += f"\n你给这张图配的文字：{caption}"
             source = (photo.get("source_description") or "").strip()
             if source and source != scene:
-                content += f"\n这张图当时要回应的原始描述：{source}"
+                content += f"\n这张图当时要回应的原始描写：{source}"
             messages.append({"role": "assistant", "content": content})
 

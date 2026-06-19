@@ -13,6 +13,20 @@ logger = logging.getLogger(__name__)
 
 VALID_VIEWS = {"selfie", "mirror", "pov", "third"}
 
+INTIMATE_CONTEXT_ZH = frozenset({
+    "交合", "做爱", "插入", "进入她", "抽插", "骑乘", "后入", "结合",
+    "融为一体", "裸体相拥", "赤裸相拥", "缠绵", "交缠", "交媾",
+    "在她体内", "进入体内", "律动", "进出", "顶入", "挺入", "侵入",
+    "侵占", "占有她", "要了她", "亲密交互", "交合中", "结合中",
+})
+
+
+def _detect_intimate_context(*sources: str) -> bool:
+    combined = " ".join(s for s in sources if s)
+    if not combined:
+        return False
+    return any(kw in combined for kw in INTIMATE_CONTEXT_ZH)
+
 
 def normalize_view(view: str | None) -> str:
     view = (view or "").strip().lower()
@@ -102,17 +116,21 @@ async def plan_roleplay_image(
     requested_view = normalize_view(view)
     fallback_scene = (prompt or intent or must_include).strip()
     if not service.has_llm_config("image"):
-        return {"scene": fallback_scene, "caption": "", "view": requested_view, "new_appearance_tags": None}
+        return {"scene": fallback_scene, "view": requested_view, "new_appearance_tags": None, "is_intimate": False}
 
     state = service._get_session_state(session_id)
     now = service._session_now(session_id)
     weather_data = await service._fetch_weather(session_id=session_id)
     weather = f"{weather_data['desc']} {weather_data['temp']} C" if weather_data else "未知"
-    time_period = service._get_time_period(now.hour)
+    time_ctx = service._get_time_context(session_id, now=now, weather=weather_data)
+    time_period = time_ctx.get("period") or service._get_time_period(now.hour)
+    time_light = service._format_time_context(session_id, now=now, weather=weather_data)
+    light_guard = service._format_light_guard(session_id, now=now, weather=weather_data)
     weekday = WEEKDAY_NAMES[now.weekday()]
     safety = service._get_effective_safety(session_id)
     purity = service._get_purity(session_id)
     dynamic = state.get("dynamic_appearance") or service.config.get("dynamic_appearance", "")
+    prompt_prefs = service._prompt_scene_preferences(session_id) if hasattr(service, "_prompt_scene_preferences") else {}
     quirk = service._get_session_cfg(session_id, "character_quirk_rule", "")
     spatial = service._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])
     bot_name = service._get_session_cfg(session_id, "bot_name", "蕾伊")
@@ -137,13 +155,21 @@ async def plan_roleplay_image(
         except Exception:
             logger.debug("world context build failed for image planning", exc_info=True)
 
+    is_intimate = _detect_intimate_context(intent, mood, prompt, dialog_context or "")
+
     system = (
         f"{service._get_effective_persona(session_id)}\n\n"
+        "Scene boundary: write scene as environment, camera framing, action, lighting, mood, and spatial context. "
+        "Do not restate stable character appearance that is already in persona/current appearance/photo memory, such as hair color, eye color, body traits, species traits, or permanent accessories. "
+        "Only mention clothing/accessories in scene when they are a deliberate one-shot visual change for this image; put one-shot visual tags in new_appearance_tags.\n"
         "你是角色扮演图片导演，负责把聊天模型给出的图片意图整合成最终画面。\n"
         f"角色身份: 角色名参考「{bot_name}」，角色类型「{role_name}」，优先使用「{bot_self_name}」作为自称。\n"
         f"当前附加外貌: {dynamic or '无'}\n"
+        f"用户画面偏好: 场景偏好={prompt_prefs.get('scene_preference') or '无'}；自拍偏好={prompt_prefs.get('selfie_preference') or '无'}。\n"
         f"角色性观念: {service._purity_directive(purity)}\n"
         f"当前场合: {time_period}, {weekday}, {safety.get('context', '')}。\n"
+        f"季节与自然光: {time_light}。\n"
+        f"{light_guard}\n"
         f"默认物理空间关系: {spatial}\n"
         "你要综合用户最近的话、聊天模型的意图、最近发过的照片、时间天气、外貌和安全约束，"
         "输出适合发给用户的一张图。不要输出英文画图标签。\n"
@@ -156,6 +182,18 @@ async def plan_roleplay_image(
         )
     if quirk:
         system += f"\n角色专属画面修补规则: {quirk}"
+    if is_intimate:
+        system += (
+            "\n亲密交互场景规则（覆盖通用视角与场景规则）:\n"
+            "当前处于亲密交互（交合/缠绵）场景，画面核心是角色本身而非环境。以下规则优先于通用规则:\n"
+            "- 视角固定为 pov（用户第一人称视角），严禁使用 selfie 或 mirror；不需要第三人称叙事全景。\n"
+            "- 人物优先: 画面重点在于角色的表情（迷离、红晕、咬唇、眼神）、身体反应（汗水、潮红、喘息、微颤）和动作姿态（拥抱、交缠、迎合），而非环境背景。\n"
+            "- 用户存在感: POV 亲密场景中，用户（男性）必须有可见的身体局部——手掌抓握腰肢/手腕、手臂环抱、胸膛压近、腹肌轮廓等。只画局部（手/臂/胸/腹/腿），不要画完整男性角色或男性面部。scene 中明确写出用户可见的身体部位及其动作。\n"
+            "- 场景精简: 环境/背景/灯光描述压缩到最短，只交代必要的时间光线氛围即可，不要展开写房间布置、窗外风景或道具细节。\n"
+            "- 构图倾向: 近距离特写或半身近景，聚焦面部表情、上半身互动和用户的身体局部，避免全身远景。\n"
+            "- 自拍物理规则不变: 画面中仍不得出现手机、相机、镜子或拿手机的手；手部规则不变。\n"
+            "- new_appearance_tags 仍只填写临时外观变化，不要把情绪或动作写进去。"
+        )
     system += (
         "\n画面主体规则: 图片主体默认必须是角色，不要把“你/用户”写成画面中被观看的主角。"
         "用户只能作为视角来源、互动对象或少量局部元素出现；只有用户明确要求双人同框时，才允许用户作为第二主体。"
@@ -167,9 +205,12 @@ async def plan_roleplay_image(
         "异地、展示穿搭或回复照片请求时优先 selfie/mirror；需要叙事全景时用 third。"
         "自拍物理规则: view=selfie 是前摄自拍，画面中不得出现手机、相机、镜子或拿手机的手；"
         "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。"
+        "selfie/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。"
         "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。"
-        "必须输出严格 JSON: {\"scene\":\"...\",\"caption\":\"...\",\"view\":\"selfie|mirror|pov|third\",\"new_appearance_tags\":\"...\"}。"
-        "new_appearance_tags 没有变化时留空。"
+        "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third\",\"new_appearance_tags\":\"...\"}。"
+        "聊天模型已经给出文字回复，这张图只配画面、不需要任何台词或配文，不要输出 caption 字段。"
+        "new_appearance_tags 只填这张图需要额外强调的一次性服装、配饰、临时发型或发色瞳色变化，英文标签逗号分隔；"
+        "这些标签只用于本次生图，不会写入长期外型。不要把姿势、表情、动作、场景、灯光写进去。没有一次性外观补充时留空。"
     )
 
     user = (
@@ -198,16 +239,19 @@ async def plan_roleplay_image(
         parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
     except Exception as exc:
         logger.error("roleplay image planning failed: %s", exc)
-        return {"scene": fallback_scene, "caption": "", "view": requested_view, "new_appearance_tags": None}
+        return {"scene": fallback_scene, "view": requested_view, "new_appearance_tags": None, "is_intimate": False}
 
     scene = normalize_scene_visual_subject((parsed.get("scene") or fallback_scene).strip())
     planned_view = normalize_view(parsed.get("view"))
-    final_view = requested_view or planned_view or "selfie"
+    default_view = "selfie"
+    if is_intimate:
+        default_view = "pov"
+    final_view = requested_view or planned_view or default_view
     if scene_implies_mirror_selfie(scene):
         final_view = "mirror"
     return {
         "scene": scene,
-        "caption": (parsed.get("caption") or "").strip(),
         "view": final_view,
         "new_appearance_tags": (parsed.get("new_appearance_tags") or "").strip(),
+        "is_intimate": is_intimate,
     }

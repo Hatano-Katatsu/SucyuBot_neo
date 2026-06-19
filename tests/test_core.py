@@ -9,8 +9,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from telegram_comfyui_selfie import TelegramComfyUIService
-from telegram_comfyui_selfie.image_planning import format_dialog_context, format_sent_photo_context, normalize_scene_visual_subject
-from telegram_comfyui_selfie.webui import build_world_route_preview, cast_config_value, masked_config, session_summary
+from telegram_comfyui_selfie.image_planning import _detect_intimate_context, format_dialog_context, format_sent_photo_context, normalize_scene_visual_subject
+from telegram_comfyui_selfie.prompt_intake import heuristic_intake
+from telegram_comfyui_selfie.webui import build_world_route_preview, cast_config_value, masked_config, serialize_prompt_slots, session_summary
 
 
 class ServiceTestCase(unittest.TestCase):
@@ -38,6 +39,9 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(svc.parse_command(" 自拍 神户街头 "), ("自拍", "神户街头"))
         self.assertEqual(svc.parse_command(" /自拍 "), ("自拍", ""))
         self.assertEqual(svc.parse_command("菜单 动线"), ("菜单", "动线"))
+        self.assertEqual(svc.parse_command("初始化"), ("初始化", ""))
+        self.assertEqual(svc.parse_command("创建OC"), ("创建OC", ""))
+        self.assertEqual(svc.parse_command("oc 名字：小雨"), ("创建OC", "名字：小雨"))
         self.assertEqual(svc.parse_command("我想看自拍"), (None, "我想看自拍"))
 
     def test_bare_selfie_message_dispatches_to_selfie_command(self):
@@ -62,10 +66,166 @@ class ServiceTestCase(unittest.TestCase):
 
             text = svc.send_message.await_args.args[1]
             self.assertIn("快速菜单", text)
-            self.assertIn("推荐先设置", text)
+            self.assertIn("第一次使用", text)
+            self.assertIn("/初始化", text)
             self.assertIn("/角色 <角色名>", text)
+            self.assertIn("/创建OC", text)
             self.assertIn("/菜单 设置", text)
             self.assertIn("/菜单 动线", text)
+
+        asyncio.run(run())
+
+    def test_start_alias_dispatches_to_init_guide(self):
+        async def run():
+            svc = self.make_service()
+            svc.send_message = AsyncMock()
+
+            await svc.dispatch_command(1, "telegram:1", "start", "")
+
+            text = svc.send_message.await_args.args[1]
+            self.assertIn("初始化向导", text)
+            self.assertIn("/创建OC", text)
+
+        asyncio.run(run())
+
+    def test_create_oc_help_includes_template(self):
+        async def run():
+            svc = self.make_service()
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_create_oc(1, "telegram:1", "")
+
+            text = svc.send_message.await_args.args[1]
+            self.assertIn("创建原创角色 OC", text)
+            self.assertIn("名字：小雨", text)
+            self.assertIn("初始穿搭", text)
+
+        asyncio.run(run())
+
+    def test_create_oc_sets_identity_without_visual_series(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            state = svc._get_session_state(sid)
+            state["chat_history"] = [{"role": "user", "content": "旧角色的话题"}]
+            translations = {
+                "黑色短发，蓝眼睛，身材纤细，浅色皮肤": "short black hair, blue eyes, slender body, pale skin",
+                "白衬衫，深色百褶裙": "white shirt, dark pleated skirt",
+            }
+            svc._translate_appearance_tags = AsyncMock(side_effect=lambda text: translations[text])
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_create_oc(
+                1,
+                sid,
+                "名字：小雨\n"
+                "角色类型：大学生\n"
+                "年龄段：adult\n"
+                "白天去向：school\n"
+                "性格：温柔、慢热\n"
+                "外貌：黑色短发，蓝眼睛，身材纤细，浅色皮肤\n"
+                "初始穿搭：白衬衫，深色百褶裙\n"
+                "与你的关系：同城暧昧对象",
+            )
+
+            state = svc._get_session_state(sid)
+            self.assertEqual(state["custom_character"], "小雨")
+            self.assertEqual(state["custom_series"], "")
+            self.assertIn("你是小雨", state["custom_scheduled_persona"])
+            self.assertEqual(state["custom_count"], "1girl")
+            self.assertNotIn("1girl", state["custom_positive_prefix"])
+            self.assertIn("short black hair", state["custom_positive_prefix"])
+            self.assertIn("short black hair", state["custom_positive_prefix"])
+            self.assertEqual(state["dynamic_appearance"], "white shirt, dark pleated skirt")
+            self.assertEqual(state["custom_character_age_stage"], "adult")
+            self.assertEqual(state["custom_character_day_anchor"], "school")
+            self.assertEqual(state["chat_history"], [])
+            self.assertEqual(state["saved_characters"]["小雨"]["series"], "")
+            text = svc.send_message.await_args.args[1]
+            self.assertIn("OC 已创建: 小雨", text)
+
+        asyncio.run(run())
+
+    def test_prompt_intake_splits_natural_oc_profile(self):
+        intake = heuristic_intake("小雨，大学生，金发蓝眼，低马尾，穿宽松白毛衣，和用户是同城暧昧对象，住在上海")
+
+        self.assertEqual(intake["name"], "小雨")
+        self.assertEqual(intake["role"], "大学生")
+        self.assertEqual(intake["age"], "adult")
+        self.assertEqual(intake["anchor"], "school")
+        self.assertIn("金发蓝眼", intake["base_appearance"])
+        self.assertIn("低马尾", intake["base_appearance"])
+        self.assertIn("宽松白毛衣", intake["dynamic_appearance"])
+        self.assertIn("同城暧昧对象", intake["relationship"])
+        self.assertEqual(intake["city"], "上海")
+
+    def test_create_oc_accepts_natural_profile_and_saves_raw_intake(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            translations = {
+                "金发蓝眼，低马尾": "blonde hair, blue eyes, low ponytail",
+                "穿宽松白毛衣": "oversized white sweater",
+            }
+            svc._translate_appearance_tags = AsyncMock(side_effect=lambda text: translations[text])
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_create_oc(
+                1,
+                sid,
+                "小雨，大学生，金发蓝眼，低马尾，穿宽松白毛衣，和用户是同城暧昧对象",
+            )
+
+            state = svc._get_session_state(sid)
+            self.assertEqual(state["custom_character"], "小雨")
+            self.assertEqual(state["custom_series"], "")
+            self.assertEqual(state["custom_count"], "1girl")
+            self.assertNotIn("1girl", state["custom_positive_prefix"])
+            self.assertIn("blonde hair", state["custom_positive_prefix"])
+            self.assertEqual(state["dynamic_appearance"], "oversized white sweater")
+            self.assertEqual(state["custom_raw_profile_text"], "小雨，大学生，金发蓝眼，低马尾，穿宽松白毛衣，和用户是同城暧昧对象")
+            self.assertIn("base_appearance", state["custom_prompt_intake"])
+            self.assertIn("自动归档", svc.send_message.await_args.args[1])
+
+        asyncio.run(run())
+
+    def test_appearance_natural_input_splits_stable_and_dynamic_slots(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            translations = {
+                "金发蓝眼": "blonde hair, blue eyes",
+                "穿白毛衣": "white sweater",
+            }
+            svc._translate_appearance_tags = AsyncMock(side_effect=lambda text: translations[text])
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_appearance(1, sid, "金发蓝眼，穿白毛衣")
+
+            state = svc._get_session_state(sid)
+            self.assertEqual(state["custom_count"], "1girl")
+            self.assertNotIn("1girl", state["custom_positive_prefix"])
+            self.assertIn("blonde hair", state["custom_positive_prefix"])
+            self.assertEqual(state["dynamic_appearance"], "white sweater")
+            text = svc.send_message.await_args.args[1]
+            self.assertIn("已按槽位自动归档", text)
+            self.assertIn("基础外观", text)
+            self.assertIn("穿搭/配饰", text)
+
+        asyncio.run(run())
+
+    def test_appearance_english_tags_keep_legacy_dynamic_behavior(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_appearance(1, sid, "white hair, glasses")
+
+            state = svc._get_session_state(sid)
+            self.assertEqual(state["custom_positive_prefix"], "")
+            self.assertIn("white hair", state["dynamic_appearance"])
+            self.assertIn("glasses", state["dynamic_appearance"])
 
         asyncio.run(run())
 
@@ -171,6 +331,19 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("@00 gx4", pos)
         self.assertIn("bad anatomy", neg)
 
+    def test_record_sent_photo_uses_effective_visual_appearance_when_empty(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["custom_default_hair"] = "silver_hair,bun"
+
+        svc._record_sent_photo(sid, "standing by a window", appearance="")
+
+        appearance = svc._get_session_state(sid)["sent_photos_history"][-1]["appearance"].lower()
+        self.assertIn("silver hair", appearance)
+        self.assertIn("hair bun", appearance)
+        self.assertNotIn("silver_hair", appearance)
+
     def test_chat_prompt_injects_visible_appearance_and_accessories(self):
         svc = self.make_service()
         sid = "telegram:1"
@@ -232,6 +405,8 @@ class ServiceTestCase(unittest.TestCase):
             "custom_character": "Alice",
             "custom_location": "大阪",
             "custom_timezone_offset": "9",
+            "custom_character_age_stage": "adult",
+            "custom_character_day_anchor": "company",
             "user_place": "mall",
             "user_place_label": "商场",
             "user_place_text": "我在商场",
@@ -251,9 +426,35 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(preview["session"]["chat_id"], 123)
         self.assertEqual(preview["city"], "大阪")
         self.assertEqual(preview["current"]["user_place"]["key"], "mall")
+        self.assertEqual(preview["current"]["life_profile"]["day_anchor"], "company")
+        self.assertTrue(preview["current"]["next_place"])
         self.assertTrue(preview["catalog"]["has_catalog"])
         self.assertEqual(len(preview["timeline"]), 8)
         self.assertTrue(any(item["is_current_slot"] for item in preview["timeline"]))
+
+    def test_webui_prompt_slot_preview_exposes_editable_fields(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        state.update({
+            "custom_positive_prefix": "1girl, black hair, blue eyes",
+            "custom_default_hair": "black hair",
+            "custom_default_eyes": "blue eyes",
+            "custom_current_style": "@00 gx4",
+            "dynamic_appearance": "white dress",
+            "custom_scene_preference": "常去咖啡店和公园",
+            "custom_selfie_preference": "更喜欢前摄自拍",
+        })
+
+        preview = serialize_prompt_slots(svc, sid, scene="standing by a cafe window")
+
+        self.assertIn("positive", preview)
+        self.assertIn("items", preview)
+        self.assertEqual(preview["editable"]["custom_scene_preference"], "常去咖啡店和公园")
+        self.assertEqual(preview["effective"]["scene_preference"], "常去咖啡店和公园")
+        self.assertEqual(preview["effective"]["selfie_preference"], "更喜欢前摄自拍")
+        self.assertTrue(any(item["key"] == "positive_final" for item in preview["items"]))
+        self.assertIn("standing by a cafe window", preview["positive"])
 
     def test_llm_config_uses_specific_values_before_legacy_fallback(self):
         svc = self.make_service()
@@ -377,9 +578,79 @@ class ServiceTestCase(unittest.TestCase):
         system = messages[0]["content"]
 
         self.assertIn("当前世界状态", system)
-        self.assertIn("角色动线", system)
+        self.assertIn("角色当前所在", system)
+        self.assertIn("接下来动线", system)
         self.assertIn("商场", system)
         self.assertIn("基础场所目录", system)
+
+    def test_life_profile_gates_anchor_places_by_identity(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        fixed_now = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)  # 周四工作日，办公时段
+        svc._session_now = lambda session_id="": fixed_now
+        state = svc._get_session_state(sid)
+
+        # 成年上班族：当前应在公司，候选里绝不出现学校
+        state["custom_character_age_stage"] = "adult"
+        state["custom_character_day_anchor"] = "company"
+        world = svc.build_world_state(sid, weather=None)
+        keys = [c["key"] for c in world["character_candidates"]]
+        self.assertEqual(world["character_place"]["key"], "company")
+        self.assertNotIn("school", keys)
+
+        # 在校学生：当前应在学校，候选里绝不出现公司
+        state["custom_character_age_stage"] = "minor"
+        state["custom_character_day_anchor"] = "school"
+        world = svc.build_world_state(sid, weather=None)
+        keys = [c["key"] for c in world["character_candidates"]]
+        self.assertEqual(world["character_place"]["key"], "school")
+        self.assertNotIn("company", keys)
+
+        # 无固定职场（主妇/自由职业/非人类设定）：公司和学校都不出现
+        state["custom_character_age_stage"] = "adult"
+        state["custom_character_day_anchor"] = "home"
+        world = svc.build_world_state(sid, weather=None)
+        keys = [c["key"] for c in world["character_candidates"]]
+        self.assertNotIn("company", keys)
+        self.assertNotIn("school", keys)
+
+        # 工厂工人：当前在工厂，公司/学校不出现
+        state["custom_character_day_anchor"] = "工人"  # 中文别名归一到 factory
+        world = svc.build_world_state(sid, weather=None)
+        keys = [c["key"] for c in world["character_candidates"]]
+        self.assertEqual(world["character_place"]["key"], "factory")
+        self.assertNotIn("company", keys)
+        self.assertNotIn("school", keys)
+
+        # 外卖员：流动型，当前在街道/车站这类公共场所，绝不在公司/学校/工厂
+        state["custom_character_day_anchor"] = "外卖员"
+        world = svc.build_world_state(sid, weather=None)
+        keys = [c["key"] for c in world["character_candidates"]]
+        self.assertIn(world["character_place"]["key"], {"street", "transit"})
+        for gated in ("company", "school", "factory"):
+            self.assertNotIn(gated, keys)
+
+    def test_ensure_life_profile_infers_and_caches_from_persona(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._call_llm = AsyncMock(return_value=json.dumps(
+                {"day_anchor": "company", "age_stage": "adult"}, ensure_ascii=False))
+
+            profile = await svc._ensure_life_profile(sid)
+            self.assertEqual(profile["day_anchor"], "company")
+            self.assertEqual(profile["age_stage"], "adult")
+            self.assertEqual(svc._call_llm.await_count, 1)
+
+            # 人设未变：命中缓存，不再调用 LLM
+            await svc._ensure_life_profile(sid)
+            self.assertEqual(svc._call_llm.await_count, 1)
+        asyncio.run(run())
 
     def test_set_location_generates_city_place_catalog_when_image_llm_exists(self):
         async def run():
@@ -411,6 +682,202 @@ class ServiceTestCase(unittest.TestCase):
             self.assertIn("增强版", text)
 
         asyncio.run(run())
+
+    def test_time_context_uses_seasonal_sunrise_and_sunset(self):
+        svc = self.make_service()
+        fixed_now = datetime(2026, 6, 19, 19, 10, tzinfo=timezone.utc)
+        ctx = svc._get_time_context(
+            "telegram:123",
+            now=fixed_now,
+            weather={"sunrise": "04:45 AM", "sunset": "07:16 PM", "lat": "34.69"},
+        )
+
+        self.assertEqual(ctx["season"], "夏季")
+        self.assertEqual(ctx["period"], "傍晚")
+        self.assertEqual(ctx["light_phase"], "黄昏/落日")
+        text = svc._format_time_context("telegram:123", now=fixed_now, weather={"sunrise": "04:45 AM", "sunset": "07:16 PM", "lat": "34.69"})
+        self.assertIn("夏季", text)
+        self.assertIn("日落 19:16", text)
+        self.assertIn("落日", text)
+
+    def test_time_context_keeps_late_afternoon_daylight_before_sunset_window(self):
+        svc = self.make_service()
+        fixed_now = datetime(2026, 6, 19, 17, 30, tzinfo=timezone.utc)
+        ctx = svc._get_time_context(
+            "telegram:123",
+            now=fixed_now,
+            weather={"sunrise": "04:45 AM", "sunset": "07:16 PM", "lat": "34.69"},
+        )
+
+        self.assertEqual(ctx["period"], "下午")
+        self.assertEqual(ctx["light_phase"], "日间自然光")
+        self.assertIn("不得写夕阳", svc._format_light_guard("telegram:123", now=fixed_now, weather={"sunrise": "04:45 AM", "sunset": "07:16 PM", "lat": "34.69"}))
+
+    def test_scheduler_scene_ensures_life_profile_and_injects_world_context(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 6, 18, 10, 30, tzinfo=timezone.utc)
+            svc._session_now = lambda session_id="": fixed_now
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            state = svc._get_session_state(sid)
+            state["custom_scene_preference"] = "常去咖啡店和公园"
+            state["custom_selfie_preference"] = "偏好前摄自拍"
+
+            async def ensure_profile(session_id, force=False):
+                session_state = svc._get_session_state(session_id)
+                session_state["life_profile"] = {
+                    "age_stage": "adult",
+                    "day_anchor": "company",
+                    "persona_hash": "test",
+                }
+                return session_state["life_profile"]
+
+            svc._ensure_life_profile = AsyncMock(side_effect=ensure_profile)
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "在办公室茶水间发来一张自拍",
+                "caption": "忙里偷闲给你看一眼。",
+                "view": "selfie",
+            }, ensure_ascii=False))
+
+            scene, caption, _, view = await svc._llm_write_scene(
+                "normal",
+                "晴 22 C",
+                "星期四",
+                "上午",
+                None,
+                sid,
+                now=fixed_now,
+            )
+
+            self.assertIn("办公室", scene)
+            self.assertEqual(caption, "忙里偷闲给你看一眼。")
+            self.assertEqual(view, "selfie")
+            svc._ensure_life_profile.assert_awaited()
+            system_prompt = svc._call_llm.await_args.args[0]
+            self.assertIn("当前世界状态", system_prompt)
+            self.assertIn("角色身份: 成年·上班族", system_prompt)
+            self.assertIn("角色当前所在: 公司", system_prompt)
+            self.assertIn("接下来动线", system_prompt)
+            self.assertIn("季节与自然光", system_prompt)
+            self.assertIn("季节/自然光", system_prompt)
+            self.assertIn("常去咖啡店和公园", system_prompt)
+            self.assertIn("偏好前摄自拍", system_prompt)
+
+        asyncio.run(run())
+
+    def test_scheduler_scene_injects_recent_photo_continuity(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 6, 19, 15, 3, tzinfo=timezone.utc)
+            ts = fixed_now.timestamp()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            state = svc._get_session_state(sid)
+            state["last_interaction"] = ts - 1800
+            state["last_message_time"] = ts - 1800
+            state["recent_message_history"] = [
+                {"text": "切，不和姐姐扯了，晚上等着！", "time": ts - 1800},
+            ]
+            state["chat_history"] = [
+                {"role": "user", "content": "切，不和姐姐扯了，晚上等着！"},
+                {"role": "assistant", "content": "晚上七点，老地方见~"},
+            ]
+            state["sent_photos_history"] = [{
+                "timestamp": ts - 1900,
+                "scene": "神户三宫站附近的咖啡店内，午后阳光透过落地窗斜洒在木桌上。",
+                "caption": "",
+                "appearance": "",
+                "view": "selfie",
+                "source_description": "意图: 咖啡店告别，约定晚上见面",
+            }]
+            svc._ensure_life_profile = AsyncMock(return_value={})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "还坐在咖啡店窗边，收起冰拿铁准备去车站",
+                "caption": "晚上见~",
+                "view": "selfie",
+            }, ensure_ascii=False))
+
+            await svc._llm_write_scene("normal", "晴 30 C", "星期五", "下午", None, sid, now=fixed_now)
+
+            system_prompt = svc._call_llm.await_args.args[0]
+            self.assertIn("短期连续性上下文", system_prompt)
+            self.assertIn("咖啡店", system_prompt)
+            self.assertIn("晚上七点", system_prompt)
+            self.assertIn("短期连续性优先于自动动线", system_prompt)
+            self.assertIn("不要突然跳到无关场景", system_prompt)
+
+        asyncio.run(run())
+
+    def test_scheduled_push_logs_world_route(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 6, 18, 10, 30, tzinfo=timezone.utc)
+            svc._session_now = lambda session_id="": fixed_now
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+
+            async def ensure_profile(session_id, force=False):
+                state = svc._get_session_state(session_id)
+                state["life_profile"] = {
+                    "age_stage": "adult",
+                    "day_anchor": "company",
+                    "persona_hash": "test",
+                }
+                return state["life_profile"]
+
+            logs = []
+            svc._ulog = lambda session_id, kind, text: logs.append((kind, text))
+            svc._ensure_life_profile = AsyncMock(side_effect=ensure_profile)
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22", "code": "113"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "在办公室茶水间发来一张自拍",
+                "caption": "忙里偷闲给你看一眼。",
+                "view": "selfie",
+                "new_appearance_tags": "white dress",
+            }, ensure_ascii=False))
+            svc._translate_to_tags = AsyncMock(return_value="english prompt")
+            svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
+            svc.send_photo = AsyncMock()
+            state = svc._get_session_state(sid)
+            state["dynamic_appearance"] = "black hoodie"
+
+            await svc._sched_fire(sid, fixed_now, mode_override="normal", skip_active_check=True)
+
+            world_logs = [text for kind, text in logs if kind == "WORLD"]
+            self.assertTrue(world_logs)
+            self.assertIn("profile=成年·上班族", world_logs[0])
+            self.assertIn("current=公司", world_logs[0])
+            svc._do_generate.assert_awaited_once_with(
+                "english prompt, white dress",
+                is_ntr=False,
+                session_id=sid,
+                one_shot_appearance="white dress",
+            )
+            self.assertEqual(state["dynamic_appearance"], "black hoodie")
+            svc.send_photo.assert_awaited_once()
+
+        asyncio.run(run())
+
+    def test_user_place_inference_ignores_character_location_mentions(self):
+        svc = self.make_service()
+
+        self.assertEqual(svc._infer_user_place("那姐姐呢～不会在咖啡厅里吧"), (None, None))
+        self.assertEqual(svc._infer_user_place("我在咖啡厅里等着")[0], "cafe")
+        self.assertEqual(svc._infer_user_place("唉，姐姐其实我在上大学")[0], "school")
+        self.assertEqual(svc._infer_user_place("要不是有课要上我现在就过去")[0], "school")
 
     def test_long_memory_is_isolated_per_character(self):
         svc = self.make_service()
@@ -541,10 +1008,35 @@ class ServiceTestCase(unittest.TestCase):
         )
 
         self.assertIn("front-camera selfie", pos)
+        self.assertIn("off-frame front-facing phone camera", pos)
         self.assertNotIn("smartphone", pos.lower())
         self.assertNotIn("mirror reflection", pos.lower())
-        self.assertIn("smartphone", neg.lower())
+        neg_tokens = {item.strip().lower() for item in neg.split(",")}
+        self.assertNotIn("smartphone", neg_tokens)
+        self.assertNotIn("phone", neg_tokens)
+        self.assertIn("visible phone", neg.lower())
+        self.assertIn("phone in hand", neg.lower())
         self.assertIn("mirror selfie", neg.lower())
+
+    def test_selfie_prompt_removes_phone_screen_ui_without_breaking_sentence(self):
+        svc = self.make_service()
+        pos, _ = svc._build_prompt(
+            "A front-camera selfie of a woman, solo, upper body framing, looking at viewer, "
+            "shot by an off-frame front-facing phone camera, no visible phone, "
+            "a woman sits by the window, gazing at a phone screen with purple eyes gleaming, "
+            "the phone screen lit showing a message interface countdown prompt, black dress, phone screen, countdown",
+            session_id="telegram:123",
+        )
+
+        lower = pos.lower()
+        self.assertIn("off-frame front-facing phone camera", lower)
+        self.assertIn("no visible phone", lower)
+        self.assertEqual(lower.count("off-frame front-facing phone camera"), 1)
+        self.assertNotIn("phone screen", lower)
+        self.assertNotIn("message interface", lower)
+        self.assertNotIn("countdown", lower)
+        self.assertNotIn("gazing at a with", lower)
+        self.assertNotIn("the lit", lower)
 
     def test_prompt_rewrites_user_subject_and_removes_phone_clause(self):
         svc = self.make_service()
@@ -582,6 +1074,217 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("Yukikaze", pos)
         self.assertIn("Azur Lane", pos)
 
+    def test_prompt_uses_visual_identity_for_non_english_character(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        state["custom_character"] = "天童爱丽丝"
+        state["custom_series"] = "碧蓝档案"
+        state["custom_visual_character"] = "aris (blue archive)"
+        state["custom_visual_series"] = "Blue Archive"
+        state["custom_positive_prefix"] = "1girl, long black hair, blue eyes"
+
+        pos, _ = svc._build_prompt("天童爱丽丝坐在窗边看雨", session_id=sid)
+
+        self.assertIn("aris (blue archive)", pos)
+        self.assertIn("Blue Archive", pos)
+        self.assertNotIn("天童爱丽丝", pos)
+        self.assertNotIn("碧蓝档案", pos)
+
+    def test_prompt_infers_visual_identity_from_existing_appearance_tag(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        state["custom_character"] = "天童爱丽丝"
+        state["custom_series"] = "碧蓝档案"
+        state["custom_positive_prefix"] = "1girl, aris (blue archive), long black hair, blue eyes"
+
+        pos, _ = svc._build_prompt("standing by a window", session_id=sid)
+
+        self.assertIn("aris (blue archive)", pos)
+        self.assertIn("blue archive", pos.lower())
+        self.assertNotIn("天童爱丽丝", pos)
+        self.assertNotIn("碧蓝档案", pos)
+
+    def test_prompt_infers_visual_identity_from_dynamic_appearance_for_old_sessions(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        state["custom_character"] = "天童爱丽丝"
+        state["custom_series"] = "碧蓝档案"
+        state["custom_positive_prefix"] = "1girl, long black hair, blue eyes"
+        state["dynamic_appearance"] = "aris (blue archive), school uniform"
+
+        pos, _ = svc._build_prompt("天童爱丽丝 sits by a window", session_id=sid)
+
+        self.assertIn("aris (blue archive)", pos)
+        self.assertIn("blue archive", pos.lower())
+        self.assertNotIn("天童爱丽丝", pos)
+        self.assertNotIn("碧蓝档案", pos)
+
+    def test_oc_prompt_omits_name_even_with_original_series_marker(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        state["custom_character"] = "小雨"
+        state["custom_series"] = "原创角色"
+        state["custom_visual_character"] = "xiaoyu"
+        state["custom_visual_series"] = "original character"
+        state["custom_positive_prefix"] = "1girl, short black hair, blue eyes"
+
+        pos, _ = svc._build_prompt("小雨坐在窗边看雨", session_id=sid)
+
+        self.assertNotIn("小雨", pos)
+        self.assertNotIn("原创角色", pos)
+        self.assertNotIn("xiaoyu", pos)
+        self.assertIn("short black hair", pos)
+
+    def test_character_command_stores_visual_identity_tags(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._llm_classify_character = AsyncMock(return_value={
+                "type": "character",
+                "name": "天童爱丽丝",
+                "series": "碧蓝档案",
+                "prompt_name": "aris (blue archive)",
+                "prompt_series": "Blue Archive",
+                "persona": "你是天童爱丽丝。",
+                "appearance": "1girl, aris (blue archive), long black hair, blue eyes",
+                "purity": 8,
+            })
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_character(1, sid, "天童爱丽丝")
+
+            state = svc._get_session_state(sid)
+            self.assertEqual(state["custom_character"], "天童爱丽丝")
+            self.assertEqual(state["custom_series"], "碧蓝档案")
+            self.assertEqual(state["custom_visual_character"], "aris (blue archive)")
+            self.assertEqual(state["custom_visual_series"], "Blue Archive")
+            self.assertEqual(state["saved_characters"]["天童爱丽丝"]["visual_character"], "aris (blue archive)")
+            text = svc.send_message.await_args.args[1]
+            self.assertIn("生图识别", text)
+            self.assertIn("aris (blue archive)", text)
+
+        asyncio.run(run())
+
+    def test_migrate_visual_identity_tags_updates_old_sessions_and_saved_characters(self):
+        svc = self.make_service()
+        state = svc._get_session_state("telegram:1")
+        state.update({
+            "custom_character": "天童爱丽丝",
+            "custom_series": "碧蓝档案",
+            "custom_positive_prefix": "1girl, long black hair, blue eyes",
+            "dynamic_appearance": "aris (blue archive), school uniform",
+            "saved_characters": {
+                "和泉紗霧": {
+                    "character": "和泉紗霧",
+                    "series": "エロマンガ先生",
+                    "appearance": "1girl, silver hair, blue eyes",
+                },
+                "淡雪": {
+                    "character": "淡雪",
+                    "series": "原创",
+                    "appearance": "1girl, white hair",
+                    "visual_character": "awayuki",
+                    "visual_series": "original character",
+                },
+                "Jeanne": {
+                    "character": "Jeanne d'Arc",
+                    "series": "Fate/Grand Order",
+                    "appearance": "1girl, blonde hair, blue eyes",
+                },
+            },
+        })
+
+        result = svc.migrate_visual_identity_tags(create_backup=False)
+
+        self.assertEqual(result["sessions_updated"], 1)
+        self.assertEqual(result["saved_characters_updated"], 3)
+        self.assertEqual(state["custom_visual_character"], "aris (blue archive)")
+        self.assertEqual(state["custom_visual_series"], "Blue Archive")
+        self.assertEqual(state["saved_characters"]["和泉紗霧"]["visual_character"], "izumi sagiri")
+        self.assertEqual(state["saved_characters"]["和泉紗霧"]["visual_series"], "Eromanga Sensei")
+        self.assertEqual(state["saved_characters"]["淡雪"]["visual_character"], "")
+        self.assertEqual(state["saved_characters"]["淡雪"]["visual_series"], "")
+        self.assertEqual(state["saved_characters"]["Jeanne"]["visual_character"], "jeanne d'arc (fate)")
+
+    def test_cleanup_prompt_prefix_preview_does_not_mutate(self):
+        svc = self.make_service()
+        svc.config["positive_prefix"] = "masterpiece, best quality, artist:wlop, 1girl, black hair, purple eyes"
+        svc.config["current_style"] = "@00 gx4"
+        state = svc._get_session_state("telegram:1")
+        state.update({
+            "custom_character": "测试角色",
+            "custom_positive_prefix": "score_9, @foo, 1boy, short hair, blue eyes",
+            "saved_characters": {
+                "A": {
+                    "character": "A",
+                    "appearance": "absurdres, artist:bar, 1girl, blonde hair",
+                },
+            },
+        })
+
+        result = svc.cleanup_prompt_prefix_slots(apply=False)
+
+        self.assertFalse(result["applied"])
+        self.assertEqual(len(result["changes"]), 3)
+        self.assertEqual(svc.config["positive_prefix"], "masterpiece, best quality, artist:wlop, 1girl, black hair, purple eyes")
+        self.assertEqual(state["custom_positive_prefix"], "score_9, @foo, 1boy, short hair, blue eyes")
+        self.assertEqual(state["saved_characters"]["A"]["appearance"], "absurdres, artist:bar, 1girl, blonde hair")
+        self.assertNotIn("1boy", result["changes"][1]["after"])
+        self.assertIn("1boy", result["changes"][1]["removed_count"])
+        self.assertIn("@foo", result["changes"][1]["style_after"])
+
+    def test_cleanup_prompt_prefix_apply_backs_up_and_moves_style(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        svc.config["positive_prefix"] = "masterpiece, best quality, artist:wlop, 1girl, black hair, purple eyes"
+        svc.config["current_style"] = "@00 gx4"
+        svc.config["style_pool"] = "@00 gx4"
+        svc.save_config()
+        state = svc._get_session_state(sid)
+        state.update({
+            "custom_character": "测试角色",
+            "custom_positive_prefix": "score_9, @foo, 1boy, short hair, blue eyes",
+            "saved_characters": {
+                "A": {
+                    "character": "A",
+                    "appearance": "absurdres, artist:bar, 1girl, blonde hair",
+                },
+            },
+        })
+        svc._write_state()
+
+        result = svc.cleanup_prompt_prefix_slots(apply=True)
+
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["config_updated"], 1)
+        self.assertEqual(result["sessions_updated"], 1)
+        self.assertEqual(result["saved_characters_updated"], 1)
+        self.assertEqual(result["count_migrated"], 2)
+        self.assertEqual(svc.config["positive_prefix"], "black hair, purple eyes")
+        self.assertEqual(svc.config["current_style"], "@00 gx4, artist:wlop")
+        self.assertIn("@00 gx4, artist:wlop", svc.config["style_pool"])
+        self.assertEqual(state["custom_count"], "1boy")
+        self.assertEqual(state["custom_positive_prefix"], "short hair, blue eyes")
+        self.assertEqual(state["custom_current_style"], "@00 gx4, @foo")
+        self.assertEqual(state["saved_characters"]["A"]["appearance"], "blonde hair")
+        self.assertEqual(state["saved_characters"]["A"]["style"], "@00 gx4, artist:bar")
+        self.assertEqual(state["saved_characters"]["A"]["count"], "1girl")
+        self.assertEqual(len(result["backup_paths"]), 2)
+        for path in result["backup_paths"]:
+            self.assertTrue(Path(path).exists())
+        saved_state = json.loads(svc.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved_state["sessions"][sid]["custom_count"], "1boy")
+        self.assertEqual(saved_state["sessions"][sid]["custom_positive_prefix"], "short hair, blue eyes")
+
     def test_image_planner_normalizes_second_person_scene_subject(self):
         scene = normalize_scene_visual_subject("\u4f60\u8212\u8212\u670d\u670d\u5730\u7a9d\u5728\u5ba2\u5385\u6c99\u53d1\u91cc")
 
@@ -602,8 +1305,33 @@ class ServiceTestCase(unittest.TestCase):
 
             svc._llm_write_scene.assert_awaited_once()
             svc._translate_to_tags.assert_awaited_once_with("坐在窗边看向镜头", session_id=sid, view="selfie")
-            svc._do_generate.assert_awaited_once_with("english prompt", session_id=sid)
+            svc._do_generate.assert_awaited_once_with("english prompt", session_id=sid, one_shot_appearance="")
             svc.send_photo.assert_awaited_once_with(123, b"image", "给你看一眼。")
+
+        asyncio.run(run())
+
+    def test_cmd_selfie_uses_planned_appearance_once_without_persisting(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            state["dynamic_appearance"] = "black hoodie"
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._llm_write_scene = AsyncMock(return_value=("坐在窗边看向镜头", "给你看一眼。", "white dress", "selfie"))
+            svc._translate_to_tags = AsyncMock(return_value="english prompt")
+            svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
+            svc.send_action = AsyncMock()
+            svc.send_photo = AsyncMock()
+
+            await svc.cmd_selfie(123, sid, "")
+
+            svc._do_generate.assert_awaited_once_with(
+                "english prompt, white dress",
+                session_id=sid,
+                one_shot_appearance="white dress",
+            )
+            self.assertEqual(state["dynamic_appearance"], "black hoodie")
+            self.assertEqual(state["sent_photos_history"][-1]["appearance"], "white dress")
 
         asyncio.run(run())
 
@@ -641,6 +1369,8 @@ class ServiceTestCase(unittest.TestCase):
                 {"role": "user", "content": "今天下班好累，想看你在家等我的样子"},
                 {"role": "assistant", "content": "那我就在客厅等你回来。"},
             ]
+            state["custom_scene_preference"] = "常去咖啡店和家中客厅"
+            state["custom_selfie_preference"] = "偏好半身前摄自拍"
             state["recent_message_history"] = [{"text": "你穿那件黑色吊带裙吧", "time": 9999999999}]
             state["sent_photos_history"] = [{
                 "timestamp": 9999999900,
@@ -655,7 +1385,7 @@ class ServiceTestCase(unittest.TestCase):
                 "scene": "穿黑色吊带裙坐在客厅沙发上等用户回家",
                 "caption": "快回来，我给你留了灯。",
                 "view": "selfie",
-                "new_appearance_tags": "",
+                "new_appearance_tags": "black camisole dress",
             }, ensure_ascii=False))
             svc._translate_to_tags = AsyncMock(return_value="english tags")
             svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
@@ -678,13 +1408,25 @@ class ServiceTestCase(unittest.TestCase):
             self.assertIn("自拍物理规则", planner_system_prompt)
             self.assertIn("当前世界状态", planner_system_prompt)
             self.assertIn("图片规划时优先遵守当前世界状态", planner_system_prompt)
+            self.assertIn("季节与自然光", planner_system_prompt)
+            self.assertIn("常去咖啡店和家中客厅", planner_system_prompt)
+            self.assertIn("偏好半身前摄自拍", planner_system_prompt)
             svc._translate_to_tags.assert_awaited_once_with(
                 "穿黑色吊带裙坐在客厅沙发上等用户回家",
                 session_id=sid,
                 view="selfie",
             )
-            svc.send_photo.assert_awaited_once_with(123, b"image", "快回来，我给你留了灯。")
-            self.assertEqual(state["sent_photos_history"][-1]["caption"], "快回来，我给你留了灯。")
+            svc._do_generate.assert_awaited_once_with(
+                "english tags, black camisole dress",
+                session_id=sid,
+                one_shot_appearance="black camisole dress",
+                is_intimate=False,
+            )
+            # 聊天途中的配图不带配文（聊天模型已经在文字里回复了）
+            svc.send_photo.assert_awaited_once_with(123, b"image", "")
+            self.assertEqual(state.get("dynamic_appearance", ""), "")
+            self.assertEqual(state["sent_photos_history"][-1]["caption"], "")
+            self.assertEqual(state["sent_photos_history"][-1]["appearance"], "black camisole dress")
             self.assertIn("用户想看角色下班后在家等自己的样子", state["sent_photos_history"][-1]["source_description"])
             self.assertIn("黑色吊带裙", state["sent_photos_history"][-1]["source_description"])
 
@@ -734,8 +1476,8 @@ class ServiceTestCase(unittest.TestCase):
 
         injected = messages[-1]["content"]
         self.assertIn("站在玄关等用户回家", injected)
+        self.assertIn("快回来，我给你留了灯。", injected)
         self.assertIn("用户想看角色下班后在家等自己的样子", injected)
-        self.assertNotIn("快回来，我给你留了灯。", injected)
 
 
     def test_user_log_writes_per_chat_file(self):
@@ -798,18 +1540,114 @@ class ServiceTestCase(unittest.TestCase):
                 patch("telegram_comfyui_selfie.generation.asyncio.sleep", new=AsyncMock()),
                 patch("telegram_comfyui_selfie.generation.random.randint", return_value=123),
             ):
-                ok, imgs, err = await svc._do_generate_locked("standing by window", session_id=sid)
+                ok, imgs, err = await svc._do_generate_locked(
+                    "standing by window",
+                    session_id=sid,
+                    one_shot_appearance="white dress",
+                )
 
             self.assertTrue(ok, err)
             self.assertEqual(imgs, [b"image-bytes"])
             text = svc._user_log_path(sid).read_text(encoding="utf-8")
             self.assertIn("PROMPT", text)
+            self.assertIn("PROMPT_SLOTS", text)
             self.assertIn("seed=123", text)
+            self.assertIn("quality=", text)
+            self.assertIn("base_appearance=", text)
+            self.assertIn("scene=standing by window", text)
+            self.assertIn("one_shot_appearance=white dress", text)
             self.assertIn("positive=", text)
             self.assertIn("negative=", text)
             self.assertIn("standing by window", text)
 
         asyncio.run(run())
+
+    def test_show_prompt_includes_prompt_slots(self):
+        async def run():
+            svc = self.make_service()
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_show_prompt(1, "telegram:1", "")
+
+            text = svc.send_message.await_args.args[1]
+            self.assertIn("Prompt 槽位", text)
+            self.assertIn("[quality]", text)
+            self.assertIn("[scene]", text)
+            self.assertIn("[positive_final]", text)
+            self.assertIn("示例 Positive", text)
+
+        asyncio.run(run())
+
+    def test_prompt_slots_clean_legacy_positive_prefix_pollution(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        svc.config["positive_prefix"] = (
+            "masterpiece, best quality, absurdres, score_9, score_8, artist:wlop, "
+            "anime coloring, clean lineart, soft cel shading, detailed illustration, "
+            "1girl, solo, succubus, black long flowing hair, purple eyes"
+        )
+
+        pos, _ = svc._build_prompt("standing by window", session_id=sid)
+        slots = svc._last_prompt_slots_by_session[sid]
+
+        self.assertEqual(slots.count, "1girl, solo")
+        self.assertEqual(slots.base_appearance, "succubus, black long flowing hair, purple eyes")
+        self.assertIn("@00 gx4", slots.style_artist)
+        self.assertIn("artist:wlop", slots.style_artist)
+        self.assertNotIn("masterpiece", slots.base_appearance)
+        self.assertNotIn("best quality", slots.base_appearance)
+        self.assertNotIn("artist:wlop", slots.base_appearance)
+        self.assertNotIn("1girl", slots.base_appearance)
+        self.assertTrue(pos.startswith("masterpiece, best quality"))
+        self.assertIn("artist:wlop", pos)
+        self.assertIn("succubus", pos)
+
+    def test_prompt_slots_render_positive_is_source_of_truth(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state.update({
+            "custom_character": "Yukikaze",
+            "custom_series": "Azur Lane",
+            "custom_positive_prefix": "artist:wlop, 1girl, solo, blonde hair, red eyes",
+            "custom_current_style": "@00 gx4",
+            "dynamic_appearance": "white dress",
+        })
+
+        pos, neg = svc._build_prompt(
+            "standing by window",
+            session_id=sid,
+            one_shot_appearance="silver necklace",
+        )
+        slots = svc._last_prompt_slots_by_session[sid]
+
+        self.assertEqual(pos, slots.positive)
+        sequence = [
+            "masterpiece",
+            "1girl",
+            "Yukikaze",
+            "@00 gx4",
+            "artist:wlop",
+            "blonde hair",
+            "white dress",
+            "standing by window",
+            "silver necklace",
+        ]
+        indexes = [pos.index(term) for term in sequence]
+        self.assertEqual(indexes, sorted(indexes))
+        self.assertNotIn("clothes", neg.lower())
+        self.assertNotIn("clothing", neg.lower())
+
+    def test_negative_drops_clothes_when_positive_has_outfit_even_without_custom_character(self):
+        svc = self.make_service()
+        svc.config["negative_prompt"] = "bad hands, clothes, clothing, low quality"
+
+        pos, neg = svc._build_prompt("A woman wearing a bathrobe by the window", session_id="telegram:1")
+
+        self.assertIn("bathrobe", pos.lower())
+        self.assertNotIn("clothes", neg.lower())
+        self.assertNotIn("clothing", neg.lower())
+        self.assertIn("bad hands", neg.lower())
 
     def test_user_log_can_be_disabled(self):
         svc = self.make_service()
@@ -851,6 +1689,29 @@ class ServiceTestCase(unittest.TestCase):
             self.assertIn("black long flowing hair", pos.lower())
             self.assertNotIn("alice", pos.lower())
             self.assertNotIn("天童爱丽丝", pos)
+
+        asyncio.run(run())
+
+    def test_character_load_restores_saved_style(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            state = svc._get_session_state(sid)
+            state["saved_characters"] = {
+                "A": {
+                    "character": "A",
+                    "series": "",
+                    "persona": "你是 A。",
+                    "appearance": "1girl, black hair",
+                    "style": "@00 gx4, artist:wlop",
+                },
+            }
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_character(1, sid, "load A")
+
+            self.assertEqual(state["custom_current_style"], "@00 gx4, artist:wlop")
+            self.assertEqual(state["custom_positive_prefix"], "1girl, black hair")
 
         asyncio.run(run())
 
@@ -922,11 +1783,22 @@ class ServiceTestCase(unittest.TestCase):
             svc = self.make_service()
             sid = "telegram:1"
             state = svc._get_session_state(sid)
-            state.update({"custom_character": "X", "custom_scheduled_persona": "p", "persona_user_set": True})
+            state.update({
+                "custom_character": "X",
+                "custom_scheduled_persona": "p",
+                "persona_user_set": True,
+                "custom_character_age_stage": "adult",
+                "custom_character_day_anchor": "company",
+                "life_profile": {"age_stage": "adult", "day_anchor": "company", "persona_hash": "old"},
+            })
             svc._save_session_state(sid, state)
             svc.send_message = AsyncMock()
             await svc.cmd_character(1, sid, "reset")
+            after = svc._get_session_state(sid)
             self.assertFalse(svc._is_character_set(sid))
+            self.assertEqual(after.get("custom_character_age_stage", ""), "")
+            self.assertEqual(after.get("custom_character_day_anchor", ""), "")
+            self.assertNotIn("life_profile", after)
 
         asyncio.run(run())
 
@@ -1009,6 +1881,124 @@ class ServiceTestCase(unittest.TestCase):
         svc.config["chat_reply_length"] = "乱填"
         self.assertEqual(svc._reply_length_directive(), "")
 
+    def test_negative_does_not_suppress_character_hair_color(self):
+        svc = self.make_service()
+        # 模拟真实配置：负向里有防杂色发的发色守卫
+        svc.config["negative_prompt"] = "bad hands, silver hair, white hair, blonde hair, low quality"
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["custom_character"] = "测试角色"
+        state["custom_positive_prefix"] = "1girl, blonde hair, blue eyes, medium breasts, pale skin"
+        pos, neg = svc._build_prompt("standing in a room", session_id=sid)
+        self.assertIn("blonde hair", pos.lower())
+        # 角色态下发色由角色 prefix 决定，所有 "<颜色> hair" 守卫都去掉，不再和角色发色对冲
+        self.assertNotIn("blonde hair", neg.lower())
+        self.assertNotIn("silver hair", neg.lower())
+        self.assertNotIn("white hair", neg.lower())
+        self.assertIn("bad hands", neg.lower())         # 非发色负向保留
+
+    def test_negative_drops_exact_conflict_with_positive(self):
+        # 通用：正负向完全相同的 token 从负向删掉
+        from telegram_comfyui_selfie.generation import _resolve_negative_conflicts
+        neg = _resolve_negative_conflicts(
+            "1girl, solo, white sweater, blonde hair",
+            "blonde hair, white sweater, low quality, bad hands",
+        )
+        self.assertNotIn("blonde hair", neg.lower())
+        self.assertNotIn("white sweater", neg.lower())
+        self.assertIn("low quality", neg.lower())
+        self.assertIn("bad hands", neg.lower())
+
+    def test_custom_hair_override_wins_over_scene_and_negative(self):
+        svc = self.make_service()
+        svc.config["negative_prompt"] = "bad hands, silver hair, black hair, brown hair, low quality"
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["custom_default_hair"] = "silver_hair,bun"
+        pos, neg = svc._build_prompt(
+            "A front-camera selfie of a woman, Dark brown hair spills loosely over her shoulders, demon horns peeking through",
+            session_id=sid,
+        )
+        low_pos = pos.lower()
+        low_neg = neg.lower()
+        self.assertIn("silver hair", low_pos)
+        self.assertIn("hair bun", low_pos)
+        self.assertNotIn("silver_hair", low_pos)
+        self.assertNotIn("dark brown hair", low_pos)
+        self.assertNotIn("spills loosely", low_pos)
+        self.assertNotIn("silver hair", low_neg)
+        self.assertIn("black hair", low_neg)
+        self.assertIn("brown hair", low_neg)
+
+    def test_dynamic_outfit_replaces_character_default_outfit(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["custom_character"] = "骑士"
+        state["custom_positive_prefix"] = "1girl, blonde hair, blue eyes, white and blue battle dress"
+        state["dynamic_appearance"] = "oversized white sweater"
+        pos, _ = svc._build_prompt("at home at night", session_id=sid)
+        self.assertIn("oversized white sweater", pos.lower())
+        self.assertNotIn("battle dress", pos.lower())   # 旧服装被换装替换
+
+    def test_character_traits_win_over_scene_hair_and_eye_descriptions(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["custom_character"] = "Knight"
+        state["custom_series"] = "Fiction"
+        state["custom_positive_prefix"] = "1girl, blue hair, green eyes, white and blue battle dress"
+
+        pos, _ = svc._build_prompt(
+            "A woman with dark brown hair and purple eyes sits by a window, wearing a loose white sweater",
+            session_id=sid,
+        )
+        low = pos.lower()
+        self.assertIn("blue hair", low)
+        self.assertIn("green eyes", low)
+        self.assertNotIn("dark brown hair", low)
+        self.assertNotIn("purple eyes", low)
+        self.assertIn("white sweater", low)
+        self.assertNotIn("battle dress", low)
+
+    def test_dynamic_appearance_wins_over_conflicting_scene_outfit(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["custom_positive_prefix"] = "1girl, blonde hair, blue eyes"
+        state["dynamic_appearance"] = "silver hair, oversized white sweater"
+
+        pos, _ = svc._build_prompt(
+            "A woman with dark brown hair sits by a window, wearing a black fitted dress",
+            session_id=sid,
+        )
+        low = pos.lower()
+        self.assertIn("silver hair", low)
+        self.assertIn("oversized white sweater", low)
+        self.assertNotIn("dark brown hair", low)
+        self.assertNotIn("black fitted dress", low)
+
+    def test_daytime_prompt_rewrites_premature_sunset_terms(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        svc._get_time_context = lambda session_id="", now=None, weather=None: {
+            "period": "下午",
+            "light_phase": "日间自然光",
+        }
+
+        pos, _ = svc._build_prompt(
+            "Evening twilight over Sannomiya Station, orange-pink clouds in the sky, "
+            "the warm yellow light of the streetlamp just flickers on, sunset, evening streetlight",
+            session_id=sid,
+        )
+        low = pos.lower()
+        self.assertIn("afternoon daylight", low)
+        self.assertIn("daytime", low)
+        self.assertNotIn("sunset", low)
+        self.assertNotIn("twilight", low)
+        self.assertNotIn("evening", low)
+        self.assertNotIn("streetlamp just flickers on", low)
+
     def test_chat_always_uses_auto_tool_choice(self):
         async def run():
             svc = self.make_service()
@@ -1036,7 +2026,16 @@ class ServiceTestCase(unittest.TestCase):
             svc._get_session_state(sid)["rounds_since_image"] = 3  # >= 最小间隔 2
             svc._call_llm_messages = AsyncMock(return_value={"choices": [{"message": {"content": "在家窝着呢~"}}]})
             svc._judge_image_moment = AsyncMock(return_value={"intent": "展示在家穿搭", "mood": "撩拨", "view": "selfie"})
-            svc.tool_generate_image = AsyncMock(return_value="图片已生成并发送")
+
+            async def fake_generate(chat_id, session_id, **kwargs):
+                history = svc._get_session_state(session_id)["chat_history"]
+                self.assertEqual(history[-2:], [
+                    {"role": "user", "content": "你在家干嘛"},
+                    {"role": "assistant", "content": "在家窝着呢~"},
+                ])
+                return "图片已生成并发送"
+
+            svc.tool_generate_image = AsyncMock(side_effect=fake_generate)
             svc.send_message = AsyncMock(); svc.send_action = AsyncMock()
 
             await svc.run_roleplay_chat(1, sid, "你在家干嘛")
@@ -1045,6 +2044,7 @@ class ServiceTestCase(unittest.TestCase):
             svc._judge_image_moment.assert_awaited_once()
             svc.tool_generate_image.assert_awaited_once()
             self.assertEqual(svc.tool_generate_image.await_args.kwargs["intent"], "展示在家穿搭")
+            self.assertEqual(svc.tool_generate_image.await_args.kwargs["prompt"], "在家窝着呢~")
 
         asyncio.run(run())
 
@@ -1094,6 +2094,56 @@ class ServiceTestCase(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_intimate_context_detection_chinese_keywords(self):
+        self.assertTrue(_detect_intimate_context("角色正在与用户交合时的面部特写"))
+        self.assertTrue(_detect_intimate_context("", "", "进入她体内"))
+        self.assertTrue(_detect_intimate_context("骑乘", "迷离表情"))
+        self.assertFalse(_detect_intimate_context("角色坐在窗边看书"))
+        self.assertFalse(_detect_intimate_context(""))
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_build_prompt_sex_scene_keeps_pov_and_strips_selfie(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["custom_positive_prefix"] = "1girl, black long hair, purple eyes"
+        state["custom_count"] = "1girl"
+        # POV 亲密场景应保留 pov, 剥离 selfie, 不加 third-person
+        pos, neg = svc._build_prompt(
+            "First-person POV, looking at a woman, sex, make love, intimate close-up, missionary position",
+            session_id=sid,
+        )
+        pos_lower = pos.lower()
+        self.assertIn("first-person pov", pos_lower)
+        self.assertNotIn("selfie", pos_lower)
+        self.assertNotIn("holding phone", pos_lower)
+        self.assertNotIn("third-person perspective", pos_lower)
+        self.assertNotIn("solo", pos_lower)
+        self.assertIn("partial male body visible", pos_lower)
+        self.assertIn("male hands", pos_lower)
+        self.assertIn("intimate close-up", pos_lower)
+        neg_lower = neg.lower()
+        for term in ["selfie", "holding phone", "phone", "arm extended", "third-person perspective"]:
+            self.assertIn(term, neg_lower, f"negative should suppress {term}")
+        self.assertNotIn("pov", neg_lower)
+        self.assertNotIn("male", neg_lower)
+
+    def test_build_prompt_intimate_flag_equivalent_to_english_keywords(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["custom_positive_prefix"] = "1girl, black long hair, purple eyes"
+        state["custom_count"] = "1girl"
+        # 不含 sex/make love 等英文关键词，仅靠 is_intimate=True 触发
+        pos, neg = svc._build_prompt(
+            "First-person POV, looking at a woman, close embrace, intimate close-up",
+            session_id=sid,
+            is_intimate=True,
+        )
+        pos_lower = pos.lower()
+        self.assertIn("first-person pov", pos_lower)
+        self.assertNotIn("solo", pos_lower)
+        self.assertIn("partial male body visible", pos_lower)
+        self.assertIn("male hands", pos_lower)
+        neg_lower = neg.lower()
+        self.assertNotIn("pov", neg_lower)
+        self.assertNotIn("male", neg_lower)
