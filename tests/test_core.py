@@ -861,10 +861,10 @@ class ServiceTestCase(unittest.TestCase):
             self.assertIn("profile=成年·上班族", world_logs[0])
             self.assertIn("current=公司", world_logs[0])
             svc._do_generate.assert_awaited_once_with(
-                "english prompt, white dress",
+                "english prompt",
                 is_ntr=False,
                 session_id=sid,
-                one_shot_appearance="white dress",
+                one_shot_appearance="",
             )
             self.assertEqual(state["dynamic_appearance"], "black hoodie")
             svc.send_photo.assert_awaited_once()
@@ -1326,7 +1326,7 @@ class ServiceTestCase(unittest.TestCase):
             await svc.cmd_selfie(123, sid, "")
 
             svc._do_generate.assert_awaited_once_with(
-                "english prompt, white dress",
+                "english prompt",
                 session_id=sid,
                 one_shot_appearance="white dress",
             )
@@ -1407,7 +1407,7 @@ class ServiceTestCase(unittest.TestCase):
             planner_system_prompt = svc._call_llm.await_args.args[0]
             self.assertIn("自拍物理规则", planner_system_prompt)
             self.assertIn("当前世界状态", planner_system_prompt)
-            self.assertIn("图片规划时优先遵守当前世界状态", planner_system_prompt)
+            self.assertIn("用户位置/空间关系判断", planner_system_prompt)
             self.assertIn("季节与自然光", planner_system_prompt)
             self.assertIn("常去咖啡店和家中客厅", planner_system_prompt)
             self.assertIn("偏好半身前摄自拍", planner_system_prompt)
@@ -1415,9 +1415,10 @@ class ServiceTestCase(unittest.TestCase):
                 "穿黑色吊带裙坐在客厅沙发上等用户回家",
                 session_id=sid,
                 view="selfie",
+                is_intimate=False,
             )
             svc._do_generate.assert_awaited_once_with(
-                "english tags, black camisole dress",
+                "english tags",
                 session_id=sid,
                 one_shot_appearance="black camisole dress",
                 is_intimate=False,
@@ -1455,7 +1456,7 @@ class ServiceTestCase(unittest.TestCase):
 
             await svc.tool_generate_image(123, sid, intent="想看对镜自拍")
 
-            svc._translate_to_tags.assert_awaited_once_with("站在浴室镜子前对镜自拍", session_id=sid, view="mirror")
+            svc._translate_to_tags.assert_awaited_once_with("站在浴室镜子前对镜自拍", session_id=sid, view="mirror", is_intimate=False)
 
         asyncio.run(run())
 

@@ -40,7 +40,7 @@
   "scheduler": "simple",
   "turbo_mode": false,
   "turbo_strength": "0.6",
-  "positive_prefix": "masterpiece, best quality, absurdres, anime coloring, clean lineart, soft cel shading, detailed illustration, 1girl, succubus, east asian, delicate beautiful face, black long flowing hair, pointy elf ears, curved black horns, purple eyes with pink pupils, slit pupils, bat-like demon wings, spaded tail, pale luminous skin, fit toned body, D cup breasts, slim waist, elegant proportions, seductive expression",
+  "positive_prefix": "masterpiece, best quality, absurdres, anime coloring, clean lineart, soft cel shading, detailed illustration, 1girl, succubus, east asian, delicate beautiful face, black long flowing hair, pointy elf ears, purple eyes with pink pupils, slit pupils, spaded tail, pale luminous skin, fit toned body, D cup breasts, slim waist, elegant proportions, seductive expression",
   "default_hair": "black long flowing hair",
   "default_eyes": "purple eyes with pink pupils, slit pupils",
   "negative_prompt": "sepia, extra fingers, fused fingers, too many fingers, mutated hands, bad hands, poorly drawn hands, bad anatomy, deformed, disfigured, extra limbs, missing limbs, long neck, cropped body, worst quality, low quality, normal quality, jpeg artifacts, photorealistic, 3d, cgi, realistic, sketch, rough, unfinished, monochrome, greyscale, thick lines, messy lineart, inconsistent style, huge breasts, gigantic breasts, flat chest, silver hair, white hair, blonde hair, child, loli, male, clothes, clothing, censor bar, mosaic, pixelated",

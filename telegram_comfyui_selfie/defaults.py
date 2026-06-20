@@ -1,26 +1,68 @@
 WEEKDAY_NAMES = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
 
 MENU_BODY = (
-    "推荐先设置这几项：\n"
-    "  1. /角色 <角色名>      设定角色，自动补全人设、外型并存档\n"
-    "  2. /纯良度 0~10|auto   控制角色边界；auto 交给系统判断\n"
-    "  3. /天气设置 <城市>    让聊天和推送知道所在地天气\n"
-    "  4. /推送频率 <次数>    每天主动发图次数；0 为关闭\n\n"
-    "日常最常用：\n"
-    "  /自拍                 按当前聊天情境生成一张图\n"
-    "  /新场景               切掉上一轮话题，避免旧场景继续串进来\n"
-    "  /记忆                 查看当前角色的长期记忆\n"
-    "  /人设查看             查看角色、人设、外型、地区、纯良度\n\n"
-    "详细菜单：\n"
-    "  /菜单 设置     基础配置和首次使用路线\n"
-    "  /菜单 角色     角色档案、人设、外型、画风\n"
-    "  /菜单 生图     自拍、提示词、ComfyUI 状态\n"
-    "  /菜单 记忆     长期记忆查看、搜索、删除\n"
-    "  /菜单 推送     主动推送频率和调度\n"
-    "  /菜单 动线     每日动线、城市地点、天气和用户当前位置\n"
-    "  /菜单 上下文   新场景和短期注意\n"
-    "  /菜单 调试     检查、测试和管理入口\n"
-    "  /菜单 全部     完整命令列表"
+    "第一次使用：\n"
+    "  /初始化              查看上手向导\n"
+    "  /角色 <角色名>       使用现成动漫/游戏角色\n"
+    "  /创建OC              创建原创角色模板和示例\n"
+    "  /天气设置 <城市>     设置城市、天气和时区\n"
+    "  /纯良度 0~10|auto    控制角色边界；数字越高越保守\n\n"
+    "日常聊天与生图：\n"
+    "  /自拍                按当前情境生成一张图\n"
+    "  /外型 <描述>         临时修改穿搭、发型、配饰\n"
+    "  /人格 <描述>         修改说话方式、性格和习惯\n"
+    "  /个性设置 关系 <描述> 设置你和角色的空间/关系设定\n"
+    "  /新场景              切掉上一轮话题，避免旧场景串进来\n\n"
+    "角色管理：\n"
+    "  /角色 list           列出角色档案\n"
+    "  /角色 load <名称>    切换角色并清空短期对话\n"
+    "  /角色 delete <名称>  删除角色档案\n"
+    "  /角色 reset          恢复默认并清空角色池/对话\n\n"
+    "记忆与推送：\n"
+    "  /记忆                查看当前角色长期记忆\n"
+    "  /记住 <内容>         手动写入长期记忆\n"
+    "  /忘记 <ID或关键词>   删除长期记忆\n"
+    "  /推送频率 <次数>     每天主动发图次数；0 为关闭\n"
+    "  /调度                查看今日推送计划\n\n"
+    "详细帮助：/菜单 设置 /菜单 角色 /菜单 生图 /菜单 记忆 /菜单 推送 /菜单 动线\n\n"
+    "检查：/人设查看 /提示词 /生图状态 /测试生图 <文本> /管理"
+)
+
+INIT_GUIDE = (
+    "初始化向导\n\n"
+    "你想怎么开始？\n\n"
+    "A. 使用现成动漫/游戏角色\n"
+    "  发送：/角色 角色名\n"
+    "  例：/角色 天童爱丽丝\n\n"
+    "B. 创建原创角色 OC\n"
+    "  发送：/创建OC\n"
+    "  我会给你一份可复制填写的模板。\n\n"
+    "C. 先用默认角色聊天\n"
+    "  直接发消息即可。\n\n"
+    "建议再设置：\n"
+    "  /天气设置 你的城市\n"
+    "  /纯良度 0~10\n\n"
+    "随时发送 /help 查看全部常用命令。"
+)
+
+OC_CREATE_HELP = (
+    "创建原创角色 OC\n\n"
+    "可以直接自然描述，例如：\n"
+    "/创建OC 小雨，大学生，黑色短发蓝眼睛，平时穿白衬衫和深色百褶裙，性格温柔慢热，和用户是同城暧昧对象\n\n"
+    "请复制下面模板，填好后整段发给我：\n\n"
+    "/创建OC\n"
+    "名字：小雨\n"
+    "角色类型：大学生\n"
+    "年龄段：adult\n"
+    "白天去向：school\n"
+    "性格：温柔、慢热、说话简短，会认真回应用户的情绪\n"
+    "外貌：黑色短发，蓝眼睛，身材纤细，浅色皮肤\n"
+    "初始穿搭：白衬衫，深色百褶裙\n"
+    "与你的关系：同城暧昧对象，周末经常一起出门\n"
+    "所在城市：上海\n\n"
+    "可用年龄段：minor / adult\n"
+    "常用白天去向：company / school / factory / farm / construction / medical / retail / delivery / driver / home / flexible\n\n"
+    "提示：也可以自然写，系统会尽量把稳定身体特征、初始穿搭、关系、城市和画风自动归档到对应槽位。"
 )
 
 MENU_TOPICS = {
@@ -256,7 +298,7 @@ DEFAULT_CONFIG = {
     "scheduler": "simple",
     "turbo_mode": False,
     "turbo_strength": "0.6",
-    "positive_prefix": "masterpiece, best quality, absurdres, anime coloring, clean lineart, soft cel shading, detailed illustration, 1girl, black long flowing hair, purple eyes",
+    "positive_prefix": "masterpiece, best quality, absurdres, anime coloring, clean lineart, soft cel shading, detailed illustration, black long flowing hair, purple eyes",
     "default_hair": "black long flowing hair",
     "default_eyes": "purple eyes",
     "negative_prompt": "extra fingers, fused fingers, too many fingers, mutated hands, bad hands, bad anatomy, deformed, disfigured, extra limbs, missing limbs, worst quality, low quality, photorealistic, 3d, child, loli, male, clothes, clothing, censor bar, mosaic, pixelated",
@@ -284,4 +326,10 @@ DEFAULT_CONFIG = {
     "world_user_place_ttl_hours": "4",
     "world_holiday_dates": "",
     "world_workday_dates": "",
+    # 角色生活档案的显式覆盖（留空则由人设自动推断）：
+    # character_age_stage: minor / adult
+    # character_day_anchor(职业/白天去向): company / school / factory / farm / construction /
+    #   medical / retail / delivery / driver / home / flexible（也接受 上班族/工人/农民/外卖员/司机 等中文）
+    "character_age_stage": "",
+    "character_day_anchor": "",
 }

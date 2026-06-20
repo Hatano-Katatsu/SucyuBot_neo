@@ -695,7 +695,11 @@ def build_prompt(
         for old in service._parse_appearance(char).get("outfit", []):
             char = service._remove_tag(char, old)
     scene_lower = scene_desc.lower()
-    sex_keywords = ["sex", "make love", "penetration", "vaginal", "missionary", "doggystyle", "cowgirl", "naked together"]
+    sex_keywords = [
+        "sex", "make love", "penetration", "penetrating", "vaginal", "missionary", "doggystyle",
+        "cowgirl", "girl on top", "straddling", "straddle", "riding", "grinding", "thrust",
+        "thrusting", "squelch", "impaled", "insertion", "humping", "creampie", "naked together",
+    ]
     is_sex_scene = is_intimate or any(k in scene_lower for k in sex_keywords)
     is_ntr_scene = is_ntr or any(k in scene_lower for k in ["ntr", "netorare", "cuckold", "split screen"])
 

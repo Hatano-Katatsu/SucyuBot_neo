@@ -34,6 +34,7 @@
         </div>
         <div class="top-actions">
           <button id="refresh-btn" class="icon-btn" title="刷新">↻</button>
+          <button id="service-start-btn" class="primary">一键启动</button>
           <button id="service-restart-btn" class="danger">重启服务</button>
           <button id="bot-toggle-btn" class="primary">启动机器人</button>
         </div>
@@ -72,6 +73,7 @@
               <dt>配置文件</dt><dd id="status-config-path">-</dd>
               <dt>状态文件</dt><dd id="status-state-path">-</dd>
               <dt>进程</dt><dd id="status-process">-</dd>
+              <dt>一键启动脚本</dt><dd id="status-launch-script">-</dd>
               <dt>ComfyUI</dt><dd id="status-comfyui">-</dd>
               <dt>聊天模型</dt><dd id="status-chat-llm-model">-</dd>
               <dt>生图辅助模型</dt><dd id="status-image-llm-model">-</dd>
@@ -113,6 +115,18 @@
             <form id="session-form" class="session-form"></form>
           </section>
         </div>
+        <section class="panel prompt-slot-panel">
+          <div class="panel-head">
+            <div>
+              <h3>Prompt 槽位编辑</h3>
+              <p class="muted">按生图槽位编辑当前用户的外观、画风和场景偏好</p>
+            </div>
+            <button id="prompt-slot-refresh">刷新预览</button>
+          </div>
+          <div id="prompt-slot-content" class="prompt-slot-content">
+            <div class="empty-state">请先从上方选择一个会话。</div>
+          </div>
+        </section>
       </section>
 
       <section class="view" id="view-world">
@@ -185,6 +199,19 @@
             </form>
           </section>
         </div>
+        <section class="panel admin-panel">
+          <div class="panel-head">
+            <div>
+              <h3>维护清理</h3>
+              <p class="muted">清理老数据里混进身体特征 Prompt 的质量词和画风词</p>
+            </div>
+            <div class="button-row">
+              <button id="prompt-cleanup-preview">预览 Prompt 清理</button>
+              <button id="prompt-cleanup-apply" class="danger">备份并执行清理</button>
+            </div>
+          </div>
+          <pre id="prompt-cleanup-output" class="logbox">尚未运行清理。</pre>
+        </section>
       </section>
     </main>
   </div>

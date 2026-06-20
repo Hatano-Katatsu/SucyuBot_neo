@@ -155,7 +155,7 @@ async def plan_roleplay_image(
         except Exception:
             logger.debug("world context build failed for image planning", exc_info=True)
 
-    is_intimate = _detect_intimate_context(intent, mood, prompt, dialog_context or "")
+    intimate_hint = _detect_intimate_context(intent, mood, prompt, dialog_context or "")
 
     system = (
         f"{service._get_effective_persona(session_id)}\n\n"
@@ -178,22 +178,29 @@ async def plan_roleplay_image(
     if world_context:
         system += (
             f"\n{world_context}\n"
-            "图片规划时优先遵守当前世界状态：角色应出现在动线合理的地点；如果用户和角色不在同一地点，优先生成自拍、对镜自拍、消息式近况或约定见面前后的画面。"
+            "其中“角色当前所在/接下来动线”按现实时间天气推断，应当遵守，角色不要无理由瞬移。"
+            "但“用户位置/空间关系判断”只是基于历史消息的参考，不是硬性指令："
+            "请结合“默认物理空间关系”设定、最近对话内容、角色此刻所在地点与当前时段，"
+            "自行判断【此刻用户是否和角色在同一空间】，并据此决定视角——"
+            "判断同处则优先 pov 或近距离 third 同框互动；判断异地、独处或仅线上联系才用 selfie/mirror。"
         )
     if quirk:
         system += f"\n角色专属画面修补规则: {quirk}"
-    if is_intimate:
-        system += (
-            "\n亲密交互场景规则（覆盖通用视角与场景规则）:\n"
-            "当前处于亲密交互（交合/缠绵）场景，画面核心是角色本身而非环境。以下规则优先于通用规则:\n"
-            "- 视角固定为 pov（用户第一人称视角），严禁使用 selfie 或 mirror；不需要第三人称叙事全景。\n"
-            "- 人物优先: 画面重点在于角色的表情（迷离、红晕、咬唇、眼神）、身体反应（汗水、潮红、喘息、微颤）和动作姿态（拥抱、交缠、迎合），而非环境背景。\n"
-            "- 用户存在感: POV 亲密场景中，用户（男性）必须有可见的身体局部——手掌抓握腰肢/手腕、手臂环抱、胸膛压近、腹肌轮廓等。只画局部（手/臂/胸/腹/腿），不要画完整男性角色或男性面部。scene 中明确写出用户可见的身体部位及其动作。\n"
-            "- 场景精简: 环境/背景/灯光描述压缩到最短，只交代必要的时间光线氛围即可，不要展开写房间布置、窗外风景或道具细节。\n"
-            "- 构图倾向: 近距离特写或半身近景，聚焦面部表情、上半身互动和用户的身体局部，避免全身远景。\n"
-            "- 自拍物理规则不变: 画面中仍不得出现手机、相机、镜子或拿手机的手；手部规则不变。\n"
-            "- new_appearance_tags 仍只填写临时外观变化，不要把情绪或动作写进去。"
-        )
+    system += (
+        "\n场景类型自判: 请判断这张图是否为【亲密交合/性爱场景】（角色与用户正在性交、骑乘、交合、爱抚生殖部位、射精等），"
+        "并在 JSON 里输出 is_intimate 布尔值。"
+        + ("系统初步判断本次可能属于亲密场景，请重点确认。" if intimate_hint else "")
+        + "\n【以下亲密交互规则仅当你判定 is_intimate=true 时适用；若判定为日常/非性场景，请完全忽略本段，按通用规则写】:\n"
+        "- 视角固定为 pov（用户第一人称视角），严禁 selfie 或 mirror，不需要第三人称全景。\n"
+        "- 用户身体归属（关键，针对双人误画）: 画面里出现的男性身体（手、手臂、胸膛、腹部、大腿）一律属于【用户】，绝不是第二个角色。"
+        "凡涉及“你的手/你的胸/你的腰/你的腿”等用户身体部位，scene 必须写成可见的男性身体局部（如 男性的手、男性胸膛、男性腹部），"
+        "不要写成“另一个角色/她/第二个人”。全图有且只有角色一名女性主体，外加用户的身体局部，严禁出现两名女性。\n"
+        "- 只画用户身体局部（手/臂/胸/腹/腿），不要画完整男性或男性面部。\n"
+        "- 人物优先: 重点在角色的表情（迷离、红晕、咬唇）、身体反应（汗水、潮红、轻颤）和互动姿态，弱化环境背景。\n"
+        "- 场景精简: 环境灯光压到最短；构图近距离特写或半身近景。\n"
+        "- 自拍物理规则不变: 不得出现手机、相机、镜子或拿手机的手。\n"
+        "- new_appearance_tags 仍只填临时外观变化，不要把情绪或动作写进去。"
+    )
     system += (
         "\n画面主体规则: 图片主体默认必须是角色，不要把“你/用户”写成画面中被观看的主角。"
         "用户只能作为视角来源、互动对象或少量局部元素出现；只有用户明确要求双人同框时，才允许用户作为第二主体。"
@@ -207,7 +214,11 @@ async def plan_roleplay_image(
         "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。"
         "selfie/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。"
         "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。"
-        "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third\",\"new_appearance_tags\":\"...\"}。"
+        "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third\",\"new_appearance_tags\":\"...\",\"user_location\":\"...\",\"co_located\":true,\"is_intimate\":false}。"
+        "is_intimate 是布尔值，按上面的场景类型自判规则给出。"
+        "co_located 是布尔值，表示你判断此刻用户是否和角色在同一空间。"
+        "user_location 填你判断的用户此刻所在场所：与角色同处填 with_user，完全无法判断填 unknown，"
+        "否则取其一: home/company/school/park/mall/street/cafe/restaurant/transit/convenience/cinema/hotel/hospital/gym/factory/farm/construction。"
         "聊天模型已经给出文字回复，这张图只配画面、不需要任何台词或配文，不要输出 caption 字段。"
         "new_appearance_tags 只填这张图需要额外强调的一次性服装、配饰、临时发型或发色瞳色变化，英文标签逗号分隔；"
         "这些标签只用于本次生图，不会写入长期外型。不要把姿势、表情、动作、场景、灯光写进去。没有一次性外观补充时留空。"
@@ -243,8 +254,21 @@ async def plan_roleplay_image(
 
     scene = normalize_scene_visual_subject((parsed.get("scene") or fallback_scene).strip())
     planned_view = normalize_view(parsed.get("view"))
+    # 把 LLM 这次对“用户位置/是否同处”的判断持久化，供下次生图参考与 Web 显示（自带连续性迟滞）。
+    if hasattr(service, "_apply_llm_user_location"):
+        try:
+            service._apply_llm_user_location(
+                session_id,
+                user_location=parsed.get("user_location") or "",
+                co_located=bool(parsed.get("co_located")),
+                now=now,
+            )
+        except Exception:
+            logger.debug("persist llm user location failed", exc_info=True)
+    # LLM 自判优先，关键词检测作 OR 兜底（尤其 LLM 漏判时）。
+    is_intimate = bool(parsed.get("is_intimate")) or intimate_hint
     default_view = "selfie"
-    if is_intimate:
+    if is_intimate or bool(parsed.get("co_located")):
         default_view = "pov"
     final_view = requested_view or planned_view or default_view
     if scene_implies_mirror_selfie(scene):

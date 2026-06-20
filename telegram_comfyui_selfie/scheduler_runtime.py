@@ -13,7 +13,13 @@ from typing import Any
 import aiohttp
 
 from .defaults import DEFAULT_CONFIG, WEEKDAY_NAMES
-from .image_planning import VALID_VIEWS, normalize_scene_visual_subject, scene_implies_mirror_selfie
+from .image_planning import (
+    VALID_VIEWS,
+    format_dialog_context,
+    format_sent_photo_context,
+    normalize_scene_visual_subject,
+    scene_implies_mirror_selfie,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +34,44 @@ class SchedulerRuntimeMixin:
                 recent.append(f"[{dt.strftime('%H:%M')}] 用户: {msg.get('text', '')}")
         return "\n".join(recent) if recent else None
 
-    async def _llm_write_scene(self, mode, weather, weekday, time_period, recent_chat=None, session_id=""):
+    def _format_scene_continuity_context(
+        self,
+        state: dict[str, Any],
+        session_id: str = "",
+        now: datetime | None = None,
+    ) -> str:
+        try:
+            ttl = max(0.25, float(self.config.get("push_continuity_hours", "2") or "2")) * 3600
+        except Exception:
+            ttl = 2 * 3600
+        now_ts = now.timestamp() if isinstance(now, datetime) else time.time()
+        latest = float(state.get("last_interaction", 0) or 0)
+        latest = max(latest, float(state.get("last_message_time", 0) or 0))
+        for msg in state.get("recent_message_history", []):
+            latest = max(latest, float(msg.get("time", 0) or 0))
+        for photo in state.get("sent_photos_history", []):
+            latest = max(latest, float(photo.get("timestamp", 0) or 0))
+        if not latest or now_ts - latest > ttl:
+            return ""
+
+        dialog = format_dialog_context(self, state, session_id, limit=8)
+        photos = format_sent_photo_context(self, state, session_id, limit=3)
+        parts = []
+        if dialog:
+            parts.append("最近对话:\n" + dialog)
+        if photos:
+            parts.append("最近发过的图片:\n" + photos)
+        if not parts:
+            return ""
+        return (
+            "短期连续性上下文（优先级高于自动动线；用于承接刚才停住的场景）:\n"
+            + "\n\n".join(parts)
+            + "\n连续性要求: 主动推送应优先承接最近已建立的地点、未完成约定、情绪和可见状态。"
+            "如果现实动线与这里冲突，短时间内以连续性为主；确实需要换地点时必须写出自然过渡，"
+            "例如离开咖啡店、去车站、回家路上，而不要突然跳到无关场景。"
+        )
+
+    async def _llm_write_scene(self, mode, weather, weekday, time_period, recent_chat=None, session_id="", now=None, weather_data=None):
         if not self.has_llm_config("image"):
             return None, None, None, None
         persona = self._get_effective_persona(session_id)
@@ -38,22 +81,37 @@ class SchedulerRuntimeMixin:
         role_name = self._get_session_cfg(session_id, "role_name", "魅魔")
         state = self._get_session_state(session_id)
         dynamic = state.get("dynamic_appearance") or self.config.get("dynamic_appearance", "")
+        prompt_prefs = self._prompt_scene_preferences(session_id) if hasattr(self, "_prompt_scene_preferences") else {}
         purity = self._get_purity(session_id)
         safety = self._get_effective_safety(session_id)
         quirk = self._get_session_cfg(session_id, "character_quirk_rule", "")
         world_context = ""
+        if hasattr(self, "_ensure_life_profile"):
+            try:
+                await self._ensure_life_profile(session_id)
+            except Exception:
+                logger.debug("life profile ensure failed for scheduler scene", exc_info=True)
         if hasattr(self, "_format_world_context"):
             try:
-                world_context = self._format_world_context(session_id, "", weather=weather, mode=mode)
+                world_context = self._format_world_context(session_id, "", weather=weather_data or weather, mode=mode, now=now)
             except Exception:
                 logger.debug("world context build failed for scheduler scene", exc_info=True)
+        continuity_context = self._format_scene_continuity_context(state, session_id, now=now)
+        time_light = self._format_time_context(session_id, now=now, weather=weather_data or weather)
+        light_guard = self._format_light_guard(session_id, now=now, weather=weather_data or weather)
 
         system = (
             f"{persona}\n\n"
+            "Scene boundary: write scene as environment, camera framing, action, lighting, mood, and spatial context. "
+            "Do not restate stable character appearance that is already in persona/current appearance/photo memory, such as hair color, eye color, body traits, species traits, or permanent accessories. "
+            "Scheduled pushes should not invent persistent outfit or appearance changes unless the user has explicitly asked for them.\n"
             f"角色身份: 角色名参考「{bot_name}」，角色类型「{role_name}」，优先使用「{bot_self_name}」作为自称。\n"
             f"当前附加外貌: {dynamic or '无'}\n"
+            f"用户画面偏好: 场景偏好={prompt_prefs.get('scene_preference') or '无'}；自拍偏好={prompt_prefs.get('selfie_preference') or '无'}。\n"
             f"角色性观念: {self._purity_directive(purity)}\n"
             f"当前场合: {time_period}, {weekday}, {safety.get('context', '')}。\n"
+            f"季节与自然光: {time_light}。\n"
+            f"{light_guard}\n"
             "你只需要构思发送给用户的画面，输出简短中文画面描述 scene 和一句中文台词 caption，不要输出英文画图标签。\n"
             "户外、办公室等公开场景必须穿着得体；深夜和私密场合可更放松。"
         )
@@ -61,7 +119,10 @@ class SchedulerRuntimeMixin:
             system += (
                 f"\n{world_context}\n"
                 "主动推送时优先遵守当前世界状态：把画面写成角色日常动线里的一个自然片段，不要无理由瞬移到用户身边。"
+                "但如果后面存在短期连续性上下文，短期连续性优先于自动动线。"
             )
+        if continuity_context:
+            system += f"\n{continuity_context}"
         if quirk:
             system += f"\n角色专属画面修补规则: {quirk}"
         system += (
@@ -77,15 +138,13 @@ class SchedulerRuntimeMixin:
             f"ntr: 用户超过 {self._compute_ntr_threshold(purity)} 天没有互动时的冷落惩罚推送，强烈 NTR 危机感，通常 selfie 或分屏。\n"
             "自拍物理规则: view=selfie 是前摄自拍，画面中不得出现手机、相机、镜子或拿手机的手；"
             "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。\n"
+            "selfie/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。\n"
             "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。\n"
             "必须输出严格 JSON: {\"scene\":\"...\",\"caption\":\"...\",\"view\":\"selfie|mirror|pov|third\"}。"
         )
         prompt = f"当前时段: {time_period}，星期: {weekday}，天气: {weather}，推送模式: {mode}。"
         if recent_chat:
             prompt += f"\n近期对话:\n{recent_chat}\n请呼应这些上下文。"
-        proactive = self._allow_llm_change_appearance(session_id) and random.random() < 0.15
-        if proactive:
-            prompt += "\n本次可以惊喜换造型，并添加 new_appearance_tags 字段，英文标签，逗号分隔。"
         try:
             text = await self._call_llm(system, prompt, temp=float(self._get_llm_value("image", "temperature_scene", "0.95")), tag="scene", purpose="image")
             parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
@@ -95,7 +154,10 @@ class SchedulerRuntimeMixin:
             scene = normalize_scene_visual_subject(parsed.get("scene") or "")
             if scene_implies_mirror_selfie(scene):
                 view = "mirror"
-            return scene, parsed.get("caption") or "", parsed.get("new_appearance_tags"), view
+            # 主动推送/自拍不再让场景生成器自主换装：旧的“随机惊喜换装”已移除，且本条管道的
+            # system prompt 输出的是中文，若读取 new_appearance_tags 会把未翻译的中文塞进 one_shot_appearance。
+            # 一次性换装仍由聊天配图的 image_planning（英文 new_appearance_tags）负责。
+            return scene, parsed.get("caption") or "", None, view
         except Exception as exc:
             logger.error("LLM scene generation failed: %s", exc)
             return None, None, None, None
@@ -132,13 +194,29 @@ class SchedulerRuntimeMixin:
             if not desc:
                 desc = cur.get("weatherDesc", [{}])[0].get("value", "")
             nearest = data.get("nearest_area", [])
-            city, lon = location, None
+            city, lon, lat = location, None, None
             if nearest:
                 names = nearest[0].get("areaName", [])
                 if names:
                     city = names[0].get("value", location)
                 lon = nearest[0].get("longitude")
-            weather = {"desc": desc, "code": cur.get("weatherCode", "0"), "temp": cur.get("temp_C", "?"), "city": city, "lon": lon}
+                lat = nearest[0].get("latitude")
+            astronomy = {}
+            daily = data.get("weather", [])
+            if daily and isinstance(daily[0], dict):
+                astronomy_items = daily[0].get("astronomy", [])
+                if astronomy_items and isinstance(astronomy_items[0], dict):
+                    astronomy = astronomy_items[0]
+            weather = {
+                "desc": desc,
+                "code": cur.get("weatherCode", "0"),
+                "temp": cur.get("temp_C", "?"),
+                "city": city,
+                "lon": lon,
+                "lat": lat,
+                "sunrise": astronomy.get("sunrise", ""),
+                "sunset": astronomy.get("sunset", ""),
+            }
             if cache_key:
                 self._weather_caches[cache_key] = {"data": weather, "ts": time.time()}
             return weather
@@ -246,22 +324,56 @@ class SchedulerRuntimeMixin:
             w = await self._fetch_weather(session_id=session_id)
             weather = f"{w['desc']} {w['temp']} C" if w else "未知"
             recent = self._get_recent_chat_history(state, session_id)
-            time_period = self._get_time_period(local_dt.hour)
-            scene, caption, new_app, view = await self._llm_write_scene(mode, weather, WEEKDAY_NAMES[local_dt.weekday()], time_period, recent, session_id)
+            time_ctx = self._get_time_context(session_id, now=local_dt, weather=w)
+            time_period = time_ctx.get("period") or self._get_time_period(local_dt.hour)
+            if hasattr(self, "_ensure_life_profile"):
+                try:
+                    await self._ensure_life_profile(session_id)
+                except Exception:
+                    logger.debug("life profile ensure failed for scheduler push", exc_info=True)
+            if hasattr(self, "build_world_state"):
+                try:
+                    world = self.build_world_state(session_id, weather=w or weather, now=local_dt, mode=mode)
+                    if world:
+                        profile = self._format_life_profile(world.get("life_profile")) if hasattr(self, "_format_life_profile") else ""
+                        current = world.get("character_place") or {}
+                        nxt = world.get("next_place") or {}
+                        self._ulog(
+                            session_id,
+                            "WORLD",
+                            "推送动线 "
+                            f"mode={mode} profile={profile or 'unknown'} "
+                            f"current={current.get('label', '?')}({current.get('name', '?')}) "
+                            f"next={world.get('next_time_period', '?')}:{nxt.get('label', '?')}({nxt.get('name', '?')})",
+                        )
+                except Exception:
+                    logger.debug("world route log failed for scheduler push", exc_info=True)
+            scene, caption, new_app, view = await self._llm_write_scene(
+                mode,
+                weather,
+                WEEKDAY_NAMES[local_dt.weekday()],
+                time_period,
+                recent,
+                session_id,
+                now=local_dt,
+                weather_data=w,
+            )
             if not scene:
                 return
-            if new_app and self._allow_llm_change_appearance(session_id):
-                state["dynamic_appearance"] = new_app
-                self._save_session_state(session_id, state)
             english = await self._translate_to_tags(scene, session_id=session_id, view=view)
-            ok, imgs, err = await self._do_generate(english, is_ntr=(mode == "ntr"), session_id=session_id)
+            ok, imgs, err = await self._do_generate(
+                english,
+                is_ntr=(mode == "ntr"),
+                session_id=session_id,
+                one_shot_appearance=new_app or "",
+            )
             if ok and imgs:
                 await self.send_photo(chat_id, imgs[0], caption or "")
                 source = self._format_image_source_description(
                     intent=f"{mode} 模式自动推送，时段: {time_period}，天气: {weather}",
                     prompt=recent or "",
                 )
-                self._record_sent_photo(session_id, scene, caption or "", view=view, source_description=source)
+                self._record_sent_photo(session_id, scene, caption or "", appearance=new_app or None, view=view, source_description=source)
             else:
                 self._ulog(session_id, "PUSH", f"生图失败 mode={mode}: {err}")
                 logger.error("scheduled generate failed: %s", err)

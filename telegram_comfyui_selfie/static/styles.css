@@ -205,6 +205,14 @@ button:disabled { opacity: .55; cursor: wait; }
   padding: 16px;
 }
 
+.admin-panel {
+  margin-top: 14px;
+}
+
+.prompt-slot-panel {
+  margin-top: 14px;
+}
+
 .panel-head {
   display: flex;
   justify-content: space-between;
@@ -269,6 +277,12 @@ button:disabled { opacity: .55; cursor: wait; }
 }
 
 .field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+  gap: 12px 14px;
+}
+
+.slot-edit-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(240px, 1fr));
   gap: 12px 14px;
@@ -349,9 +363,75 @@ input:focus, textarea:focus, select:focus {
   margin-top: 4px;
 }
 
-.session-form, .action-form {
+.session-form, .action-form, .prompt-slot-form {
   display: grid;
   gap: 12px;
+}
+
+.preview-scene {
+  margin-top: 2px;
+}
+
+.effective-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.effective-grid > div {
+  border: 1px solid var(--line);
+  background: var(--soft);
+  padding: 10px;
+  min-width: 0;
+}
+
+.effective-grid span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 5px;
+}
+
+.effective-grid strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.prompt-slot-preview {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(260px, .8fr);
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.prompt-slot-preview h4 {
+  margin: 0 0 10px;
+}
+
+.slot-list {
+  display: grid;
+  gap: 8px;
+}
+
+.slot-row {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+
+.slot-row strong {
+  color: var(--accent-strong);
+  font-size: 13px;
+}
+
+.slot-row span {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .empty-state {
@@ -517,6 +597,6 @@ input:focus, textarea:focus, select:focus {
   .shell { grid-template-columns: 1fr; }
   .sidebar { position: static; }
   nav { grid-template-columns: repeat(4, 1fr); }
-  .split, .session-layout, .status-grid, .field-grid, .world-summary, .catalog-row, .note-line { grid-template-columns: 1fr; }
+  .split, .session-layout, .status-grid, .field-grid, .slot-edit-grid, .effective-grid, .prompt-slot-preview, .slot-row, .world-summary, .catalog-row, .note-line { grid-template-columns: 1fr; }
   .topbar { align-items: flex-start; flex-direction: column; }
 }

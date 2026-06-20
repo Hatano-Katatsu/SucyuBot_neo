@@ -29,11 +29,14 @@ def create_web_app(service) -> web.Application:
     app.router.add_get("/api/sessions/{session_id:.+}", api_session_detail)
     app.router.add_patch("/api/sessions/{session_id:.+}", api_update_session)
     app.router.add_delete("/api/sessions/{session_id:.+}", api_delete_session)
+    app.router.add_get("/api/prompt-slots/{session_id:.+}", api_prompt_slots)
     app.router.add_post("/api/world/{session_id:.+}/places/refresh", api_world_refresh_places)
     app.router.add_get("/api/world/{session_id:.+}", api_world_route)
     app.router.add_post("/api/bot/start", api_bot_start)
     app.router.add_post("/api/bot/stop", api_bot_stop)
     app.router.add_post("/api/service/restart", api_service_restart)
+    app.router.add_post("/api/admin/migrate-visual-tags", api_migrate_visual_tags)
+    app.router.add_post("/api/admin/cleanup-prompt-prefix", api_cleanup_prompt_prefix)
     app.router.add_get("/api/logs", api_logs)
     app.router.add_get("/api/logs/{chat_id:.+}", api_log_detail)
     app.router.add_delete("/api/logs/{chat_id:.+}", api_log_clear)
@@ -152,6 +155,7 @@ def serialize_user_place(user_place: dict[str, Any] | None) -> dict[str, Any] | 
         "key": user_place.get("key", ""),
         "label": user_place.get("label", ""),
         "text": user_place.get("text", ""),
+        "co_located": bool(user_place.get("co_located")),
         "updated_at": updated,
         "updated_ago": human_ago(time.time() - updated) if updated else "",
     }
@@ -167,10 +171,23 @@ def serialize_world_state(world: dict[str, Any]) -> dict[str, Any]:
         "weekday": world.get("weekday", ""),
         "day_type": world.get("day_type", ""),
         "time_period": world.get("time_period", ""),
+        "time_context": {
+            "season": (world.get("time_context") or {}).get("season", ""),
+            "light_phase": (world.get("time_context") or {}).get("light_phase", ""),
+            "light_hint": (world.get("time_context") or {}).get("light_hint", ""),
+            "sunrise": ((world.get("time_context") or {}).get("sunrise").strftime("%H:%M") if (world.get("time_context") or {}).get("sunrise") else ""),
+            "sunset": ((world.get("time_context") or {}).get("sunset").strftime("%H:%M") if (world.get("time_context") or {}).get("sunset") else ""),
+        },
         "weather": world.get("weather", ""),
         "weather_is_bad": bool(world.get("weather_is_bad")),
         "character_place": serialize_place(world.get("character_place")),
         "character_candidates": [serialize_place(item) for item in world.get("character_candidates", [])],
+        "next_place": serialize_place(world.get("next_place")),
+        "next_time_period": world.get("next_time_period", ""),
+        "life_profile": {
+            "age_stage": (world.get("life_profile") or {}).get("age_stage", ""),
+            "day_anchor": (world.get("life_profile") or {}).get("day_anchor", ""),
+        },
         "user_place": serialize_user_place(world.get("user_place")),
         "relation": world.get("relation", ""),
         "constraints": list(world.get("constraints") or []),
@@ -239,6 +256,50 @@ def build_world_route_preview(service, session_id: str, weather: Any = None) -> 
     return payload
 
 
+def serialize_prompt_slots(service, session_id: str, scene: str = "{场景描述}") -> dict[str, Any]:
+    state = service._get_session_state(session_id)
+    positive, negative = service._build_prompt(scene or "{场景描述}", session_id=session_id)
+    slots = None
+    cache = getattr(service, "_last_prompt_slots_by_session", {})
+    if isinstance(cache, dict):
+        slots = cache.get(session_id)
+    items = []
+    if hasattr(slots, "as_display_items"):
+        items = [{"key": key, "value": value} for key, value in slots.as_display_items()]
+    prefs = service._prompt_scene_preferences(session_id) if hasattr(service, "_prompt_scene_preferences") else {
+        "scene_preference": "",
+        "selfie_preference": "",
+    }
+    return {
+        "scene": scene,
+        "positive": positive,
+        "negative": negative,
+        "items": items,
+        "editable": {
+            "custom_count": state.get("custom_count", ""),
+            "custom_positive_prefix": state.get("custom_positive_prefix", ""),
+            "custom_default_hair": state.get("custom_default_hair", ""),
+            "custom_default_eyes": state.get("custom_default_eyes", ""),
+            "custom_current_style": state.get("custom_current_style", ""),
+            "dynamic_appearance": state.get("dynamic_appearance", ""),
+            "custom_scene_preference": state.get("custom_scene_preference", ""),
+            "custom_selfie_preference": state.get("custom_selfie_preference", ""),
+        },
+        "effective": {
+            "positive_prefix": service._get_session_cfg(session_id, "positive_prefix", ""),
+            "default_hair": service._get_session_cfg(session_id, "default_hair", ""),
+            "default_eyes": service._get_session_cfg(session_id, "default_eyes", ""),
+            "current_style": service._get_current_style(session_id),
+            "scene_preference": prefs.get("scene_preference", ""),
+            "selfie_preference": prefs.get("selfie_preference", ""),
+        },
+        "notes": [
+            "基础外观只放稳定身体身份特征；1girl/1boy/solo 已迁移到人数槽 custom_count。",
+            "场景偏好会注入生图辅助模型，用来影响配图和主动推送的地点、时间与自拍习惯。",
+        ],
+    }
+
+
 async def api_status(request: web.Request):
     service = service_from(request)
     config = service.config
@@ -251,6 +312,7 @@ async def api_status(request: web.Request):
         "web_url": f"http://{config.get('web_host', '127.0.0.1')}:{config.get('web_port', 8787)}",
         "config_path": str(service.config_path),
         "state_path": str(service.state_path),
+        "launch_script": str(Path.cwd() / "Start-SucyuBot.cmd"),
         "token_configured": bool(config.get("telegram_bot_token")),
         "llm_configured": service.has_llm_config("chat") and service.has_llm_config("image"),
         "chat_llm_configured": service.has_llm_config("chat"),
@@ -310,13 +372,26 @@ async def api_update_session(request: web.Request):
     state = service._get_session_state(sid)
     allowed = {
         "custom_scheduled_persona", "custom_role_name", "custom_bot_name", "custom_bot_self_name",
-        "custom_spatial_relationship", "custom_location", "custom_timezone_offset", "custom_positive_prefix",
+        "custom_spatial_relationship", "custom_location", "custom_timezone_offset",
+        "custom_count", "custom_positive_prefix",
         "custom_default_hair", "custom_default_eyes", "custom_current_style", "dynamic_appearance",
-        "custom_character", "custom_series", "custom_daily_selfie_limit",
+        "custom_scene_preference", "custom_selfie_preference",
+        "custom_character", "custom_series", "custom_visual_character", "custom_visual_series", "custom_daily_selfie_limit",
+        "custom_character_age_stage", "custom_character_day_anchor",
     }
+    life_profile_keys = {
+        "custom_scheduled_persona", "custom_role_name", "custom_bot_name",
+        "custom_character", "custom_series", "custom_visual_character", "custom_visual_series", "custom_character_age_stage",
+        "custom_character_day_anchor",
+    }
+    profile_touched = False
     for key in allowed:
         if key in payload:
             state[key] = "" if payload[key] is None else str(payload[key])
+            if key in life_profile_keys:
+                profile_touched = True
+    if profile_touched:
+        state.pop("life_profile", None)
     if "purity" in payload:
         raw = str(payload["purity"]).strip()
         if raw:
@@ -341,6 +416,15 @@ async def api_delete_session(request: web.Request):
     service.sessions.pop(sid, None)
     service._write_state()
     return json_ok()
+
+
+async def api_prompt_slots(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if sid not in service.sessions:
+        return json_error("会话不存在", status=404)
+    scene = request.query.get("scene", "{场景描述}")
+    return json_ok({"prompt": serialize_prompt_slots(service, sid, scene=scene)})
 
 
 async def api_world_route(request: web.Request):
@@ -395,6 +479,22 @@ async def api_service_restart(request: web.Request):
         return json_error(f"无法准备重启: {exc}", status=500)
     asyncio.create_task(service.shutdown_for_process_restart())
     return json_ok({"restart": restart})
+
+
+async def api_migrate_visual_tags(request: web.Request):
+    service = service_from(request)
+    return json_ok({"migration": service.migrate_visual_identity_tags()})
+
+
+async def api_cleanup_prompt_prefix(request: web.Request):
+    service = service_from(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    apply_changes = parse_bool(payload.get("apply", False)) if isinstance(payload, dict) else False
+    cleanup = service.cleanup_prompt_prefix_slots(apply=apply_changes)
+    return json_ok({"cleanup": cleanup})
 
 
 async def api_logs(request: web.Request):

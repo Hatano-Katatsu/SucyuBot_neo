@@ -6,6 +6,7 @@ const state = {
   selectedSession: null,
   selectedWorldSession: null,
   worldPreview: null,
+  promptSlots: null,
   logs: [],
   selectedLog: null,
 };
@@ -89,6 +90,8 @@ const configSections = [
     ["daily_selfie_limit", "每日随机推送", "number"],
     ["location", "默认城市", "text"],
     ["timezone_offset", "时区偏移", "text"],
+    ["character_age_stage", "默认年龄段", "select:,minor,adult"],
+    ["character_day_anchor", "默认白天去向", "select:,company,school,factory,farm,construction,medical,retail,delivery,driver,home,flexible"],
     ["world_runtime_enabled", "启用自动动线", "bool"],
     ["world_city_places_enabled", "城市地点增强", "bool"],
     ["world_city_places_ttl_days", "城市地点缓存天数", "number"],
@@ -114,25 +117,45 @@ const configSections = [
 const sessionFields = [
   ["custom_character", "角色", "text"],
   ["custom_series", "作品/系列", "text"],
+  ["custom_visual_character", "生图角色Tag", "text"],
+  ["custom_visual_series", "生图作品Tag", "text"],
   ["custom_scheduled_persona", "会话人格", "textarea"],
+  ["custom_count", "人数", "text"],
   ["custom_positive_prefix", "身体特征", "textarea"],
   ["dynamic_appearance", "临时外型", "textarea"],
+  ["custom_scene_preference", "场景偏好", "textarea"],
+  ["custom_selfie_preference", "自拍偏好", "textarea"],
   ["custom_role_name", "角色类型", "text"],
   ["custom_bot_name", "角色名", "text"],
   ["custom_bot_self_name", "自称", "text"],
   ["custom_spatial_relationship", "空间关系", "textarea"],
   ["custom_location", "城市", "text"],
   ["custom_timezone_offset", "时区偏移", "text"],
+  ["custom_character_age_stage", "年龄段覆盖", "select:,minor,adult"],
+  ["custom_character_day_anchor", "白天去向覆盖", "select:,company,school,factory,farm,construction,medical,retail,delivery,driver,home,flexible"],
   ["custom_current_style", "画风", "text"],
   ["custom_daily_selfie_limit", "每日推送覆盖", "text"],
   ["purity", "纯良度", "number"],
   ["custom_allow_llm_change_appearance", "模型改外型", "select:,true,false"],
 ];
 
-const commands = ["菜单", "帮助", "自拍", "天气", "天气设置", "画风", "角色", "外型", "人格", "纯良度", "新场景", "记忆", "记住", "忘记", "推送频率", "调度", "测试推送", "测试生图", "提示词", "生图状态", "管理", "turbo"];
+const promptSlotFields = [
+  ["custom_count", "人数 (1girl/1boy)", "text"],
+  ["custom_positive_prefix", "基础外观", "textarea"],
+  ["custom_default_hair", "默认发色/发型", "text"],
+  ["custom_default_eyes", "默认瞳色", "text"],
+  ["custom_current_style", "画风", "text"],
+  ["dynamic_appearance", "临时穿搭/配饰", "textarea"],
+  ["custom_scene_preference", "场景偏好", "textarea"],
+  ["custom_selfie_preference", "自拍偏好", "textarea"],
+];
+
+const commands = ["初始化", "菜单", "帮助", "创建OC", "自拍", "天气", "天气设置", "画风", "角色", "外型", "人格", "纯良度", "新场景", "记忆", "记住", "忘记", "推送频率", "调度", "测试推送", "测试生图", "提示词", "生图状态", "管理", "turbo"];
 const commandHelp = {
+  "初始化": ["查看新用户上手向导。", ""],
   "菜单": ["打开快速菜单或某个详细分区。", "设置 / 角色 / 生图 / 记忆 / 推送 / 动线 / 上下文 / 调试 / 全部"],
   "帮助": ["等同于 /菜单。", ""],
+  "创建OC": ["创建原创角色。名字只用于对话身份，不会作为生图角色标签写入提示词。", "名字：小雨\n角色类型：大学生\n年龄段：adult\n白天去向：school\n性格：温柔、慢热、说话简短，会认真回应用户的情绪\n外貌：黑色短发，蓝眼睛，身材纤细，浅色皮肤\n初始穿搭：白衬衫，深色百褶裙\n与你的关系：同城暧昧对象，周末经常一起出门\n所在城市：上海"],
   "自拍": ["按当前会话和聊天情境生成一张图。", ""],
   "天气": ["查看城市天气；留空时使用当前会话城市。", "上海"],
   "天气设置": ["设置当前会话的城市、时区和天气来源；也会用于每日动线和城市地点增强。", "上海"],
@@ -233,11 +256,14 @@ function renderStatus() {
   $("#bot-toggle-btn").textContent = s.bot_running ? "停止机器人" : "启动机器人";
   $("#bot-toggle-btn").classList.toggle("danger", s.bot_running);
   $("#bot-toggle-btn").classList.toggle("primary", !s.bot_running);
+  $("#service-start-btn").textContent = s.bot_running ? "服务已启动" : "一键启动";
+  $("#service-start-btn").disabled = Boolean(s.bot_running);
   $("#bot-name").textContent = s.bot_username ? `@${s.bot_username}` : (s.token_configured ? "Token 已填写" : "Token 未填写");
   $("#status-web-url").textContent = s.web_url;
   $("#status-config-path").textContent = s.config_path;
   $("#status-state-path").textContent = s.state_path;
   $("#status-process").textContent = s.process_id ? `PID ${s.process_id}` : "-";
+  $("#status-launch-script").textContent = s.launch_script || "-";
   $("#status-comfyui").textContent = s.comfyui_url || "-";
   $("#status-chat-llm-model").textContent = s.chat_llm_model ? `${s.chat_llm_model} @ ${s.chat_llm_api_base}` : "-";
   $("#status-image-llm-model").textContent = s.image_llm_model ? `${s.image_llm_model} @ ${s.image_llm_api_base}` : "-";
@@ -323,6 +349,7 @@ async function selectSession(sessionId) {
   const data = await api(`/api/sessions/${encodeURIComponent(sessionId)}`);
   renderSessionForm(data.state, data.session);
   renderSessions();
+  await loadPromptSlots();
 }
 
 function renderSessionForm(sessionState, summary) {
@@ -346,6 +373,92 @@ function renderSessionForm(sessionState, summary) {
     await loadAll();
     toast("会话已删除");
   };
+}
+
+function renderPromptSlotEditor(prompt) {
+  const box = $("#prompt-slot-content");
+  if (!state.selectedSession) {
+    box.innerHTML = `<div class="empty-state">请先从上方选择一个会话。</div>`;
+    return;
+  }
+  const editable = prompt?.editable || {};
+  const effective = prompt?.effective || {};
+  const items = prompt?.items || [];
+  const notes = (prompt?.notes || []).map(note => `<li>${escapeHtml(note)}</li>`).join("");
+  const previewScene = prompt?.scene || "{场景描述}";
+  const slotRows = items.map(item => `
+    <div class="slot-row">
+      <strong>${escapeHtml(item.key)}</strong>
+      <span>${escapeHtml(item.value || "（空）")}</span>
+    </div>
+  `).join("");
+
+  box.innerHTML = `
+    <form id="prompt-slot-form" class="prompt-slot-form">
+      <div class="slot-edit-grid"></div>
+      <label class="preview-scene">预览场景<input name="preview_scene" value="${escapeHtml(previewScene)}"></label>
+      <div class="effective-grid">
+        <div><span>实际基础外观</span><strong>${escapeHtml(effective.positive_prefix || "（空）")}</strong></div>
+        <div><span>实际画风</span><strong>${escapeHtml(effective.current_style || "（空）")}</strong></div>
+        <div><span>实际默认发型</span><strong>${escapeHtml(effective.default_hair || "（空）")}</strong></div>
+        <div><span>实际默认瞳色</span><strong>${escapeHtml(effective.default_eyes || "（空）")}</strong></div>
+        <div><span>场景偏好</span><strong>${escapeHtml(effective.scene_preference || "（空）")}</strong></div>
+        <div><span>自拍偏好</span><strong>${escapeHtml(effective.selfie_preference || "（空）")}</strong></div>
+      </div>
+      <div class="form-actions">
+        <button type="button" id="prompt-slot-preview">刷新槽位预览</button>
+        <button class="primary" type="submit">保存槽位</button>
+      </div>
+    </form>
+    <div class="prompt-slot-preview">
+      <section>
+        <h4>槽位预览</h4>
+        <div class="slot-list">${slotRows || `<div class="empty-state">暂无槽位。</div>`}</div>
+      </section>
+      <section>
+        <h4>编辑说明</h4>
+        <ul class="constraint-list">${notes}</ul>
+      </section>
+    </div>
+  `;
+  const grid = box.querySelector(".slot-edit-grid");
+  promptSlotFields.forEach(field => grid.appendChild(inputFor(field, editable)));
+  $("#prompt-slot-preview").onclick = () => loadPromptSlots();
+  $("#prompt-slot-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const btn = event.submitter;
+    setBusy(btn, true);
+    try {
+      const values = formValues(event.currentTarget);
+      delete values.preview_scene;
+      await api(`/api/sessions/${encodeURIComponent(state.selectedSession)}`, { method: "PATCH", body: values });
+      await selectSession(state.selectedSession);
+      await loadAll();
+      toast("Prompt 槽位已保存");
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+    }
+  };
+}
+
+async function loadPromptSlots() {
+  if (!state.selectedSession) {
+    renderPromptSlotEditor(null);
+    return;
+  }
+  const sceneInput = document.querySelector("#prompt-slot-form input[name=preview_scene]");
+  const scene = sceneInput ? sceneInput.value : "{场景描述}";
+  try {
+    const sid = encodeURIComponent(state.selectedSession);
+    const data = await api(`/api/prompt-slots/${sid}?scene=${encodeURIComponent(scene)}`);
+    state.promptSlots = data.prompt;
+    renderPromptSlotEditor(data.prompt);
+  } catch (err) {
+    $("#prompt-slot-content").innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
+    toast(err.message, "error");
+  }
 }
 
 function worldSessionTitle(item) {
@@ -423,6 +536,25 @@ function placeText(place) {
   return `${place.label || place.key || "未知"}${name}`;
 }
 
+function lifeProfileText(profile = {}) {
+  const age = { minor: "未成年", adult: "成年", unknown: "年龄未知" }[profile.age_stage] || "年龄未知";
+  const anchor = {
+    company: "上班族",
+    school: "在校/学校",
+    factory: "工厂工人",
+    farm: "务农",
+    construction: "建筑工人",
+    medical: "医护",
+    retail: "店员/服务员",
+    delivery: "外卖/快递",
+    driver: "司机",
+    home: "无固定职场",
+    flexible: "时间自由",
+    unknown: "去向未知",
+  }[profile.day_anchor] || "去向未知";
+  return `${age} · ${anchor}`;
+}
+
 function placeTags(place) {
   if (!place) return "";
   const tags = [place.indoor ? "室内" : "室外", place.public ? "公开场合" : "私密场合"];
@@ -453,12 +585,15 @@ function renderTimeline(timeline = []) {
   return `<div class="timeline-list">${timeline.map(item => {
     const place = item.character_place || {};
     const classes = item.is_current_slot ? "timeline-item now" : "timeline-item";
+    const light = item.time_context || {};
+    const lightText = light.light_phase ? `${light.season || ""} · ${light.light_phase}${light.sunrise && light.sunset ? ` · 日出 ${light.sunrise} / 日落 ${light.sunset}` : ""}` : "";
     return `
       <article class="${classes}">
         <time>${escapeHtml(item.slot_label || "")}</time>
         <div>
           <strong>${escapeHtml(placeText(place))}</strong>
           <p>${escapeHtml(item.time_period || "")} · ${escapeHtml(item.day_type || "")} · ${escapeHtml(item.weather || "天气未知")}</p>
+          ${lightText ? `<p>${escapeHtml(lightText)}</p>` : ""}
           <div class="tag-row">${placeTags(place)}</div>
         </div>
       </article>
@@ -481,16 +616,24 @@ function renderWorldRoute(world) {
   }
   const current = world.current || {};
   const currentPlace = current.character_place || {};
-  const userPlace = current.user_place ? `${current.user_place.label}${current.user_place.text ? ` · ${current.user_place.text}` : ""}${current.user_place.updated_ago ? ` · ${current.user_place.updated_ago}` : ""}` : "未知";
+  const nextPlace = current.next_place || null;
+  const light = current.time_context || {};
+  const lightText = light.light_phase ? `${light.season || ""} · ${light.light_phase}${light.sunrise && light.sunset ? ` · 日出 ${light.sunrise} / 日落 ${light.sunset}` : ""}` : "-";
+  const nextText = nextPlace ? `${current.next_time_period || "接下来"} · ${placeText(nextPlace)}` : "未知";
+  const up = current.user_place;
+  const userPlace = up ? `${up.co_located ? "🤝 同处 · " : ""}${up.label}${up.text ? ` · ${up.text}` : ""}${up.updated_ago ? ` · ${up.updated_ago}` : ""}` : "未知";
   const constraints = (current.constraints || []).map(item => `<li>${escapeHtml(item)}</li>`).join("");
   const override = current.spatial_override ? `<div class="note-line"><strong>额外空间关系</strong><span>${escapeHtml(current.spatial_override)}</span></div>` : "";
 
   box.innerHTML = `
     <div class="world-summary">
       <div><span>角色当前</span><strong>${escapeHtml(placeText(currentPlace))}</strong><div class="tag-row">${placeTags(currentPlace)}</div></div>
+      <div><span>角色身份</span><strong>${escapeHtml(lifeProfileText(current.life_profile || {}))}</strong></div>
+      <div><span>接下来</span><strong>${escapeHtml(nextText)}</strong></div>
       <div><span>用户位置</span><strong>${escapeHtml(userPlace)}</strong></div>
       <div><span>地点来源</span><strong>${escapeHtml(current.catalog_source || "-")}</strong></div>
       <div><span>天气</span><strong>${escapeHtml(current.weather || world.weather || "未知")}</strong></div>
+      <div><span>自然光</span><strong>${escapeHtml(lightText)}</strong></div>
     </div>
     <section class="world-block">
       <h4>空间判断</h4>
@@ -586,6 +729,52 @@ function updateCommandHelp() {
   if (arg) arg.placeholder = placeholder || "";
 }
 
+function formatPromptCleanup(cleanup) {
+  const changes = cleanup.changes || [];
+  const lines = [
+    cleanup.applied ? "执行结果" : "预览结果",
+    `配置更新: ${cleanup.config_updated || 0}`,
+    `会话更新: ${cleanup.sessions_updated || 0}`,
+    `角色档案更新: ${cleanup.saved_characters_updated || 0}`,
+    `待处理条目: ${changes.length}`,
+  ];
+  if (cleanup.backup_paths && cleanup.backup_paths.length) {
+    lines.push(`备份: ${cleanup.backup_paths.join(" | ")}`);
+  }
+  if (cleanup.note) lines.push(`说明: ${cleanup.note}`);
+  if (!changes.length) {
+    lines.push("", "没有发现需要清理的 positive_prefix 污染。");
+    return lines.join("\n");
+  }
+  lines.push("", "变更预览:");
+  changes.slice(0, 40).forEach((item, index) => {
+    lines.push(`${index + 1}. ${item.label}${item.character ? ` (${item.character})` : ""}`);
+    if (item.removed_quality) lines.push(`   移除质量词: ${item.removed_quality}`);
+    if (item.moved_style) lines.push(`   移动风格词: ${item.moved_style}`);
+    if (item.style_before !== item.style_after) lines.push(`   ${item.style_field}: ${item.style_before || "（空）"} -> ${item.style_after || "（空）"}`);
+    lines.push(`   before: ${item.before}`);
+    lines.push(`   after : ${item.after || "（空）"}`);
+  });
+  if (changes.length > 40) lines.push(`... 还有 ${changes.length - 40} 条未显示`);
+  return lines.join("\n");
+}
+
+async function runPromptCleanup(applyChanges, button) {
+  if (applyChanges && !window.confirm("这会先备份 config/state，再改写老 Prompt 数据。继续吗？")) return;
+  setBusy(button, true);
+  try {
+    const data = await api("/api/admin/cleanup-prompt-prefix", { method: "POST", body: { apply: applyChanges } });
+    $("#prompt-cleanup-output").textContent = formatPromptCleanup(data.cleanup || {});
+    if (applyChanges) await loadAll();
+    toast(applyChanges ? "Prompt 清理已执行" : "Prompt 清理预览已生成");
+  } catch (err) {
+    $("#prompt-cleanup-output").textContent = err.message;
+    toast(err.message, "error");
+  } finally {
+    setBusy(button, false);
+  }
+}
+
 async function initEvents() {
   $all(".nav").forEach(btn => btn.onclick = () => switchView(btn.dataset.view));
   $("#refresh-btn").onclick = () => loadAll().then(() => toast("已刷新"));
@@ -614,6 +803,25 @@ async function initEvents() {
       await loadLogs();
     } catch (err) {
       toast(err.message, "error");
+    }
+  };
+
+  $("#service-start-btn").onclick = async (event) => {
+    const btn = event.currentTarget;
+    setBusy(btn, true);
+    setBusy($("#bot-toggle-btn"), true);
+    try {
+      if (!state.status?.bot_running) {
+        await api("/api/bot/start", { method: "POST" });
+      }
+      await loadAll();
+      toast("服务已启动");
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+      setBusy($("#bot-toggle-btn"), false);
+      if (state.status?.bot_running) btn.disabled = true;
     }
   };
 
@@ -718,6 +926,9 @@ async function initEvents() {
       setBusy(btn, false);
     }
   };
+
+  $("#prompt-cleanup-preview").onclick = (event) => runPromptCleanup(false, event.currentTarget);
+  $("#prompt-cleanup-apply").onclick = (event) => runPromptCleanup(true, event.currentTarget);
 }
 
 async function waitForServiceRestart(oldPid) {

@@ -1201,7 +1201,7 @@ class TelegramComfyUIService(
             raise RuntimeError("LLM 返回空内容")
         return text
 
-    async def _translate_to_tags(self, natural: str, session_id: str = "", view: str = "") -> str:
+    async def _translate_to_tags(self, natural: str, session_id: str = "", view: str = "", is_intimate: bool = False) -> str:
         if not self.has_llm_config("image"):
             return natural
         view = (view or "").strip().lower()
@@ -1251,6 +1251,14 @@ class TelegramComfyUIService(
                 "前摄自拍不出现手机和镜子；只有对镜自拍才允许镜子和手机同时出现。"
                 "避免复杂手势和多手互动；除非原文强制要求，尽量不强调手部。"
                 "自然语言句子尽量不要使用逗号。输出格式: English visual sentence. key tag, key tag, key tag"
+            )
+        if is_intimate:
+            # 亲密场景翻译护栏：第二人称身体必须翻成男性身体局部，绝不能被通用“主体是角色”规则改成第二个角色（双女根因）。
+            system += (
+                " Intimate scene override: this is an explicit sex scene with exactly ONE female character (the role) plus the user's partial male body. "
+                "Any male body part (hands, arms, chest, torso, thighs) belongs to the USER and must be rendered as visible male body parts "
+                "(male hands, male torso, male thighs), never as a second person or 'the character'. "
+                "Chinese phrases like 你的手/你的胸/你的腰/你的腿 must become male body parts, not a second character. Output exactly one woman, never two women."
             )
         text = await self._call_llm(system, f"请翻译: {natural}", temp=float(self._get_llm_value("image", "temperature_translate", "0.3")), tag="translate", purpose="image")
         body = text.strip().strip(",")
@@ -1392,9 +1400,7 @@ class TelegramComfyUIService(
         new_app = (plan.get("new_appearance_tags") or "").strip()
         is_intimate = bool(plan.get("is_intimate"))
         state = self._get_session_state(session_id)
-        english = await self._translate_to_tags(scene, session_id=session_id, view=final_view)
-        if new_app:
-            english = f"{english}, {new_app}" if english else new_app
+        english = await self._translate_to_tags(scene, session_id=session_id, view=final_view, is_intimate=is_intimate)
         ok, imgs, err = await self._do_generate(english, session_id=session_id, one_shot_appearance=new_app or "", is_intimate=is_intimate)
         if not ok or not imgs:
             self._ulog(session_id, "ERROR", f"工具生图失败: {err}")
