@@ -18,6 +18,9 @@ INTIMATE_CONTEXT_ZH = frozenset({
     "融为一体", "裸体相拥", "赤裸相拥", "缠绵", "交缠", "交媾",
     "在她体内", "进入体内", "律动", "进出", "顶入", "挺入", "侵入",
     "侵占", "占有她", "要了她", "亲密交互", "交合中", "结合中",
+    # 事后/余韵/同床共枕等贴身画面（用户身体仍与角色同框）：同样按亲密处理，避免被当成单人自拍。
+    "事后", "高潮", "余韵", "云雨", "鱼水之欢", "欢爱", "内射", "中出",
+    "精液", "射进", "射在", "同床", "共枕", "事后温存", "相拥而眠",
 })
 
 
@@ -156,6 +159,8 @@ async def plan_roleplay_image(
             logger.debug("world context build failed for image planning", exc_info=True)
 
     intimate_hint = _detect_intimate_context(intent, mood, prompt, dialog_context or "")
+    user_gender = service._get_user_gender(session_id) if hasattr(service, "_get_user_gender") else "male"
+    user_g_zh = "女性" if user_gender == "female" else "男性"
 
     system = (
         f"{service._get_effective_persona(session_id)}\n\n"
@@ -187,15 +192,19 @@ async def plan_roleplay_image(
     if quirk:
         system += f"\n角色专属画面修补规则: {quirk}"
     system += (
-        "\n场景类型自判: 请判断这张图是否为【亲密交合/性爱场景】（角色与用户正在性交、骑乘、交合、爱抚生殖部位、射精等），"
-        "并在 JSON 里输出 is_intimate 布尔值。"
+        "\n场景类型自判: 只要角色与用户有贴身性接触（性交、骑乘、交合、爱抚、拥抱贴身、亲吻、前戏，"
+        "或任何用户身体会与角色贴合入画的性暗示情形），都判为亲密场景 is_intimate=true；纯日常、无身体接触才是 false。"
+        "性事刚结束的事后温存、同床共枕、相拥而眠、躺在对方身边、爱抚余韵等画面，只要用户的身体仍与角色同框贴近，"
+        "同样判为 is_intimate=true（不要因为‘性行为已结束’就当成日常）。"
+        "请在 JSON 里输出 is_intimate 布尔值。"
         + ("系统初步判断本次可能属于亲密场景，请重点确认。" if intimate_hint else "")
         + "\n【以下亲密交互规则仅当你判定 is_intimate=true 时适用；若判定为日常/非性场景，请完全忽略本段，按通用规则写】:\n"
         "- 视角固定为 pov（用户第一人称视角），严禁 selfie 或 mirror，不需要第三人称全景。\n"
-        "- 用户身体归属（关键，针对双人误画）: 画面里出现的男性身体（手、手臂、胸膛、腹部、大腿）一律属于【用户】，绝不是第二个角色。"
-        "凡涉及“你的手/你的胸/你的腰/你的腿”等用户身体部位，scene 必须写成可见的男性身体局部（如 男性的手、男性胸膛、男性腹部），"
-        "不要写成“另一个角色/她/第二个人”。全图有且只有角色一名女性主体，外加用户的身体局部，严禁出现两名女性。\n"
-        "- 只画用户身体局部（手/臂/胸/腹/腿），不要画完整男性或男性面部。\n"
+        f"- 用户身体归属（关键，针对双人误画）: 画面焦点永远是角色（一名女性）。用户作为亲密伴侣入画时，只画用户的【{user_g_zh}】身体局部（手、手臂、胸膛或胸部、腹、背、腿），"
+        "绝不能把用户写成有完整面部、发型、表情、迷离眼神的第二个主角，更不能让用户喧宾夺主。\n"
+        f"凡“你的手/你的胸/你的背/你的腿”等用户身体部位，scene 要写成可见的{user_g_zh}身体局部，不要写成“另一个角色/她/第二个人”。"
+        "除非用户明确要求双人同框，画面里被完整刻画的人物只有角色一名。\n"
+        f"- 只画用户身体局部（手/臂/胸/腹/背/腿），不要画完整的{user_g_zh}全身或面部。\n"
         "- 人物优先: 重点在角色的表情（迷离、红晕、咬唇）、身体反应（汗水、潮红、轻颤）和互动姿态，弱化环境背景。\n"
         "- 场景精简: 环境灯光压到最短；构图近距离特写或半身近景。\n"
         "- 自拍物理规则不变: 不得出现手机、相机、镜子或拿手机的手。\n"
@@ -206,6 +215,12 @@ async def plan_roleplay_image(
         "用户只能作为视角来源、互动对象或少量局部元素出现；只有用户明确要求双人同框时，才允许用户作为第二主体。"
         "如果草案写成“你坐着/你躺着/你穿着”，必须改写为“角色坐着/她躺着/角色穿着”。"
         "角色名只用于台词称呼；默认或原创角色不要把名字当作画面标签，画面描述应依靠角色类型和外貌特征。既有作品角色可以保留角色名和作品名。"
+    )
+    system += (
+        "\n单人构图硬规则: 当视角是 selfie 前摄自拍或 mirror 对镜自拍时，画面里【只能有角色一个人】，"
+        "scene 绝不能写入第二个人（用户、伴侣、他、她、对方、男人、女人）或对方的完整身体、面部。"
+        "如果此刻用户/伴侣的身体会和角色同框入画（如躺在身边、被搂着、贴身依偎），就不要用 selfie/mirror，"
+        "必须改用 pov，并且只把对方写成画面边缘的身体局部（手、手臂、胸膛、腿等），不要写成完整的第二个人。"
     )
     system += (
         "\n视角规则: 身处同一空间或用户明确要靠近互动时优先 pov；"
@@ -271,8 +286,11 @@ async def plan_roleplay_image(
     if is_intimate or bool(parsed.get("co_located")):
         default_view = "pov"
     final_view = requested_view or planned_view or default_view
-    if scene_implies_mirror_selfie(scene):
+    if scene_implies_mirror_selfie(scene) and not is_intimate:
         final_view = "mirror"
+    # 亲密/事后贴身画面里前摄自拍、对镜自拍物理上讲不通（自拍框 + 第二人同框会画出断臂/双人）：硬性改 POV。
+    if is_intimate and final_view in {"selfie", "mirror"}:
+        final_view = "pov"
     return {
         "scene": scene,
         "view": final_view,

@@ -508,6 +508,29 @@ SECOND_PERSON_SUBJECT_ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 场景里出现“与角色性别相反的第二个人（伴侣）”的信号。scene 到这一步已译成英文，故只匹配英文。
+# 用于兜底：当本该是单人图却混进了伴侣（多为用户被写成第三人称 him/he），改走亲密/伴侣局部路径。
+MALE_PARTNER_RE = re.compile(
+    r"\b(?:he|him|his|himself|boyfriend|husband|male partner|a man|the man|another man)\b",
+    re.IGNORECASE,
+)
+FEMALE_PARTNER_RE = re.compile(
+    r"\b(?:she|her|hers|herself|girlfriend|wife|female partner|a woman|the woman|another woman)\b",
+    re.IGNORECASE,
+)
+# 自拍/对镜取景措辞：伴侣同框时必须清掉，避免“自拍框 + 画面里有第二人”自相矛盾。
+SELF_CAMERA_FRAMING_RE = re.compile(
+    r"\bA front-camera selfie of a (?:woman|man|girl|boy)\b|"
+    r"\bA selfie of a (?:woman|man|girl|boy)\b|"
+    r"\bA mirror reflection of a (?:woman|man|girl|boy)\b|"
+    r"\bshot by an off-frame front-facing phone camera\b|"
+    r"\bno visible phone\b|"
+    r"\bonly mirror reflection is visible\b|"
+    r"\bno foreground person\b|"
+    r"\bsingle reflected body\b",
+    re.IGNORECASE,
+)
+
 
 def _normalize_second_person_visual_subject(scene_desc: str) -> str:
     text = (scene_desc or "").strip()
@@ -694,18 +717,7 @@ def build_prompt(
     if service._parse_appearance(scene_desc).get("outfit"):
         for old in service._parse_appearance(char).get("outfit", []):
             char = service._remove_tag(char, old)
-    scene_lower = scene_desc.lower()
-    sex_keywords = [
-        "sex", "make love", "penetration", "penetrating", "vaginal", "missionary", "doggystyle",
-        "cowgirl", "girl on top", "straddling", "straddle", "riding", "grinding", "thrust",
-        "thrusting", "squelch", "impaled", "insertion", "humping", "creampie", "naked together",
-    ]
-    is_sex_scene = is_intimate or any(k in scene_lower for k in sex_keywords)
-    is_ntr_scene = is_ntr or any(k in scene_lower for k in ["ntr", "netorare", "cuckold", "split screen"])
-
-    quality = "masterpiece, best quality, absurdres, score_9, score_8, anime coloring, clean lineart, soft cel shading, detailed illustration"
-    if safety.get("tag"):
-        quality += f", {safety['tag']}"
+    # 角色性别先算出来（人数槽与“第二人”检测都要用）。
     persisted_count = (state.get("custom_count") or "").strip() if session_id else ""
     gender_from_count = infer_gender_from_count(persisted_count) if persisted_count else ""
     male = (
@@ -713,6 +725,27 @@ def build_prompt(
         or (not gender_from_count and "1boy" in {_tag_key(tag) for tag in _split_tags(prefix_parts.count)})
         or (not gender_from_count and infer_gender_from_prefix(char) == "boy")
     )
+
+    scene_lower = scene_desc.lower()
+    sex_keywords = [
+        "sex", "make love", "penetration", "penetrating", "vaginal", "missionary", "doggystyle",
+        "cowgirl", "girl on top", "straddling", "straddle", "riding", "grinding", "thrust",
+        "thrusting", "squelch", "impaled", "insertion", "humping", "creampie", "naked together",
+    ]
+    is_ntr_scene = is_ntr or any(k in scene_lower for k in ["ntr", "netorare", "cuckold", "split screen"])
+    # 兜底：场景里混进了与角色性别相反的第二个人（伴侣），但本该是单人图——这是 1girl/solo 与
+    # “画面里有第二人”的硬矛盾，最易画出断臂/双人。非 NTR 时按亲密/伴侣场景处理，让伴侣只入局部。
+    partner_re = FEMALE_PARTNER_RE if male else MALE_PARTNER_RE
+    scene_has_partner = bool(partner_re.search(scene_desc))
+    is_sex_scene = (
+        is_intimate
+        or any(k in scene_lower for k in sex_keywords)
+        or (scene_has_partner and not is_ntr_scene)
+    )
+
+    quality = "masterpiece, best quality, absurdres, score_9, score_8, anime coloring, clean lineart, soft cel shading, detailed illustration"
+    if safety.get("tag"):
+        quality += f", {safety['tag']}"
     count = "1boy, solo" if male else "1girl, solo"
     if is_ntr or is_sex_scene:
         count = re.sub(r"\bsolo\b,?\s*", "", count).strip(", ")
@@ -751,10 +784,26 @@ def build_prompt(
 
     prompt_view = _infer_prompt_view(scene_desc)
     if is_sex_scene and not is_ntr_scene:
+        # 伴侣/性爱/事后贴身画面不能是单人自拍取景：先清掉自拍/对镜的相机取景措辞，
+        # 否则会出现“自拍框 + 画面里有第二人”的矛盾（断臂/双人的主因）。
+        scene_desc = SELF_CAMERA_FRAMING_RE.sub("", scene_desc)
         for tag in ["selfie", "solo", "holding phone", "arm extended", "mirror selfie", "phone"]:
             scene_desc = re.sub(r"\b" + re.escape(tag) + r"\b", "", scene_desc, flags=re.IGNORECASE)
-        scene_desc += ", partial male body visible, male hands, male torso, intimate close-up"
-        neg = _remove_negatives(neg, "male")
+        scene_desc = re.sub(r"\s*,\s*,+", ", ", scene_desc)
+        scene_desc = re.sub(r"\s+([,.;])", r"\1", scene_desc)
+        scene_desc = re.sub(r"\s{2,}", " ", scene_desc).strip(" ,")
+        # 取景清空后若已无 POV/对视开头，补一个 POV 取景，确保是“贴身视角”而非无主语近景。
+        if not re.search(r"first-person pov|looking at a (?:woman|man)", scene_desc, re.IGNORECASE):
+            scene_desc = f"{view_opener('pov', 'boy' if male else 'girl')}, {scene_desc}".strip(", ")
+            scene_desc = re.sub(r"\bsolo\b,?\s*", "", scene_desc)
+        user_gender = service._get_user_gender(session_id) if session_id and hasattr(service, "_get_user_gender") else "male"
+        if user_gender == "female":
+            # 用户是女性（百合/女用户）：伴侣画成女性局部，放开“双女”负向，但仍保留 male 负向。
+            scene_desc += ", partner's hands, partner's arms, intimate close-up"
+            neg = _remove_negatives(neg, "2girls", "multiple girls", "extra girls", "multiple characters", "second body", "duplicate body")
+        else:
+            scene_desc += ", partial male body visible, male hands, male torso, intimate close-up"
+            neg = _remove_negatives(neg, "male")
         neg = _append_negatives(neg, "selfie", "holding phone", "phone", "cellphone", "mobile phone", "smartphone", "arm extended", "third-person perspective")
     else:
         has_phone = _contains_any(scene_desc, PHONE_TERMS)
