@@ -7,7 +7,9 @@ __pycache__/
 data/
 generated/
 logs/
+exports/
 *.log
+*.zip
 config.json
 last_comfyui_prompt.txt
 last_selfie.txt

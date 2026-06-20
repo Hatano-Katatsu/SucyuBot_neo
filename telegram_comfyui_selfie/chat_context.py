@@ -188,13 +188,26 @@ class ChatContextMixin:
             )
         world_context = self._format_world_context(session_id, user_text, mode="chat")
         if world_context:
-            system += (
-                "\n\n"
-                f"{world_context}\n"
-                "聊天时优先遵守这个世界状态：你清楚自己此刻所在的地点，也知道今天接下来一个时间段大概会去哪里，"
-                "在相关时可以自然地提到（例如“我现在在公司”“等会儿要去逛商场”），但不要机械地报地点。"
-                "不要让角色无理由瞬移；如果用户和角色不在同一地点，优先用消息、自拍、电话或约定见面推进。"
-            )
+            # 对话进行中：对话已建立的场景优先，动线只作背景；只有冷启动/刚换场景才以动线引导，
+            # 避免角色随现实时间被算法“传送”（家→公园这类飘移）。
+            active_dialog = bool(self._active_chat_history(state, self._short_context_history_limit()))
+            if active_dialog:
+                system += (
+                    "\n\n"
+                    f"{world_context}\n"
+                    "以上是你的日常动线背景参考。当前正在进行的对话场景优先级最高："
+                    "如果对话里你已经处在某个地点（在家、在车站、在仓库等），或刚说过自己在哪，就保持那个地点不变，"
+                    "不要因为上面动线显示的时间点不同，就擅自把自己挪到别处。"
+                    "只有在开启全新话题、对话出现明显时间跳跃、或需要交代你独自近况时，才依据动线更新所在地。"
+                    "无论如何不要无理由瞬移；与用户不在同一地点时，用消息、自拍、电话或约定见面推进。"
+                )
+            else:
+                system += (
+                    "\n\n"
+                    f"{world_context}\n"
+                    "聊天时可参考这个世界状态自然提及所在与去向（例如“我现在在公司”“等会儿要去逛商场”），但不要机械地报地点。"
+                    "不要让角色无理由瞬移；如果用户和角色不在同一地点，优先用消息、自拍、电话或约定见面推进。"
+                )
         if state.get("replying_to_selfie"):
             photos = state.get("sent_photos_history", [])
             last_photo = photos[-1] if photos else {}
