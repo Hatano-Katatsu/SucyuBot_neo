@@ -400,6 +400,41 @@ class TelegramComfyUIService(
                 return override
         return self.config.get(key, default)
 
+    @staticmethod
+    def _persona_with_character_identity(character: Any, series: Any, persona: Any) -> str:
+        """确保既有角色的人设里有明确身份，避免模型回落到全局默认角色。"""
+        base = str(persona or "").strip()
+        name = str(character or "").strip()
+        if not name:
+            return base
+        if name in base:
+            return base
+        work = str(series or "").strip()
+        prefix = f"你是{name}{f'（{work}）' if work else ''}。"
+        return f"{prefix}\n{base}" if base else prefix
+
+    def _session_role_identity(self, session_id: str = "") -> tuple[str, str, str]:
+        """返回当前会话的角色类型、角色名、自称；角色态不回落到全局默认角色名。"""
+        state = self._get_session_state(session_id) if session_id else {}
+        if session_id and self._is_character_set(session_id) and state.get("custom_character"):
+            role_name = (
+                state.get("custom_role_name")
+                or state.get("custom_series")
+                or "角色"
+            )
+            bot_name = (
+                state.get("custom_bot_name")
+                or state.get("custom_character")
+                or self.config.get("bot_name", "蕾伊")
+            )
+            bot_self_name = state.get("custom_bot_self_name") or "我"
+            return role_name, bot_name, bot_self_name
+        return (
+            self._get_session_cfg(session_id, "role_name", "魅魔"),
+            self._get_session_cfg(session_id, "bot_name", "蕾伊"),
+            self._get_session_cfg(session_id, "bot_self_name", "我"),
+        )
+
     # ---------------------------------------------------------------------
     # Chat handling
     # ---------------------------------------------------------------------
@@ -498,6 +533,12 @@ class TelegramComfyUIService(
         state = self._get_session_state(session_id)
         if self._is_character_set(session_id):
             base = state.get("custom_scheduled_persona", "")
+            if state.get("custom_character"):
+                base = self._persona_with_character_identity(
+                    state.get("custom_character", ""),
+                    state.get("custom_series", ""),
+                    base,
+                )
         else:
             base = self._get_session_cfg(session_id, "scheduled_persona", DEFAULT_CONFIG["scheduled_persona"])
         if not base:

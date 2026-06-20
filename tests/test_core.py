@@ -1165,12 +1165,49 @@ class ServiceTestCase(unittest.TestCase):
             state = svc._get_session_state(sid)
             self.assertEqual(state["custom_character"], "天童爱丽丝")
             self.assertEqual(state["custom_series"], "碧蓝档案")
+            self.assertEqual(state["custom_bot_name"], "天童爱丽丝")
             self.assertEqual(state["custom_visual_character"], "aris (blue archive)")
             self.assertEqual(state["custom_visual_series"], "Blue Archive")
             self.assertEqual(state["saved_characters"]["天童爱丽丝"]["visual_character"], "aris (blue archive)")
             text = svc.send_message.await_args.args[1]
             self.assertIn("生图识别", text)
             self.assertIn("aris (blue archive)", text)
+
+        asyncio.run(run())
+
+    def test_character_command_pins_dialog_identity_when_persona_omits_name(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "role_name": "蕾伊",
+                "bot_name": "蕾伊",
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._llm_classify_character = AsyncMock(return_value={
+                "type": "character",
+                "name": "东云绘名",
+                "series": "Project Sekai",
+                "prompt_name": "Ena Shinonome",
+                "prompt_series": "Project Sekai",
+                "persona": "性格内向、缺乏自信，但内心渴望被认可；喜欢绘画。",
+                "appearance": "1girl, brown hair, long hair, brown eyes",
+                "purity": 8,
+            })
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_character(1, sid, "东云绘名")
+
+            state = svc._get_session_state(sid)
+            self.assertEqual(state["custom_bot_name"], "东云绘名")
+            self.assertTrue(state["custom_scheduled_persona"].startswith("你是东云绘名（Project Sekai）。"))
+            system = svc._build_chat_messages(sid, "你好")[0]["content"]
+            self.assertIn("你当前扮演的角色是「东云绘名」（Project Sekai）", system)
+            self.assertIn("你是东云绘名（Project Sekai）。", system)
+            self.assertNotIn("进行蕾伊角色扮演", system)
+            self.assertNotIn("你是蕾伊", system)
 
         asyncio.run(run())
 
@@ -1916,6 +1953,22 @@ class ServiceTestCase(unittest.TestCase):
         pos, _ = svc._build_prompt("standing", session_id=sid)
         # 身体特征为空时回退全局默认，绝不产出无身体特征的提示词。
         self.assertIn("black long flowing hair", pos.lower())
+
+    def test_legacy_character_state_does_not_fall_back_to_default_identity(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        svc.config.update({"role_name": "蕾伊", "bot_name": "蕾伊"})
+        state = svc._get_session_state(sid)
+        state["custom_character"] = "东云绘名"
+        state["custom_series"] = "Project Sekai"
+        state["custom_bot_name"] = ""
+        state["custom_scheduled_persona"] = "性格内向、缺乏自信，但内心渴望被认可。"
+
+        system = svc._build_chat_messages(sid, "你好")[0]["content"]
+
+        self.assertIn("你是东云绘名（Project Sekai）。", system)
+        self.assertIn("你当前扮演的角色是「东云绘名」（Project Sekai）", system)
+        self.assertNotIn("你当前扮演的角色是「蕾伊」", system)
 
     def test_personalize_persona_marks_user_set(self):
         async def run():

@@ -889,6 +889,9 @@ class CommandHandlersMixin:
             switching = (data.get("character", "") or "") != (state.get("custom_character") or "")
             state["custom_character"] = data.get("character", "")
             state["custom_series"] = data.get("series", "")
+            state["custom_role_name"] = data.get("role_name", "") if switching else (state.get("custom_role_name") or data.get("role_name", ""))
+            state["custom_bot_name"] = data.get("bot_name") or data.get("character", "")
+            state["custom_bot_self_name"] = data.get("bot_self_name", "") if switching else (state.get("custom_bot_self_name") or data.get("bot_self_name", ""))
             state["custom_visual_character"] = data.get("visual_character", "")
             state["custom_visual_series"] = data.get("visual_series", "")
             state["custom_scheduled_persona"] = data.get("persona", "")
@@ -944,9 +947,17 @@ class CommandHandlersMixin:
                 raw_appearance = raw_appearance[m.end():].strip(" ,")
             state["custom_character"] = name
             state["custom_series"] = result.get("series", "")
+            state["custom_role_name"] = result.get("role_name") or result.get("role") or ""
+            state["custom_bot_name"] = name
+            if switching:
+                state["custom_bot_self_name"] = ""
             state["custom_visual_character"] = result.get("prompt_name") or result.get("visual_name") or result.get("image_name") or ""
             state["custom_visual_series"] = result.get("prompt_series") or result.get("visual_series") or result.get("image_series") or ""
-            state["custom_scheduled_persona"] = result.get("persona", "")
+            state["custom_scheduled_persona"] = self._persona_with_character_identity(
+                name,
+                state["custom_series"],
+                result.get("persona", ""),
+            )
             state["custom_positive_prefix"] = raw_appearance
             if count_tag:
                 state["custom_count"] = count_tag
@@ -958,6 +969,9 @@ class CommandHandlersMixin:
             saved[name] = {
                 "character": state["custom_character"],
                 "series": state["custom_series"],
+                "role_name": state.get("custom_role_name", ""),
+                "bot_name": state.get("custom_bot_name", ""),
+                "bot_self_name": state.get("custom_bot_self_name", ""),
                 "visual_character": state["custom_visual_character"],
                 "visual_series": state["custom_visual_series"],
                 "persona": state["custom_scheduled_persona"],

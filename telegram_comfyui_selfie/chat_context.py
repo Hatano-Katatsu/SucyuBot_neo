@@ -179,13 +179,7 @@ class ChatContextMixin:
         time_light = self._format_time_context(session_id, now=now)
         light_guard = self._format_light_guard(session_id, now=now)
         persona = self._get_effective_persona(session_id)
-        role_name = self._get_session_cfg(session_id, "role_name", "魅魔")
-        bot_name = self._get_session_cfg(session_id, "bot_name", "蕾伊")
-        bot_self_name = self._get_session_cfg(session_id, "bot_self_name", "我")
-        if self._is_character_set(session_id):
-            role_name = state.get("custom_role_name", "") or role_name
-            bot_name = state.get("custom_bot_name", "") or bot_name
-            bot_self_name = state.get("custom_bot_self_name", "") or bot_self_name
+        role_name, bot_name, bot_self_name = self._session_role_identity(session_id)
 
         freq = self.config.get("selfie_frequency", "频繁")
         freq_inst = {
@@ -200,8 +194,9 @@ class ChatContextMixin:
 
         system = (
             f"{persona}\n\n"
-            f"你正在与用户进行{role_name}角色扮演。角色名参考是「{bot_name}」，不要强行把角色名当自称；"
-            f"对话中优先使用「{bot_self_name}」作为自称。\n"
+            f"你当前扮演的角色是「{bot_name}」（{role_name}）。除非用户明确要求换角色，否则你就是「{bot_name}」，"
+            f"不要声称自己是其他角色或默认角色。对话中按角色习惯使用「{bot_self_name}」或自然第一人称作为自称，"
+            "不要不自然地反复报全名。\n"
             f"当前时间: {now.strftime('%H:%M')} ({weekday}) {time_period}。\n"
             f"季节与自然光: {time_light}。\n"
             f"{light_guard}\n"

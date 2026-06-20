@@ -164,9 +164,12 @@ async def plan_roleplay_image(
     prompt_prefs = service._prompt_scene_preferences(session_id) if hasattr(service, "_prompt_scene_preferences") else {}
     quirk = service._get_session_cfg(session_id, "character_quirk_rule", "")
     spatial = service._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])
-    bot_name = service._get_session_cfg(session_id, "bot_name", "蕾伊")
-    bot_self_name = service._get_session_cfg(session_id, "bot_self_name", "我")
-    role_name = service._get_session_cfg(session_id, "role_name", "魅魔")
+    if hasattr(service, "_session_role_identity"):
+        role_name, bot_name, bot_self_name = service._session_role_identity(session_id)
+    else:
+        bot_name = service._get_session_cfg(session_id, "bot_name", "蕾伊")
+        bot_self_name = service._get_session_cfg(session_id, "bot_self_name", "我")
+        role_name = service._get_session_cfg(session_id, "role_name", "魅魔")
     dialog_context = format_dialog_context(service, state, session_id)
     photo_context = format_sent_photo_context(service, state, session_id)
     memory_query = "\n".join(part for part in (intent, mood, must_include, prompt, dialog_context or "") if part)
@@ -197,7 +200,7 @@ async def plan_roleplay_image(
         "Do not restate stable character appearance that is already in persona/current appearance/photo memory, such as hair color, eye color, body traits, species traits, or permanent accessories. "
         "Only mention clothing/accessories in scene when they are a deliberate one-shot visual change for this image; put one-shot visual tags in new_appearance_tags.\n"
         "你是角色扮演图片导演，负责把聊天模型给出的图片意图整合成最终画面。\n"
-        f"角色身份: 角色名参考「{bot_name}」，角色类型「{role_name}」，优先使用「{bot_self_name}」作为自称。\n"
+        f"角色身份: 当前角色是「{bot_name}」（{role_name}），优先使用「{bot_self_name}」作为自称；不要写成其他默认角色。\n"
         f"当前附加外貌: {dynamic or '无'}\n"
         f"用户画面偏好: 场景偏好={prompt_prefs.get('scene_preference') or '无'}；自拍偏好={prompt_prefs.get('selfie_preference') or '无'}。\n"
         f"角色性观念: {service._purity_directive(purity)}\n"

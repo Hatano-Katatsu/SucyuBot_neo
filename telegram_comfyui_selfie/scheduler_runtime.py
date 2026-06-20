@@ -76,10 +76,8 @@ class SchedulerRuntimeMixin:
             return None, None, None, None
         persona = self._get_effective_persona(session_id)
         spatial = self._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])
-        bot_name = self._get_session_cfg(session_id, "bot_name", "蕾伊")
-        bot_self_name = self._get_session_cfg(session_id, "bot_self_name", "我")
-        role_name = self._get_session_cfg(session_id, "role_name", "魅魔")
         state = self._get_session_state(session_id)
+        role_name, bot_name, bot_self_name = self._session_role_identity(session_id)
         dynamic = state.get("dynamic_appearance") or self.config.get("dynamic_appearance", "")
         prompt_prefs = self._prompt_scene_preferences(session_id) if hasattr(self, "_prompt_scene_preferences") else {}
         purity = self._get_purity(session_id)
@@ -105,7 +103,7 @@ class SchedulerRuntimeMixin:
             "Scene boundary: write scene as environment, camera framing, action, lighting, mood, and spatial context. "
             "Do not restate stable character appearance that is already in persona/current appearance/photo memory, such as hair color, eye color, body traits, species traits, or permanent accessories. "
             "Scheduled pushes should not invent persistent outfit or appearance changes unless the user has explicitly asked for them.\n"
-            f"角色身份: 角色名参考「{bot_name}」，角色类型「{role_name}」，优先使用「{bot_self_name}」作为自称。\n"
+            f"角色身份: 当前角色是「{bot_name}」（{role_name}），优先使用「{bot_self_name}」作为自称；不要写成其他默认角色。\n"
             f"当前附加外貌: {dynamic or '无'}\n"
             f"用户画面偏好: 场景偏好={prompt_prefs.get('scene_preference') or '无'}；自拍偏好={prompt_prefs.get('selfie_preference') or '无'}。\n"
             f"角色性观念: {self._purity_directive(purity)}\n"
@@ -409,4 +407,3 @@ class SchedulerRuntimeMixin:
             msg = {1: "已经好几天没和我说过话了……是不是我哪里做得不好？", 2: "又是没等到你的一天。你是不是已经忘了这里还有一个我。", 3: "如果你真的不在乎我，那我也该学着不等了。"}[stage]
         self._ulog(session_id, "NTR", f"stage={stage} 冷落{days}天: {msg}")
         await self.send_message(self.chat_id_from_session(session_id), msg)
-
