@@ -31,6 +31,22 @@ def _detect_intimate_context(*sources: str) -> bool:
     return any(kw in combined for kw in INTIMATE_CONTEXT_ZH)
 
 
+# 用户明确要“把设备拍进画面”（性爱/亲密时拍照、录像、对镜）的信号。命中则放行手机/镜子、
+# 不再强制把亲密场景掰成 POV。规划器 LLM 的 device_in_frame 为主判，这里是确定性兜底。
+DEVICE_CONTEXT_ZH = frozenset({
+    "拍照", "拍下来", "拍张", "拍一张", "拍张照", "录像", "录视频", "录下来",
+    "录制", "摄像", "边做边拍", "边做边录", "拍片", "拍成视频", "录成视频",
+    "性爱录像", "做爱录像", "性爱视频", "做爱视频", "手机拍", "相机拍", "拍我们",
+})
+
+
+def _detect_device_context(*sources: str) -> bool:
+    combined = " ".join(s for s in sources if s)
+    if not combined:
+        return False
+    return any(kw in combined for kw in DEVICE_CONTEXT_ZH)
+
+
 def normalize_view(view: str | None) -> str:
     view = (view or "").strip().lower()
     return view if view in VALID_VIEWS else ""
@@ -118,8 +134,20 @@ async def plan_roleplay_image(
 ) -> dict[str, Any]:
     requested_view = normalize_view(view)
     fallback_scene = (prompt or intent or must_include).strip()
+    fallback_intimate_hint = _detect_intimate_context(intent, mood, prompt)
+    fallback_device_hint = _detect_device_context(intent, mood, prompt)
     if not service.has_llm_config("image"):
-        return {"scene": fallback_scene, "view": requested_view, "new_appearance_tags": None, "is_intimate": False}
+        fallback_view = requested_view
+        if fallback_intimate_hint and not fallback_device_hint and fallback_view in {"selfie", "mirror"}:
+            fallback_view = "pov"
+        return {
+            "scene": fallback_scene,
+            "view": fallback_view,
+            "new_appearance_tags": None,
+            "is_intimate": fallback_intimate_hint,
+            "partner_in_frame": False,
+            "device_in_frame": fallback_device_hint,
+        }
 
     state = service._get_session_state(session_id)
     now = service._session_now(session_id)
@@ -159,6 +187,7 @@ async def plan_roleplay_image(
             logger.debug("world context build failed for image planning", exc_info=True)
 
     intimate_hint = _detect_intimate_context(intent, mood, prompt, dialog_context or "")
+    device_hint = _detect_device_context(intent, mood, prompt, dialog_context or "")
     user_gender = service._get_user_gender(session_id) if hasattr(service, "_get_user_gender") else "male"
     user_g_zh = "女性" if user_gender == "female" else "男性"
 
@@ -207,7 +236,8 @@ async def plan_roleplay_image(
         f"- 只画用户身体局部（手/臂/胸/腹/背/腿），不要画完整的{user_g_zh}全身或面部。\n"
         "- 人物优先: 重点在角色的表情（迷离、红晕、咬唇）、身体反应（汗水、潮红、轻颤）和互动姿态，弱化环境背景。\n"
         "- 场景精简: 环境灯光压到最短；构图近距离特写或半身近景。\n"
-        "- 自拍物理规则不变: 不得出现手机、相机、镜子或拿手机的手。\n"
+        "- 自拍物理规则不变: 默认不得出现手机、相机、镜子或拿手机的手；"
+        "但若用户明确要求在亲密时拍照/录像/对镜（device_in_frame=true），则按其要求放行对应的 selfie/mirror 视角与手机/镜子入画。\n"
         "- new_appearance_tags 仍只填临时外观变化，不要把情绪或动作写进去。"
     )
     system += (
@@ -219,8 +249,12 @@ async def plan_roleplay_image(
     system += (
         "\n单人构图硬规则: 当视角是 selfie 前摄自拍或 mirror 对镜自拍时，画面里【只能有角色一个人】，"
         "scene 绝不能写入第二个人（用户、伴侣、他、她、对方、男人、女人）或对方的完整身体、面部。"
-        "如果此刻用户/伴侣的身体会和角色同框入画（如躺在身边、被搂着、贴身依偎），就不要用 selfie/mirror，"
-        "必须改用 pov，并且只把对方写成画面边缘的身体局部（手、手臂、胸膛、腿等），不要写成完整的第二个人。"
+        "如果此刻用户/伴侣的身体会和角色同框入画（如躺在身边、被搂着、贴身依偎），默认不要用 selfie/mirror，"
+        "改用 pov，并且只把对方写成画面边缘的身体局部（手、手臂、胸膛、腿等），不要写成完整的第二个人。"
+        "唯一例外是用户明确要求拍照/录像/对镜（device_in_frame=true）：此时可保留其要求的 selfie/mirror 视角，"
+        "但对方依然只画身体局部，不得写成完整的第二个主角。\n"
+        "partner_in_frame: 当画面里会出现用户/伴侣的身体（哪怕只是局部）时置 true；纯角色单人时 false。\n"
+        "device_in_frame: 仅当用户明确要求把手机/相机/镜子作为拍照、录像、对镜的道具拍进画面时置 true；否则 false。"
     )
     system += (
         "\n视角规则: 身处同一空间或用户明确要靠近互动时优先 pov；"
@@ -229,8 +263,9 @@ async def plan_roleplay_image(
         "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。"
         "selfie/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。"
         "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。"
-        "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third\",\"new_appearance_tags\":\"...\",\"user_location\":\"...\",\"co_located\":true,\"is_intimate\":false}。"
+        "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third\",\"new_appearance_tags\":\"...\",\"user_location\":\"...\",\"co_located\":true,\"is_intimate\":false,\"partner_in_frame\":false,\"device_in_frame\":false}。"
         "is_intimate 是布尔值，按上面的场景类型自判规则给出。"
+        "partner_in_frame、device_in_frame 都是布尔值，按上面单人构图硬规则里的定义给出。"
         "co_located 是布尔值，表示你判断此刻用户是否和角色在同一空间。"
         "user_location 填你判断的用户此刻所在场所：与角色同处填 with_user，完全无法判断填 unknown，"
         "否则取其一: home/company/school/park/mall/street/cafe/restaurant/transit/convenience/cinema/hotel/hospital/gym/factory/farm/construction。"
@@ -265,7 +300,17 @@ async def plan_roleplay_image(
         parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
     except Exception as exc:
         logger.error("roleplay image planning failed: %s", exc)
-        return {"scene": fallback_scene, "view": requested_view, "new_appearance_tags": None, "is_intimate": False}
+        fallback_view = requested_view
+        if intimate_hint and not device_hint and fallback_view in {"selfie", "mirror"}:
+            fallback_view = "pov"
+        return {
+            "scene": fallback_scene,
+            "view": fallback_view,
+            "new_appearance_tags": None,
+            "is_intimate": intimate_hint,
+            "partner_in_frame": False,
+            "device_in_frame": device_hint,
+        }
 
     scene = normalize_scene_visual_subject((parsed.get("scene") or fallback_scene).strip())
     planned_view = normalize_view(parsed.get("view"))
@@ -282,18 +327,25 @@ async def plan_roleplay_image(
             logger.debug("persist llm user location failed", exc_info=True)
     # LLM 自判优先，关键词检测作 OR 兜底（尤其 LLM 漏判时）。
     is_intimate = bool(parsed.get("is_intimate")) or intimate_hint
+    partner_in_frame = bool(parsed.get("partner_in_frame"))
+    # 设备入画：规划器主判 + 中文关键词兜底。命中则放行手机/镜子、不再强制把画面掰成 POV。
+    device_in_frame = bool(parsed.get("device_in_frame")) or device_hint
+    two_person = is_intimate or partner_in_frame
     default_view = "selfie"
-    if is_intimate or bool(parsed.get("co_located")):
+    if two_person or bool(parsed.get("co_located")):
         default_view = "pov"
     final_view = requested_view or planned_view or default_view
-    if scene_implies_mirror_selfie(scene) and not is_intimate:
+    if scene_implies_mirror_selfie(scene) and (device_in_frame or not two_person):
         final_view = "mirror"
-    # 亲密/事后贴身画面里前摄自拍、对镜自拍物理上讲不通（自拍框 + 第二人同框会画出断臂/双人）：硬性改 POV。
-    if is_intimate and final_view in {"selfie", "mirror"}:
+    # 亲密/伴侣同框画面里前摄自拍、对镜自拍物理上讲不通（自拍框 + 第二人会画出断臂/双人）：硬性改 POV。
+    # 例外：用户明确要拍照/录像/对镜（device_in_frame）时尊重其 selfie/mirror 视角。
+    if two_person and not device_in_frame and final_view in {"selfie", "mirror"}:
         final_view = "pov"
     return {
         "scene": scene,
         "view": final_view,
         "new_appearance_tags": (parsed.get("new_appearance_tags") or "").strip(),
         "is_intimate": is_intimate,
+        "partner_in_frame": partner_in_frame,
+        "device_in_frame": device_in_frame,
     }

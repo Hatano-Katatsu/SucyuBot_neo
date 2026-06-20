@@ -1002,6 +1002,7 @@ class CommandHandlersMixin:
             "生图作品": "custom_visual_series", "生图作品tag": "custom_visual_series",
             "年龄段": "custom_character_age_stage", "年龄": "custom_character_age_stage",
             "职场": "custom_character_day_anchor", "白天去向": "custom_character_day_anchor",
+            "用户性别": "custom_user_gender", "我的性别": "custom_user_gender",
         }
         if not action:
             lines = ["其余设置（空=使用全局默认）"]

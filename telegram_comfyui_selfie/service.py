@@ -574,6 +574,15 @@ class TelegramComfyUIService(
             return "你性格保守，不轻易越界；只有在对方持续引导下才一点点打开心扉。"
         return "你是纯洁的天使，完全不涉及任何性相关内容，言行永远纯真 safe。"
 
+    def _get_user_gender(self, session_id: str = "") -> str:
+        """用户自己的性别（male/female）：决定亲密场景里“用户身体”画成男性还是女性局部。"""
+        state = self._get_session_state(session_id) if session_id else {}
+        raw = state.get("custom_user_gender") or self.config.get("user_gender") or "male"
+        g = re.sub(r"\s+", "", str(raw).strip().lower())
+        if g in ("female", "f", "woman", "女", "女性", "女生", "girl"):
+            return "female"
+        return "male"
+
     @staticmethod
     def _get_time_period(hour: int) -> str:
         return rough_time_period(hour)
@@ -1096,8 +1105,13 @@ class TelegramComfyUIService(
         session_id: str = "",
         one_shot_appearance: str = "",
         is_intimate: bool = False,
+        partner_in_frame: bool = False,
+        device_in_frame: bool = False,
     ) -> tuple[str, str]:
-        return image_generation.build_prompt(self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance, is_intimate=is_intimate)
+        return image_generation.build_prompt(
+            self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
+            is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
+        )
 
     def _format_last_prompt_slots(self, session_id: str = "") -> str:
         slots = None
@@ -1253,12 +1267,15 @@ class TelegramComfyUIService(
                 "自然语言句子尽量不要使用逗号。输出格式: English visual sentence. key tag, key tag, key tag"
             )
         if is_intimate:
-            # 亲密场景翻译护栏：第二人称身体必须翻成男性身体局部，绝不能被通用“主体是角色”规则改成第二个角色（双女根因）。
+            # 亲密场景翻译护栏：第二人称身体翻成“用户作为伴侣的局部身体”，按用户性别决定男/女，绝不能写成完整的第二个主角（双女根因）。
+            ug = self._get_user_gender(session_id)
+            body = "female" if ug == "female" else "male"
             system += (
-                " Intimate scene override: this is an explicit sex scene with exactly ONE female character (the role) plus the user's partial male body. "
-                "Any male body part (hands, arms, chest, torso, thighs) belongs to the USER and must be rendered as visible male body parts "
-                "(male hands, male torso, male thighs), never as a second person or 'the character'. "
-                "Chinese phrases like 你的手/你的胸/你的腰/你的腿 must become male body parts, not a second character. Output exactly one woman, never two women."
+                " Intimate scene override: the only fully drawn character is the role (one woman). "
+                f"The user appears only as an intimate partner's partial {body} body (hands, arms, chest, torso, back, thighs), "
+                "never as a complete second character with their own face, hair, or expression. "
+                f"Chinese 你的手/你的胸/你的背/你的腿 must become visible partial {body} body parts of the partner, not a second person. "
+                "Do not turn the user into a second full character."
             )
         text = await self._call_llm(system, f"请翻译: {natural}", temp=float(self._get_llm_value("image", "temperature_translate", "0.3")), tag="translate", purpose="image")
         body = text.strip().strip(",")
@@ -1349,8 +1366,13 @@ class TelegramComfyUIService(
         session_id: str = "",
         one_shot_appearance: str = "",
         is_intimate: bool = False,
+        partner_in_frame: bool = False,
+        device_in_frame: bool = False,
     ) -> tuple[bool, list[bytes], str]:
-        return await image_generation.do_generate(self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance, is_intimate=is_intimate)
+        return await image_generation.do_generate(
+            self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
+            is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
+        )
 
     async def _do_generate_locked(
         self,
@@ -1359,8 +1381,13 @@ class TelegramComfyUIService(
         session_id: str = "",
         one_shot_appearance: str = "",
         is_intimate: bool = False,
+        partner_in_frame: bool = False,
+        device_in_frame: bool = False,
     ) -> tuple[bool, list[bytes], str]:
-        return await image_generation.do_generate_locked(self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance, is_intimate=is_intimate)
+        return await image_generation.do_generate_locked(
+            self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
+            is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
+        )
 
     # ---------------------------------------------------------------------
     # Tools
@@ -1399,9 +1426,15 @@ class TelegramComfyUIService(
         final_view = (plan.get("view") or "").strip()
         new_app = (plan.get("new_appearance_tags") or "").strip()
         is_intimate = bool(plan.get("is_intimate"))
+        partner_in_frame = bool(plan.get("partner_in_frame"))
+        device_in_frame = bool(plan.get("device_in_frame"))
         state = self._get_session_state(session_id)
-        english = await self._translate_to_tags(scene, session_id=session_id, view=final_view, is_intimate=is_intimate)
-        ok, imgs, err = await self._do_generate(english, session_id=session_id, one_shot_appearance=new_app or "", is_intimate=is_intimate)
+        # 伴侣同框时也套用翻译护栏（对方只画局部、不画成完整第二人）。
+        english = await self._translate_to_tags(scene, session_id=session_id, view=final_view, is_intimate=is_intimate or partner_in_frame)
+        ok, imgs, err = await self._do_generate(
+            english, session_id=session_id, one_shot_appearance=new_app or "",
+            is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
+        )
         if not ok or not imgs:
             self._ulog(session_id, "ERROR", f"工具生图失败: {err}")
             return f"生图失败: {err}"

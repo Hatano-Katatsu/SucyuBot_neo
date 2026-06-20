@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from telegram_comfyui_selfie import TelegramComfyUIService
-from telegram_comfyui_selfie.image_planning import _detect_intimate_context, format_dialog_context, format_sent_photo_context, normalize_scene_visual_subject
+from telegram_comfyui_selfie.image_planning import _detect_intimate_context, format_dialog_context, format_sent_photo_context, normalize_scene_visual_subject, plan_roleplay_image
 from telegram_comfyui_selfie.prompt_intake import heuristic_intake
 from telegram_comfyui_selfie.webui import build_world_route_preview, cast_config_value, masked_config, serialize_prompt_slots, session_summary
 
@@ -1422,6 +1422,8 @@ class ServiceTestCase(unittest.TestCase):
                 session_id=sid,
                 one_shot_appearance="black camisole dress",
                 is_intimate=False,
+                partner_in_frame=False,
+                device_in_frame=False,
             )
             # 聊天途中的配图不带配文（聊天模型已经在文字里回复了）
             svc.send_photo.assert_awaited_once_with(123, b"image", "")
@@ -1457,6 +1459,66 @@ class ServiceTestCase(unittest.TestCase):
             await svc.tool_generate_image(123, sid, intent="想看对镜自拍")
 
             svc._translate_to_tags.assert_awaited_once_with("站在浴室镜子前对镜自拍", session_id=sid, view="mirror", is_intimate=False)
+
+        asyncio.run(run())
+
+    def test_roleplay_image_planner_device_hint_preserves_device_view(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "卧室里对镜自拍，角色靠在床边，画面边缘只有伴侣的手臂",
+                "view": "mirror",
+                "new_appearance_tags": "",
+                "user_location": "with_user",
+                "co_located": True,
+                "is_intimate": True,
+                "partner_in_frame": True,
+                "device_in_frame": False,
+            }, ensure_ascii=False))
+
+            plan = await plan_roleplay_image(svc, sid, intent="想在做爱时录像留念")
+
+            self.assertEqual(plan["view"], "mirror")
+            self.assertTrue(plan["is_intimate"])
+            self.assertTrue(plan["partner_in_frame"])
+            self.assertTrue(plan["device_in_frame"])
+
+        asyncio.run(run())
+
+    def test_roleplay_image_planner_intimate_without_device_forces_pov(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "卧室床边贴身依偎，角色靠近镜头，画面边缘只有伴侣的手臂",
+                "view": "selfie",
+                "new_appearance_tags": "",
+                "user_location": "with_user",
+                "co_located": True,
+                "is_intimate": True,
+                "partner_in_frame": True,
+                "device_in_frame": False,
+            }, ensure_ascii=False))
+
+            plan = await plan_roleplay_image(svc, sid, intent="想看事后依偎的画面")
+
+            self.assertEqual(plan["view"], "pov")
+            self.assertTrue(plan["is_intimate"])
+            self.assertTrue(plan["partner_in_frame"])
+            self.assertFalse(plan["device_in_frame"])
 
         asyncio.run(run())
 
@@ -2148,3 +2210,64 @@ class ServiceTestCase(unittest.TestCase):
         neg_lower = neg.lower()
         self.assertNotIn("pov", neg_lower)
         self.assertNotIn("male", neg_lower)
+
+    def test_build_prompt_partner_flag_routes_to_partner_path(self):
+        # 规划器 partner_in_frame=True：即便场景没有 him/he 代词，也按伴侣路径处理（去 solo、画男伴局部）。
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["custom_positive_prefix"] = "1girl, black long hair, purple eyes"
+        state["custom_count"] = "1girl"
+        pos, neg = svc._build_prompt(
+            "First-person POV, looking at a woman, lying together in bed at night",
+            session_id=sid,
+            partner_in_frame=True,
+        )
+        pos_lower = pos.lower()
+        self.assertNotIn("solo", pos_lower)
+        self.assertIn("partial male body visible", pos_lower)
+        self.assertNotIn("male", neg.lower())
+
+    def test_build_prompt_device_in_frame_keeps_selfie_and_phone(self):
+        # 用户明确要“做爱时对镜自拍/录像”：device_in_frame=True 应保留自拍/对镜取景与设备，不强制清掉。
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["custom_positive_prefix"] = "1girl, black long hair, purple eyes"
+        state["custom_count"] = "1girl"
+        pos, neg = svc._build_prompt(
+            "A mirror reflection of a woman, holding a smartphone, sex, riding him, intimate close-up",
+            session_id=sid,
+            is_intimate=True,
+            device_in_frame=True,
+        )
+        pos_lower = pos.lower()
+        # 设备与对镜取景保留
+        self.assertIn("mirror reflection", pos_lower)
+        self.assertIn("smartphone", pos_lower)
+        # 仍按性爱场景去掉 solo、画男伴局部
+        self.assertNotIn("solo", pos_lower)
+        self.assertIn("partial male body visible", pos_lower)
+        # 手机/对镜负向被放开，male 负向去掉
+        neg_lower = neg.lower()
+        for term in ["holding phone", "visible phone", "mirror selfie"]:
+            self.assertNotIn(term, neg_lower)
+        self.assertNotIn("male", neg_lower)
+
+    def test_build_prompt_intimate_without_device_strips_phone(self):
+        # 对照组：同样亲密但没有 device_in_frame，手机/自拍取景应被清掉、补 POV。
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["custom_positive_prefix"] = "1girl, black long hair, purple eyes"
+        state["custom_count"] = "1girl"
+        pos, neg = svc._build_prompt(
+            "A front-camera selfie of a woman, solo, lying beside him after sex",
+            session_id=sid,
+            is_intimate=True,
+        )
+        pos_lower = pos.lower()
+        self.assertNotIn("front-camera selfie", pos_lower)
+        self.assertNotIn("solo", pos_lower)
+        self.assertIn("first-person pov", pos_lower)
+        self.assertIn("partial male body visible", pos_lower)

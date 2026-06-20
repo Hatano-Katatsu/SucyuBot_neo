@@ -518,6 +518,13 @@ FEMALE_PARTNER_RE = re.compile(
     r"\b(?:she|her|hers|herself|girlfriend|wife|female partner|a woman|the woman|another woman)\b",
     re.IGNORECASE,
 )
+# 设备入画（用户要求拍照/录像）的英文兜底：scene 到这步已译成英文。命中则放行手机/相机，不抹设备。
+# 只匹配【无歧义的拍摄意图】词；故意不含 "holding a phone/smartphone"——那既可能是误泄漏的手机
+# （应被清掉），区分不了意图。真正的拍摄意图主要由规划器 device_in_frame 与中文关键词（基于用户原话）给出。
+DEVICE_SCENE_RE = re.compile(
+    r"\b(?:recording|filming|sex tape|on camera|camcorder|video camera)\b",
+    re.IGNORECASE,
+)
 # 自拍/对镜取景措辞：伴侣同框时必须清掉，避免“自拍框 + 画面里有第二人”自相矛盾。
 SELF_CAMERA_FRAMING_RE = re.compile(
     r"\bA front-camera selfie of a (?:woman|man|girl|boy)\b|"
@@ -695,6 +702,8 @@ def build_prompt(
     session_id: str = "",
     one_shot_appearance: str = "",
     is_intimate: bool = False,
+    partner_in_frame: bool = False,
+    device_in_frame: bool = False,
 ) -> tuple[str, str]:
     raw_scene_desc = scene_desc
     state = service._get_session_state(session_id) if session_id else {}
@@ -733,10 +742,12 @@ def build_prompt(
         "thrusting", "squelch", "impaled", "insertion", "humping", "creampie", "naked together",
     ]
     is_ntr_scene = is_ntr or any(k in scene_lower for k in ["ntr", "netorare", "cuckold", "split screen"])
-    # 兜底：场景里混进了与角色性别相反的第二个人（伴侣），但本该是单人图——这是 1girl/solo 与
-    # “画面里有第二人”的硬矛盾，最易画出断臂/双人。非 NTR 时按亲密/伴侣场景处理，让伴侣只入局部。
+    # 第二人/设备：规划器主判（partner_in_frame / device_in_frame）+ 确定性正则兜底（覆盖无规划器的
+    # /自拍、调度推送等路径）。场景里混进与角色性别相反的伴侣，但本该是单人图，是 1girl/solo 与
+    # “画面里有第二人”的硬矛盾，最易画出断臂/双人；非 NTR 时按亲密/伴侣场景处理，让伴侣只入局部。
     partner_re = FEMALE_PARTNER_RE if male else MALE_PARTNER_RE
-    scene_has_partner = bool(partner_re.search(scene_desc))
+    scene_has_partner = partner_in_frame or bool(partner_re.search(scene_desc))
+    device_present = device_in_frame or bool(DEVICE_SCENE_RE.search(scene_desc))
     is_sex_scene = (
         is_intimate
         or any(k in scene_lower for k in sex_keywords)
@@ -784,17 +795,22 @@ def build_prompt(
 
     prompt_view = _infer_prompt_view(scene_desc)
     if is_sex_scene and not is_ntr_scene:
-        # 伴侣/性爱/事后贴身画面不能是单人自拍取景：先清掉自拍/对镜的相机取景措辞，
-        # 否则会出现“自拍框 + 画面里有第二人”的矛盾（断臂/双人的主因）。
-        scene_desc = SELF_CAMERA_FRAMING_RE.sub("", scene_desc)
-        for tag in ["selfie", "solo", "holding phone", "arm extended", "mirror selfie", "phone"]:
-            scene_desc = re.sub(r"\b" + re.escape(tag) + r"\b", "", scene_desc, flags=re.IGNORECASE)
-        scene_desc = re.sub(r"\s*,\s*,+", ", ", scene_desc)
-        scene_desc = re.sub(r"\s+([,.;])", r"\1", scene_desc)
-        scene_desc = re.sub(r"\s{2,}", " ", scene_desc).strip(" ,")
-        # 取景清空后若已无 POV/对视开头，补一个 POV 取景，确保是“贴身视角”而非无主语近景。
-        if not re.search(r"first-person pov|looking at a (?:woman|man)", scene_desc, re.IGNORECASE):
-            scene_desc = f"{view_opener('pov', 'boy' if male else 'girl')}, {scene_desc}".strip(", ")
+        if not device_present:
+            # 伴侣/性爱/事后贴身画面不能是单人自拍取景：先清掉自拍/对镜的相机取景措辞，
+            # 否则会出现“自拍框 + 画面里有第二人”的矛盾（断臂/双人的主因）。
+            # 用户明确要拍照/录像（device_present）时跳过：保留其自拍/对镜取景与设备。
+            scene_desc = SELF_CAMERA_FRAMING_RE.sub("", scene_desc)
+            for tag in ["selfie", "solo", "holding phone", "arm extended", "mirror selfie", "phone"]:
+                scene_desc = re.sub(r"\b" + re.escape(tag) + r"\b", "", scene_desc, flags=re.IGNORECASE)
+            scene_desc = re.sub(r"\s*,\s*,+", ", ", scene_desc)
+            scene_desc = re.sub(r"\s+([,.;])", r"\1", scene_desc)
+            scene_desc = re.sub(r"\s{2,}", " ", scene_desc).strip(" ,")
+            # 取景清空后若已无 POV/对视开头，补一个 POV 取景，确保是“贴身视角”而非无主语近景。
+            if not re.search(r"first-person pov|looking at a (?:woman|man)", scene_desc, re.IGNORECASE):
+                scene_desc = f"{view_opener('pov', 'boy' if male else 'girl')}, {scene_desc}".strip(", ")
+                scene_desc = re.sub(r"\bsolo\b,?\s*", "", scene_desc)
+        else:
+            # 设备入画：仍要去掉 solo（画面里有两个身体），但保留自拍/对镜取景与设备。
             scene_desc = re.sub(r"\bsolo\b,?\s*", "", scene_desc)
         user_gender = service._get_user_gender(session_id) if session_id and hasattr(service, "_get_user_gender") else "male"
         if user_gender == "female":
@@ -804,7 +820,15 @@ def build_prompt(
         else:
             scene_desc += ", partial male body visible, male hands, male torso, intimate close-up"
             neg = _remove_negatives(neg, "male")
-        neg = _append_negatives(neg, "selfie", "holding phone", "phone", "cellphone", "mobile phone", "smartphone", "arm extended", "third-person perspective")
+        if device_present:
+            # 用户要把手机/相机/镜子拍进画面：放开手机与对镜负向，让设备能渲染出来。
+            neg = _remove_negatives(
+                neg, "holding phone", "phone", "cellphone", "mobile phone", "smartphone",
+                "visible phone", "phone in hand", "hand holding phone", "mirror", "mirror reflection", "mirror selfie",
+                *VISIBLE_PHONE_NEGATIVES,
+            )
+        else:
+            neg = _append_negatives(neg, "selfie", "holding phone", "phone", "cellphone", "mobile phone", "smartphone", "arm extended", "third-person perspective")
     else:
         has_phone = _contains_any(scene_desc, PHONE_TERMS)
         has_mirror = _contains_any(scene_desc, MIRROR_TERMS)
@@ -939,11 +963,16 @@ async def do_generate(
     session_id: str = "",
     one_shot_appearance: str = "",
     is_intimate: bool = False,
+    partner_in_frame: bool = False,
+    device_in_frame: bool = False,
 ) -> tuple[bool, list[bytes], str]:
     async with service._gen_lock:
         service._generating = True
         try:
-            return await do_generate_locked(service, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance, is_intimate=is_intimate)
+            return await do_generate_locked(
+                service, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
+                is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
+            )
         finally:
             service._generating = False
 
@@ -955,9 +984,14 @@ async def do_generate_locked(
     session_id: str = "",
     one_shot_appearance: str = "",
     is_intimate: bool = False,
+    partner_in_frame: bool = False,
+    device_in_frame: bool = False,
 ) -> tuple[bool, list[bytes], str]:
     ensure_comfy_session(service)
-    positive, negative = build_prompt(service, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance, is_intimate=is_intimate)
+    positive, negative = build_prompt(
+        service, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
+        is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
+    )
     seed = random.randint(0, 2**63 - 1)
     if session_id and hasattr(service, "_ulog"):
         slots = getattr(service, "_last_prompt_slots", None)

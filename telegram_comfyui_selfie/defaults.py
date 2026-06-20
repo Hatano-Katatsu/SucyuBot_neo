@@ -332,4 +332,7 @@ DEFAULT_CONFIG = {
     #   medical / retail / delivery / driver / home / flexible（也接受 上班族/工人/农民/外卖员/司机 等中文）
     "character_age_stage": "",
     "character_day_anchor": "",
+    # 用户自己的性别：male / female。决定亲密场景里“用户身体”画成男性还是女性局部
+    # （默认 male；改 female 支持百合/女性用户，配合角色性别可覆盖异性恋/百合/gay 等取向）。
+    "user_gender": "male",
 }
