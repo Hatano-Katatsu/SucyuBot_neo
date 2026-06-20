@@ -12,6 +12,21 @@ from .defaults import WEEKDAY_NAMES
 logger = logging.getLogger(__name__)
 
 FREQ_MAX_ROUNDS = {"极频繁": 2, "频繁": 3, "适度": 5, "偶尔": 8}
+# 各档位的最小配图间隔（轮）：发图后至少留白这么多轮才允许下一张主动配图。
+# 用户明确开口要图时不受此约束（见 _user_requested_image / _should_block_chat_image）。
+FREQ_MIN_GAP = {"极频繁": 1, "频繁": 2, "适度": 3, "偶尔": 5}
+# 用户“明确想看图”的意图检测：命中则即便在冷却期内也放行配图。
+# 只是冷却期的放行旁路；漏判最多让用户等满冷却或改用 /自拍，故偏向覆盖常见说法、控制误判。
+IMAGE_REQUEST_RE = re.compile(
+    r"(自拍|selfie|\bpic\b|\bphoto\b|"
+    r"拍(?:一|两|几)?[张个]|拍照|拍来|"
+    r"看看?你|瞧瞧你|想看你|让我(?:看|瞧)(?:看|瞧)?|给我?(?:看|瞧)(?:看|瞧)?|"
+    r"看你(?:的|现在|此刻|那边|那儿|长什么|长啥)|看(?:一)?下你|"
+    r"发(?:我)?(?:张|个|一张|几张|一下)?(?:图|照|照片|自拍)|来(?:张|个|一张)(?:图|照|照片)?|"
+    r"照片|图片|什么样[子貌]|啥样[子貌]?|长(?:什么|啥)样|(?:现在|此刻|这会儿)的样[子貌]|"
+    r"你的(?:样子|穿搭|打扮|照片)|镜子里|对镜|你那(?:边|儿)(?:啥|什么|怎))",
+    re.IGNORECASE,
+)
 SHORT_CONTEXT_RESET_RE = re.compile(
     r"(换个话题|换话题|换一?个场景|新场景|下一幕|下一段|另起|说点别的|聊点别的|不说这个|先不说|不聊这个|别提这个|跳过这个|结束这个|这个话题到此|算了|重新开始|从头来|回到正题)"
 )
@@ -76,12 +91,26 @@ class ChatContextMixin:
         content = (assistant.get("content") or "").strip()
         tool_calls = assistant.get("tool_calls") or []
 
+        explicit_image_req = self._user_requested_image(user_text)
+
         image_emitted = False
         if tool_calls:
             messages.append(assistant)
             for call in tool_calls:
+                fn_name = (call.get("function") or {}).get("name")
+                if fn_name == "generate_roleplay_image" and self._should_block_chat_image(
+                    session_id, user_text, explicit=explicit_image_req
+                ):
+                    # 冷却期内模型主动配图：跳过生图，仅保留文字回复（用户明确要图时不会走到这里）。
+                    self._ulog(session_id, "IMG", "冷却期内抑制模型主动配图")
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call.get("id", "tool"),
+                        "content": "（系统提示：当前处于配图冷却期，本次不发图。请用文字自然回应，不要再请求配图，也不要在文字里描述照片。）",
+                    })
+                    continue
                 tool_result = await self._execute_tool_call(chat_id, session_id, call)
-                if (call.get("function") or {}).get("name") == "generate_roleplay_image":
+                if fn_name == "generate_roleplay_image":
                     image_emitted = True
                 messages.append({
                     "role": "tool",
@@ -104,9 +133,14 @@ class ChatContextMixin:
 
         scene = self._handle_leaked_image_text(content)
         if scene:
-            image_emitted = True
             content = self._strip_leaked_image_text(content)
-            asyncio.create_task(self._push_image_from_text(session_id, scene))
+            if self._should_block_chat_image(session_id, user_text, explicit=explicit_image_req):
+                # 冷却期内模型把图片描述泄漏进文字：清掉痕迹但不发图。
+                self._ulog(session_id, "IMG", "冷却期内抑制模型泄漏的配图")
+                content = self._strip_photo_memory_echo(content)
+            else:
+                image_emitted = True
+                asyncio.create_task(self._push_image_from_text(session_id, scene))
         else:
             content = self._strip_photo_memory_echo(content)
 
@@ -114,7 +148,9 @@ class ChatContextMixin:
         # 只先做判断；真正发图放到本轮对话入库之后，避免图片规划看不到刚才的用户/角色文本。
         judge_decision = None
         if not image_emitted:
-            judge_decision = await self._judge_image_moment(session_id, user_text, content)
+            judge_decision = await self._judge_image_moment(
+                session_id, user_text, content, explicit=explicit_image_req
+            )
 
         history = state.get("chat_history", [])
         history.append({"role": "user", "content": user_text})
@@ -316,12 +352,40 @@ class ChatContextMixin:
             "详细": "回复长度：可以适当展开，但单次不要超过约 300 字。",
         }.get(preset, "")
 
-    def _image_min_gap(self) -> int:
-        """最小配图间隔（轮）：刚发过图后留白几轮再考虑，避免连刷。"""
+    def _image_min_gap(self, freq: str | None = None) -> int:
+        """最小配图间隔（轮）：刚发过图后留白几轮再考虑，避免连刷。随频率档位变化。
+
+        全局 image_min_gap_rounds 若显式配置，则作为下限地板（取与档位间隔的较大者）。
+        """
+        if freq is None:
+            freq = self.config.get("selfie_frequency", "频繁")
+        tier = FREQ_MIN_GAP.get(freq, 2)
         try:
-            return max(1, int(self.config.get("image_min_gap_rounds", "2") or "2"))
+            cfg = self.config.get("image_min_gap_rounds")
+            if cfg is not None and str(cfg).strip() != "":
+                return max(1, max(tier, int(cfg)))
         except Exception:
-            return 2
+            pass
+        return max(1, tier)
+
+    def _user_requested_image(self, text: str) -> bool:
+        """用户是否明确开口要看图/自拍/照片：命中则配图不受冷却期约束。"""
+        return bool(IMAGE_REQUEST_RE.search(text or ""))
+
+    def _should_block_chat_image(self, session_id: str, user_text: str, *, explicit: bool | None = None) -> bool:
+        """聊天触发的配图（模型主动调工具或泄漏图片描述）是否应被冷却拦截。
+
+        关闭档位一律拦截；其余档位在冷却期内拦截，但用户明确要图时放行。
+        """
+        freq = self.config.get("selfie_frequency", "频繁")
+        if freq == "关闭":
+            return True
+        if explicit is None:
+            explicit = self._user_requested_image(user_text)
+        if explicit:
+            return False
+        rounds = self._get_session_state(session_id).get("rounds_since_image", 0)
+        return rounds < self._image_min_gap(freq)
 
     def _recent_dialog_for_judge(self, state: dict[str, Any], limit: int = 6) -> str:
         lines = []
@@ -333,7 +397,7 @@ class ChatContextMixin:
             lines.append(f"{role}: {content[:200]}")
         return "\n".join(lines)
 
-    async def _judge_image_moment(self, session_id: str, user_text: str, draft_reply: str) -> dict[str, Any] | None:
+    async def _judge_image_moment(self, session_id: str, user_text: str, draft_reply: str, *, explicit: bool = False) -> dict[str, Any] | None:
         """独立的配图时机判断器：由对话内容决定此刻是否自然地补一张图。
 
         故意做成一个干净、专注的小判断（关 thinking、只输出 JSON），这样模型会按内容
@@ -347,8 +411,8 @@ class ChatContextMixin:
             return None
         state = self._get_session_state(session_id)
         rounds = state.get("rounds_since_image", 0)
-        if rounds < self._image_min_gap():
-            return None  # 刚发过图，留白
+        if not explicit and rounds < self._image_min_gap(freq):
+            return None  # 刚发过图，留白（用户明确要图时不受冷却约束）
         overdue = self._image_nudge_due(freq, rounds)
         tendency = {
             "极频繁": "门槛很低：稍微有点画面感、场景或情绪就发。",
