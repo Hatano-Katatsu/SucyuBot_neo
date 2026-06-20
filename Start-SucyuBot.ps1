@@ -38,20 +38,35 @@ function Open-WebUi {
   }
 }
 
+function Test-PythonHasAiohttp([string]$file, [string[]]$prefixArgs) {
+  # The service's only third-party dependency is aiohttp; a runtime without it
+  # crashes on import and the launcher would loop forever. Probe each candidate
+  # so we never pick a broken one (e.g. a bundled runtime that lost aiohttp).
+  try {
+    $probeArgs = @($prefixArgs) + @("-c", "import aiohttp")
+    # Use the call operator with splatting: Start-Process mangles args containing spaces.
+    & $file @probeArgs 2>$null 1>$null
+    return ($LASTEXITCODE -eq 0)
+  } catch {
+    return $false
+  }
+}
+
 function Resolve-Python {
+  $candidates = @()
   $bundled = Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
-  if (Test-Path -LiteralPath $bundled) {
-    return @{ File = $bundled; PrefixArgs = @() }
-  }
+  if (Test-Path -LiteralPath $bundled) { $candidates += , @{ File = $bundled; PrefixArgs = @() } }
   $py = Get-Command py.exe -ErrorAction SilentlyContinue
-  if ($py) {
-    return @{ File = $py.Source; PrefixArgs = @("-3") }
-  }
+  if ($py) { $candidates += , @{ File = $py.Source; PrefixArgs = @("-3") } }
   $python = Get-Command python.exe -ErrorAction SilentlyContinue
-  if ($python) {
-    return @{ File = $python.Source; PrefixArgs = @() }
+  if ($python) { $candidates += , @{ File = $python.Source; PrefixArgs = @() } }
+  if ($candidates.Count -eq 0) { throw "No Python runtime found." }
+  # Prefer the first runtime that can actually import aiohttp.
+  foreach ($cand in $candidates) {
+    if (Test-PythonHasAiohttp $cand.File $cand.PrefixArgs) { return $cand }
   }
-  throw "No Python runtime found."
+  # None has aiohttp: fall back to the first so the service fails loudly with a clear error.
+  return $candidates[0]
 }
 
 if (Test-LocalPort $port) {
