@@ -223,6 +223,23 @@ class SchedulerRuntimeMixin:
             logger.warning("weather fetch failed: %s", exc)
             return None
 
+    def _schedule_weather_refresh(self, session_id: str) -> bool:
+        """聊天时若天气缓存已过期（>30 分钟），后台异步刷新。
+
+        纯文字聊天本身从不拉天气（时间/光照/世界状态只读缓存），不刷新会让天气停在最近一次
+        生图/推送/手动查询时的值（常常是早安推送那次）。这里在缓存过期时 fire-and-forget 拉一次，
+        不阻塞当前回复，下一轮即用上新天气。`_fetch_weather` 内部已捕获异常并写回缓存。
+        """
+        cached = self._weather_caches.get(session_id or "__default__")
+        ts = float(cached.get("ts", 0)) if isinstance(cached, dict) else 0.0
+        if time.time() - ts < 1800:
+            return False
+        try:
+            asyncio.create_task(self._fetch_weather(session_id=session_id))
+        except RuntimeError:
+            return False  # 无运行中的事件循环（极少见）
+        return True
+
     @staticmethod
     def _is_bad_weather(w) -> bool:
         return bool(w and w.get("code", "0") in {"200", "299", "300", "399", "500", "599", "600", "699", "700", "799"})

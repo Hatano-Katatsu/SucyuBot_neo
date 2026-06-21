@@ -37,6 +37,7 @@ class ChatContextMixin:
         previous_interaction = state.get("last_interaction", 0)
         reset_reason = self._short_context_reset_reason(text, previous_interaction)
         self._touch(session_id)
+        self._schedule_weather_refresh(session_id)  # 天气缓存过期则后台刷新，避免聊天天气停在早安推送那次
         if reset_reason:
             self._reset_short_context(state, reset_reason)
         self._update_user_place_from_text(session_id, text)
