@@ -65,6 +65,12 @@
   "world_runtime_enabled": true,
   "world_city_places_enabled": true,
   "world_city_places_ttl_days": "30",
+  "amap_api_key": "",
+  "amap_poi_enabled": true,
+  "amap_poi_per_type": "5",
+  "google_places_api_key": "",
+  "google_places_enabled": true,
+  "google_places_language": "",
   "world_user_place_ttl_hours": "4",
   "world_holiday_dates": "",
   "world_workday_dates": ""

@@ -727,6 +727,39 @@ class ServiceTestCase(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_tool_update_location_preserves_specific_place_name(self):
+        """显式说"去上海海军博物馆"应钉到 museum 类别，并保留完整地名作显示名（而非目录里随便一家馆）。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 6, 18, 14, 0, tzinfo=timezone.utc)
+            svc._session_now = lambda session_id="": fixed_now
+            await svc.tool_update_location(sid, "上海海军博物馆")
+            state = svc._get_session_state(sid)
+            self.assertEqual(state["character_place"], "museum")
+            self.assertEqual(state["character_place_name"], "上海海军博物馆")
+            cp = svc.build_world_state(sid, weather=None)["character_place"]
+            self.assertEqual(cp["key"], "museum")
+            self.assertEqual(cp["name"], "上海海军博物馆")  # 显示这一家，而非 PLACE_TYPES 示例
+
+        asyncio.run(run())
+
+    def test_llm_extract_preserves_specific_place_name(self):
+        """LLM 从角色回复抽取地点时，带出的具体地名也被保留为显示名。"""
+        async def run():
+            svc = self.make_service()
+            svc.config.update({"image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "https://x"})
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 6, 18, 14, 0, tzinfo=timezone.utc)
+            svc._session_now = lambda session_id="": fixed_now
+            svc._call_llm = AsyncMock(return_value='{"place":"museum","place_name":"上海海军博物馆"}')
+            self.assertTrue(await svc._update_character_place_from_text(sid, "我现在到上海海军博物馆啦"))
+            cp = svc.build_world_state(sid, weather=None)["character_place"]
+            self.assertEqual(cp["key"], "museum")
+            self.assertEqual(cp["name"], "上海海军博物馆")
+
+        asyncio.run(run())
+
     def test_character_place_expires_after_ttl(self):
         async def run():
             svc = self.make_service()
@@ -851,6 +884,116 @@ class ServiceTestCase(unittest.TestCase):
             await svc.tool_update_location(sid, "公司")
             self.assertEqual(state["character_place_confidence"], 0.95)
             self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "company")
+
+        asyncio.run(run())
+
+    def test_new_leisure_place_categories_extract_and_pin(self):
+        """新增的休闲/文化类目（博物馆等）能识别并钉位——覆盖'角色出现在上海海军博物馆'诉求。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 6, 18, 14, 0, tzinfo=timezone.utc)
+            svc._session_now = lambda session_id="": fixed_now
+            # 模型显式声明在海军博物馆（tool_update_location 走正则识别）→ 钉位为 museum
+            msg = await svc.tool_update_location(sid, "上海海军博物馆")
+            self.assertIn("博物馆", msg)
+            world = svc.build_world_state(sid, weather=None)
+            self.assertEqual(world["character_place"]["key"], "museum")
+            self.assertEqual(world["character_place"]["label"], "博物馆")
+
+        asyncio.run(run())
+
+    def test_new_leisure_place_categories_keyword_routing(self):
+        """新类目的中文关键词都能被 _infer_user_place 正确归类。"""
+        svc = self.make_service()
+        cases = {
+            "我正在海军博物馆里看展": "museum",
+            "周末去海边吹风": "beach",
+            "在图书馆自习": "library",
+            "去超市买菜": "supermarket",
+            "晚上在酒吧喝一杯": "bar",
+            "我在动物园看熊猫": "zoo",
+            "在神社祈愿": "temple",
+            "我在游乐园玩": "amusement",
+            "在书店看书": "bookstore",
+        }
+        for text, expected in cases.items():
+            self.assertEqual(svc._infer_user_place(text)[0], expected, f"{text} 应归类到 {expected}")
+
+    def test_library_supermarket_not_shadowed_by_old_categories(self):
+        """图书馆不再被 school 抢走、超市不再被 convenience 抢走。"""
+        svc = self.make_service()
+        self.assertEqual(svc._infer_user_place("我在图书馆")[0], "library")
+        self.assertEqual(svc._infer_user_place("我在超市")[0], "supermarket")
+        # 学校/便利店本身仍正常路由
+        self.assertEqual(svc._infer_user_place("我在学校上课")[0], "school")
+        self.assertEqual(svc._infer_user_place("我在便利店")[0], "convenience")
+
+    def test_amap_poi_catalog_used_for_china_city(self):
+        """LLM 判为中国城市时，目录用高德真实 POI，动线取名用它。"""
+        async def run():
+            svc = self.make_service()
+            svc.config["amap_api_key"] = "test-key"
+            svc.config["amap_poi_enabled"] = True
+            svc._classify_city_region = AsyncMock(return_value="china")
+            sample = {
+                "museum": ["上海海军博物馆", "上海博物馆"],
+                "park": ["人民公园", "复兴公园"],
+            }
+            svc._fetch_amap_places = AsyncMock(return_value=sample)
+            result = await svc._ensure_city_place_catalog("上海", force=True)
+            self.assertEqual(result["status"], "amap")
+            self.assertIn("上海海军博物馆", result["places"]["museum"])
+            self.assertEqual(svc._place_example("上海", "museum", 0), "上海海军博物馆")
+            cat = svc.city_place_catalogs[svc._city_catalog_key("上海")]
+            self.assertEqual(cat["source"], "amap")
+
+        asyncio.run(run())
+
+    def test_amap_falls_back_when_no_poi(self):
+        """中国城市高德无结果、无谷歌、无 image LLM 时回落 basic（位置系统仍有内置示例兜底）。"""
+        async def run():
+            svc = self.make_service()
+            svc.config["amap_api_key"] = "test-key"
+            svc._classify_city_region = AsyncMock(return_value="china")
+            svc._fetch_amap_places = AsyncMock(return_value={})
+            result = await svc._ensure_city_place_catalog("某无POI小城", force=True)
+            self.assertEqual(result["status"], "basic")
+
+        asyncio.run(run())
+
+    def test_overseas_city_uses_google_and_never_amap(self):
+        """LLM 判为海外时只用谷歌，绝不调用高德（防同名中国地点污染目录）。"""
+        async def run():
+            svc = self.make_service()
+            svc.config["amap_api_key"] = "ak"
+            svc.config["google_places_api_key"] = "gk"
+            svc._classify_city_region = AsyncMock(return_value="overseas")
+            svc._fetch_amap_places = AsyncMock(return_value={"museum": ["错误的中国馆"]})
+            svc._fetch_google_places = AsyncMock(return_value={
+                "museum": ["Kobe Maritime Museum"], "park": ["Sorakuen Garden"],
+            })
+            result = await svc._ensure_city_place_catalog("神户", force=True)
+            self.assertEqual(result["status"], "google")
+            self.assertIn("Kobe Maritime Museum", result["places"]["museum"])
+            svc._fetch_amap_places.assert_not_awaited()  # 海外绝不碰高德
+            self.assertEqual(svc.city_place_catalogs[svc._city_catalog_key("神户")]["source"], "google")
+
+        asyncio.run(run())
+
+    def test_china_city_prefers_amap_over_google(self):
+        """中国城市高德有结果时优先高德，不调用谷歌。"""
+        async def run():
+            svc = self.make_service()
+            svc.config["amap_api_key"] = "ak"
+            svc.config["google_places_api_key"] = "gk"
+            svc._classify_city_region = AsyncMock(return_value="china")
+            svc._fetch_amap_places = AsyncMock(return_value={"museum": ["上海博物馆"]})
+            svc._fetch_google_places = AsyncMock(return_value={"museum": ["should-not-be-used"]})
+            result = await svc._ensure_city_place_catalog("上海", force=True)
+            self.assertEqual(result["status"], "amap")
+            self.assertEqual(result["places"]["museum"], ["上海博物馆"])
+            svc._fetch_google_places.assert_not_awaited()
 
         asyncio.run(run())
 

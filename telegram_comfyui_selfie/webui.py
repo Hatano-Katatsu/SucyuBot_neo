@@ -11,7 +11,7 @@ from aiohttp import web
 from .world_runtime import PLACE_TYPES
 
 
-SECRET_KEYS = {"telegram_bot_token", "llm_api_key", "chat_llm_api_key", "image_llm_api_key"}
+SECRET_KEYS = {"telegram_bot_token", "llm_api_key", "chat_llm_api_key", "image_llm_api_key", "amap_api_key", "google_places_api_key"}
 WORLD_TIMELINE_HOURS = (6, 8, 11, 13, 16, 18, 20, 23)
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -7,6 +8,8 @@ import re
 import time
 from datetime import datetime, timedelta
 from typing import Any
+
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
@@ -209,19 +212,125 @@ PLACE_TYPES: dict[str, dict[str, Any]] = {
         "views": ["third", "selfie"],
         "activities": ["施工", "搬运", "午歇", "收工"],
     },
+    # ---- 休闲/文化/景点类（对应高德 风景名胜110000 / 科教文化140000 / 体育休闲080000 等大类）----
+    # 这些多为"目的地"而非每日固定动线：主要靠用户/模型显式钉位、城市目录召唤，节假日白天也会小幅进入候选。
+    "museum": {
+        "label": "博物馆",
+        "examples": ["展厅", "馆内长廊", "展品前", "博物馆大厅", "馆外广场"],
+        "indoor": True,
+        "public": True,
+        "views": ["selfie", "third"],
+        "activities": ["看展", "参观", "拍照打卡", "歇脚"],
+    },
+    "landmark": {
+        "label": "景点",
+        "examples": ["观景台", "地标前", "景区广场", "石阶上", "栈道边"],
+        "indoor": False,
+        "public": True,
+        "views": ["third", "selfie"],
+        "activities": ["游览", "拍照打卡", "看风景", "散步"],
+    },
+    "temple": {
+        "label": "寺庙神社",
+        "examples": ["山门前", "鸟居下", "香炉旁", "祈愿牌前", "石阶上"],
+        "indoor": False,
+        "public": True,
+        "views": ["third", "selfie"],
+        "activities": ["参拜", "祈愿", "抽签", "散步"],
+    },
+    "library": {
+        "label": "图书馆",
+        "examples": ["书架间", "靠窗书桌", "自习区", "借阅台旁", "馆内楼梯"],
+        "indoor": True,
+        "public": True,
+        "views": ["selfie", "third"],
+        "activities": ["看书", "自习", "借书", "查资料"],
+    },
+    "zoo": {
+        "label": "动物园/水族馆",
+        "examples": ["展区前", "水族箱旁", "海洋馆隧道", "动物园入口", "温室花房"],
+        "indoor": False,
+        "public": True,
+        "views": ["third", "selfie"],
+        "activities": ["看动物", "拍照", "投喂", "散步"],
+    },
+    "amusement": {
+        "label": "游乐园",
+        "examples": ["摩天轮下", "旋转木马旁", "游乐园门口", "过山车前", "园内大街"],
+        "indoor": False,
+        "public": True,
+        "views": ["selfie", "third"],
+        "activities": ["玩游乐设施", "排队", "拍照打卡", "约会"],
+    },
+    "bar": {
+        "label": "酒吧",
+        "examples": ["吧台前", "卡座", "霓虹灯下", "酒吧门口", "驻唱舞台旁"],
+        "indoor": True,
+        "public": True,
+        "views": ["selfie", "third"],
+        "activities": ["喝酒", "听歌", "聊天", "夜晚放松"],
+    },
+    "ktv": {
+        "label": "KTV",
+        "examples": ["包厢沙发", "点歌屏前", "麦克风旁", "KTV走廊", "包厢门口"],
+        "indoor": True,
+        "public": True,
+        "views": ["selfie", "mirror", "third"],
+        "activities": ["唱歌", "聚会", "玩闹", "夜晚消遣"],
+    },
+    "stadium": {
+        "label": "体育馆/球场",
+        "examples": ["看台", "场边", "入口通道", "球场边", "演出场馆外"],
+        "indoor": False,
+        "public": True,
+        "views": ["third", "selfie"],
+        "activities": ["看比赛", "看演出", "应援", "运动"],
+    },
+    "supermarket": {
+        "label": "超市",
+        "examples": ["生鲜区", "货架间", "购物车旁", "收银台前", "超市入口"],
+        "indoor": True,
+        "public": True,
+        "views": ["selfie", "third"],
+        "activities": ["采购", "买菜", "囤货", "逛超市"],
+    },
+    "bookstore": {
+        "label": "书店",
+        "examples": ["书架前", "阅读角", "新书台旁", "书店咖啡区", "落地窗边"],
+        "indoor": True,
+        "public": True,
+        "views": ["selfie", "third"],
+        "activities": ["看书", "选书", "歇脚", "拍照"],
+    },
+    "beach": {
+        "label": "海边",
+        "examples": ["沙滩上", "海浪边", "栈桥上", "礁石旁", "海滨步道"],
+        "indoor": False,
+        "public": True,
+        "views": ["selfie", "third"],
+        "activities": ["看海", "踏浪", "拍照", "散步"],
+    },
+    "salon": {
+        "label": "美容美发",
+        "examples": ["镜台前", "理发椅上", "美甲桌旁", "SPA房", "店内沙发"],
+        "indoor": True,
+        "public": True,
+        "views": ["mirror", "selfie"],
+        "activities": ["做头发", "美甲", "护理", "放松"],
+    },
 }
 
 PLACE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("home", re.compile(r"(到家|回家|在家|家里|客厅|卧室|厨房|玄关|阳台|my home|at home)", re.I)),
     ("company", re.compile(r"(公司|办公室|上班|工位|写字楼|公司楼下|office|work)", re.I)),
-    ("school", re.compile(r"(学校|大学|教室|图书馆|上课|有课|放学|校园|school|college|university|classroom|library)", re.I)),
+    ("school", re.compile(r"(学校|大学|教室|上课|有课|放学|校园|school|college|university|classroom)", re.I)),
     ("park", re.compile(r"(公园|湖边|草坪|散步|park)", re.I)),
     ("mall", re.compile(r"(商场|购物中心|商城|试衣|逛街|mall|shopping)", re.I)),
     ("street", re.compile(r"(大街|街上|路上|路口|商业街|street|road)", re.I)),
     ("cafe", re.compile(r"(咖啡店|咖啡馆|咖啡厅|cafe|coffee)", re.I)),
     ("restaurant", re.compile(r"(餐厅|饭店|吃饭|晚饭|午饭|restaurant|dinner|lunch)", re.I)),
     ("transit", re.compile(r"(地铁|车站|公交|出租车|高铁|火车站|机场|station|subway|train|airport)", re.I)),
-    ("convenience", re.compile(r"(便利店|小卖部|超市|convenience|store)", re.I)),
+    ("convenience", re.compile(r"(便利店|小卖部|convenience|store)", re.I)),
     ("cinema", re.compile(r"(电影院|电影票|影厅|cinema|movie)", re.I)),
     ("hotel", re.compile(r"(酒店|旅馆|民宿|hotel)", re.I)),
     ("hospital", re.compile(r"(医院|诊所|候诊|hospital|clinic)", re.I)),
@@ -229,9 +338,47 @@ PLACE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("factory", re.compile(r"(工厂|车间|厂里|流水线|生产线|factory|plant)", re.I)),
     ("farm", re.compile(r"(田里|田间|地里|农田|菜地|果园|大棚|种地|farm|field)", re.I)),
     ("construction", re.compile(r"(工地|脚手架|施工现场|construction site)", re.I)),
+    ("museum", re.compile(r"(博物馆|纪念馆|美术馆|科技馆|展览馆|展馆|museum|gallery)", re.I)),
+    ("landmark", re.compile(r"(景点|景区|名胜|地标|观景台|打卡点|attraction|landmark|scenic)", re.I)),
+    ("temple", re.compile(r"(寺庙|寺院|神社|道观|教堂|庙里|鸟居|参拜|temple|shrine|church)", re.I)),
+    ("library", re.compile(r"(图书馆|借阅|阅览室|library)", re.I)),
+    ("zoo", re.compile(r"(动物园|水族馆|海洋馆|植物园|温室馆|zoo|aquarium)", re.I)),
+    ("amusement", re.compile(r"(游乐园|游乐场|摩天轮|过山车|嘉年华|迪士尼|环球影城|amusement|theme park)", re.I)),
+    ("bar", re.compile(r"(酒吧|清吧|居酒屋|夜店|bar|pub|nightclub)", re.I)),
+    ("ktv", re.compile(r"(ktv|量贩|包厢|卡拉ok|karaoke)", re.I)),
+    ("stadium", re.compile(r"(体育馆|体育场|球场|竞技场|演唱会|演出场馆|stadium|arena)", re.I)),
+    ("supermarket", re.compile(r"(超市|大卖场|大润发|沃尔玛|山姆会员|supermarket)", re.I)),
+    ("bookstore", re.compile(r"(书店|书城|书吧|bookstore)", re.I)),
+    ("beach", re.compile(r"(海边|海滨|沙滩|海岸|海滩|beach|seaside)", re.I)),
+    ("salon", re.compile(r"(美容院|美发店|理发店|美甲店|做头发|spa|沙龙|salon)", re.I)),
 ]
 
 CITY_CATALOG_KEYS = set(PLACE_TYPES)
+
+# 场所类目 → 高德 POI 关键字搜索用的中文关键字。只映射"有真实公共 POI"的类目；
+# home/street/factory/farm/construction 没有有意义的可命名公共地点，留给 PLACE_TYPES 内置示例兜底。
+AMAP_KEYWORDS: dict[str, str] = {
+    "school": "学校", "park": "公园", "mall": "购物中心", "cafe": "咖啡厅",
+    "restaurant": "餐厅", "transit": "地铁站", "convenience": "便利店",
+    "cinema": "电影院", "hotel": "酒店", "hospital": "医院", "gym": "健身房",
+    "company": "写字楼", "museum": "博物馆", "landmark": "景点", "temple": "寺庙",
+    "library": "图书馆", "zoo": "动物园", "amusement": "游乐园", "bar": "酒吧",
+    "ktv": "KTV", "stadium": "体育馆", "supermarket": "超市", "bookstore": "书店",
+    "salon": "美容美发",
+}
+
+# 场所类目 → 谷歌 Places(New) 文本搜索关键词（英文）。高德覆盖不到的海外城市用谷歌兜全球。
+# 同样只映射有真实公共 POI 的类目；home/street/factory/farm/construction 留给内置示例。
+GOOGLE_KEYWORDS: dict[str, str] = {
+    "school": "school", "park": "park", "mall": "shopping mall", "cafe": "cafe",
+    "restaurant": "restaurant", "transit": "train station", "convenience": "convenience store",
+    "cinema": "movie theater", "hotel": "hotel", "hospital": "hospital", "gym": "gym",
+    "company": "office building", "museum": "museum", "landmark": "tourist attraction",
+    "temple": "temple shrine", "library": "library", "zoo": "zoo aquarium",
+    "amusement": "amusement park", "bar": "bar", "ktv": "karaoke", "stadium": "stadium",
+    "supermarket": "supermarket", "bookstore": "bookstore", "salon": "beauty salon",
+}
+
 BAD_WEATHER_RE = re.compile(r"(雨|雪|雷|雾|霾|大风|暴|storm|rain|snow|fog|thunder|shower)", re.I)
 HOT_COLD_RE = re.compile(r"(炎热|高温|酷暑|寒冷|低温|冰|hot|cold|freezing)", re.I)
 CLEAR_WEATHER_RE = re.compile(r"(晴|clear|sunny)", re.I)
@@ -326,6 +473,15 @@ class WorldRuntimeMixin:
                 scores.update(home=4, restaurant=2, mall=1, convenience=1, cafe=1)
             else:
                 scores.update(home=6, convenience=1)
+        # 休闲/文化目的地：仅节假日小幅加权，让博物馆、景点、海边、酒吧等偶尔进入候选，
+        # 权重低于商场/公园不抢主导。日常这些地点主要靠用户/模型显式钉位或城市目录召唤。
+        if is_day_off:
+            if 9 <= hour < 18:
+                for k in ("museum", "landmark", "zoo", "amusement", "bookstore", "library", "beach"):
+                    scores[k] = scores.get(k, 0.0) + 1.0
+            elif 18 <= hour < 24:
+                for k in ("bar", "ktv", "stadium"):
+                    scores[k] = scores.get(k, 0.0) + 1.0
         if mode == "morning":
             scores["home"] += 3
         elif mode == "ntr":
@@ -592,6 +748,7 @@ class WorldRuntimeMixin:
             "key": key,
             "label": state.get("character_place_label") or PLACE_TYPES[key]["label"],
             "text": state.get("character_place_text") or "",
+            "name": (state.get("character_place_name") or "").strip(),
             "updated_at": updated,
             "authority": authority,
             "confidence": conf,
@@ -607,6 +764,7 @@ class WorldRuntimeMixin:
         confidence: float,
         *,
         source: str = "auto",
+        name: str = "",
     ) -> bool:
         if key not in PLACE_TYPES:
             return False
@@ -614,6 +772,8 @@ class WorldRuntimeMixin:
         state["character_place"] = key
         state["character_place_label"] = PLACE_TYPES[key]["label"]
         state["character_place_text"] = (matched or "")[:40]
+        # 用户/模型明确说的具体地名（如"上海海军博物馆"），优先于目录示例名显示；为空则不覆盖。
+        state["character_place_name"] = (name or "").strip()[:40]
         state["character_place_updated_at"] = time.time()
         state["character_place_confidence"] = confidence
         # 新一轮位置确认：把"距上次确认位置的轮数"清零（见 chat_context.handle_chat 的自增）。
@@ -653,9 +813,11 @@ class WorldRuntimeMixin:
             "- 只认角色作为【第一人称自述此刻所在】的明确交代（如“我现在在公司”“刚到家”“坐在星巴克”）。"
             "回忆、计划、提及他人位置、否定句（“不在家”）、反问（“你猜我在哪”）一律算 unknown。\n"
             "- 必须是具体场所，映射到枚举之一: home, company, school, park, mall, street, cafe, restaurant, "
-            "transit, convenience, cinema, hotel, hospital, gym, factory, farm, construction。"
+            "transit, convenience, cinema, hotel, hospital, gym, factory, farm, construction, "
+            "museum, landmark, temple, library, zoo, amusement, bar, ktv, stadium, supermarket, bookstore, beach, salon。"
             "无法判断或未交代填 unknown。\n"
-            f"只输出: {{\"place\":\"home|company|school|park|mall|street|cafe|restaurant|transit|convenience|cinema|hotel|hospital|gym|factory|farm|construction|unknown\"}}"
+            "- place_name 填角色自述的【具体地点名】（如\"上海海军博物馆\"、\"星巴克国金中心店\"、\"陆家嘴\"），没有具体名就填空字符串。\n"
+            f"只输出: {{\"place\":\"home|company|school|park|mall|street|cafe|restaurant|transit|convenience|cinema|hotel|hospital|gym|factory|farm|construction|museum|landmark|temple|library|zoo|amusement|bar|ktv|stadium|supermarket|bookstore|beach|salon|unknown\",\"place_name\":\"具体地名或空\"}}"
         )
         try:
             raw = await self._call_llm(
@@ -667,6 +829,7 @@ class WorldRuntimeMixin:
             )
             parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", (raw or "")).strip())
             key = str(parsed.get("place") or "").strip().lower()
+            place_name = str(parsed.get("place_name") or "").strip()
         except Exception as exc:
             logger.warning("location LLM extract failed: %s", exc)
             return False
@@ -677,7 +840,7 @@ class WorldRuntimeMixin:
         if key in ANCHOR_ONLY_PLACES and key not in self._profile_allowed_anchor_places(self._life_profile(session_id)):
             logger.debug("skip llm-extracted anchor place %s: 与角色职业身份不符", key)
             return False
-        return self._set_character_place(session_id, key, text, 0.8, source="llm")
+        return self._set_character_place(session_id, key, text, 0.8, source="llm", name=place_name)
 
     async def tool_update_location(self, session_id: str, place: str = "") -> str:
         """聊天模型显式声明角色换到新地点时调用，持续生效，优先于时钟动线。"""
@@ -687,7 +850,8 @@ class WorldRuntimeMixin:
         key, matched = self._infer_user_place(place)
         if not key:
             return f"无法识别地点「{place[:30]}」，位置未更新。可用：家/公司/学校/商场/咖啡店/餐厅/公园/街道/车站/便利店等。"
-        self._set_character_place(session_id, key, matched or place, 0.95, source="tool")
+        # place 是模型给的完整地名（如"上海海军博物馆"），整段存为具体地名；key 仅作类别用于动线规则。
+        self._set_character_place(session_id, key, matched or place, 0.95, source="tool", name=place)
         self._ulog(session_id, "MOVE", f"角色移动到 {PLACE_TYPES[key]['label']}（{place[:30]}）")
         return f"已记录角色当前在 {PLACE_TYPES[key]['label']}。"
 
@@ -818,6 +982,10 @@ class WorldRuntimeMixin:
             pinned = self._top_place_candidates(city, {persisted["key"]: 1}, count=1)
             if pinned:
                 character_place = pinned[0]
+                # 明确说过的具体地名优先于目录示例（"约角色去上海海军博物馆"→显示这一家，而非该类里随便一家）。
+                specific = (persisted.get("name") or "").strip()
+                if specific and specific != character_place.get("label"):
+                    character_place = {**character_place, "name": specific}
         next_now, next_period = self._next_period_datetime(now)
         next_place = self._place_for_time(city, next_now, weather, mode=mode, profile=profile)
         user_place = self._active_user_place(state)
@@ -954,6 +1122,156 @@ class WorldRuntimeMixin:
             ttl = 30 * 86400
         return time.time() - float(catalog.get("updated_at", 0) or 0) < ttl
 
+    def _amap_enabled(self) -> bool:
+        return bool(str(self.config.get("amap_api_key", "") or "").strip()) and self._bool_config("amap_poi_enabled", True)
+
+    async def _fetch_amap_places(self, city: str) -> dict[str, list[str]]:
+        """用高德 POI 关键字搜索为城市拉取各类目的真实地点名。
+
+        每个类目一次请求（限定城市），失败/无结果的类目直接留空，由 PLACE_TYPES 内置示例兜底。
+        只用城市级关键字搜索，不上传用户经纬度，避免泄露用户精确位置。
+        """
+        api_key = str(self.config.get("amap_api_key", "") or "").strip()
+        if not api_key or not city:
+            return {}
+        try:
+            per_type = max(2, min(10, int(self.config.get("amap_poi_per_type", 5) or 5)))
+        except Exception:
+            per_type = 5
+        base = "https://restapi.amap.com/v3/place/text"
+        sem = asyncio.Semaphore(3)  # 控制并发，照顾高德个人配额 QPS
+        results: dict[str, list[str]] = {}
+
+        async def fetch_one(session: aiohttp.ClientSession, place_key: str, keyword: str):
+            params = {
+                "key": api_key, "keywords": keyword, "city": city, "citylimit": "true",
+                "offset": str(per_type), "page": "1", "extensions": "base", "output": "json",
+            }
+            try:
+                async with sem:
+                    async with session.get(base, params=params) as resp:
+                        if resp.status != 200:
+                            return
+                        data = await resp.json(content_type=None)
+            except Exception as exc:
+                logger.debug("amap poi fetch failed %s/%s: %s", city, place_key, exc)
+                return
+            if str(data.get("status")) != "1":
+                logger.debug("amap poi non-ok %s/%s: %s", city, place_key, data.get("info"))
+                return
+            names: list[str] = []
+            for poi in data.get("pois", []) or []:
+                name = str(poi.get("name") or "").strip()
+                if name and name not in names:
+                    names.append(name[:40])
+                if len(names) >= per_type:
+                    break
+            if names:
+                results[place_key] = names
+
+        timeout = aiohttp.ClientTimeout(total=25)
+        async with aiohttp.ClientSession(trust_env=True, timeout=timeout) as session:
+            await asyncio.gather(*(fetch_one(session, k, kw) for k, kw in AMAP_KEYWORDS.items()))
+        return results
+
+    async def _classify_city_region(self, city: str) -> str:
+        """让 LLM 判定城市属于中国大陆还是海外，决定 POI 来源（高德管中国、谷歌管海外）。结果按城市缓存。
+
+        返回 "china" / "overseas" / ""（无 image-LLM 或判定失败时返回空，交上层默认策略）。
+        比依赖高德地理编码更稳——高德会把"神户/东京"这类海外名模糊匹配到同名的中国村庄/兴趣点。
+        """
+        city = (city or "").strip()
+        if not city:
+            return ""
+        cache = getattr(self, "_city_region_cache", None)
+        if cache is None:
+            cache = self._city_region_cache = {}
+        ck = self._city_catalog_key(city)
+        if ck in cache:
+            return cache[ck]
+        if not self.has_llm_config("image"):
+            return ""
+        system = (
+            "判断给定地名主要位于【中国大陆】还是【海外】。香港、澳门、台湾及其它国家都算 overseas。"
+            "只输出严格 JSON，不要解释: {\"region\":\"china|overseas\"}"
+        )
+        try:
+            raw = await self._call_llm(system, city, temp=0.0, tag="city-region", purpose="image")
+            parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", (raw or "")).strip())
+            region = str(parsed.get("region") or "").strip().lower()
+        except Exception as exc:
+            logger.warning("city region classify failed %s: %s", city, exc)
+            return ""
+        if region not in ("china", "overseas"):
+            return ""
+        cache[ck] = region
+        return region
+
+    def _google_places_enabled(self) -> bool:
+        return bool(str(self.config.get("google_places_api_key", "") or "").strip()) and self._bool_config("google_places_enabled", True)
+
+    async def _fetch_google_places(self, city: str) -> dict[str, list[str]]:
+        """用谷歌 Places(New) 文本搜索为城市拉取各类目真实地点名（全球覆盖，给高德管不到的海外城市兜底）。
+
+        每类一次 searchText 请求（textQuery="<英文关键词> in <城市>"）。失败/无结果的类目留空，由内置示例兜底。
+        """
+        api_key = str(self.config.get("google_places_api_key", "") or "").strip()
+        if not api_key or not city:
+            return {}
+        try:
+            per_type = max(2, min(20, int(self.config.get("amap_poi_per_type", 5) or 5)))
+        except Exception:
+            per_type = 5
+        lang = str(self.config.get("google_places_language", "") or "").strip()
+        url = "https://places.googleapis.com/v1/places:searchText"
+        headers = {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": api_key,
+            "X-Goog-FieldMask": "places.displayName",  # 只取名字，控制计费档位
+        }
+        sem = asyncio.Semaphore(3)
+        results: dict[str, list[str]] = {}
+
+        async def fetch_one(session: aiohttp.ClientSession, place_key: str, keyword: str):
+            body: dict[str, Any] = {"textQuery": f"{keyword} in {city}", "pageSize": per_type}
+            if lang:
+                body["languageCode"] = lang
+            try:
+                async with sem:
+                    async with session.post(url, json=body, headers=headers) as resp:
+                        if resp.status != 200:
+                            logger.debug("google places http %s %s/%s", resp.status, city, place_key)
+                            return
+                        data = await resp.json(content_type=None)
+            except Exception as exc:
+                logger.debug("google places fetch failed %s/%s: %s", city, place_key, exc)
+                return
+            names: list[str] = []
+            for poi in data.get("places", []) or []:
+                name = str(((poi.get("displayName") or {}).get("text")) or "").strip()
+                if name and name not in names:
+                    names.append(name[:40])
+                if len(names) >= per_type:
+                    break
+            if names:
+                results[place_key] = names
+
+        timeout = aiohttp.ClientTimeout(total=25)
+        async with aiohttp.ClientSession(trust_env=True, timeout=timeout) as session:
+            await asyncio.gather(*(fetch_one(session, k, kw) for k, kw in GOOGLE_KEYWORDS.items()))
+        return results
+
+    def _store_city_catalog(self, key: str, city: str, places: dict[str, list[str]], source: str):
+        if not hasattr(self, "city_place_catalogs"):
+            self.city_place_catalogs = {}
+        self.city_place_catalogs[key] = {
+            "city": city,
+            "updated_at": time.time(),
+            "places": places,
+            "source": source,
+        }
+        self._write_state()
+
     async def _ensure_city_place_catalog(self, city: str, force: bool = False) -> dict[str, Any]:
         city = (city or "").strip()
         key = self._city_catalog_key(city)
@@ -961,13 +1279,37 @@ class WorldRuntimeMixin:
             return {"status": "disabled", "city": city, "places": {}}
         if not force and self._city_catalog_is_fresh(city):
             return {"status": "cached", "city": city, "places": self._catalog_for_city(city)}
+        # 由大模型判定中国/海外，决定 POI 来源优先级（高德管中国、谷歌管全球）。
+        # china: 高德优先、谷歌兜底；overseas/未知: 只用谷歌——绝不让高德对海外城市出手，
+        # 否则会把同名中国地点（神户→河北、东京→广西）当成结果污染目录。
+        region = await self._classify_city_region(city)
+        providers: list[str] = []
+        if region == "china":
+            if self._amap_enabled():
+                providers.append("amap")
+            if self._google_places_enabled():
+                providers.append("google")
+        else:  # overseas 或未知
+            if self._google_places_enabled():
+                providers.append("google")
+        for prov in providers:
+            if prov == "amap":
+                places = self._normalize_city_place_payload(await self._fetch_amap_places(city))
+            else:
+                places = self._normalize_city_place_payload(await self._fetch_google_places(city))
+            if places:
+                self._store_city_catalog(key, city, places, source=prov)
+                return {"status": prov, "city": city, "places": places}
+            logger.info("%s 无结果，继续回落（region=%s）: %s", prov, region or "unknown", city)
         if not self.has_llm_config("image"):
             return {"status": "basic", "city": city, "places": {}}
         system = (
             "你是城市生活场景资料整理器。请为指定城市生成适合角色扮演日常动线的代表性地点。"
             "只输出严格 JSON，不要解释。键名固定为 places，内部键只能使用: "
-            "home, company, school, park, mall, street, cafe, restaurant, transit, convenience, cinema, hotel, hospital, gym, factory, farm, construction。"
+            "home, company, school, park, mall, street, cafe, restaurant, transit, convenience, cinema, hotel, hospital, gym, factory, farm, construction, "
+            "museum, landmark, temple, library, zoo, amusement, bar, ktv, stadium, supermarket, bookstore, beach, salon。"
             "每类给 2 到 5 个真实或城市中常见的代表地点、商圈、区域或设施名。不要编造过于具体的门牌。"
+            "没有对应地点的类别（如该城市没有海边 beach）可以省略不输出。"
         )
         user = f"城市: {city}\n输出示例: {{\"places\":{{\"park\":[\"某公园\"],\"mall\":[\"某商圈\"]}}}}"
         try:
@@ -985,12 +1327,5 @@ class WorldRuntimeMixin:
             return {"status": "failed", "city": city, "places": {}}
         if not places:
             return {"status": "failed", "city": city, "places": {}}
-        if not hasattr(self, "city_place_catalogs"):
-            self.city_place_catalogs = {}
-        self.city_place_catalogs[key] = {
-            "city": city,
-            "updated_at": time.time(),
-            "places": places,
-        }
-        self._write_state()
+        self._store_city_catalog(key, city, places, source="llm")
         return {"status": "generated", "city": city, "places": places}
