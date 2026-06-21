@@ -35,6 +35,7 @@ def create_web_app(service) -> web.Application:
     app.router.add_post("/api/bot/start", api_bot_start)
     app.router.add_post("/api/bot/stop", api_bot_stop)
     app.router.add_post("/api/service/restart", api_service_restart)
+    app.router.add_post("/api/service/stop", api_service_stop)
     app.router.add_post("/api/admin/migrate-visual-tags", api_migrate_visual_tags)
     app.router.add_post("/api/admin/cleanup-prompt-prefix", api_cleanup_prompt_prefix)
     app.router.add_get("/api/logs", api_logs)
@@ -483,6 +484,12 @@ async def api_service_restart(request: web.Request):
         return json_error(f"无法准备重启: {exc}", status=500)
     asyncio.create_task(service.shutdown_for_process_restart())
     return json_ok({"restart": restart})
+
+
+async def api_service_stop(request: web.Request):
+    service = service_from(request)
+    asyncio.create_task(service.shutdown_service())
+    return json_ok({"stopping": True})
 
 
 async def api_migrate_visual_tags(request: web.Request):

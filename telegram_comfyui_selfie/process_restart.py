@@ -131,3 +131,13 @@ except Exception as exc:
         await self.stop_bot()
         await self.stop_web_console()
         await self.close()
+
+    async def shutdown_service(self, delay: float = 0.35):
+        """完全关闭服务（停机器人 + Web 控制台 + 退出进程），不重启。"""
+        try:
+            self._flush_sessions(force=True)
+            self.save_config()
+        except Exception:
+            logger.debug("flush/save on service shutdown failed", exc_info=True)
+        logger.info("service shutdown requested via web console")
+        await self.shutdown_for_process_restart(delay)

@@ -253,11 +253,6 @@ function renderStatus() {
   $("#metric-generate").textContent = s.generating ? "生成中" : "空闲";
   const llmReady = Number(Boolean(s.chat_llm_configured)) + Number(Boolean(s.image_llm_configured));
   $("#metric-llm").textContent = `${llmReady}/2 已配置`;
-  $("#bot-toggle-btn").textContent = s.bot_running ? "停止机器人" : "启动机器人";
-  $("#bot-toggle-btn").classList.toggle("danger", s.bot_running);
-  $("#bot-toggle-btn").classList.toggle("primary", !s.bot_running);
-  $("#service-start-btn").textContent = s.bot_running ? "服务已启动" : "一键启动";
-  $("#service-start-btn").disabled = Boolean(s.bot_running);
   $("#bot-name").textContent = s.bot_username ? `@${s.bot_username}` : (s.token_configured ? "Token 已填写" : "Token 未填写");
   $("#status-web-url").textContent = s.web_url;
   $("#status-config-path").textContent = s.config_path;
@@ -835,31 +830,11 @@ async function initEvents() {
     }
   };
 
-  $("#service-start-btn").onclick = async (event) => {
-    const btn = event.currentTarget;
-    setBusy(btn, true);
-    setBusy($("#bot-toggle-btn"), true);
-    try {
-      if (!state.status?.bot_running) {
-        await api("/api/bot/start", { method: "POST" });
-      }
-      await loadAll();
-      toast("服务已启动");
-    } catch (err) {
-      toast(err.message, "error");
-    } finally {
-      setBusy(btn, false);
-      setBusy($("#bot-toggle-btn"), false);
-      if (state.status?.bot_running) btn.disabled = true;
-    }
-  };
-
   $("#service-restart-btn").onclick = async (event) => {
     if (!window.confirm("这会重启整个 Python 服务进程，当前 Web 控制台会短暂断开。继续吗？")) return;
     const btn = event.currentTarget;
     const oldPid = state.status?.process_id;
     setBusy(btn, true);
-    setBusy($("#bot-toggle-btn"), true);
     try {
       const data = await api("/api/service/restart", { method: "POST" });
       const restart = data.restart || {};
@@ -869,25 +844,18 @@ async function initEvents() {
       toast(err.message, "error");
     } finally {
       setBusy(btn, false);
-      setBusy($("#bot-toggle-btn"), false);
     }
   };
 
-  $("#bot-toggle-btn").onclick = async (event) => {
+  $("#service-stop-btn").onclick = async (event) => {
+    if (!window.confirm("这会完全关闭服务进程（机器人和 Web 控制台都会停止，需要在服务器上重新启动）。继续吗？")) return;
     const btn = event.currentTarget;
     setBusy(btn, true);
     try {
-      if (state.status?.bot_running) {
-        await api("/api/bot/stop", { method: "POST" });
-        toast("机器人已停止");
-      } else {
-        await api("/api/bot/start", { method: "POST" });
-        toast("机器人已启动");
-      }
-      await loadAll();
+      await api("/api/service/stop", { method: "POST" });
+      toast("服务正在关闭，Web 控制台即将断开。");
     } catch (err) {
       toast(err.message, "error");
-    } finally {
       setBusy(btn, false);
     }
   };
