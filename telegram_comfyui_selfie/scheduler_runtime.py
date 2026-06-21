@@ -237,16 +237,16 @@ class SchedulerRuntimeMixin:
                     now = self._session_now(session_id)
                     today = now.strftime("%Y-%m-%d")
                     time_str = now.strftime("%H:%M")
+                    try:
+                        daily_limit = int(str(self._get_session_cfg(session_id, "daily_selfie_limit", "3")).strip())
+                    except ValueError:
+                        daily_limit = 3
                     if state.get("daily_trigger_date") != today:
-                        try:
-                            limit = int(str(self._get_session_cfg(session_id, "daily_selfie_limit", "3")).strip())
-                        except ValueError:
-                            limit = 3
                         times = []
-                        if limit > 0:
+                        if daily_limit > 0:
                             start, end = 8 * 60 + 30, 23 * 60 + 50
-                            slot = (end - start) / limit
-                            for i in range(limit):
+                            slot = (end - start) / daily_limit
+                            for i in range(daily_limit):
                                 minute = random.randint(int(start + i * slot), int(start + (i + 1) * slot))
                                 times.append(f"{minute // 60:02d}:{minute % 60:02d}")
                         state["daily_trigger_times"] = sorted(times)
@@ -254,7 +254,8 @@ class SchedulerRuntimeMixin:
                         state["daily_triggered_times"] = []
                         self._mark_dirty(session_id)
 
-                    if now.hour == 8 and now.minute < 5 and state.get("last_morning_greet_date") != today:
+                    # 推送关闭(每日次数=0)时，早安推送也不发——否则“关闭推送”每天早上又冒出来（用户报的“只持续一天”）。
+                    if daily_limit > 0 and now.hour == 8 and now.minute < 5 and state.get("last_morning_greet_date") != today:
                         state["last_morning_greet_date"] = today
                         self._mark_dirty(session_id)
                         if not self._check_goodnight_inhibition(state) and session_id not in self._active_pushes:
