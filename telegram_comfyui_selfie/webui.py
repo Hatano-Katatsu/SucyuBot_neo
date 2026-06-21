@@ -15,8 +15,20 @@ SECRET_KEYS = {"telegram_bot_token", "llm_api_key", "chat_llm_api_key", "image_l
 WORLD_TIMELINE_HOURS = (6, 8, 11, 13, 16, 18, 20, 23)
 
 
+@web.middleware
+async def _no_cache_assets(request: web.Request, handler):
+    """控制台 HTML/JS/CSS 不走浏览器缓存，避免改完 UI 还显示旧界面。"""
+    resp = await handler(request)
+    if request.path == "/" or request.path.startswith("/static/"):
+        try:
+            resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        except Exception:
+            pass
+    return resp
+
+
 def create_web_app(service) -> web.Application:
-    app = web.Application(client_max_size=2 * 1024 * 1024)
+    app = web.Application(client_max_size=2 * 1024 * 1024, middlewares=[_no_cache_assets])
     app["service"] = service
     static_dir = Path(__file__).with_name("static")
 
