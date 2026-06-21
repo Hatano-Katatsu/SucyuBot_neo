@@ -285,6 +285,10 @@ def serialize_prompt_slots(service, session_id: str, scene: str = "{场景描述
             "custom_scene_preference": state.get("custom_scene_preference", ""),
             "custom_selfie_preference": state.get("custom_selfie_preference", ""),
         },
+        # 只读：当前衣柜按槽位拆分（编辑仍走上面的 dynamic_appearance 扁平框，保存后会自动重新分槽）。
+        "wardrobe": service._get_wardrobe(state),
+        # 只读：衣橱收藏（角色穿过、可点名复穿的衣服）。
+        "closet": state.get("wardrobe_closet") or {},
         "effective": {
             "positive_prefix": service._get_session_cfg(session_id, "positive_prefix", ""),
             "default_hair": service._get_session_cfg(session_id, "default_hair", ""),

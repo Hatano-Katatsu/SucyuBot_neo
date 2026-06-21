@@ -6,6 +6,7 @@ import re
 import time
 from typing import Any
 
+from . import appearance as appearance_rules
 from . import prompt_intake
 from .defaults import INIT_GUIDE, MENU_BODY, MENU_TOPICS, MENU_TOPIC_ALIASES, OC_CREATE_HELP, SCENES, WEEKDAY_NAMES
 from .memory import format_memory_lines
@@ -118,6 +119,7 @@ class CommandHandlersMixin:
             "角色": self.cmd_character,
             "个性设置": self.cmd_personalize,
             "外型": self.cmd_appearance,
+            "衣橱": self.cmd_closet,
             "外貌自动": self.cmd_auto_appearance,
             "记忆": self.cmd_memory,
             "记住": self.cmd_remember,
@@ -759,6 +761,8 @@ class CommandHandlersMixin:
         state.pop("custom_daily_selfie_limit", None)
         state["custom_allow_llm_change_appearance"] = None
         state["dynamic_appearance"] = ""
+        state["wardrobe"] = {}
+        state["wardrobe_closet"] = {}
         state["persona_user_set"] = False
         state["purity"] = None
         state["purity_user_set"] = False
@@ -1059,15 +1063,17 @@ class CommandHandlersMixin:
         tags = arg.strip()
         state = self._get_session_state(session_id)
         if not tags:
+            wardrobe_view = appearance_rules.wardrobe_summary(self._get_wardrobe(state)) or "（默认）"
             await self.send_message(
                 chat_id,
                 "当前外型设置\n"
-                f"穿搭/配饰/临时发型瞳色: {state.get('dynamic_appearance') or '（默认）'}\n"
+                f"衣柜（按槽位）:\n{wardrobe_view}\n"
                 f"物种特征: {(state.get('custom_positive_prefix') or '（默认）')[:200]}\n"
                 f"默认发色: {state.get('custom_default_hair') or self.config.get('default_hair')}\n"
                 f"默认瞳色: {state.get('custom_default_eyes') or self.config.get('default_eyes')}\n"
                 f"模型自主改外型: {'允许' if self._allow_llm_change_appearance(session_id) else '禁止'}\n\n"
-                "用法: /外型 <自然描述或标签> | /外型 归档 <描述> | /外型 特征 <标签> | /外型 发色 <标签> | /外型 瞳色 <标签> | /外型 自动变装 on/off | /外型 reset",
+                "换装直接说穿/换/脱即可（上衣/下装/连衣裙/外套/内衣/袜/鞋分槽，同槽自动替换，连衣裙覆盖上下装）。\n"
+                "用法: /外型 <换装描述，如 换上红色旗袍 / 脱掉外套 / 只换黑色胸罩> | /外型 归档 <描述> | /外型 特征 <标签> | /外型 发色 <标签> | /外型 瞳色 <标签> | /外型 自动变装 on/off | /外型 reset",
             )
             return
         parts = tags.split(None, 1)
@@ -1116,9 +1122,8 @@ class CommandHandlersMixin:
             await self._set_auto_appearance(chat_id, session_id, sub_arg)
             return
         if tags.lower() in ("无", "clear", "重置", "reset", "none"):
-            state["dynamic_appearance"] = ""
-            self._save_session_state(session_id, state)
-            await self.send_message(chat_id, "已重置为默认外型。")
+            await self._apply_wardrobe(session_id, "reset")
+            await self.send_message(chat_id, "已重置为默认外型（衣柜已清空）。")
             return
         should_intake = auto_intake_requested or bool(re.search(r"[\u4e00-\u9fff]", tags))
         if should_intake:
@@ -1139,9 +1144,9 @@ class CommandHandlersMixin:
                     state["custom_count"] = gender
                 applied.append(f"基础外观: {base_tags[:180]}")
             if dynamic_src:
-                dynamic_tags = await self._oc_translate_tags(dynamic_src)
-                state["dynamic_appearance"] = self._merge_appearance(state.get("dynamic_appearance", ""), dynamic_tags)
-                applied.append(f"穿搭/配饰: {dynamic_tags[:180]}")
+                # 服装/配饰走衣柜分槽（同槽替换、连衣裙互斥），不再扁平合并。
+                await self._wardrobe_apply_to_state(state, dynamic_src)
+                applied.append(f"穿搭/配饰: {(state.get('dynamic_appearance') or '')[:180]}")
             style = self._apply_intake_style(state, intake)
             if style:
                 applied.append(f"画风: {style[:120]}")
@@ -1158,12 +1163,38 @@ class CommandHandlersMixin:
                 self._save_session_state(session_id, state)
                 await self.send_message(chat_id, "已按槽位自动归档：\n" + "\n".join(applied))
                 return
-        new_tags = tags
-        if re.search(r"[\u4e00-\u9fff]", tags):
-            new_tags = await self._translate_appearance_tags(tags)
-        state["dynamic_appearance"] = self._merge_appearance(state.get("dynamic_appearance", ""), new_tags)
-        self._save_session_state(session_id, state)
-        await self.send_message(chat_id, f"外型已临时更改为: {state['dynamic_appearance']}")
+        result = await self._apply_wardrobe(session_id, tags)
+        await self.send_message(chat_id, f"外型已临时更改为: {result}")
+
+    async def cmd_closet(self, chat_id, session_id, arg):
+        state = self._get_session_state(session_id)
+        closet = state.get("wardrobe_closet") if isinstance(state.get("wardrobe_closet"), dict) else {}
+        arg = (arg or "").strip()
+        parts = arg.split(None, 1)
+        sub = parts[0].lower() if parts else ""
+        sub_arg = parts[1].strip() if len(parts) > 1 else ""
+        if sub in ("删除", "删", "remove", "rm", "del"):
+            if sub_arg in closet:
+                closet.pop(sub_arg, None)
+                state["wardrobe_closet"] = closet
+                self._save_session_state(session_id, state)
+                await self.send_message(chat_id, f"已从衣橱移除「{sub_arg}」。")
+            else:
+                await self.send_message(chat_id, f"衣橱里没有「{sub_arg}」。用法: /衣橱 删除 <名称>")
+            return
+        if sub in ("清空", "clear", "reset"):
+            state["wardrobe_closet"] = {}
+            self._save_session_state(session_id, state)
+            await self.send_message(chat_id, "已清空衣橱收藏。")
+            return
+        summary = appearance_rules.closet_summary(closet)
+        wearing = appearance_rules.wardrobe_summary(self._get_wardrobe(state)) or "（默认/无）"
+        await self.send_message(
+            chat_id,
+            f"当前穿着:\n{wearing}\n\n"
+            f"衣橱收藏（{len(closet)} 件，可点名复穿，如对我说“换上那件碎花连衣裙”）:\n{summary or '（空，角色穿过的衣服会自动收藏）'}\n\n"
+            "用法: /衣橱 | /衣橱 删除 <名称> | /衣橱 清空",
+        )
 
     async def cmd_auto_appearance(self, chat_id, session_id, arg):
         await self._set_auto_appearance(chat_id, session_id, arg.strip())

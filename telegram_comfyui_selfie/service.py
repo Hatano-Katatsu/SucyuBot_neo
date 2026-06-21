@@ -29,6 +29,13 @@ from .world_runtime import WorldRuntimeMixin
 
 logger = logging.getLogger(__name__)
 
+_CJK_RE = re.compile(r"[一-鿿]")
+
+
+def _HAS_CJK(text: str) -> bool:
+    return bool(_CJK_RE.search(text or ""))
+
+
 IMG_CALL_LEAK_RE = re.compile(
     r"\*{0,2}\s*[（(]\s*(?:调用|使用|call)?\s*`?generate_roleplay_image`?\s*[:：，,]?\s*(.*?)\s*[)）]\s*\*{0,2}",
     re.DOTALL | re.IGNORECASE,
@@ -344,6 +351,8 @@ class TelegramComfyUIService(
             "chat_history": [],
             "sent_photos_history": [],
             "dynamic_appearance": "",
+            "wardrobe": {},
+            "wardrobe_closet": {},
             "replying_to_selfie": False,
             "last_sent_selfie_time": 0,
             "last_sent_selfie_caption": "",
@@ -1491,22 +1500,101 @@ class TelegramComfyUIService(
         )
         return f"图片已生成并发送。画面: {scene}"
 
-    async def tool_change_appearance(self, session_id: str, description: str = "", mode: str = "merge") -> str:
+    def _get_wardrobe(self, state: dict) -> dict:
+        """取当前衣柜。衣柜与扁平 dynamic_appearance 不一致时（老数据无衣柜、或 webui 直接改了扁平串）
+        以扁平串为准重新分槽——保证两者始终同步。"""
+        wardrobe = state.get("wardrobe")
+        if not isinstance(wardrobe, dict):
+            wardrobe = {}
+        dyn = (state.get("dynamic_appearance") or "").strip()
+        if not dyn:
+            return {}
+        if appearance_rules.render_wardrobe(wardrobe) != appearance_rules.normalize_appearance_text(dyn):
+            wardrobe = appearance_rules.seed_wardrobe_from_text(dyn, self._outfit_kw, self._accessory_kw)
+        return wardrobe
+
+    def _wardrobe_closet_context(self, session_id: str) -> str:
+        """给聊天模型看的衣橱清单（按槽位的中文名），让角色知道自己有哪些衣服。"""
         state = self._get_session_state(session_id)
-        if not self._allow_llm_change_appearance(session_id):
-            return "当前会话已关闭模型自主修改外型，dynamic_appearance 未改变。"
+        return appearance_rules.closet_summary(state.get("wardrobe_closet") or {})
+
+    async def _classify_wardrobe_change(self, description: str, current_summary: str = "", closet_brief: str = "") -> dict:
+        """大模型把一次换装描述拆解到固定衣柜槽位（含穿/脱/换意图），返回结构化 JSON。
+        若用户点名衣橱里已有的衣服，用其英文标签填对应槽位；并给新穿上的衣物起个简短中文名（names）。"""
+        system = (
+            "你是角色换装分类器。把用户或角色描述的外观变化拆解到固定衣柜槽位，"
+            "每个涉及的槽位填英文 danbooru 标签（可多件用逗号），不涉及的槽位留空。只输出 JSON，不要解释。\n"
+            "服装槽位: dress, top, bottom, outerwear, bra, panties, legwear, footwear；外观槽位: hair(临时发型/发色), eyes(瞳色), other(其它视觉补充)。规则:\n"
+            "- 连衣裙类（连衣裙/旗袍/和服/泳衣连体/jumpsuit/bodysuit）填 dress，系统会自动覆盖 top+bottom，不要再填 top/bottom。\n"
+            "- 上半身衣物→top；下半身（裤/裙/短裤）→bottom；外套/夹克/大衣/开衫→outerwear；胸罩→bra；内裤→panties；袜/丝袜/连裤袜→legwear；鞋→footwear。\n"
+            "- 眼镜/项链/耳环/手套/帽子/choker 等配饰：要戴上的填 accessory_add，要摘掉的填 accessory_remove。\n"
+            "- 脱掉/不穿某一层（如脱外套、光脚、摘掉发饰）：把该槽位名放进 remove 列表。\n"
+            "- 想整套换掉/全裸从头来：reset_all=true。\n"
+            "- 若用户/剧情点名【衣橱里已有的衣服】（见下方清单），直接用清单里的英文标签填进对应槽位。\n"
+            "- names：给本次新穿上的每个服装槽位起个简短中文名（如 dress→\"碎花连衣裙\"），用于衣橱收藏；没新衣物则留空。\n"
+            "严格 JSON: {\"dress\":\"\",\"top\":\"\",\"bottom\":\"\",\"outerwear\":\"\",\"bra\":\"\",\"panties\":\"\",\"legwear\":\"\",\"footwear\":\"\",\"hair\":\"\",\"eyes\":\"\",\"other\":\"\",\"accessory_add\":\"\",\"accessory_remove\":\"\",\"remove\":[],\"reset_all\":false,\"names\":{}}"
+        )
+        user = (
+            f"当前衣柜（穿在身上）:\n{current_summary or '（空）'}\n\n"
+            f"衣橱收藏（已有的衣服，可点名复穿）:\n{closet_brief or '（空）'}\n\n"
+            f"要应用的外观变化: {description}"
+        )
+        text = await self._call_llm(system, user, temp=0.2, tag="wardrobe-classify", purpose="image", disable_thinking=True)
+        parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
+        if not isinstance(parsed, dict):
+            raise ValueError("wardrobe classify did not return an object")
+        return parsed
+
+    async def _wardrobe_apply_to_state(self, state: dict, description: str, *, replace: bool = False) -> str:
+        """把一次换装应用到 state（改 wardrobe + dynamic_appearance），不落盘——由调用方保存。"""
         desc = (description or "").strip()
         if desc.lower() in ("reset", "none", "clear", "无", "", "重置", "恢复", "默认"):
+            state["wardrobe"] = {}
             state["dynamic_appearance"] = ""
-            self._save_session_state(session_id, state)
-            return "外貌已重置为默认"
-        if re.search(r"[a-zA-Z]{3,}", desc) and not re.search(r"[\u4e00-\u9fff]", desc):
-            tags = desc
-        else:
-            tags = await self._translate_appearance_tags(desc)
-        state["dynamic_appearance"] = self._merge_appearance(state.get("dynamic_appearance", ""), tags, mode=mode)
+            return ""
+        wardrobe = {} if replace else self._get_wardrobe(state)
+        closet = state.get("wardrobe_closet") if isinstance(state.get("wardrobe_closet"), dict) else {}
+        change: dict = {}
+        try:
+            change = await self._classify_wardrobe_change(
+                desc, appearance_rules.wardrobe_summary(wardrobe), appearance_rules.closet_brief_for_llm(closet)
+            )
+            wardrobe = appearance_rules.apply_wardrobe_change(wardrobe, change)
+        except Exception as exc:
+            logger.warning("wardrobe classify failed, fallback to keyword slotting: %s", exc)
+            if re.search(r"[a-zA-Z]{3,}", desc) and not _HAS_CJK(desc):
+                tags = desc
+            else:
+                tags = await self._translate_appearance_tags(desc)
+            seed = appearance_rules.seed_wardrobe_from_text(tags, self._outfit_kw, self._accessory_kw)
+            change = {slot: val for slot, val in seed.items()}
+            wardrobe = appearance_rules.apply_wardrobe_seed(wardrobe, seed)
+        # 自动收藏：仅把【本次新穿上】的服装存进衣橱（用应用后的标签，含点名复穿时解析出的标签）。
+        names = change.get("names") if isinstance(change.get("names"), dict) else {}
+        now = time.time()
+        for slot in appearance_rules.WARDROBE_CLOTHING_SLOTS:
+            if not str(change.get(slot) or "").strip():
+                continue  # 本次没设这个槽位 → 不动衣橱
+            tags = (wardrobe.get(slot) or "").strip()
+            if tags:
+                closet = appearance_rules.closet_add(closet, names.get(slot, ""), slot, tags, now=now)
+        state["wardrobe_closet"] = closet
+        state["wardrobe"] = wardrobe
+        state["dynamic_appearance"] = appearance_rules.render_wardrobe(wardrobe)
+        return state["dynamic_appearance"]
+
+    async def _apply_wardrobe(self, session_id: str, description: str, *, replace: bool = False) -> str:
+        """换装统一入口：分槽（LLM 主判，关键词兜底）→ 应用规则 → 渲染回 dynamic_appearance 并持久化。"""
+        state = self._get_session_state(session_id)
+        rendered = await self._wardrobe_apply_to_state(state, description, replace=replace)
         self._save_session_state(session_id, state)
-        return f"外貌已改变: {state['dynamic_appearance']}"
+        return rendered or "（已清空）"
+
+    async def tool_change_appearance(self, session_id: str, description: str = "", mode: str = "merge") -> str:
+        if not self._allow_llm_change_appearance(session_id):
+            return "当前会话已关闭模型自主修改外型，dynamic_appearance 未改变。"
+        result = await self._apply_wardrobe(session_id, description, replace=(mode == "replace"))
+        return f"外貌已改变: {result}"
 
     async def _push_image_from_text(self, session_id: str, scene: str):
         chat_id = self.chat_id_from_session(session_id)

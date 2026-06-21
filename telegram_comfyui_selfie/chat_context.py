@@ -217,6 +217,17 @@ class ChatContextMixin:
                 "不要编造不存在的配饰）：\n"
                 f"{visual_context}"
             )
+        closet_context = self._wardrobe_closet_context(session_id) if hasattr(self, "_wardrobe_closet_context") else ""
+        if closet_context:
+            system += (
+                "\n你的衣橱里收藏着这些穿过的衣服（你清楚自己有哪些）：\n"
+                f"{closet_context}\n"
+                "用户点名某件、或剧情/场合自然需要时（出门、睡前、洗澡后、约会等），可以让角色换上其中一件；不要无缘无故频繁换装。"
+            )
+        system += (
+            "\n换装持久化（重要）：当剧情里角色换上、脱下或更换了服装/配饰/发型时，必须调用 change_appearance 工具记录这次变化，"
+            "这样你会一直记得自己穿着什么、之后的配图也保持一致。不要只在文字里描述换装却不调用工具。"
+        )
         world_context = self._format_world_context(session_id, user_text, mode="chat")
         if world_context:
             # 对话进行中：对话已建立的场景优先，动线只作背景；只有冷启动/刚换场景才以动线引导，
@@ -298,11 +309,16 @@ class ChatContextMixin:
             "type": "function",
                 "function": {
                     "name": "change_appearance",
-                    "description": "持续修改角色外貌、穿搭或配饰。",
+                    "description": (
+                        "当剧情里角色换衣服/穿脱/改外观时调用，持续生效。支持分层换装："
+                        "上衣、下装、连衣裙、外套、内衣(胸罩/内裤)、袜、鞋可分别更换；同类自动替换，连衣裙会覆盖上下装；"
+                        "也可脱掉某层或摘掉配饰。description 用自然语言描述这次变化即可（如“换上红色旗袍”“脱掉外套光脚”“只换黑色蕾丝内衣”）。"
+                        "mode 一般用 merge；只有要整套从头换/全部清空时才用 replace。"
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "description": {"type": "string"},
+                            "description": {"type": "string", "description": "这次外观/换装变化的自然语言描述。"},
                             "mode": {"type": "string", "enum": ["merge", "replace"]},
                         },
                         "required": ["description"],

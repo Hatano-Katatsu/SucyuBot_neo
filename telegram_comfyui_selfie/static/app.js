@@ -392,6 +392,27 @@ function renderPromptSlotEditor(prompt) {
       <span>${escapeHtml(item.value || "（空）")}</span>
     </div>
   `).join("");
+  const WARDROBE_SLOT_LABELS = {
+    hair: "发型/发色", eyes: "瞳色", dress: "连衣裙", top: "上衣", bottom: "下装",
+    outerwear: "外套", bra: "胸衣", panties: "内裤", legwear: "袜", footwear: "鞋",
+    accessory: "配饰", other: "其它",
+  };
+  const wardrobe = prompt?.wardrobe || {};
+  const wardrobeRows = Object.keys(WARDROBE_SLOT_LABELS)
+    .filter(slot => (wardrobe[slot] || "").trim())
+    .map(slot => `
+    <div class="slot-row">
+      <strong>${escapeHtml(WARDROBE_SLOT_LABELS[slot])}</strong>
+      <span>${escapeHtml(wardrobe[slot])}</span>
+    </div>
+  `).join("");
+  const closet = prompt?.closet || {};
+  const closetRows = Object.keys(closet).map(name => `
+    <div class="slot-row">
+      <strong>${escapeHtml(name)}</strong>
+      <span>${escapeHtml(closet[name]?.slot || "")} · ${escapeHtml(closet[name]?.tags || "")}</span>
+    </div>
+  `).join("");
 
   box.innerHTML = `
     <form id="prompt-slot-form" class="prompt-slot-form">
@@ -411,6 +432,14 @@ function renderPromptSlotEditor(prompt) {
       </div>
     </form>
     <div class="prompt-slot-preview">
+      <section>
+        <h4>当前衣柜（按槽位 · 只读）</h4>
+        <div class="slot-list">${wardrobeRows || `<div class="empty-state">衣柜为空（无附加外型）。</div>`}</div>
+      </section>
+      <section>
+        <h4>衣橱收藏（穿过的衣服 · 只读）</h4>
+        <div class="slot-list">${closetRows || `<div class="empty-state">衣橱为空。</div>`}</div>
+      </section>
       <section>
         <h4>槽位预览</h4>
         <div class="slot-list">${slotRows || `<div class="empty-state">暂无槽位。</div>`}</div>

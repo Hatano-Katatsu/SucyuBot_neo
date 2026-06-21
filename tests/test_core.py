@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from telegram_comfyui_selfie import TelegramComfyUIService
+from telegram_comfyui_selfie import appearance as appearance_rules
 from telegram_comfyui_selfie.image_planning import _detect_intimate_context, format_dialog_context, format_sent_photo_context, normalize_scene_visual_subject, plan_roleplay_image
 from telegram_comfyui_selfie.prompt_intake import heuristic_intake
 from telegram_comfyui_selfie.webui import build_world_route_preview, cast_config_value, masked_config, serialize_prompt_slots, session_summary
@@ -2309,6 +2310,144 @@ class ServiceTestCase(unittest.TestCase):
         for term in ["holding phone", "visible phone", "mirror selfie"]:
             self.assertNotIn(term, neg_lower)
         self.assertNotIn("male", neg_lower)
+
+    def test_wardrobe_same_slot_replaces_and_dress_excludes(self):
+        # 同槽替换、内衣/鞋独立、连衣裙互斥覆盖上下装。
+        wd = {}
+        wd = appearance_rules.apply_wardrobe_change(wd, {"top": "white blouse", "bottom": "blue jeans"})
+        wd = appearance_rules.apply_wardrobe_change(wd, {"bra": "red lace bra"})  # 内衣独立
+        self.assertEqual(wd.get("top"), "white blouse")
+        self.assertEqual(wd.get("bottom"), "blue jeans")
+        self.assertEqual(wd.get("bra"), "red lace bra")
+        # 换上衣 → 替换 top，不动 bottom/bra
+        wd = appearance_rules.apply_wardrobe_change(wd, {"top": "black tank top"})
+        self.assertEqual(wd.get("top"), "black tank top")
+        self.assertEqual(wd.get("bottom"), "blue jeans")
+        # 连衣裙 → 清掉 top+bottom，保留 bra
+        wd = appearance_rules.apply_wardrobe_change(wd, {"dress": "black evening gown"})
+        self.assertNotIn("top", wd)
+        self.assertNotIn("bottom", wd)
+        self.assertEqual(wd.get("dress"), "black evening gown")
+        self.assertEqual(wd.get("bra"), "red lace bra")
+        # 再设下装 → 清掉连衣裙
+        wd = appearance_rules.apply_wardrobe_change(wd, {"bottom": "denim shorts"})
+        self.assertNotIn("dress", wd)
+        self.assertEqual(wd.get("bottom"), "denim shorts")
+
+    def test_wardrobe_accessory_accumulate_remove_and_reset(self):
+        wd = appearance_rules.apply_wardrobe_change({}, {"accessory_add": "glasses, silver necklace"})
+        wd = appearance_rules.apply_wardrobe_change(wd, {"accessory_add": "choker"})
+        self.assertEqual(wd.get("accessory"), "glasses, silver necklace, choker")
+        wd = appearance_rules.apply_wardrobe_change(wd, {"accessory_remove": "silver necklace"})
+        self.assertEqual(wd.get("accessory"), "glasses, choker")
+        # remove 槽位（脱外套）
+        wd = appearance_rules.apply_wardrobe_change(wd, {"outerwear": "denim jacket"})
+        wd = appearance_rules.apply_wardrobe_change(wd, {"remove": ["outerwear"]})
+        self.assertNotIn("outerwear", wd)
+        self.assertEqual(appearance_rules.apply_wardrobe_change(wd, {"reset_all": True}), {})
+
+    def test_wardrobe_seed_from_legacy_flat_text(self):
+        acc_kw = ["glasses", "necklace", "choker"]
+        seed = appearance_rules.seed_wardrobe_from_text(
+            "black long flowing hair, purple eyes, red dress, black heels, glasses", None, acc_kw
+        )
+        self.assertEqual(seed.get("hair"), "black long flowing hair")
+        self.assertEqual(seed.get("eyes"), "purple eyes")
+        self.assertEqual(seed.get("dress"), "red dress")
+        self.assertEqual(seed.get("footwear"), "black heels")
+        self.assertEqual(seed.get("accessory"), "glasses")
+
+    def test_apply_wardrobe_uses_llm_classifier_and_persists(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc._classify_wardrobe_change = AsyncMock(return_value={"dress": "red qipao"})
+            result = await svc._apply_wardrobe(sid, "换上红色旗袍")
+            self.assertIn("red qipao", result)
+            state = svc._get_session_state(sid)
+            self.assertEqual(state["wardrobe"].get("dress"), "red qipao")
+            self.assertIn("red qipao", state["dynamic_appearance"])
+            # 再换胸罩：旗袍保留、bra 新增（衣柜持久）
+            svc._classify_wardrobe_change = AsyncMock(return_value={"bra": "black bra"})
+            await svc._apply_wardrobe(sid, "换个黑色胸罩")
+            state = svc._get_session_state(sid)
+            self.assertEqual(state["wardrobe"].get("dress"), "red qipao")
+            self.assertEqual(state["wardrobe"].get("bra"), "black bra")
+
+        asyncio.run(run())
+
+    def test_apply_wardrobe_migrates_legacy_dynamic_appearance(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            state = svc._get_session_state(sid)
+            state["dynamic_appearance"] = "red dress, black heels"  # 老数据，无 wardrobe
+            state["wardrobe"] = {}
+            # 只换鞋：旧 dress 应被迁移保留，footwear 被替换
+            svc._classify_wardrobe_change = AsyncMock(return_value={"footwear": "white sneakers"})
+            await svc._apply_wardrobe(sid, "换白色运动鞋")
+            state = svc._get_session_state(sid)
+            self.assertEqual(state["wardrobe"].get("dress"), "red dress")
+            self.assertEqual(state["wardrobe"].get("footwear"), "white sneakers")
+
+        asyncio.run(run())
+
+    def test_closet_add_dedupes_by_tags_and_caps(self):
+        closet = {}
+        closet = appearance_rules.closet_add(closet, "碎花裙", "dress", "floral dress", now=1.0)
+        closet = appearance_rules.closet_add(closet, "蓝衬衫", "top", "blue shirt", now=2.0)
+        self.assertEqual(set(closet), {"碎花裙", "蓝衬衫"})
+        # 同 tags 改名 → 视为同一件，旧名清掉
+        closet = appearance_rules.closet_add(closet, "碎花连衣裙", "dress", "floral dress", now=3.0)
+        self.assertNotIn("碎花裙", closet)
+        self.assertIn("碎花连衣裙", closet)
+        # cap 淘汰最久没穿的
+        for i in range(40):
+            closet = appearance_rules.closet_add(closet, f"item{i}", "top", f"tagset{i}", now=10.0 + i, cap=5)
+        self.assertLessEqual(len(closet), 5)
+
+    def test_apply_wardrobe_autocaptures_to_closet(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc._classify_wardrobe_change = AsyncMock(return_value={"dress": "floral dress", "names": {"dress": "碎花连衣裙"}})
+            await svc._apply_wardrobe(sid, "换上碎花连衣裙")
+            closet = svc._get_session_state(sid)["wardrobe_closet"]
+            self.assertIn("碎花连衣裙", closet)
+            self.assertEqual(closet["碎花连衣裙"]["slot"], "dress")
+            # 换上衣 → 衣橱新增上衣，碎花裙仍在收藏
+            svc._classify_wardrobe_change = AsyncMock(return_value={"top": "blue blouse", "names": {"top": "蓝衬衫"}})
+            await svc._apply_wardrobe(sid, "换蓝衬衫")
+            closet = svc._get_session_state(sid)["wardrobe_closet"]
+            self.assertEqual(set(closet), {"碎花连衣裙", "蓝衬衫"})
+
+        asyncio.run(run())
+
+    def test_wardrobe_reset_keeps_closet(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc._classify_wardrobe_change = AsyncMock(return_value={"dress": "red dress", "names": {"dress": "红裙"}})
+            await svc._apply_wardrobe(sid, "穿红裙")
+            await svc._apply_wardrobe(sid, "reset")  # 脱掉当前外型
+            state = svc._get_session_state(sid)
+            self.assertEqual(state["wardrobe"], {})
+            self.assertEqual(state["dynamic_appearance"], "")
+            self.assertIn("红裙", state["wardrobe_closet"])  # 衣橱收藏保留
+
+        asyncio.run(run())
+
+    def test_tool_change_appearance_respects_permission(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc._get_session_state(sid)["custom_allow_llm_change_appearance"] = False
+            svc._classify_wardrobe_change = AsyncMock(return_value={"dress": "x"})
+            out = await svc.tool_change_appearance(sid, "换裙子")
+            self.assertIn("已关闭", out)
+            svc._classify_wardrobe_change.assert_not_awaited()
+
+        asyncio.run(run())
 
     def test_build_prompt_intimate_without_device_strips_phone(self):
         # 对照组：同样亲密但没有 device_in_frame，手机/自拍取景应被清掉、补 POV。
