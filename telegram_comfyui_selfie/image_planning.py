@@ -164,6 +164,7 @@ async def plan_roleplay_image(
     prompt_prefs = service._prompt_scene_preferences(session_id) if hasattr(service, "_prompt_scene_preferences") else {}
     quirk = service._get_session_cfg(session_id, "character_quirk_rule", "")
     spatial = service._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])
+    spatial_line = f"默认物理空间关系: {spatial}\n" if str(spatial).strip() else ""
     if hasattr(service, "_session_role_identity"):
         role_name, bot_name, bot_self_name = service._session_role_identity(session_id)
     else:
@@ -189,6 +190,10 @@ async def plan_roleplay_image(
         except Exception:
             logger.debug("world context build failed for image planning", exc_info=True)
 
+    # 角色地点权威来源：新鲜期内（对话/工具确立的 character_place）钉死本次画面地点；
+    # 过期/为空时让规划器自行判断并把结果回写，闭合“位置持久化 → 生图”这条回路。
+    pinned_place = service._active_character_place(state) if hasattr(service, "_active_character_place") else None
+
     intimate_hint = _detect_intimate_context(intent, mood, prompt, dialog_context or "")
     device_hint = _detect_device_context(intent, mood, prompt, dialog_context or "")
     user_gender = service._get_user_gender(session_id) if hasattr(service, "_get_user_gender") else "male"
@@ -207,7 +212,7 @@ async def plan_roleplay_image(
         f"当前场合: {time_period}, {weekday}, {safety.get('context', '')}。\n"
         f"季节与自然光: {time_light}。\n"
         f"{light_guard}\n"
-        f"默认物理空间关系: {spatial}\n"
+        f"{spatial_line}"
         "你要综合用户最近的话、聊天模型的意图、最近发过的照片、时间天气、外貌和安全约束，"
         "输出适合发给用户的一张图。不要输出英文画图标签。\n"
         "公开场合必须穿着得体；私密场合可以更放松。避免和最近照片重复。"
@@ -235,6 +240,12 @@ async def plan_roleplay_image(
                 "其中“角色当前所在/接下来动线”按现实时间天气推断，应当遵守，角色不要无理由瞬移。"
                 + space_judgement
             )
+    if pinned_place:
+        system += (
+            f"\n地点锁定（最高优先，覆盖上面动线背景）: 角色此刻所在地点已确定为「{pinned_place['label']}」"
+            f"（枚举值 {pinned_place['key']}）。本次画面必须就发生在这个地点，只描写该地点内的动作、姿态、光线、道具和氛围，"
+            "不要把角色画到别的场所（严禁瞬移）；character_location 字段必须等于这个枚举值。"
+        )
     if quirk:
         system += f"\n角色专属画面修补规则: {quirk}"
     system += (
@@ -280,7 +291,8 @@ async def plan_roleplay_image(
         "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。"
         "selfie/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。"
         "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。"
-        "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third\",\"new_appearance_tags\":\"...\",\"user_location\":\"...\",\"co_located\":true,\"is_intimate\":false,\"partner_in_frame\":false,\"device_in_frame\":false}。"
+        "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third\",\"new_appearance_tags\":\"...\",\"character_location\":\"...\",\"user_location\":\"...\",\"co_located\":true,\"is_intimate\":false,\"partner_in_frame\":false,\"device_in_frame\":false}。"
+        "character_location 填角色此刻所在场所的英文枚举（取值同 user_location，但不含 with_user/unknown）：若上面给出了角色地点约束，必须填那个枚举值；没有约束时按动线与对话自行判断。"
         "is_intimate 是布尔值，按上面的场景类型自判规则给出。"
         "partner_in_frame、device_in_frame 都是布尔值，按上面单人构图硬规则里的定义给出。"
         "co_located 是布尔值，表示你判断此刻用户是否和角色在同一空间。"
@@ -342,6 +354,12 @@ async def plan_roleplay_image(
             )
         except Exception:
             logger.debug("persist llm user location failed", exc_info=True)
+    # 冷启动（无新鲜 character_place）时把规划器判断的角色地点回写，下次生图/聊天即有权威来源；
+    # 已钉死时不回写，避免规划器二次发挥覆盖对话确立的位置。
+    if not pinned_place and hasattr(service, "_set_character_place"):
+        char_loc = (parsed.get("character_location") or "").strip().lower()
+        if char_loc and char_loc not in ("with_user", "unknown"):
+            service._set_character_place(session_id, char_loc, char_loc, 0.6)
     # LLM 自判优先，关键词检测作 OR 兜底（尤其 LLM 漏判时）。
     is_intimate = bool(parsed.get("is_intimate")) or intimate_hint
     partner_in_frame = bool(parsed.get("partner_in_frame"))

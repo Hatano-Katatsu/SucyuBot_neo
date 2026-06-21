@@ -21,9 +21,11 @@ SESSION_CUSTOM_RESET_KEYS = (
     "custom_raw_profile_text", "custom_prompt_intake",
     "custom_character", "custom_series",
     "custom_visual_character", "custom_visual_series",
-    "custom_character_age_stage", "custom_character_day_anchor",
+    "custom_character_age_stage", "custom_character_occupation", "custom_character_day_anchor",
 )
-RESET_DONE_MSG = (
+RESET_DONE_MSG = "对话上下文与照片历史已清空。角色设定与角色池保持不变。"
+
+CLEARUP_DONE_MSG = (
     "已恢复全局默认：本会话的人设、角色、身体特征、外型、称呼、地区时区、推送频率、纯良度覆盖，"
     "以及全部角色档案均已清空，并已重置对话上下文。\n"
     "下一句起将以默认人设回应。"
@@ -41,10 +43,11 @@ OC_FIELD_ALIASES = {
     "年龄段": "age",
     "年龄": "age",
     "age": "age",
-    "白天去向": "anchor",
-    "职场": "anchor",
-    "职业": "anchor",
-    "day_anchor": "anchor",
+    "职业": "occupation",
+    "职场": "occupation",
+    "白天去向": "occupation",
+    "occupation": "occupation",
+    "day_anchor": "occupation",
     "性格": "persona",
     "人格": "persona",
     "人设": "persona",
@@ -66,6 +69,25 @@ OC_FIELD_ALIASES = {
     "城市": "city",
     "地点": "city",
     "city": "city",
+}
+
+# /个性设置 可调项的单一事实来源：(展示名, state key, 输入别名)。
+# 展示列表与别名映射都由这里派生，避免两份清单手动对齐时漂移。
+# 人格走专用命令 /人格；关系走专用命令 /关系，均不在此处重复。
+PERSONALIZE_FIELDS = [
+    ("角色类型", "custom_role_name", ("称呼", "角色类型")),
+    ("角色名", "custom_bot_name", ("角色名", "名字")),
+    ("自称", "custom_bot_self_name", ("自称",)),
+    ("生图角色Tag", "custom_visual_character", ("生图角色", "生图角色tag")),
+    ("生图作品Tag", "custom_visual_series", ("生图作品", "生图作品tag")),
+    ("年龄段", "custom_character_age_stage", ("年龄段", "年龄")),
+    ("职业", "custom_character_occupation", ("职业", "职场", "白天去向")),
+    ("用户性别", "custom_user_gender", ("用户性别", "我的性别")),
+]
+# 改这些字段后需要让 life_profile 缓存失效，下次重新生成生活档案。
+PERSONALIZE_LIFE_PROFILE_KEYS = {
+    "custom_role_name", "custom_bot_name", "custom_character_age_stage",
+    "custom_character_occupation", "custom_character_day_anchor",
 }
 
 
@@ -94,6 +116,16 @@ class CommandHandlersMixin:
             "resetcontext": "新场景",
             "上下文重置": "新场景",
             "清空上下文": "新场景",
+            "relationship": "关系",
+            "空间关系": "关系",
+            "rollback": "回滚",
+            "undo": "回滚",
+            "回退": "回滚",
+            "撤回": "回滚",
+            "regenerate": "重答",
+            "redo": "重答",
+            "重新生成": "重答",
+            "重新回答": "重答",
         }
         command = aliases.get(command, command)
         handlers = {
@@ -118,6 +150,7 @@ class CommandHandlersMixin:
             "推送频率": self.cmd_push_frequency,
             "角色": self.cmd_character,
             "个性设置": self.cmd_personalize,
+            "关系": self.cmd_relationship,
             "外型": self.cmd_appearance,
             "衣橱": self.cmd_closet,
             "外貌自动": self.cmd_auto_appearance,
@@ -125,6 +158,8 @@ class CommandHandlersMixin:
             "记住": self.cmd_remember,
             "忘记": self.cmd_forget,
             "新场景": self.cmd_new_scene,
+            "回滚": self.cmd_rollback,
+            "重答": self.cmd_regenerate,
             "调度": self.cmd_sched,
             "管理": self.cmd_management,
         }
@@ -241,6 +276,31 @@ class CommandHandlersMixin:
                 self._ulog(session_id, "WARN", f"OC 城市地点目录生成失败: {exc}")
         return note
 
+    @staticmethod
+    def _missing_character_slots(state: dict[str, Any]) -> list[str]:
+        """返回角色建档后仍为空、值得提醒用户补的槽位中文名。"""
+        checks = [
+            ("年龄段", state.get("custom_character_age_stage")),
+            ("职业", state.get("custom_character_occupation")),
+            ("关系", state.get("custom_spatial_relationship")),
+            ("城市", state.get("custom_location")),
+        ]
+        return [label for label, val in checks if not str(val or "").strip()]
+
+    @staticmethod
+    def _slot_fill_hint(missing: list[str]) -> str:
+        if not missing:
+            return ""
+        examples = {
+            "年龄段": "/个性设置 年龄段 adult",
+            "职业": "/个性设置 职业 上班族",
+            "关系": "/关系 同城恋人",
+            "城市": "/天气设置 上海",
+        }
+        lines = [f"还差这些没填：{'、'.join(missing)}，可按需补上："]
+        lines += [f"  {examples[m]}" for m in missing if m in examples]
+        return "\n".join(lines)
+
     async def cmd_create_oc(self, chat_id, session_id, arg):
         text = (arg or "").strip()
         if not text:
@@ -267,6 +327,7 @@ class CommandHandlersMixin:
         appearance = (fields.get("appearance") or "").strip()
         outfit = (fields.get("outfit") or "").strip()
         relationship = (fields.get("relationship") or "").strip()
+        occupation = (fields.get("occupation") or "").strip()
         city = (fields.get("city") or "").strip()
         gender = self._oc_gender_tag(name, role, persona, appearance)
 
@@ -275,27 +336,34 @@ class CommandHandlersMixin:
         if hasattr(self, "_normalize_age_stage"):
             age = self._normalize_age_stage(fields.get("age")) or self._normalize_age_stage(role)
         if hasattr(self, "_normalize_day_anchor"):
-            anchor = self._normalize_day_anchor(fields.get("anchor")) or self._normalize_day_anchor(role)
+            # 职业是用户填的自由文本，白天去向枚举由职业（其次角色类型）后台派生。
+            anchor = (
+                self._normalize_day_anchor(fields.get("anchor"))
+                or self._normalize_day_anchor(occupation)
+                or self._normalize_day_anchor(role)
+            )
 
         appearance_tags = await self._oc_translate_tags(appearance)
         outfit_tags = await self._oc_translate_tags(outfit)
         if not appearance_tags:
             appearance_tags = f"{self.config.get('default_hair', 'black long flowing hair')}, {self.config.get('default_eyes', 'purple eyes')}"
 
-        persona_lines = [f"你是{name}，一名{role}。"]
-        if persona:
-            persona_lines.append(persona)
-        if relationship:
-            persona_lines.append(f"你和用户的关系: {relationship}")
+        # 人设串只存纯人格描述（性格/语气/习惯）；身份、角色类型、关系、职业都不写时焊接，
+        # 由读取侧实时组装：_get_effective_persona 补身份，聊天/生图/推送各自的身份行补角色类型，
+        # rel_line 补关系。这样改任一字段即时生效、永不与人设串漂移。
+        persona_text = persona.strip()
+
+        if switching:
+            self._snapshot_character(state)
 
         state["custom_count"] = gender
         state["custom_character"] = name
-        state["custom_series"] = ""  # OC 不写作品名，避免生图 prompt 把姓名当视觉标签。
+        state["custom_series"] = ""
         state["custom_visual_character"] = ""
         state["custom_visual_series"] = ""
         state["custom_role_name"] = role
         state["custom_bot_name"] = name
-        state["custom_scheduled_persona"] = "\n".join(persona_lines)
+        state["custom_scheduled_persona"] = persona_text
         state["custom_positive_prefix"] = appearance_tags
         state["dynamic_appearance"] = outfit_tags
         state["custom_spatial_relationship"] = relationship
@@ -304,6 +372,7 @@ class CommandHandlersMixin:
         state["custom_raw_profile_text"] = text
         state["custom_prompt_intake"] = intake
         state["custom_character_age_stage"] = age
+        state["custom_character_occupation"] = occupation
         state["custom_character_day_anchor"] = anchor
         state["persona_user_set"] = True
         applied_style = self._apply_intake_style(state, intake)
@@ -311,21 +380,9 @@ class CommandHandlersMixin:
         if switching:
             self._clear_conversation_context(state)
 
+        self._snapshot_character(state)
         saved = state.setdefault("saved_characters", {})
-        saved[name] = {
-            "character": name,
-            "series": "",
-            "visual_character": "",
-            "visual_series": "",
-            "persona": state["custom_scheduled_persona"],
-            "appearance": appearance_tags,
-            "raw_profile": text,
-            "prompt_intake": intake,
-            "scene_preference": state["custom_scene_preference"],
-            "selfie_preference": state["custom_selfie_preference"],
-            "style": applied_style,
-            "purity": state.get("purity"),
-        }
+        saved[name]["raw_profile"] = text
         self._save_session_state(session_id, state)
         city_note = await self._apply_oc_city(session_id, city) if city else ""
         self._ulog(session_id, "SWITCH", f"创建 OC {name}" + ("（已清空对话上下文）" if switching else ""))
@@ -334,7 +391,7 @@ class CommandHandlersMixin:
             f"OC 已创建: {name}",
             f"角色类型: {role}",
             f"年龄段: {age or '自动推断'}",
-            f"白天去向: {anchor or '自动推断'}",
+            f"职业: {occupation or '自动推断'}",
             f"身体特征: {appearance_tags[:300]}",
         ]
         if outfit_tags:
@@ -348,6 +405,9 @@ class CommandHandlersMixin:
             lines.append(f"自动归档: {summary[:300]}")
         if city_note:
             lines.append(city_note)
+        hint = self._slot_fill_hint(self._missing_character_slots(state))
+        if hint:
+            lines.append("\n" + hint)
         lines.append("\n现在可以直接开始聊天，或发送 /自拍 看第一张图。")
         await self.send_message(chat_id, "\n".join(lines))
 
@@ -452,6 +512,68 @@ class CommandHandlersMixin:
         self._reset_short_context(state, "用户手动开启新短期场景")
         self._save_session_state(session_id, state)
         await self.send_message(chat_id, "已开启新的短期场景。之后默认不会主动延续切换前的话题、画面和动作。")
+
+    async def cmd_rollback(self, chat_id, session_id, arg):
+        """回退 N 轮对话：从聊天历史尾部删掉最近 N 条角色回复及其对应的用户消息。方便测试时撤回。"""
+        state = self._get_session_state(session_id)
+        history = state.get("chat_history", [])
+        if not history:
+            await self.send_message(chat_id, "当前没有可回滚的对话。")
+            return
+        arg = (arg or "").strip()
+        try:
+            n = max(1, int(arg)) if arg else 1
+        except ValueError:
+            await self.send_message(chat_id, "用法: /回滚 [轮数]，例如 /回滚 2（默认 1 轮）。")
+            return
+        turns = 0
+        while turns < n and history:
+            popped_assistant = False
+            while history:
+                if history.pop().get("role") == "assistant":
+                    popped_assistant = True
+                    break
+            if not popped_assistant:
+                break
+            if history and history[-1].get("role") == "user":
+                history.pop()
+            turns += 1
+        state["chat_history"] = history
+        if int(state.get("short_context_start", 0) or 0) > len(history):
+            state["short_context_start"] = 0
+        state["replying_to_selfie"] = False
+        self._save_session_state(session_id, state)
+        self._ulog(session_id, "ROLLBACK", f"回退 {turns} 轮，剩余 {len(history)} 条上下文")
+        tail = next((m.get("content", "") for m in reversed(history) if m.get("role") == "user"), "")
+        note = f"已回退 {turns} 轮对话，剩余 {len(history)} 条上下文。"
+        if tail:
+            note += f"\n当前末尾用户消息: {tail[:80]}"
+        await self.send_message(chat_id, note)
+
+    async def cmd_regenerate(self, chat_id, session_id, arg):
+        """重答：删掉上一条角色回复，用同一条用户消息重新生成。方便测试对比。"""
+        state = self._get_session_state(session_id)
+        history = state.get("chat_history", [])
+        if history and history[-1].get("role") == "assistant":
+            history.pop()
+        if not history or history[-1].get("role") != "user":
+            await self.send_message(chat_id, "没有可重答的上一条用户消息。")
+            return
+        last_user = (history.pop().get("content") or "").strip()
+        state["chat_history"] = history
+        state["replying_to_selfie"] = False
+        self._save_session_state(session_id, state)
+        if not last_user:
+            await self.send_message(chat_id, "上一条用户消息为空，无法重答。")
+            return
+        if not self.has_llm_config("chat"):
+            await self.send_message(chat_id, "聊天模型未配置，无法重答。")
+            return
+        await self.send_action(chat_id, "typing")
+        reply = await self.run_roleplay_chat(chat_id, session_id, last_user)
+        if reply:
+            self._ulog(session_id, "REGEN", reply)
+            await self.send_message(chat_id, reply)
 
     async def cmd_weather(self, chat_id, session_id, arg):
         city = arg.strip()
@@ -786,6 +908,37 @@ class CommandHandlersMixin:
         state["last_sent_selfie_source_description"] = ""
         state["last_sent_selfie_replied"] = False
         state["rounds_since_image"] = 0
+        # 角色位置不跨角色继承：换角色后由新角色的对话/动线重新确立。
+        state["character_place"] = ""
+        state["character_place_updated_at"] = 0
+
+    @staticmethod
+    def _snapshot_character(state: dict[str, Any]):
+        """保存当前角色最新状态到 saved_characters 快照。"""
+        name = (state.get("custom_character") or "").strip()
+        if not name:
+            return
+        saved = state.setdefault("saved_characters", {})
+        saved[name] = {
+            "character": name,
+            "series": state.get("custom_series", ""),
+            "role_name": state.get("custom_role_name", ""),
+            "bot_name": state.get("custom_bot_name", ""),
+            "bot_self_name": state.get("custom_bot_self_name", ""),
+            "visual_character": state.get("custom_visual_character", ""),
+            "visual_series": state.get("custom_visual_series", ""),
+            "persona": state.get("custom_scheduled_persona", ""),
+            "appearance": state.get("custom_positive_prefix", ""),
+            "count": state.get("custom_count", ""),
+            "age_stage": state.get("custom_character_age_stage", ""),
+            "occupation": state.get("custom_character_occupation", ""),
+            "day_anchor": state.get("custom_character_day_anchor", ""),
+            "relationship": state.get("custom_spatial_relationship", ""),
+            "scene_preference": state.get("custom_scene_preference", ""),
+            "selfie_preference": state.get("custom_selfie_preference", ""),
+            "style": state.get("custom_current_style", ""),
+            "purity": state.get("purity"),
+        }
 
     async def cmd_purity(self, chat_id, session_id, arg):
         text = arg.strip().lower()
@@ -858,26 +1011,27 @@ class CommandHandlersMixin:
             lines.append(f"身体特征: {(state.get('custom_positive_prefix') or '（未设定）')[:300]}")
             lines.append(f"已保存角色: {', '.join(saved.keys()) or '无'}")
             lines.append("\n用法: /角色 <角色名> | /角色 load <名称> | /角色 list | /角色 delete <名称>")
-            lines.append("/角色 reset 一键恢复全局默认（含角色池与对话） | /角色 clearup 仅清空角色池")
+            lines.append("/角色 reset 仅清空对话上下文 | /角色 clearup 恢复全局默认（清角色/人设/角色池）")
             await self.send_message(chat_id, "\n".join(lines))
             return
         if lower == "reset":
-            self._reset_session_customization(state)
+            self._clear_conversation_context(state)
             self._save_session_state(session_id, state)
-            self._ulog(session_id, "RESET", "/角色 reset 恢复全局默认（清空角色/人设/对话/角色池）")
+            self._ulog(session_id, "RESET", "/角色 reset 清空对话上下文")
             await self.send_message(chat_id, RESET_DONE_MSG)
             return
         if lower in ("clear", "重置", "恢复默认", "清除"):
-            await self.send_message(chat_id, "硬重置入口已统一为 /角色 reset；这个别名不再执行重置。")
+            await self.send_message(chat_id, "轻量重置: /角色 reset（仅清对话上下文）\n硬重置: /角色 clearup（恢复全局默认，清角色/人设/角色池）")
             return
         parts = text.split(None, 1)
         sub = parts[0].lower()
         sub_arg = parts[1].strip() if len(parts) > 1 else ""
         if sub == "clearup":
             count = len(saved)
-            saved.clear()
+            self._reset_session_customization(state)
             self._save_session_state(session_id, state)
-            await self.send_message(chat_id, f"已清空全部 {count} 个角色档案。")
+            self._ulog(session_id, "RESET", f"/角色 clearup 恢复全局默认（清角色/人设/对话/角色池，共 {count} 个角色档案）")
+            await self.send_message(chat_id, CLEARUP_DONE_MSG)
             return
         if sub in ("list", "ls"):
             if not saved:
@@ -891,6 +1045,8 @@ class CommandHandlersMixin:
                 await self.send_message(chat_id, f"未找到角色 {sub_arg}。")
                 return
             switching = (data.get("character", "") or "") != (state.get("custom_character") or "")
+            if switching:
+                self._snapshot_character(state)
             state["custom_character"] = data.get("character", "")
             state["custom_series"] = data.get("series", "")
             state["custom_role_name"] = data.get("role_name", "") if switching else (state.get("custom_role_name") or data.get("role_name", ""))
@@ -901,6 +1057,10 @@ class CommandHandlersMixin:
             state["custom_scheduled_persona"] = data.get("persona", "")
             state["custom_positive_prefix"] = data.get("appearance", "")
             state["custom_count"] = data.get("count", "")
+            state["custom_character_age_stage"] = data.get("age_stage", "")
+            state["custom_character_occupation"] = data.get("occupation", "")
+            state["custom_character_day_anchor"] = data.get("day_anchor", "")
+            state["custom_spatial_relationship"] = data.get("relationship", "") if switching else (state.get("custom_spatial_relationship") or data.get("relationship", ""))
             state["custom_scene_preference"] = data.get("scene_preference", "")
             state["custom_selfie_preference"] = data.get("selfie_preference", "")
             if data.get("style"):
@@ -943,6 +1103,8 @@ class CommandHandlersMixin:
         if result.get("type") == "character":
             name = result.get("name", text)
             switching = name != (state.get("custom_character") or "")
+            if switching:
+                self._snapshot_character(state)
             raw_appearance = (result.get("appearance") or "").strip()
             count_tag = ""
             m = re.match(r"\b(1girl|1boy)\b", raw_appearance)
@@ -957,32 +1119,25 @@ class CommandHandlersMixin:
                 state["custom_bot_self_name"] = ""
             state["custom_visual_character"] = result.get("prompt_name") or result.get("visual_name") or result.get("image_name") or ""
             state["custom_visual_series"] = result.get("prompt_series") or result.get("visual_series") or result.get("image_series") or ""
-            state["custom_scheduled_persona"] = self._persona_with_character_identity(
-                name,
-                state["custom_series"],
-                result.get("persona", ""),
-            )
+            state["custom_scheduled_persona"] = result.get("persona", "")
             state["custom_positive_prefix"] = raw_appearance
             if count_tag:
                 state["custom_count"] = count_tag
+            # 补齐 age/职业/白天去向/关系：大模型认识该角色，可直接判断；anchor 缺失时由职业派生。
+            occupation = (result.get("occupation") or "").strip()
+            anchor = self._normalize_day_anchor(result.get("anchor")) or self._normalize_day_anchor(occupation)
+            state["custom_character_age_stage"] = self._normalize_age_stage(result.get("age"))
+            state["custom_character_occupation"] = occupation
+            state["custom_character_day_anchor"] = anchor
+            relationship = (result.get("relationship") or "").strip()
+            if relationship and (switching or not state.get("custom_spatial_relationship")):
+                state["custom_spatial_relationship"] = relationship
             if result.get("purity") is not None and not state.get("purity_user_set"):
                 try:
                     state["purity"] = max(0, min(10, int(result["purity"])))
                 except (TypeError, ValueError):
                     pass
-            saved[name] = {
-                "character": state["custom_character"],
-                "series": state["custom_series"],
-                "role_name": state.get("custom_role_name", ""),
-                "bot_name": state.get("custom_bot_name", ""),
-                "bot_self_name": state.get("custom_bot_self_name", ""),
-                "visual_character": state["custom_visual_character"],
-                "visual_series": state["custom_visual_series"],
-                "persona": state["custom_scheduled_persona"],
-                "appearance": state["custom_positive_prefix"],
-                "count": state.get("custom_count", ""),
-                "purity": state.get("purity"),
-            }
+            self._snapshot_character(state)
             if switching:
                 self._clear_conversation_context(state)  # 换角色：避免上一个角色的对话/画面串味
             self._save_session_state(session_id, state)
@@ -990,7 +1145,11 @@ class CommandHandlersMixin:
             visual_note = ""
             if state.get("custom_visual_character") or state.get("custom_visual_series"):
                 visual_note = f"\n生图识别: {state.get('custom_visual_character') or '（空）'}{(' / ' + state.get('custom_visual_series', '')) if state.get('custom_visual_series') else ''}"
-            await self.send_message(chat_id, f"已设定角色: {name}\n作品: {state['custom_series'] or '（未指定）'}{visual_note}\n人设: {state['custom_scheduled_persona'][:200]}\n身体特征: {state['custom_positive_prefix'][:250]}")
+            reply = f"已设定角色: {name}\n作品: {state['custom_series'] or '（未指定）'}{visual_note}\n人设: {state['custom_scheduled_persona'][:200]}\n身体特征: {state['custom_positive_prefix'][:250]}"
+            hint = self._slot_fill_hint(self._missing_character_slots(state))
+            if hint:
+                reply += "\n\n" + hint
+            await self.send_message(chat_id, reply)
         elif result.get("type") == "appearance":
             raw_tags = (result.get("tags") or "").strip()
             count_tag = ""
@@ -1011,37 +1170,18 @@ class CommandHandlersMixin:
         parts = arg.split(None, 1) if arg else []
         action = parts[0] if parts else ""
         value = parts[1] if len(parts) > 1 else ""
-        mapping = {
-            "人格": "custom_scheduled_persona", "人设": "custom_scheduled_persona",
-            "称呼": "custom_role_name", "角色类型": "custom_role_name",
-            "角色名": "custom_bot_name", "名字": "custom_bot_name",
-            "自称": "custom_bot_self_name", "关系": "custom_spatial_relationship",
-            "生图角色": "custom_visual_character", "生图角色tag": "custom_visual_character",
-            "生图作品": "custom_visual_series", "生图作品tag": "custom_visual_series",
-            "年龄段": "custom_character_age_stage", "年龄": "custom_character_age_stage",
-            "职场": "custom_character_day_anchor", "白天去向": "custom_character_day_anchor",
-            "用户性别": "custom_user_gender", "我的性别": "custom_user_gender",
-        }
+        mapping = {alias: key for _, key, aliases in PERSONALIZE_FIELDS for alias in aliases}
         if not action:
             lines = ["其余设置（空=使用全局默认）"]
-            labels = [
-                ("custom_scheduled_persona", "人格文本"),
-                ("custom_role_name", "角色类型"),
-                ("custom_bot_name", "角色名"),
-                ("custom_bot_self_name", "自称"),
-                ("custom_visual_character", "生图角色Tag"),
-                ("custom_visual_series", "生图作品Tag"),
-                ("custom_spatial_relationship", "关系设定"),
-                ("custom_character_age_stage", "年龄段"),
-                ("custom_character_day_anchor", "白天去向"),
-            ]
-            for key, label in labels:
+            for label, key, _ in PERSONALIZE_FIELDS:
                 lines.append(f"{label}: {state.get(key, '') or '（默认）'}")
-            lines.append("\n用法: /个性设置 <项> <值> 覆盖单项。硬重置请使用 /角色 reset")
+            lines.append(f"关系设定: {state.get('custom_spatial_relationship', '') or '（默认）'}（用 /关系 修改）")
+            lines.append("人格文本: 用 /人格 查看或修改")
+            lines.append("\n用法: /个性设置 <项> <值> 覆盖单项。/角色 reset 仅清对话上下文，/角色 clearup 硬重置。")
             await self.send_message(chat_id, "\n".join(lines))
             return
         if action == "reset":
-            await self.send_message(chat_id, "硬重置入口已统一为 /角色 reset；/个性设置 reset 不再清空对话或角色数据。")
+            await self.send_message(chat_id, "轻量重置: /角色 reset（仅清对话上下文）\n硬重置: /角色 clearup（恢复全局默认，清角色/人设/角色池）")
             return
         key = mapping.get(action)
         if not key:
@@ -1051,13 +1191,30 @@ class CommandHandlersMixin:
             await self.send_message(chat_id, f"当前 {action}: {state.get(key, '') or '（默认）'}")
             return
         state[key] = value
-        if key == "custom_scheduled_persona":
-            # 与 /人格 保持一致：自定义人设即进入角色态。
-            state["persona_user_set"] = True
-        if key in {"custom_scheduled_persona", "custom_role_name", "custom_bot_name", "custom_character_age_stage", "custom_character_day_anchor"}:
+        if key == "custom_character_occupation":
+            # 职业是用户面向字段，白天去向枚举由职业后台派生。
+            state["custom_character_day_anchor"] = self._normalize_day_anchor(value)
+        if key in PERSONALIZE_LIFE_PROFILE_KEYS:
             state.pop("life_profile", None)
         self._save_session_state(session_id, state)
         await self.send_message(chat_id, f"{action} 已覆盖为: {value[:200]}")
+
+    async def cmd_relationship(self, chat_id, session_id, arg):
+        state = self._get_session_state(session_id)
+        value = (arg or "").strip()
+        if not value:
+            current = state.get("custom_spatial_relationship", "") or "（默认）"
+            await self.send_message(
+                chat_id,
+                f"当前你和角色的关系: {current}\n\n"
+                "用法: /关系 <描述你和角色的关系>\n"
+                "例: /关系 同城暧昧对象，周末经常一起出门\n"
+                "可写同居、异地、同公司、同学校等；作为高级覆盖项，不替代自动动线。",
+            )
+            return
+        state["custom_spatial_relationship"] = value
+        self._save_session_state(session_id, state)
+        await self.send_message(chat_id, f"你和角色的关系已设为: {value[:200]}")
 
     async def cmd_appearance(self, chat_id, session_id, arg):
         tags = arg.strip()

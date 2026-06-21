@@ -250,8 +250,47 @@ class TelegramComfyUIService(
             catalogs = data.get("city_place_catalogs", {})
             if isinstance(catalogs, dict):
                 self.city_place_catalogs = catalogs
+            self._migrate_legacy_personas()
         except Exception as exc:
             logger.warning("加载状态失败，使用空状态: %s", exc)
+
+    # 老数据迁移：早期把身份/关系焊进了 custom_scheduled_persona，现已改为读时组装。
+    # 启动时把这两类前缀剥掉，让人设串退化成纯人格描述（幂等，剥干净后不再变动）。
+    _LEGACY_OC_IDENTITY_RE = re.compile(r"^你是[^，,。\n]+，一名[^。\n]*。[ \t]*\n?")
+    _LEGACY_REL_LINE_RE = re.compile(r"(?:^|\n)你和用户的关系[:：][^\n]*")
+
+    @classmethod
+    def _strip_legacy_persona_bakein(cls, text: Any) -> tuple[Any, bool]:
+        if not text or not isinstance(text, str):
+            return text, False
+        new = cls._LEGACY_OC_IDENTITY_RE.sub("", text, count=1)
+        new = cls._LEGACY_REL_LINE_RE.sub("", new).strip()
+        return new, new != text.strip()
+
+    def _migrate_legacy_personas(self):
+        changed = False
+        for state in self.sessions.values():
+            if not isinstance(state, dict):
+                continue
+            new, ch = self._strip_legacy_persona_bakein(state.get("custom_scheduled_persona"))
+            if ch:
+                state["custom_scheduled_persona"] = new
+                changed = True
+            saved = state.get("saved_characters")
+            if isinstance(saved, dict):
+                for entry in saved.values():
+                    if not isinstance(entry, dict):
+                        continue
+                    np, ch2 = self._strip_legacy_persona_bakein(entry.get("persona"))
+                    if ch2:
+                        entry["persona"] = np
+                        changed = True
+        if changed:
+            try:
+                self._write_state()
+                logger.info("已清洗历史人设串里焊死的身份/关系前缀")
+            except Exception:
+                logger.warning("历史人设迁移写回失败", exc_info=True)
 
     def _write_state(self):
         state = {
@@ -370,6 +409,11 @@ class TelegramComfyUIService(
             "user_place_text": "",
             "user_place_updated_at": 0,
             "user_place_confidence": 0,
+            "character_place": "",
+            "character_place_label": "",
+            "character_place_text": "",
+            "character_place_updated_at": 0,
+            "character_place_confidence": 0,
             "custom_count": "",
             "custom_positive_prefix": "",
             "custom_default_hair": "",
@@ -385,6 +429,7 @@ class TelegramComfyUIService(
             "custom_visual_character": "",
             "custom_visual_series": "",
             "custom_character_age_stage": "",
+            "custom_character_occupation": "",
             "custom_character_day_anchor": "",
             "persona_user_set": False,
             "saved_characters": {},
@@ -539,6 +584,11 @@ class TelegramComfyUIService(
         return {"level": effective, "tag": tag, "context": context}
 
     def _get_effective_persona(self, session_id: str) -> str:
+        """读时组装聊天人格：纯人格描述串 + 身份安全前缀 + 短期附加外型。
+
+        custom_scheduled_persona 只存纯人格描述（性格/语气/习惯），不含身份、角色类型、
+        关系、职业——这些是字段单源，由本函数（身份）和各 prompt 的身份行/关系行实时拼。
+        """
         state = self._get_session_state(session_id)
         if self._is_character_set(session_id):
             base = state.get("custom_scheduled_persona", "")
@@ -1348,7 +1398,11 @@ class TelegramComfyUIService(
             "你是角色设定助手。判断用户描述属于既有作品角色或外观体貌特征，只输出 JSON。\n"
             "既有作品角色输出 {\"type\":\"character\",\"name\":\"用户可读角色名\",\"series\":\"用户可读作品名\","
             "\"prompt_name\":\"Anima/danbooru可识别的英文或罗马音角色tag\",\"prompt_series\":\"Anima/danbooru可识别的英文或罗马音作品tag\","
-            "\"persona\":\"中文人设\",\"appearance\":\"英文prompt标签\",\"purity\":0到10整数}。\n"
+            "\"persona\":\"中文人设\",\"appearance\":\"英文prompt标签\",\"purity\":0到10整数,"
+            "\"age\":\"minor或adult\",\"occupation\":\"角色的中文职业/身份，如 高中生/上班族/护士\","
+            "\"anchor\":\"按职业从 company/school/factory/farm/construction/medical/retail/delivery/driver/home/flexible 里选一个白天去向\","
+            "\"relationship\":\"若用户在描述里写了和角色的关系就原样填，没写则留空\"}。\n"
+            "age/occupation/anchor 依据你对该角色的了解判断；relationship 只在用户明确写了关系时才填，不要替用户编造。\n"
             "外观描述输出 {\"type\":\"appearance\",\"tags\":\"英文prompt标签\"}。\n"
             "name/series 可以保留中文或日文方便用户识别；prompt_name/prompt_series 必须使用英文、罗马音或官方英文名，不要输出中文、日文假名或汉字。"
             "例如：天童爱丽丝 => prompt_name 写 aris (blue archive)，prompt_series 写 Blue Archive；和泉纱雾 => prompt_name 写 Sagiri Izumi，prompt_series 写 Eromanga Sensei。\n"
@@ -1365,7 +1419,8 @@ class TelegramComfyUIService(
         system = (
             "你是提示词槽位归档器，只输出 JSON。用户会自然描述角色、外观、穿搭、画风、场景偏好或关系。"
             "不要扩写，不要润色，不要替用户新增设定，只把原文按用途归档。"
-            "字段固定为: name, role, age, anchor, persona, base_appearance, dynamic_appearance, relationship, city, style, scene_preference, selfie_preference, unclassified。"
+            "字段固定为: name, role, age, occupation, anchor, persona, base_appearance, dynamic_appearance, relationship, city, style, scene_preference, selfie_preference, unclassified。"
+            "occupation 放角色的中文职业/身份原文（如 高中生/上班族/护士）；anchor 从职业推断白天去向枚举。"
             "base_appearance 只放稳定身体身份特征：性别、发色、发型、瞳色、肤色、体型、物种特征、伤疤、纹身等永久标志。"
             "dynamic_appearance 只放当前/默认穿搭、配饰、临时发型瞳色、持有物；不要放场景、姿势、灯光。"
             "style 只放画风、artist tag、渲染风格；不要放质量词。"

@@ -545,6 +545,62 @@ class WorldRuntimeMixin:
         self._mark_dirty(session_id)
         return True
 
+    # ---- 角色位置持久化：对话/工具确立的位置在新鲜期内优先于时钟推断，消除跨上下文的位置漂移 ----
+    def _active_character_place(self, state: dict[str, Any]) -> dict[str, Any] | None:
+        try:
+            ttl = max(0.25, float(self.config.get("world_character_place_ttl_hours", "4") or "4")) * 3600
+        except Exception:
+            ttl = 4 * 3600
+        updated = float(state.get("character_place_updated_at", 0) or 0)
+        if not updated or time.time() - updated > ttl:
+            return None
+        key = (state.get("character_place") or "").strip()
+        if key not in PLACE_TYPES:
+            return None
+        return {
+            "key": key,
+            "label": state.get("character_place_label") or PLACE_TYPES[key]["label"],
+            "text": state.get("character_place_text") or "",
+            "updated_at": updated,
+        }
+
+    def _set_character_place(self, session_id: str, key: str, matched: str, confidence: float) -> bool:
+        if key not in PLACE_TYPES:
+            return False
+        state = self._get_session_state(session_id)
+        state["character_place"] = key
+        state["character_place_label"] = PLACE_TYPES[key]["label"]
+        state["character_place_text"] = (matched or "")[:40]
+        state["character_place_updated_at"] = time.time()
+        state["character_place_confidence"] = confidence
+        self._mark_dirty(session_id)
+        return True
+
+    def _update_character_place_from_text(self, session_id: str, text: str) -> bool:
+        """从角色（助手）回复里自动抽取角色自述所在并持久化。
+
+        助手以角色身份发言，故 `_infer_user_place` 提取出的“说话者自述所在”即角色位置。
+        自动抽取置信度低于工具显式声明。
+        """
+        if not session_id or not self._world_runtime_enabled():
+            return False
+        key, matched = self._infer_user_place(text)
+        if not key:
+            return False
+        return self._set_character_place(session_id, key, matched or (text or ""), 0.8)
+
+    async def tool_update_location(self, session_id: str, place: str = "") -> str:
+        """聊天模型显式声明角色换到新地点时调用，持续生效，优先于时钟动线。"""
+        place = (place or "").strip()
+        if not place:
+            return "未提供地点。"
+        key, matched = self._infer_user_place(place)
+        if not key:
+            return f"无法识别地点「{place[:30]}」，位置未更新。可用：家/公司/学校/商场/咖啡店/餐厅/公园/街道/车站/便利店等。"
+        self._set_character_place(session_id, key, matched or place, 0.95)
+        self._ulog(session_id, "MOVE", f"角色移动到 {PLACE_TYPES[key]['label']}（{place[:30]}）")
+        return f"已记录角色当前在 {PLACE_TYPES[key]['label']}。"
+
     def _apply_llm_user_location(
         self,
         session_id: str,
@@ -655,6 +711,12 @@ class WorldRuntimeMixin:
         if not candidates:
             candidates = [self._top_place_candidates(city, {"home": 1}, count=1)[0]]
         character_place = candidates[0]
+        # 对话/工具确立的角色位置在新鲜期内优先于时钟推断（跨上下文重置、推送/生图都据此保持连续）。
+        persisted = self._active_character_place(state)
+        if persisted:
+            pinned = self._top_place_candidates(city, {persisted["key"]: 1}, count=1)
+            if pinned:
+                character_place = pinned[0]
         next_now, next_period = self._next_period_datetime(now)
         next_place = self._place_for_time(city, next_now, weather, mode=mode, profile=profile)
         user_place = self._active_user_place(state)
@@ -701,6 +763,7 @@ class WorldRuntimeMixin:
         weather: Any = None,
         mode: str = "chat",
         now: datetime | None = None,
+        pin_location: bool = True,
     ) -> str:
         if weather is None:
             cached = getattr(self, "_weather_caches", {}).get(session_id or "__default__")
@@ -732,11 +795,21 @@ class WorldRuntimeMixin:
             lines.append(f"- 季节/自然光: {self._format_time_context(session_id, now=now, weather=weather)}")
         if identity:
             lines.append(f"- 角色身份: {identity}")
+        if pin_location:
+            lines += [
+                f"- 角色当前所在: {current_line}",
+                f"- 接下来动线: {next_line}",
+                f"- 用户位置: {user_text_line}",
+                f"- 空间关系判断: {world['relation']}",
+            ]
+        else:
+            # 对话进行中：不钉死时钟算出的具体地点与相对关系（否则会和对话已建立的位置打架、导致瞬移），
+            # 只给“这个时段日常多半在哪一带”的倾向作背景，当前所在交给对话决定。
+            lines.append(
+                f"- 日常此时多半在 {cp['label']} 一带（仅背景倾向，当前位置以对话为准，不要据此瞬移）"
+            )
+            lines.append(f"- 用户位置: {user_text_line}")
         lines += [
-            f"- 角色当前所在: {current_line}",
-            f"- 接下来动线: {next_line}",
-            f"- 用户位置: {user_text_line}",
-            f"- 空间关系判断: {world['relation']}",
             f"- 场景约束: {'；'.join(world['constraints'])}",
             f"- 地点来源: {world['catalog_source']}",
         ]

@@ -152,6 +152,10 @@ class ChatContextMixin:
                 session_id, user_text, content, explicit=explicit_image_req
             )
 
+        # 自动抽取角色自述位置并持久化（工具 update_location 是显式高置信路径，这里是兜底基线）。
+        if content:
+            self._update_character_place_from_text(session_id, content)
+
         history = state.get("chat_history", [])
         history.append({"role": "user", "content": user_text})
         if content:
@@ -180,6 +184,8 @@ class ChatContextMixin:
         light_guard = self._format_light_guard(session_id, now=now)
         persona = self._get_effective_persona(session_id)
         role_name, bot_name, bot_self_name = self._session_role_identity(session_id)
+        relationship = self._get_session_cfg(session_id, "spatial_relationship", "")
+        rel_line = f"你和用户的关系: {str(relationship).strip()}。\n" if str(relationship).strip() else ""
 
         freq = self.config.get("selfie_frequency", "频繁")
         freq_inst = {
@@ -197,6 +203,7 @@ class ChatContextMixin:
             f"你当前扮演的角色是「{bot_name}」（{role_name}）。除非用户明确要求换角色，否则你就是「{bot_name}」，"
             f"不要声称自己是其他角色或默认角色。对话中按角色习惯使用「{bot_self_name}」或自然第一人称作为自称，"
             "不要不自然地反复报全名。\n"
+            f"{rel_line}"
             f"当前时间: {now.strftime('%H:%M')} ({weekday}) {time_period}。\n"
             f"季节与自然光: {time_light}。\n"
             f"{light_guard}\n"
@@ -228,11 +235,17 @@ class ChatContextMixin:
             "\n换装持久化（重要）：当剧情里角色换上、脱下或更换了服装/配饰/发型时，必须调用 change_appearance 工具记录这次变化，"
             "这样你会一直记得自己穿着什么、之后的配图也保持一致。不要只在文字里描述换装却不调用工具。"
         )
-        world_context = self._format_world_context(session_id, user_text, mode="chat")
+        system += (
+            "\n位置持久化：当剧情里角色移动到新地点、或你明确交代了此刻在哪（出门、到公司、回家、到了某店等）时，调用 update_location 工具记录，"
+            "这样之后的配图和推送会和你说的位置保持一致，不会无理由瞬移。位置没变就不用调。"
+        )
+        # 对话进行中：对话已建立的场景优先，动线只作背景；只有冷启动/刚换场景才以动线引导，
+        # 避免角色随现实时间被算法“传送”（家→公园这类飘移）。对话态不钉死时钟地点（pin_location=False）。
+        active_dialog = bool(self._active_chat_history(state, self._short_context_history_limit()))
+        world_context = self._format_world_context(
+            session_id, user_text, mode="chat", pin_location=not active_dialog
+        )
         if world_context:
-            # 对话进行中：对话已建立的场景优先，动线只作背景；只有冷启动/刚换场景才以动线引导，
-            # 避免角色随现实时间被算法“传送”（家→公园这类飘移）。
-            active_dialog = bool(self._active_chat_history(state, self._short_context_history_limit()))
             if active_dialog:
                 system += (
                     "\n\n"
@@ -325,6 +338,23 @@ class ChatContextMixin:
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "update_location",
+                    "description": (
+                        "当剧情里角色移动到新地点、或明确交代了自己此刻在哪时调用，持续生效，之后的配图和推送会据此保持一致。"
+                        "place 用自然语言写角色当前所在（如“家里”“公司”“楼下咖啡店”“商场”“在路上”）。只在位置确实变化或首次确立时调用，不要每句都报。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "place": {"type": "string", "description": "角色当前所在的自然语言描述。"},
+                        },
+                        "required": ["place"],
+                    },
+                },
+            },
         ]
 
     async def _execute_tool_call(self, chat_id: int | str, session_id: str, call: dict[str, Any]) -> str:
@@ -346,6 +376,8 @@ class ChatContextMixin:
             )
         if fn == "change_appearance":
             return await self.tool_change_appearance(session_id, args.get("description", ""), args.get("mode", "merge"))
+        if fn == "update_location":
+            return await self.tool_update_location(session_id, args.get("place", ""))
         return f"未知工具: {fn}"
 
     @staticmethod

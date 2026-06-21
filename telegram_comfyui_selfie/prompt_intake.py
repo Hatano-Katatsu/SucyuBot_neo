@@ -9,6 +9,7 @@ INTAKE_FIELDS = (
     "name",
     "role",
     "age",
+    "occupation",
     "anchor",
     "persona",
     "base_appearance",
@@ -191,6 +192,7 @@ def classify_phrase(phrase: str, out: dict[str, str]):
         if role_re.search(phrase):
             out["role"] = out["role"] or role
             out["age"] = out["age"] or age
+            out["occupation"] = out["occupation"] or role
             out["anchor"] = out["anchor"] or anchor
             return
     if RELATION_RE.search(phrase):
@@ -231,6 +233,7 @@ def merge_oc_fields(fields: dict[str, str], intake: dict[str, Any]) -> dict[str,
         "name": "name",
         "role": "role",
         "age": "age",
+        "occupation": "occupation",
         "anchor": "anchor",
         "persona": "persona",
         "base_appearance": "appearance",

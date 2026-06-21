@@ -394,12 +394,12 @@ async def api_update_session(request: web.Request):
         "custom_default_hair", "custom_default_eyes", "custom_current_style", "dynamic_appearance",
         "custom_scene_preference", "custom_selfie_preference",
         "custom_character", "custom_series", "custom_visual_character", "custom_visual_series", "custom_daily_selfie_limit",
-        "custom_character_age_stage", "custom_character_day_anchor",
+        "custom_character_age_stage", "custom_character_occupation", "custom_character_day_anchor",
     }
     life_profile_keys = {
         "custom_scheduled_persona", "custom_role_name", "custom_bot_name",
         "custom_character", "custom_series", "custom_visual_character", "custom_visual_series", "custom_character_age_stage",
-        "custom_character_day_anchor",
+        "custom_character_occupation", "custom_character_day_anchor",
     }
     profile_touched = False
     for key in allowed:

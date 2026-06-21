@@ -122,7 +122,7 @@ class ServiceTestCase(unittest.TestCase):
                 "名字：小雨\n"
                 "角色类型：大学生\n"
                 "年龄段：adult\n"
-                "白天去向：school\n"
+                "职业：大学生\n"
                 "性格：温柔、慢热\n"
                 "外貌：黑色短发，蓝眼睛，身材纤细，浅色皮肤\n"
                 "初始穿搭：白衬衫，深色百褶裙\n"
@@ -132,18 +132,72 @@ class ServiceTestCase(unittest.TestCase):
             state = svc._get_session_state(sid)
             self.assertEqual(state["custom_character"], "小雨")
             self.assertEqual(state["custom_series"], "")
-            self.assertIn("你是小雨", state["custom_scheduled_persona"])
+            # 人设串只存纯人格描述；身份/角色类型/关系都不再焊接，由读时组装。
+            self.assertEqual(state["custom_scheduled_persona"], "温柔、慢热")
+            self.assertNotIn("一名", state["custom_scheduled_persona"])
+            self.assertNotIn("同城暧昧对象", state["custom_scheduled_persona"])
+            self.assertIn("你是小雨", svc._get_effective_persona(sid))
+            self.assertEqual(state["custom_spatial_relationship"], "同城暧昧对象")
             self.assertEqual(state["custom_count"], "1girl")
             self.assertNotIn("1girl", state["custom_positive_prefix"])
             self.assertIn("short black hair", state["custom_positive_prefix"])
             self.assertIn("short black hair", state["custom_positive_prefix"])
             self.assertEqual(state["dynamic_appearance"], "white shirt, dark pleated skirt")
             self.assertEqual(state["custom_character_age_stage"], "adult")
+            self.assertEqual(state["custom_character_occupation"], "大学生")
             self.assertEqual(state["custom_character_day_anchor"], "school")
             self.assertEqual(state["chat_history"], [])
             self.assertEqual(state["saved_characters"]["小雨"]["series"], "")
             text = svc.send_message.await_args.args[1]
             self.assertIn("OC 已创建: 小雨", text)
+
+        asyncio.run(run())
+
+    def test_migrate_legacy_persona_strips_baked_identity_and_relationship(self):
+        svc = self.make_service()
+        legacy = "你是小雨，一名大学生。\n温柔、慢热\n你和用户的关系: 同城暧昧对象"
+        cleaned, changed = svc._strip_legacy_persona_bakein(legacy)
+        self.assertTrue(changed)
+        self.assertEqual(cleaned, "温柔、慢热")
+        # 幂等：剥干净后再跑不再变动
+        again, changed2 = svc._strip_legacy_persona_bakein(cleaned)
+        self.assertFalse(changed2)
+        self.assertEqual(again, "温柔、慢热")
+        # 已有角色的“你是X（作品）。”不是漂移源，不被误删
+        anime = "你是天童爱丽丝（碧蓝档案）。\n开朗"
+        kept, ch = svc._strip_legacy_persona_bakein(anime)
+        self.assertFalse(ch)
+        self.assertEqual(kept, anime.strip())
+        # 会话级 + 角色快照一并迁移
+        svc.sessions["telegram:9"] = {
+            "custom_scheduled_persona": legacy,
+            "saved_characters": {"小雨": {"persona": legacy}},
+        }
+        svc._migrate_legacy_personas()
+        self.assertEqual(svc.sessions["telegram:9"]["custom_scheduled_persona"], "温柔、慢热")
+        self.assertEqual(svc.sessions["telegram:9"]["saved_characters"]["小雨"]["persona"], "温柔、慢热")
+
+    def test_rollback_rewinds_n_turns(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.send_message = AsyncMock()
+            state = svc._get_session_state(sid)
+            state["chat_history"] = [
+                {"role": "user", "content": "u1"}, {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"}, {"role": "assistant", "content": "a2"},
+                {"role": "user", "content": "u3"}, {"role": "assistant", "content": "a3"},
+            ]
+            await svc.cmd_rollback(1, sid, "2")
+            hist = svc._get_session_state(sid)["chat_history"]
+            self.assertEqual([m["content"] for m in hist], ["u1", "a1"])
+            # 默认回退 1 轮
+            await svc.cmd_rollback(1, sid, "")
+            hist = svc._get_session_state(sid)["chat_history"]
+            self.assertEqual(hist, [])
+            # 空历史给出提示，不报错
+            await svc.cmd_rollback(1, sid, "")
+            self.assertIn("没有可回滚", svc.send_message.await_args.args[1])
 
         asyncio.run(run())
 
@@ -583,6 +637,71 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("接下来动线", system)
         self.assertIn("商场", system)
         self.assertIn("基础场所目录", system)
+
+    def test_world_context_unpins_clock_location_during_active_dialog(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        fixed_now = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)
+        svc._session_now = lambda session_id="": fixed_now
+        state = svc._get_session_state(sid)
+        # 对话进行中（有活跃聊天历史）：不钉死时钟算出的具体地点/相对关系，避免瞬移
+        state["chat_history"] = [
+            {"role": "user", "content": "在家吗"},
+            {"role": "assistant", "content": "在家呢，刚到客厅"},
+        ]
+        state["short_context_start"] = 0
+        system = svc._build_chat_messages(sid, "那我现在过去")[0]["content"]
+        self.assertIn("当前世界状态", system)
+        self.assertNotIn("角色当前所在", system)
+        self.assertNotIn("空间关系判断", system)
+        self.assertIn("以对话为准", system)
+        # 冷启动（无活跃历史）仍然钉时钟地点，供模型自然提及
+        state["chat_history"] = []
+        cold = svc._build_chat_messages(sid, "你好")[0]["content"]
+        self.assertIn("角色当前所在", cold)
+
+    def test_character_place_autoextract_overrides_clock(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        fixed_now = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)  # 工作日办公时段
+        svc._session_now = lambda session_id="": fixed_now
+        state = svc._get_session_state(sid)
+        state["custom_character_age_stage"] = "adult"
+        state["custom_character_day_anchor"] = "company"
+        # 时钟此刻判公司
+        self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "company")
+        # 角色回复说在家 → 自动抽取并持久化 → 压过时钟
+        self.assertTrue(svc._update_character_place_from_text(sid, "我在家呢，刚到客厅"))
+        self.assertEqual(state["character_place"], "home")
+        self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "home")
+
+    def test_tool_update_location_sets_and_pins_character_place(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)
+            svc._session_now = lambda session_id="": fixed_now
+            msg = await svc.tool_update_location(sid, "楼下的咖啡店")
+            self.assertIn("咖啡", msg)
+            state = svc._get_session_state(sid)
+            self.assertEqual(state["character_place"], "cafe")
+            self.assertEqual(state["character_place_confidence"], 0.95)
+            self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "cafe")
+
+        asyncio.run(run())
+
+    def test_character_place_expires_after_ttl(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        fixed_now = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)
+        svc._session_now = lambda session_id="": fixed_now
+        state = svc._get_session_state(sid)
+        state["custom_character_age_stage"] = "adult"
+        state["custom_character_day_anchor"] = "company"
+        svc._update_character_place_from_text(sid, "我在家")
+        self.assertEqual(state["character_place"], "home")
+        state["character_place_updated_at"] = 1.0  # 远早于 TTL → 过期
+        self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "company")
 
     def test_life_profile_gates_anchor_places_by_identity(self):
         svc = self.make_service()
@@ -1176,6 +1295,49 @@ class ServiceTestCase(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_character_command_fills_age_occupation_anchor_relationship(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._llm_classify_character = AsyncMock(return_value={
+                "type": "character",
+                "name": "天童爱丽丝",
+                "series": "碧蓝档案",
+                "prompt_name": "aris (blue archive)",
+                "prompt_series": "Blue Archive",
+                "persona": "你是天童爱丽丝。",
+                "appearance": "1girl, long black hair, blue eyes",
+                "purity": 8,
+                "age": "adult",
+                "occupation": "学生",
+                "anchor": "school",
+                "relationship": "青梅竹马",
+            })
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_character(1, sid, "天童爱丽丝")
+
+            state = svc._get_session_state(sid)
+            self.assertEqual(state["custom_character_age_stage"], "adult")
+            self.assertEqual(state["custom_character_occupation"], "学生")
+            self.assertEqual(state["custom_character_day_anchor"], "school")
+            self.assertEqual(state["custom_spatial_relationship"], "青梅竹马")
+            self.assertEqual(state["saved_characters"]["天童爱丽丝"]["occupation"], "学生")
+            # 关系注入聊天系统提示
+            system = svc._build_chat_messages(sid, "你好")[0]["content"]
+            self.assertIn("你和用户的关系: 青梅竹马", system)
+            # 没填城市时提醒补槽位
+            text = svc.send_message.await_args.args[1]
+            self.assertIn("还差", text)
+            self.assertIn("城市", text)
+
+        asyncio.run(run())
+
     def test_character_command_pins_dialog_identity_when_persona_omits_name(self):
         async def run():
             svc = self.make_service()
@@ -1203,7 +1365,8 @@ class ServiceTestCase(unittest.TestCase):
 
             state = svc._get_session_state(sid)
             self.assertEqual(state["custom_bot_name"], "东云绘名")
-            self.assertTrue(state["custom_scheduled_persona"].startswith("你是东云绘名（Project Sekai）。"))
+            self.assertIn("性格内向", state["custom_scheduled_persona"])
+            self.assertNotIn("你是东云", state["custom_scheduled_persona"])
             system = svc._build_chat_messages(sid, "你好")[0]["content"]
             self.assertIn("你当前扮演的角色是「东云绘名」（Project Sekai）", system)
             self.assertIn("你是东云绘名（Project Sekai）。", system)
@@ -1563,6 +1726,49 @@ class ServiceTestCase(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_image_planner_locks_location_to_persisted_place(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._set_character_place(sid, "home", "在家", 0.8)  # 新鲜的对话确立位置
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "坐在客厅沙发", "view": "selfie", "character_location": "mall",
+            }, ensure_ascii=False))
+            await plan_roleplay_image(svc, sid, intent="看看你在干嘛")
+            system = svc._call_llm.await_args.args[0]
+            self.assertIn("地点锁定", system)
+            self.assertIn("家", system)
+            # 已钉死：规划器乱选的 mall 不回写，仍是 home
+            self.assertEqual(svc._get_session_state(sid)["character_place"], "home")
+
+        asyncio.run(run())
+
+    def test_image_planner_writes_back_location_when_unpinned(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "在咖啡店窗边", "view": "selfie", "character_location": "cafe",
+            }, ensure_ascii=False))
+            await plan_roleplay_image(svc, sid, intent="看看你在干嘛")
+            system = svc._call_llm.await_args.args[0]
+            self.assertNotIn("地点锁定", system)  # 无持久位置，不钉
+            self.assertEqual(svc._get_session_state(sid)["character_place"], "cafe")  # 规划器判断回写
+
+        asyncio.run(run())
+
     def test_photo_memory_injects_source_description_instead_of_caption(self):
         svc = self.make_service()
         state = svc._get_session_state("telegram:123")
@@ -1778,7 +1984,7 @@ class ServiceTestCase(unittest.TestCase):
             svc._save_session_state(sid, state)
             svc.send_message = AsyncMock()
 
-            await svc.cmd_character(1, sid, "reset")
+            await svc.cmd_character(1, sid, "clearup")
 
             after = svc._get_session_state(sid)
             self.assertFalse(svc._is_character_set(sid))
@@ -1838,7 +2044,7 @@ class ServiceTestCase(unittest.TestCase):
             svc._save_session_state(sid, state)
             svc.send_message = AsyncMock()
 
-            await svc.cmd_character(1, sid, "reset")
+            await svc.cmd_character(1, sid, "clearup")
 
             after = svc._get_session_state(sid)
             self.assertEqual(after.get("saved_characters"), {})
@@ -1897,7 +2103,7 @@ class ServiceTestCase(unittest.TestCase):
             })
             svc._save_session_state(sid, state)
             svc.send_message = AsyncMock()
-            await svc.cmd_character(1, sid, "reset")
+            await svc.cmd_character(1, sid, "clearup")
             after = svc._get_session_state(sid)
             self.assertFalse(svc._is_character_set(sid))
             self.assertEqual(after.get("custom_character_age_stage", ""), "")
@@ -1974,12 +2180,12 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("你当前扮演的角色是「东云绘名」（Project Sekai）", system)
         self.assertNotIn("你当前扮演的角色是「蕾伊」", system)
 
-    def test_personalize_persona_marks_user_set(self):
+    def test_persona_define_marks_user_set(self):
         async def run():
             svc = self.make_service()
             sid = "telegram:1"
             svc.send_message = AsyncMock()
-            await svc.cmd_personalize(1, sid, "人格 温柔体贴")
+            await svc.cmd_persona_define(1, sid, "温柔体贴")
             self.assertTrue(svc._is_character_set(sid))
             self.assertEqual(svc._get_effective_persona(sid).split("\n")[0], "温柔体贴")
 

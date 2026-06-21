@@ -76,6 +76,7 @@ class SchedulerRuntimeMixin:
             return None, None, None, None
         persona = self._get_effective_persona(session_id)
         spatial = self._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])
+        spatial_hint = f"默认物理空间设定（{spatial}）" if str(spatial).strip() else "默认无固定空间设定"
         state = self._get_session_state(session_id)
         role_name, bot_name, bot_self_name = self._session_role_identity(session_id)
         dynamic = state.get("dynamic_appearance") or self.config.get("dynamic_appearance", "")
@@ -132,7 +133,7 @@ class SchedulerRuntimeMixin:
         system += (
             "\n模式要求:\n"
             "morning: 必须使用 pov，刚睡醒、厨房或卧室早安场景。\n"
-            f"normal: 根据默认物理空间设定（{spatial}）和近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror。\n"
+            f"normal: 根据{spatial_hint}和近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror。\n"
             f"ntr: 用户超过 {self._compute_ntr_threshold(purity)} 天没有互动时的冷落惩罚推送，强烈 NTR 危机感，通常 selfie 或分屏。\n"
             "自拍物理规则: view=selfie 是前摄自拍，画面中不得出现手机、相机、镜子或拿手机的手；"
             "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。\n"
