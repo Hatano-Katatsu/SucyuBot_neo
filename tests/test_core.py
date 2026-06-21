@@ -1445,6 +1445,9 @@ class ServiceTestCase(unittest.TestCase):
             self.assertIn("自拍物理规则", planner_system_prompt)
             self.assertIn("当前世界状态", planner_system_prompt)
             self.assertIn("用户位置/空间关系判断", planner_system_prompt)
+            # 有活跃对话时，动线只作背景，对话已确立的地点优先（防止配图把角色按现实时段“传送”）。
+            self.assertIn("对话场景优先级最高", planner_system_prompt)
+            self.assertNotIn("应当遵守，角色不要无理由瞬移", planner_system_prompt)
             self.assertIn("季节与自然光", planner_system_prompt)
             self.assertIn("常去咖啡店和家中客厅", planner_system_prompt)
             self.assertIn("偏好半身前摄自拍", planner_system_prompt)
