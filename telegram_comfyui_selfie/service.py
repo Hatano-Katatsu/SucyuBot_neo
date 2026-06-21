@@ -414,6 +414,8 @@ class TelegramComfyUIService(
             "character_place_text": "",
             "character_place_updated_at": 0,
             "character_place_confidence": 0,
+            "character_place_history": [],
+            "rounds_since_location": 0,
             "custom_count": "",
             "custom_positive_prefix": "",
             "custom_default_hair": "",

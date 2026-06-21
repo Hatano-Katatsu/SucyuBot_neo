@@ -331,6 +331,12 @@ DEFAULT_CONFIG = {
     "world_city_places_enabled": True,
     "world_city_places_ttl_days": "30",
     "world_user_place_ttl_hours": "4",
+    # 角色位置 pin 的权威分档：strong(锁死生图)/weak(仅参考)/硬 TTL(回落时钟)。
+    "world_character_place_ttl_hours": "4",
+    "world_character_place_strong_hours": "1.0",
+    "world_character_place_stale_rounds": "8",
+    # 角色回复后是否用 LLM 抽取位置（关=纯靠 tool_update_location + 时钟动线兜底）。
+    "world_location_llm_extract": True,
     "world_holiday_dates": "",
     "world_workday_dates": "",
     # 角色生活档案的显式覆盖（留空则由人设自动推断）：

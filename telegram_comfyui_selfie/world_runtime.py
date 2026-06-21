@@ -571,14 +571,43 @@ class WorldRuntimeMixin:
         key = (state.get("character_place") or "").strip()
         if key not in PLACE_TYPES:
             return None
+        # 权威分档（供生图侧区分"锁死"与"参考"）：
+        # - strong：刚刚（< strong_hours，默认 1h）确认、轮次未过期（< stale_rounds，默认 8）、且高置信（≥0.8）。
+        # - weak：仍在硬 TTL 内但已陈旧——时间过半、多轮未再确认、或本就是低置信抽取/冷启动回写。
+        #   生图侧不再据此锁死，改作"参考 + 历史轨迹线索"，避免陈旧 pin 把角色卡死在某地。
+        # - None：超过硬 TTL，完全回落时钟动线（由上面的 TTL 判定返回 None）。
+        try:
+            strong_hours = max(0.0, float(self.config.get("world_character_place_strong_hours", "1.0") or "1.0"))
+        except Exception:
+            strong_hours = 1.0
+        try:
+            stale_rounds = max(0, int(self.config.get("world_character_place_stale_rounds", "8") or "8"))
+        except Exception:
+            stale_rounds = 8
+        age = time.time() - updated
+        conf = float(state.get("character_place_confidence", 0) or 0)
+        rounds_since = int(state.get("rounds_since_location", 0) or 0)
+        authority = "strong" if (age <= strong_hours * 3600 and rounds_since < stale_rounds and conf >= 0.8) else "weak"
         return {
             "key": key,
             "label": state.get("character_place_label") or PLACE_TYPES[key]["label"],
             "text": state.get("character_place_text") or "",
             "updated_at": updated,
+            "authority": authority,
+            "confidence": conf,
+            "age_hours": age / 3600.0,
+            "rounds_since": rounds_since,
         }
 
-    def _set_character_place(self, session_id: str, key: str, matched: str, confidence: float) -> bool:
+    def _set_character_place(
+        self,
+        session_id: str,
+        key: str,
+        matched: str,
+        confidence: float,
+        *,
+        source: str = "auto",
+    ) -> bool:
         if key not in PLACE_TYPES:
             return False
         state = self._get_session_state(session_id)
@@ -587,27 +616,68 @@ class WorldRuntimeMixin:
         state["character_place_text"] = (matched or "")[:40]
         state["character_place_updated_at"] = time.time()
         state["character_place_confidence"] = confidence
+        # 新一轮位置确认：把"距上次确认位置的轮数"清零（见 chat_context.handle_chat 的自增）。
+        state["rounds_since_location"] = 0
+        # 位置历史轨迹（ring buffer，cap 20，镜像 recent_message_history/sent_photos_history 模式）。
+        # 去重连续相同的地点——同一地点连续确认只记首条，避免一条 pin 把轨迹撑满。
+        history = list(state.get("character_place_history", []))
+        if not history or history[-1].get("key") != key:
+            history.append({
+                "key": key,
+                "label": PLACE_TYPES[key]["label"],
+                "source": source,
+                "confidence": confidence,
+                "ts": time.time(),
+            })
+            state["character_place_history"] = history[-20:]
         self._mark_dirty(session_id)
         return True
 
-    def _update_character_place_from_text(self, session_id: str, text: str) -> bool:
-        """从角色（助手）回复里自动抽取角色自述所在并持久化。
+    async def _update_character_place_from_text(self, session_id: str, text: str) -> bool:
+        """用 LLM 从角色（助手）回复里判断角色此刻所在的具体地点并持久化。
 
-        助手以角色身份发言，故 `_infer_user_place` 提取出的“说话者自述所在”即角色位置。
-        自动抽取置信度低于工具显式声明。
+        角色侧放弃正则（漏判多、误判多），改为每轮非空回复做一次轻量 LLM 分类。LLM 判成具体地点才写入
+        （confidence 0.8），判成 unknown 或解析失败则不动 pin/计数。无 image-LLM 配置时直接返回——位置系统
+        仍有 tool_update_location + 时钟动线兜底，不会瘫痪。锚定职场仍受职业身份门约束（见下方）。
+
+        助手以角色身份发言，故"说话者此刻在哪"即角色位置。
         """
-        if not session_id or not self._world_runtime_enabled():
+        if not session_id or not self._world_runtime_enabled() or not (text or "").strip():
             return False
-        key, matched = self._infer_user_place(text)
-        if not key:
+        if not self._bool_config("world_location_llm_extract", True) or not self.has_llm_config("image"):
             return False
-        # 锚定职场（公司/学校/工厂/田/工地）只在与角色职业身份相符时才自动钉位：
-        # 避免主妇/自由职业/非人类设定的角色随口提一句“上班/公司”就被钉到办公室，
-        # 在 TTL 内连深夜都回不到家。模型显式声明换地点走 tool_update_location（0.95），不受此限。
+        system = (
+            "你专门判断角色扮演对话里【角色本人此刻所在的具体地点】。下面给你一段角色的发言，"
+            "判断角色有没有交代自己现在身处哪个具体场所。只输出严格 JSON，不要解释。\n"
+            "规则:\n"
+            "- 只认角色作为【第一人称自述此刻所在】的明确交代（如“我现在在公司”“刚到家”“坐在星巴克”）。"
+            "回忆、计划、提及他人位置、否定句（“不在家”）、反问（“你猜我在哪”）一律算 unknown。\n"
+            "- 必须是具体场所，映射到枚举之一: home, company, school, park, mall, street, cafe, restaurant, "
+            "transit, convenience, cinema, hotel, hospital, gym, factory, farm, construction。"
+            "无法判断或未交代填 unknown。\n"
+            f"只输出: {{\"place\":\"home|company|school|park|mall|street|cafe|restaurant|transit|convenience|cinema|hotel|hospital|gym|factory|farm|construction|unknown\"}}"
+        )
+        try:
+            raw = await self._call_llm(
+                system,
+                (text or "").strip()[:300],
+                temp=0.1,
+                tag="location-extract",
+                purpose="image",
+            )
+            parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", (raw or "")).strip())
+            key = str(parsed.get("place") or "").strip().lower()
+        except Exception as exc:
+            logger.warning("location LLM extract failed: %s", exc)
+            return False
+        if not key or key == "unknown" or key not in PLACE_TYPES:
+            return False
+        # 锚定职场（公司/学校/工厂/田/工地）仍受职业身份门约束：避免无固定职场角色被 LLM 抽到公司后钉死。
+        # 模型显式声明换地点走 tool_update_location（0.95），不受此限。
         if key in ANCHOR_ONLY_PLACES and key not in self._profile_allowed_anchor_places(self._life_profile(session_id)):
-            logger.debug("skip auto-pin anchor place %s: 与角色职业身份不符", key)
+            logger.debug("skip llm-extracted anchor place %s: 与角色职业身份不符", key)
             return False
-        return self._set_character_place(session_id, key, matched or (text or ""), 0.8)
+        return self._set_character_place(session_id, key, text, 0.8, source="llm")
 
     async def tool_update_location(self, session_id: str, place: str = "") -> str:
         """聊天模型显式声明角色换到新地点时调用，持续生效，优先于时钟动线。"""
@@ -617,7 +687,7 @@ class WorldRuntimeMixin:
         key, matched = self._infer_user_place(place)
         if not key:
             return f"无法识别地点「{place[:30]}」，位置未更新。可用：家/公司/学校/商场/咖啡店/餐厅/公园/街道/车站/便利店等。"
-        self._set_character_place(session_id, key, matched or place, 0.95)
+        self._set_character_place(session_id, key, matched or place, 0.95, source="tool")
         self._ulog(session_id, "MOVE", f"角色移动到 {PLACE_TYPES[key]['label']}（{place[:30]}）")
         return f"已记录角色当前在 {PLACE_TYPES[key]['label']}。"
 

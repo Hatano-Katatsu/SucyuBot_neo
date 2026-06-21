@@ -911,6 +911,8 @@ class CommandHandlersMixin:
         # 角色位置不跨角色继承：换角色后由新角色的对话/动线重新确立。
         state["character_place"] = ""
         state["character_place_updated_at"] = 0
+        state["character_place_history"] = []
+        state["rounds_since_location"] = 0
 
     @staticmethod
     def _snapshot_character(state: dict[str, Any]):

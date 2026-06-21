@@ -190,9 +190,20 @@ async def plan_roleplay_image(
         except Exception:
             logger.debug("world context build failed for image planning", exc_info=True)
 
-    # 角色地点权威来源：新鲜期内（对话/工具确立的 character_place）钉死本次画面地点；
-    # 过期/为空时让规划器自行判断并把结果回写，闭合“位置持久化 → 生图”这条回路。
+    # 角色地点权威来源：按 authority 分档处理。
+    # - strong（刚确认/高置信/轮次未过期）：钉死本次画面地点，防瞬移。
+    # - weak（仍新鲜但已陈旧：时间过半/多轮未提及/低置信）：不锁死，改作"参考 + 历史轨迹线索"，
+    #   允许规划器结合对话重新判断并回写刷新，避免陈旧 pin 把角色卡死在某地。
+    # - None（超硬 TTL）：完全交规划器自行判断。
     pinned_place = service._active_character_place(state) if hasattr(service, "_active_character_place") else None
+    strong_pin = pinned_place if (pinned_place and pinned_place.get("authority") == "strong") else None
+    weak_pin = pinned_place if (pinned_place and pinned_place.get("authority") == "weak") else None
+    # 最近位置轨迹（用于 weak / 冷启动时给规划器一条动线连续性线索）。
+    location_trail = ""
+    history = state.get("character_place_history", []) if isinstance(state, dict) else []
+    if history and not strong_pin:
+        recent = history[-3:]
+        location_trail = "、".join(item.get("label", item.get("key", "?")) for item in recent if isinstance(item, dict))
 
     intimate_hint = _detect_intimate_context(intent, mood, prompt, dialog_context or "")
     device_hint = _detect_device_context(intent, mood, prompt, dialog_context or "")
@@ -240,12 +251,20 @@ async def plan_roleplay_image(
                 "其中“角色当前所在/接下来动线”按现实时间天气推断，应当遵守，角色不要无理由瞬移。"
                 + space_judgement
             )
-    if pinned_place:
+    if strong_pin:
         system += (
-            f"\n地点锁定（最高优先，覆盖上面动线背景）: 角色此刻所在地点已确定为「{pinned_place['label']}」"
-            f"（枚举值 {pinned_place['key']}）。本次画面必须就发生在这个地点，只描写该地点内的动作、姿态、光线、道具和氛围，"
+            f"\n地点锁定（最高优先，覆盖上面动线背景）: 角色此刻所在地点已确定为「{strong_pin['label']}」"
+            f"（枚举值 {strong_pin['key']}）。本次画面必须就发生在这个地点，只描写该地点内的动作、姿态、光线、道具和氛围，"
             "不要把角色画到别的场所（严禁瞬移）；character_location 字段必须等于这个枚举值。"
         )
+    elif weak_pin:
+        system += (
+            f"\n地点参考（较弱，角色此前提到在「{weak_pin['label']}」，但已过去一段对话/时间，可能已变动）: "
+            "请结合最近对话判断此刻是否仍在该地点；若对话明确指向别处，以对话为准。"
+            "不要无理由瞬移，也不要把角色死钉在该地点。"
+        )
+    if location_trail:
+        system += f"\n近期位置轨迹（连续性参考，按时间正序）: {location_trail}。可据此判断动线方向。"
     if quirk:
         system += f"\n角色专属画面修补规则: {quirk}"
     system += (
@@ -354,12 +373,13 @@ async def plan_roleplay_image(
             )
         except Exception:
             logger.debug("persist llm user location failed", exc_info=True)
-    # 冷启动（无新鲜 character_place）时把规划器判断的角色地点回写，下次生图/聊天即有权威来源；
-    # 已钉死时不回写，避免规划器二次发挥覆盖对话确立的位置。
-    if not pinned_place and hasattr(service, "_set_character_place"):
+    # 角色地点回写：strong pin（已锁死）不回写，避免规划器二次发挥覆盖对话确立的位置；
+    # 冷启动（无 pin）或 weak pin（已陈旧）时，允许规划器重新判断并刷新——冷启动写入、weak 同地只是
+    # 重置新鲜度/轮次（去重不新增轨迹），weak 异地则更新到本轮判断，让陈旧 pin 不再卡死画面。
+    if not strong_pin and hasattr(service, "_set_character_place"):
         char_loc = (parsed.get("character_location") or "").strip().lower()
         if char_loc and char_loc not in ("with_user", "unknown"):
-            service._set_character_place(session_id, char_loc, char_loc, 0.6)
+            service._set_character_place(session_id, char_loc, char_loc, 0.6, source="image")
     # LLM 自判优先，关键词检测作 OR 兜底（尤其 LLM 漏判时）。
     is_intimate = bool(parsed.get("is_intimate")) or intimate_hint
     partner_in_frame = bool(parsed.get("partner_in_frame"))

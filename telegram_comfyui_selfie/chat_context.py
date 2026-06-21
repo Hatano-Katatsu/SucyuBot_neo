@@ -51,6 +51,9 @@ class ChatContextMixin:
             state["last_sent_selfie_replied"] = True
 
         state["rounds_since_image"] = state.get("rounds_since_image", 0) + 1
+        # "距上次确认位置的轮数"：每轮 +1，由 _set_character_place（角色再次明确位置时）清零。
+        # 用来给陈旧 pin 降权——多轮没再提及地点时，该 pin 不再锁死生图。
+        state["rounds_since_location"] = state.get("rounds_since_location", 0) + 1
         if state.get("ntr_affection_reset"):
             self._tick_ntr_reconcile(state)
 
@@ -153,9 +156,15 @@ class ChatContextMixin:
                 session_id, user_text, content, explicit=explicit_image_req
             )
 
-        # 自动抽取角色自述位置并持久化（工具 update_location 是显式高置信路径，这里是兜底基线）。
+        # 自动抽取角色自述位置并持久化（工具 update_location 是显式高置信路径，这里是 LLM 判定兜底）。
+        # fire-and-forget：不阻塞回复返回，抽取结果下一轮生效。
         if content:
-            self._update_character_place_from_text(session_id, content)
+            async def _bg_extract():
+                try:
+                    await self._update_character_place_from_text(session_id, content)
+                except Exception:
+                    logger.warning("background location extract failed", exc_info=True)
+            asyncio.create_task(_bg_extract())
 
         history = state.get("chat_history", [])
         history.append({"role": "user", "content": user_text})

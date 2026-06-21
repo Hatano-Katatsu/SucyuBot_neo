@@ -163,7 +163,7 @@ class ServiceTestCase(unittest.TestCase):
         again, changed2 = svc._strip_legacy_persona_bakein(cleaned)
         self.assertFalse(changed2)
         self.assertEqual(again, "温柔、慢热")
-        # 已有角色的“你是X（作品）。”不是漂移源，不被误删
+        # 已有角色的"你是X（作品）。"不是漂移源，不被误删
         anime = "你是天童爱丽丝（碧蓝档案）。\n开朗"
         kept, ch = svc._strip_legacy_persona_bakein(anime)
         self.assertFalse(ch)
@@ -694,19 +694,23 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("角色当前所在", cold)
 
     def test_character_place_autoextract_overrides_clock(self):
-        svc = self.make_service()
-        sid = "telegram:123"
-        fixed_now = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)  # 工作日办公时段
-        svc._session_now = lambda session_id="": fixed_now
-        state = svc._get_session_state(sid)
-        state["custom_character_age_stage"] = "adult"
-        state["custom_character_day_anchor"] = "company"
-        # 时钟此刻判公司
-        self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "company")
-        # 角色回复说在家 → 自动抽取并持久化 → 压过时钟
-        self.assertTrue(svc._update_character_place_from_text(sid, "我在家呢，刚到客厅"))
-        self.assertEqual(state["character_place"], "home")
-        self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "home")
+        async def run():
+            svc = self.make_service()
+            svc.config.update({"image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "https://x"})
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)  # 工作日办公时段
+            svc._session_now = lambda session_id="": fixed_now
+            state = svc._get_session_state(sid)
+            state["custom_character_age_stage"] = "adult"
+            state["custom_character_day_anchor"] = "company"
+            # 时钟此刻判公司
+            self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "company")
+            # mock LLM 返回 home → 自动抽取并持久化 → 压过时钟
+            svc._call_llm = AsyncMock(return_value='{"place":"home"}')
+            self.assertTrue(await svc._update_character_place_from_text(sid, "我在家呢，刚到客厅"))
+            self.assertEqual(state["character_place"], "home")
+            self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "home")
+        asyncio.run(run())
 
     def test_tool_update_location_sets_and_pins_character_place(self):
         async def run():
@@ -724,17 +728,21 @@ class ServiceTestCase(unittest.TestCase):
         asyncio.run(run())
 
     def test_character_place_expires_after_ttl(self):
-        svc = self.make_service()
-        sid = "telegram:123"
-        fixed_now = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)
-        svc._session_now = lambda session_id="": fixed_now
-        state = svc._get_session_state(sid)
-        state["custom_character_age_stage"] = "adult"
-        state["custom_character_day_anchor"] = "company"
-        svc._update_character_place_from_text(sid, "我在家")
-        self.assertEqual(state["character_place"], "home")
-        state["character_place_updated_at"] = 1.0  # 远早于 TTL → 过期
-        self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "company")
+        async def run():
+            svc = self.make_service()
+            svc.config.update({"image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "https://x"})
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)
+            svc._session_now = lambda session_id="": fixed_now
+            state = svc._get_session_state(sid)
+            state["custom_character_age_stage"] = "adult"
+            state["custom_character_day_anchor"] = "company"
+            svc._call_llm = AsyncMock(return_value='{"place":"home"}')
+            self.assertTrue(await svc._update_character_place_from_text(sid, "我在家"))
+            self.assertEqual(state["character_place"], "home")
+            state["character_place_updated_at"] = 1.0  # 远早于 TTL → 过期
+            self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "company")
+        asyncio.run(run())
 
     def test_life_profile_gates_anchor_places_by_identity(self):
         svc = self.make_service()
@@ -784,43 +792,51 @@ class ServiceTestCase(unittest.TestCase):
             self.assertNotIn(gated, keys)
 
     def test_autoextract_skips_anchor_place_mismatching_identity(self):
-        """主妇/自由职业角色随口提“上班/公司”不应被自动钉到公司（仍回落时钟动线）。"""
-        svc = self.make_service()
-        sid = "telegram:123"
-        fixed_now = datetime(2026, 6, 18, 23, 30, tzinfo=timezone.utc)  # 工作日深夜
-        svc._session_now = lambda session_id="": fixed_now
-        state = svc._get_session_state(sid)
-        state["custom_character_age_stage"] = "adult"
-        state["custom_character_day_anchor"] = "home"  # 无固定职场
-        # 角色回复里提到“公司/上班”——身份不符，不钉位
-        self.assertFalse(svc._update_character_place_from_text(sid, "今天上班累死了，刚到公司楼下"))
-        self.assertEqual(state.get("character_place", ""), "")
-        # 深夜动线仍回落到家，而不是公司（商务中心）
-        self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "home")
-        # 对照：上班族角色提到公司则可被钉位（办公时段）
-        state["custom_character_day_anchor"] = "company"
-        day_now = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)
-        svc._session_now = lambda session_id="": day_now
-        self.assertTrue(svc._update_character_place_from_text(sid, "还在公司加班"))
-        self.assertEqual(state["character_place"], "company")
+        """主妇/自由职业角色随口提"上班/公司"不应被自动钉到公司（仍回落时钟动线）。"""
+        async def run():
+            svc = self.make_service()
+            svc.config.update({"image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "https://x"})
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 6, 18, 23, 30, tzinfo=timezone.utc)  # 工作日深夜
+            svc._session_now = lambda session_id="": fixed_now
+            state = svc._get_session_state(sid)
+            state["custom_character_age_stage"] = "adult"
+            state["custom_character_day_anchor"] = "home"  # 无固定职场
+            # LLM 返回 company 但身份不符 → 不钉位
+            svc._call_llm = AsyncMock(return_value='{"place":"company"}')
+            self.assertFalse(await svc._update_character_place_from_text(sid, "今天上班累死了，刚到公司楼下"))
+            self.assertEqual(state.get("character_place", ""), "")
+            # 深夜动线仍回落到家，而不是公司（商务中心）
+            self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "home")
+            # 对照：上班族角色提到公司则可被钉位（办公时段）
+            state["custom_character_day_anchor"] = "company"
+            day_now = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)
+            svc._session_now = lambda session_id="": day_now
+            self.assertTrue(await svc._update_character_place_from_text(sid, "还在公司加班"))
+            self.assertEqual(state["character_place"], "company")
+        asyncio.run(run())
 
     def test_autoextract_anchor_pin_does_not_persist_into_night(self):
         """上班族傍晚被自动钉到公司，深夜应回落到家，而非整夜停在公司。"""
-        svc = self.make_service()
-        sid = "telegram:123"
-        state = svc._get_session_state(sid)
-        state["custom_character_age_stage"] = "adult"
-        state["custom_character_day_anchor"] = "company"
-        # 傍晚办公时段：自动抽取钉到公司，且当下覆盖时钟生效
-        evening = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)
-        svc._session_now = lambda session_id="": evening
-        self.assertTrue(svc._update_character_place_from_text(sid, "还在公司"))
-        self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "company")
-        # 同一条持久位置仍在 TTL 内，但到了深夜（时钟判家），低置信锚定职场不再覆盖时钟
-        night = datetime(2026, 6, 18, 23, 30, tzinfo=timezone.utc)
-        svc._session_now = lambda session_id="": night
-        self.assertEqual(state["character_place"], "company")  # 持久字段未清，仍新鲜
-        self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "home")
+        async def run():
+            svc = self.make_service()
+            svc.config.update({"image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "https://x"})
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            state["custom_character_age_stage"] = "adult"
+            state["custom_character_day_anchor"] = "company"
+            # 傍晚办公时段：自动抽取钉到公司，且当下覆盖时钟生效
+            evening = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)
+            svc._session_now = lambda session_id="": evening
+            svc._call_llm = AsyncMock(return_value='{"place":"company"}')
+            self.assertTrue(await svc._update_character_place_from_text(sid, "还在公司"))
+            self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "company")
+            # 同一条持久位置仍在 TTL 内，但到了深夜（时钟判家），低置信锚定职场不再覆盖时钟
+            night = datetime(2026, 6, 18, 23, 30, tzinfo=timezone.utc)
+            svc._session_now = lambda session_id="": night
+            self.assertEqual(state["character_place"], "company")  # 持久字段未清，仍新鲜
+            self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "home")
+        asyncio.run(run())
 
     def test_tool_anchor_pin_respected_even_at_night(self):
         """显式 tool_update_location（0.95）声明在公司，深夜也尊重剧情、不被时段规则压回家。"""
@@ -1718,7 +1734,7 @@ class ServiceTestCase(unittest.TestCase):
             self.assertIn("自拍物理规则", planner_system_prompt)
             self.assertIn("当前世界状态", planner_system_prompt)
             self.assertIn("用户位置/空间关系判断", planner_system_prompt)
-            # 有活跃对话时，动线只作背景，对话已确立的地点优先（防止配图把角色按现实时段“传送”）。
+            # 有活跃对话时，动线只作背景，对话已确立的地点优先（防止配图把角色按现实时段"传送"）。
             self.assertIn("对话场景优先级最高", planner_system_prompt)
             self.assertNotIn("应当遵守，角色不要无理由瞬移", planner_system_prompt)
             self.assertIn("季节与自然光", planner_system_prompt)
@@ -2601,7 +2617,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertNotIn("male", neg.lower())
 
     def test_build_prompt_device_in_frame_keeps_selfie_and_phone(self):
-        # 用户明确要“做爱时对镜自拍/录像”：device_in_frame=True 应保留自拍/对镜取景与设备，不强制清掉。
+        # 用户明确要"做爱时对镜自拍/录像"：device_in_frame=True 应保留自拍/对镜取景与设备，不强制清掉。
         svc = self.make_service()
         sid = "telegram:1"
         state = svc._get_session_state(sid)
