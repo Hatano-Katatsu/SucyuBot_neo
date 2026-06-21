@@ -261,7 +261,10 @@ def build_world_route_preview(service, session_id: str, weather: Any = None) -> 
     for index, hour in enumerate(WORLD_TIMELINE_HOURS):
         slot_now = now.replace(hour=hour, minute=0, second=0, microsecond=0)
         next_hour = WORLD_TIMELINE_HOURS[index + 1] if index + 1 < len(WORLD_TIMELINE_HOURS) else 24
-        item = serialize_world_state(service.build_world_state(session_id, weather=weather, now=slot_now, mode="chat"))
+        # 时间线是"按钟点预测一整天动线"，应是纯时钟+职业动线；"此刻"的持久位置只体现在上面的 current，
+        # 不能套到每个预测时段（否则一整天会被同一个 pin 钉成同一个地点）。
+        item = serialize_world_state(service.build_world_state(
+            session_id, weather=weather, now=slot_now, mode="chat", apply_persisted_place=False))
         item["slot_label"] = f"{hour:02d}:00"
         item["is_current_slot"] = hour <= now.hour < next_hour
         timeline.append(item)

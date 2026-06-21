@@ -783,6 +783,82 @@ class ServiceTestCase(unittest.TestCase):
         for gated in ("company", "school", "factory"):
             self.assertNotIn(gated, keys)
 
+    def test_autoextract_skips_anchor_place_mismatching_identity(self):
+        """主妇/自由职业角色随口提“上班/公司”不应被自动钉到公司（仍回落时钟动线）。"""
+        svc = self.make_service()
+        sid = "telegram:123"
+        fixed_now = datetime(2026, 6, 18, 23, 30, tzinfo=timezone.utc)  # 工作日深夜
+        svc._session_now = lambda session_id="": fixed_now
+        state = svc._get_session_state(sid)
+        state["custom_character_age_stage"] = "adult"
+        state["custom_character_day_anchor"] = "home"  # 无固定职场
+        # 角色回复里提到“公司/上班”——身份不符，不钉位
+        self.assertFalse(svc._update_character_place_from_text(sid, "今天上班累死了，刚到公司楼下"))
+        self.assertEqual(state.get("character_place", ""), "")
+        # 深夜动线仍回落到家，而不是公司（商务中心）
+        self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "home")
+        # 对照：上班族角色提到公司则可被钉位（办公时段）
+        state["custom_character_day_anchor"] = "company"
+        day_now = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)
+        svc._session_now = lambda session_id="": day_now
+        self.assertTrue(svc._update_character_place_from_text(sid, "还在公司加班"))
+        self.assertEqual(state["character_place"], "company")
+
+    def test_autoextract_anchor_pin_does_not_persist_into_night(self):
+        """上班族傍晚被自动钉到公司，深夜应回落到家，而非整夜停在公司。"""
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        state["custom_character_age_stage"] = "adult"
+        state["custom_character_day_anchor"] = "company"
+        # 傍晚办公时段：自动抽取钉到公司，且当下覆盖时钟生效
+        evening = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)
+        svc._session_now = lambda session_id="": evening
+        self.assertTrue(svc._update_character_place_from_text(sid, "还在公司"))
+        self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "company")
+        # 同一条持久位置仍在 TTL 内，但到了深夜（时钟判家），低置信锚定职场不再覆盖时钟
+        night = datetime(2026, 6, 18, 23, 30, tzinfo=timezone.utc)
+        svc._session_now = lambda session_id="": night
+        self.assertEqual(state["character_place"], "company")  # 持久字段未清，仍新鲜
+        self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "home")
+
+    def test_tool_anchor_pin_respected_even_at_night(self):
+        """显式 tool_update_location（0.95）声明在公司，深夜也尊重剧情、不被时段规则压回家。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            state["custom_character_age_stage"] = "adult"
+            state["custom_character_day_anchor"] = "company"
+            night = datetime(2026, 6, 18, 23, 30, tzinfo=timezone.utc)
+            svc._session_now = lambda session_id="": night
+            await svc.tool_update_location(sid, "公司")
+            self.assertEqual(state["character_place_confidence"], 0.95)
+            self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "company")
+
+        asyncio.run(run())
+
+    def test_persisted_place_not_applied_to_forecast_hours(self):
+        """持久 pin 是'此刻'的位置，按指定钟点预测一整天时不应套用，否则整天被钉成同一地点。"""
+        svc = self.make_service()
+        sid = "telegram:123"
+        day = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)  # 工作日办公时段
+        svc._session_now = lambda session_id="": day
+        state = svc._get_session_state(sid)
+        state["custom_character_age_stage"] = "adult"
+        state["custom_character_day_anchor"] = "company"
+        # 工具显式钉到咖啡店（高置信，正常应覆盖此刻时钟）
+        svc._set_character_place(sid, "cafe", "楼下咖啡店", 0.95)
+        # 此刻：采用持久 pin
+        self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "cafe")
+        # 预测深夜：apply_persisted_place=False → 回落纯时钟动线（家），而不是被 pin 钉成咖啡店
+        night = day.replace(hour=23)
+        forecast = svc.build_world_state(sid, weather=None, now=night, apply_persisted_place=False)
+        self.assertEqual(forecast["character_place"]["key"], "home")
+        # 预测办公时段：同样走纯职业动线（公司），不受 pin 影响
+        work = svc.build_world_state(sid, weather=None, now=day, apply_persisted_place=False)
+        self.assertEqual(work["character_place"]["key"], "company")
+
     def test_ensure_life_profile_infers_and_caches_from_persona(self):
         async def run():
             svc = self.make_service()

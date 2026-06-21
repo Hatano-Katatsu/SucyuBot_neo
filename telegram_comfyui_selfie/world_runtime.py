@@ -375,6 +375,25 @@ class WorldRuntimeMixin:
             anchor = anchor or self._normalize_day_anchor(cached.get("day_anchor"))
         return {"age_stage": age or "unknown", "day_anchor": anchor or "unknown"}
 
+    @staticmethod
+    def _resolve_day_anchor(profile: dict[str, str] | None) -> str:
+        """归一出角色实际的白天职场锚点。未成年即便被判成上班族也按在校学生处理。"""
+        profile = profile or {}
+        anchor = profile.get("day_anchor") or "unknown"
+        age = profile.get("age_stage") or "unknown"
+        if age == "minor" and anchor == "company":
+            anchor = "school"
+        return anchor
+
+    def _profile_allowed_anchor_places(self, profile: dict[str, str] | None) -> set[str]:
+        """角色按职业身份可以出现的身份锚定职场集合（公司/学校/工厂/田/工地）。
+
+        无固定职场（主妇/自由职业/非人类设定）返回空集——这类角色不该出现在任何锚定职场。
+        """
+        anchor = self._resolve_day_anchor(profile)
+        spec = OCCUPATION_ANCHORS.get(anchor) or OCCUPATION_ANCHORS["home"]
+        return {key for key in spec["places"] if key in ANCHOR_ONLY_PLACES}
+
     def _apply_life_profile_to_scores(self, scores: dict[str, float], profile: dict[str, str] | None):
         """按角色职业重定向“白天工作时段”权重，并屏蔽身份不符的锚定职场。
 
@@ -384,12 +403,7 @@ class WorldRuntimeMixin:
           这样成年上班族不会出现在学校、未成年不会出现在公司、路人不会出现在车间或工地。
         - 无固定职场（主妇/自由职业/魅魔等设定或无法判断）时，把工作权重转到居家与休闲。
         """
-        profile = profile or {}
-        anchor = profile.get("day_anchor") or "unknown"
-        age = profile.get("age_stage") or "unknown"
-        # 未成年绝不出现在公司：即便职业被判成上班族，也按在校学生处理。
-        if age == "minor" and anchor == "company":
-            anchor = "school"
+        anchor = self._resolve_day_anchor(profile)
         work_weight = sum(scores.get(key, 0.0) for key in WORK_SIGNAL_PLACES)
         for key in ANCHOR_ONLY_PLACES:
             scores[key] = 0.0
@@ -587,6 +601,12 @@ class WorldRuntimeMixin:
         key, matched = self._infer_user_place(text)
         if not key:
             return False
+        # 锚定职场（公司/学校/工厂/田/工地）只在与角色职业身份相符时才自动钉位：
+        # 避免主妇/自由职业/非人类设定的角色随口提一句“上班/公司”就被钉到办公室，
+        # 在 TTL 内连深夜都回不到家。模型显式声明换地点走 tool_update_location（0.95），不受此限。
+        if key in ANCHOR_ONLY_PLACES and key not in self._profile_allowed_anchor_places(self._life_profile(session_id)):
+            logger.debug("skip auto-pin anchor place %s: 与角色职业身份不符", key)
+            return False
         return self._set_character_place(session_id, key, matched or (text or ""), 0.8)
 
     async def tool_update_location(self, session_id: str, place: str = "") -> str:
@@ -695,6 +715,7 @@ class WorldRuntimeMixin:
         weather: Any = None,
         now: datetime | None = None,
         mode: str = "chat",
+        apply_persisted_place: bool = True,
     ) -> dict[str, Any]:
         if not self._world_runtime_enabled():
             return {}
@@ -712,7 +733,17 @@ class WorldRuntimeMixin:
             candidates = [self._top_place_candidates(city, {"home": 1}, count=1)[0]]
         character_place = candidates[0]
         # 对话/工具确立的角色位置在新鲜期内优先于时钟推断（跨上下文重置、推送/生图都据此保持连续）。
-        persisted = self._active_character_place(state)
+        # apply_persisted_place=False 用于"按指定钟点预测一整天动线"的场景（如 WebUI 时间线）：
+        # 持久 pin 是"此刻"的位置，新鲜度按真实墙钟判定，与传入的 now 无关；若对每个预测时段都套用，
+        # 会把一整天都钉成同一个地点。预测应是纯时钟+职业动线，只有"此刻"才采用持久 pin。
+        persisted = self._active_character_place(state) if apply_persisted_place else None
+        if persisted:
+            pkey = persisted["key"]
+            conf = float(state.get("character_place_confidence", 0) or 0)
+            # 低置信（自动抽取 0.8）钉到锚定职场时，仅在该场所时段合理（时钟+职业评分>0）才覆盖时钟，
+            # 否则傍晚提一句“上班”会让角色深夜仍停在公司/学校。显式工具声明（0.95）尊重剧情、不受此限。
+            if pkey in ANCHOR_ONLY_PLACES and conf < 0.9 and scores.get(pkey, 0.0) <= 0:
+                persisted = None
         if persisted:
             pinned = self._top_place_candidates(city, {persisted["key"]: 1}, count=1)
             if pinned:
