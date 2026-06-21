@@ -203,3 +203,34 @@ python -m unittest tests.test_core -v
 ```
 
 如果只改文档或 WebUI 文案，可以不跑完整测试，但要在最终回复里说明未运行测试的原因。
+
+## 设计评估与改进路线（2026-06-21 评审）
+
+> 一次代码评审的结论，供接手者判断改造优先级。总判断：本项目的**设计判断力**（什么该拆、什么该单源、什么不该记）明显高于其**代码形态**（无类型巨型字典、巨型文件、正则堆）。不缺好品味，缺的是把好品味落实成类型和结构的那层约束。
+
+### 逐模块评分（A 优秀 / B 良好 / C 能用但有隐患）
+
+- **`memory.py` — A**：全项目最干净的模块，唯一老实写成独立类（非 mixin）。SQLite 复合索引、软删除、插入去重、`character` 隔离、`hit_count` 反馈都是经过思考的决策。弱点：记忆只增不减（无淘汰机制，`importance/hit_count` 只用于排序不用于驱逐，久了 `LIMIT 300` 会截断真正该召回的）；关键词 n-gram 检索有天花板。
+- **`memory_policy.py` — A-**：「LLM 提炼 + 代码正则双重守门」是防御纵深的正解，"长期记忆不是第二套人设系统"想得很清楚。弱点：守门靠三组中文正则（`STABLE/TRANSIENT/STRUCTURED_CUE`），加语义就得动正则，对换说法无能为力。
+- **`generation.py`（PromptSlots）— B+**：用 `dataclass` 把提示词槽位化、`render_positive()` 单一来源，是把字符串拼接工程化的正解。弱点：1039 行干了至少四件事（槽位定义 + 旧前缀解析 + 清理迁移工具 + ComfyUI 工作流构建提交 + 性别推断）；槽位仍是逗号 tag 字符串，未真正结构化。
+- **`image_planning.py` — B**：「LLM 主判（`is_intimate/partner_in_frame/device_in_frame`）+ 中文关键词确定性兜底」是成熟范式。弱点：`INTIMATE_CONTEXT_ZH`/`DEVICE_CONTEXT_ZH` 手写 frozenset 是维护黑洞，且亲密判断逻辑在 planner 与 `generation.py` 两处重复。
+- **`chat_context.py` — B-**：复杂度的汇流口。`handle_chat` 长流程方法、满屏就地 `state[...]=` 变更、意图识别一堆大正则。全项目最难测、最难改之处（耦合短期上下文/长期记忆/世界动线/生图）。
+- **`service.py` — C+**：mixin 模式攒到天花板。1743 行上帝对象，mixin 间靠 `self` 互调 + `hasattr` 防御、无接口契约；`VISUAL_IDENTITY_OVERRIDES` 硬编码映射表不可扩展；状态全挤在一个 `__init__`。
+- **`telegram_io.py` — A-**：小而美，单一职责，153 行一目了然。唯一刺：`create_task` fire-and-forget 吞异常（全项目通病）。
+- **`webui.py` — B-**：REST 规整、密钥掩码到位，但**零鉴权**且能启停整个服务（默认仅绑 127.0.0.1 兜底）。
+- **`world_runtime.py` / `scheduler_runtime.py` — B**：位置漂移的「带 TTL 权威字段 + 读时组装 + prompt 解耦」三步闭环是教科书级正确解，最能体现成长。代价是文件偏大、启发式偏多。
+
+### 三个贯穿全局的系统性问题（比单模块更重要）
+
+1. **无类型的 `state: dict[str, Any]` 是万恶之源**。几十个字段靠字符串 key 散落各处，AGENTS.md 里反复出现的「字段焊死/漂移/串味」bug 根因都在此——没有一处能看全所有字段及语义。
+2. **正则被当 NLU 用**。意图识别、位置抽取、亲密/设备判断、人设清洗全是大正则，每个都是维护债，且天生处理不了换说法。
+3. **mixin 上帝对象到顶**。再加功能只能继续往 `self` 上挂，耦合只增不减。
+
+### 改进优先级（按 ROI 排序）
+
+1. **【最高】给 session state 上强类型模型**（dataclass/pydantic）：一次重构消灭一整类历史漂移 bug，把原则从「写在 AGENTS.md 靠人遵守」变成「写在类型里靠工具遵守」。
+2. **【高】补 CI + 给 fire-and-forget 任务统一加异常 supervise**（如 `_supervised_task` + `add_done_callback`）：近乎零成本，立刻提升可靠性与可调试性，根治「生图失败要翻 service.log」。
+3. **【高】WebUI 加最小鉴权**（本地 token/密码，或拒绝非 loopback 绑定）：安全洞，工作量小。
+4. **【中】拆 `generation.py`（构建 vs ComfyUI 提交）+ 槽位结构化**（scene 拆 `props/forbidden/pose`，规则用代码强制而非散文叮嘱）：与「下一阶段目标」一致。
+5. **【中】关键词表集中化 + 身份映射表外部化**（移到 `heuristics.py` 或数据文件，两处引用同一份）：治维护债与重复真相来源。
+6. **【低/长期】mixin → 组合**（显式协作对象替代 `self` 互调）、**记忆检索上 BM25 或可选 embedding + 记忆淘汰机制**：架构性演进，不急。
