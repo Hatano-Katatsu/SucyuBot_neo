@@ -1069,6 +1069,7 @@ class CommandHandlersMixin:
                 state["purity"] = data.get("purity")
             if switching:
                 self._clear_conversation_context(state)  # 换角色：避免上一个角色的对话/画面串味
+                state["dynamic_appearance"] = ""  # 不继承上一个角色的临时穿搭
             state.pop("life_profile", None)
             self._save_session_state(session_id, state)
             self._ulog(session_id, "SWITCH", f"载入角色 {sub_arg}" + ("（已清空对话上下文）" if switching else ""))
@@ -1117,6 +1118,7 @@ class CommandHandlersMixin:
             state["custom_bot_name"] = name
             if switching:
                 state["custom_bot_self_name"] = ""
+                state["dynamic_appearance"] = ""  # 既有角色不继承上一个角色/默认的临时穿搭，初始服装交给画面规划器按场景决定
             state["custom_visual_character"] = result.get("prompt_name") or result.get("visual_name") or result.get("image_name") or ""
             state["custom_visual_series"] = result.get("prompt_series") or result.get("visual_series") or result.get("image_series") or ""
             state["custom_scheduled_persona"] = result.get("persona", "")

@@ -160,7 +160,7 @@ async def plan_roleplay_image(
     weekday = WEEKDAY_NAMES[now.weekday()]
     safety = service._get_effective_safety(session_id)
     purity = service._get_purity(session_id)
-    dynamic = state.get("dynamic_appearance") or service.config.get("dynamic_appearance", "")
+    dynamic = service._effective_dynamic_appearance(session_id) if hasattr(service, "_effective_dynamic_appearance") else (state.get("dynamic_appearance") or service.config.get("dynamic_appearance", ""))
     prompt_prefs = service._prompt_scene_preferences(session_id) if hasattr(service, "_prompt_scene_preferences") else {}
     quirk = service._get_session_cfg(session_id, "character_quirk_rule", "")
     spatial = service._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])

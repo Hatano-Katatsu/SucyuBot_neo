@@ -79,7 +79,7 @@ class SchedulerRuntimeMixin:
         spatial_hint = f"默认物理空间设定（{spatial}）" if str(spatial).strip() else "默认无固定空间设定"
         state = self._get_session_state(session_id)
         role_name, bot_name, bot_self_name = self._session_role_identity(session_id)
-        dynamic = state.get("dynamic_appearance") or self.config.get("dynamic_appearance", "")
+        dynamic = self._effective_dynamic_appearance(session_id)
         prompt_prefs = self._prompt_scene_preferences(session_id) if hasattr(self, "_prompt_scene_preferences") else {}
         purity = self._get_purity(session_id)
         safety = self._get_effective_safety(session_id)

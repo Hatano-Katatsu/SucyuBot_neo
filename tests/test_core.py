@@ -201,6 +201,22 @@ class ServiceTestCase(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_set_character_does_not_inherit_default_outfit(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        svc.config["dynamic_appearance"] = "black silk slip dress, black lace bra"  # 默认魅魔穿搭
+        state = svc._get_session_state(sid)
+        # 默认角色（未设角色）：用全局默认穿搭
+        self.assertIn("black silk slip dress", svc._effective_dynamic_appearance(sid))
+        # 设了既有角色且自己没穿搭：不回退默认穿搭（避免串到东云绘名身上）
+        state["custom_character"] = "东云绘名"
+        state["dynamic_appearance"] = ""
+        self.assertEqual(svc._effective_dynamic_appearance(sid), "")
+        self.assertNotIn("black silk slip dress", svc._get_effective_persona(sid))
+        # 角色有自己的临时穿搭时照常用
+        state["dynamic_appearance"] = "school uniform"
+        self.assertEqual(svc._effective_dynamic_appearance(sid), "school uniform")
+
     def test_prompt_intake_splits_natural_oc_profile(self):
         intake = heuristic_intake("小雨，大学生，金发蓝眼，低马尾，穿宽松白毛衣，和用户是同城暧昧对象，住在上海")
 

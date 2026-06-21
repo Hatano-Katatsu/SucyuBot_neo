@@ -603,8 +603,20 @@ class TelegramComfyUIService(
         if not base:
             # 兜底：角色态但人设被清空（半重置残留）时回退全局默认，绝不返回空人设。
             base = self.config.get("scheduled_persona") or DEFAULT_CONFIG["scheduled_persona"]
-        additional = state.get("dynamic_appearance") or self.config.get("dynamic_appearance", "")
+        additional = self._effective_dynamic_appearance(session_id)
         return f"{base}\n\n[当前附加人设/短期穿搭与配饰: {additional}]" if additional else base
+
+    def _effective_dynamic_appearance(self, session_id: str = "") -> str:
+        """当前临时穿搭。全局默认 dynamic_appearance 只属于默认角色（魅魔）；
+        一旦设了角色（OC/既有），就不再回退全局默认，避免默认服装串到东云绘名这类角色身上——
+        既有角色没有自带初始穿搭时返回空，交给画面规划器按场景决定。"""
+        state = self._get_session_state(session_id) if session_id else {}
+        own = (state.get("dynamic_appearance") or "").strip()
+        if own:
+            return own
+        if session_id and self._is_character_set(session_id):
+            return ""
+        return self.config.get("dynamic_appearance", "")
 
     def _allow_llm_change_appearance(self, session_id: str) -> bool:
         state = self._get_session_state(session_id)
@@ -1165,7 +1177,7 @@ class TelegramComfyUIService(
         if not effective:
             return ""
         state = self._get_session_state(session_id)
-        dynamic_slots = self._parse_appearance(state.get("dynamic_appearance", "") or self.config.get("dynamic_appearance", ""))
+        dynamic_slots = self._parse_appearance(self._effective_dynamic_appearance(session_id))
         slots = self._parse_appearance(effective)
         hair = self._clean_chat_visual_tags(slots.get("hair", []), limit=6)
         eyes = self._clean_chat_visual_tags(slots.get("eyes", []), limit=4)
