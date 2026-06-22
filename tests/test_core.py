@@ -15,6 +15,15 @@ from telegram_comfyui_selfie.prompt_intake import heuristic_intake
 from telegram_comfyui_selfie.webui import build_world_route_preview, cast_config_value, masked_config, serialize_prompt_slots, session_summary
 
 
+def make_mock_request(app, path, method="GET", admin=False, query=None):
+    from aiohttp import web
+    from aiohttp.test_utils import make_mocked_request
+    req = make_mocked_request(method, path, app=app, headers={"Content-Type": "application/json"})
+    if admin:
+        req["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+    return req
+
+
 class ServiceTestCase(unittest.TestCase):
     def make_service(self):
         tmp = tempfile.TemporaryDirectory()
@@ -66,13 +75,15 @@ class ServiceTestCase(unittest.TestCase):
             await svc.cmd_menu(1, "telegram:1", "")
 
             text = svc.send_message.await_args.args[1]
+            # 当前默认菜单是"高频指令"快捷版，面向已初始化用户；
+            # 初始化引导走 /初始化 命令，完整命令走 /完整菜单。
             self.assertIn("快速菜单", text)
-            self.assertIn("第一次使用", text)
-            self.assertIn("/初始化", text)
-            self.assertIn("/角色 <角色名>", text)
-            self.assertIn("/创建OC", text)
-            self.assertIn("/菜单 设置", text)
-            self.assertIn("/菜单 动线", text)
+            self.assertIn("/自拍", text)
+            self.assertIn("/角色", text)
+            self.assertIn("/修改角色", text)
+            self.assertIn("/记忆", text)
+            self.assertIn("/webui", text)
+            self.assertIn("/完整菜单", text)
 
         asyncio.run(run())
 
@@ -371,8 +382,8 @@ class ServiceTestCase(unittest.TestCase):
 
         self.assertEqual(info["old_pid"], os.getpid())
         self.assertEqual(info["helper_pid"], 4242)
-        saved = json.loads(svc.state_path.read_text(encoding="utf-8"))
-        self.assertEqual(saved["sessions"][sid]["custom_character"], "重启测试角色")
+        saved = svc.app_store.load_session_state(sid)
+        self.assertEqual(saved["custom_character"], "重启测试角色")
         self.assertTrue(svc._restart_requested)
         self.assertTrue(svc.prepare_process_restart()["already_requested"])
 
@@ -456,11 +467,11 @@ class ServiceTestCase(unittest.TestCase):
         self.assertNotIn("masterpiece", context)
         self.assertNotIn("best quality", context)
 
-        system = svc._build_chat_messages(sid, "你现在戴着什么？")[0]["content"]
-        self.assertIn("当前可见外型与配饰", system)
-        self.assertIn("用户问到外貌、穿搭、配饰或随身物时优先依据这里", system)
-        self.assertIn("silver-rimmed glasses", system)
-        self.assertIn("dual swords", system)
+        all_sys = "\n".join(m["content"] for m in svc._build_chat_messages(sid, "你现在戴着什么？") if m.get("role") == "system")
+        self.assertIn("当前可见外型与配饰", all_sys)
+        self.assertIn("用户问到外貌、穿搭、配饰或随身物时优先依据这里", all_sys)
+        self.assertIn("silver-rimmed glasses", all_sys)
+        self.assertIn("dual swords", all_sys)
 
     def test_webui_masks_secrets(self):
         svc = self.make_service()
@@ -579,8 +590,9 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("黑色吊带裙", context)
 
         messages = svc._build_chat_messages(sid, "今晚穿黑色吊带裙可以吗")
-        self.assertIn("长期记忆", messages[0]["content"])
-        self.assertIn("温柔安抚式回复", messages[0]["content"])
+        all_sys = "\n".join(m["content"] for m in messages if m.get("role") == "system")
+        self.assertIn("长期记忆", all_sys)
+        self.assertIn("温柔安抚式回复", all_sys)
 
     def test_long_memory_extraction_writes_structured_memory(self):
         async def run():
@@ -663,7 +675,7 @@ class ServiceTestCase(unittest.TestCase):
 
         self.assertTrue(svc._update_user_place_from_text(sid, "我在商场等你"))
         messages = svc._build_chat_messages(sid, "晚上在哪见？")
-        system = messages[0]["content"]
+        system = "\n".join(m["content"] for m in messages if m.get("role") == "system")
 
         self.assertIn("当前世界状态", system)
         self.assertIn("角色当前所在", system)
@@ -683,14 +695,14 @@ class ServiceTestCase(unittest.TestCase):
             {"role": "assistant", "content": "在家呢，刚到客厅"},
         ]
         state["short_context_start"] = 0
-        system = svc._build_chat_messages(sid, "那我现在过去")[0]["content"]
+        system = "\n".join(m["content"] for m in svc._build_chat_messages(sid, "那我现在过去") if m.get("role") == "system")
         self.assertIn("当前世界状态", system)
         self.assertNotIn("角色当前所在", system)
         self.assertNotIn("空间关系判断", system)
         self.assertIn("以对话为准", system)
         # 冷启动（无活跃历史）仍然钉时钟地点，供模型自然提及
         state["chat_history"] = []
-        cold = svc._build_chat_messages(sid, "你好")[0]["content"]
+        cold = "\n".join(m["content"] for m in svc._build_chat_messages(sid, "你好") if m.get("role") == "system")
         self.assertIn("角色当前所在", cold)
 
     def test_character_place_autoextract_overrides_clock(self):
@@ -955,6 +967,11 @@ class ServiceTestCase(unittest.TestCase):
         async def run():
             svc = self.make_service()
             svc.config["amap_api_key"] = "test-key"
+            # 清空模型 profile，使 has_llm_config("image") 返回 False，验证 basic 回落
+            svc.config["global_model_profiles"] = {}
+            svc.config["default_fast_model_profile"] = ""
+            svc.config["default_chat_model_profile"] = ""
+            svc.config["llm_api_key"] = ""
             svc._classify_city_region = AsyncMock(return_value="china")
             svc._fetch_amap_places = AsyncMock(return_value={})
             result = await svc._ensure_city_place_catalog("某无POI小城", force=True)
@@ -1319,9 +1336,10 @@ class ServiceTestCase(unittest.TestCase):
         ])
 
         messages = svc._build_chat_messages(sid, "继续说晚饭")
+        all_sys = "\n".join(m["content"] for m in messages if m.get("role") == "system")
         packed = "\n".join(m.get("content", "") for m in messages)
 
-        self.assertIn("短期注意规则", messages[0]["content"])
+        self.assertIn("短期注意规则", all_sys)
         self.assertIn("聊聊晚饭吃什么", packed)
         self.assertNotIn("卧室窗边", packed)
 
@@ -1729,7 +1747,7 @@ class ServiceTestCase(unittest.TestCase):
                 },
             },
         })
-        svc._write_state()
+        svc._save_session_state(sid, state)
 
         result = svc.cleanup_prompt_prefix_slots(apply=True)
 
@@ -1750,9 +1768,9 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(len(result["backup_paths"]), 2)
         for path in result["backup_paths"]:
             self.assertTrue(Path(path).exists())
-        saved_state = json.loads(svc.state_path.read_text(encoding="utf-8"))
-        self.assertEqual(saved_state["sessions"][sid]["custom_count"], "1boy")
-        self.assertEqual(saved_state["sessions"][sid]["custom_positive_prefix"], "short hair, blue eyes")
+        saved_state = svc.app_store.load_session_state(sid)
+        self.assertEqual(saved_state["custom_count"], "1boy")
+        self.assertEqual(saved_state["custom_positive_prefix"], "short hair, blue eyes")
 
     def test_image_planner_normalizes_second_person_scene_subject(self):
         scene = normalize_scene_visual_subject("\u4f60\u8212\u8212\u670d\u670d\u5730\u7a9d\u5728\u5ba2\u5385\u6c99\u53d1\u91cc")
@@ -2549,11 +2567,11 @@ class ServiceTestCase(unittest.TestCase):
         svc = self.make_service()
         sid = "telegram:1"
         # 默认不限制：系统提示里没有长度约束
-        sys_default = svc._build_chat_messages(sid, "你好")[0]["content"]
+        sys_default = "\n".join(m["content"] for m in svc._build_chat_messages(sid, "你好") if m.get("role") == "system")
         self.assertNotIn("回复长度", sys_default)
         # 设为简短后注入约束
         svc.config["chat_reply_length"] = "简短"
-        sys_short = svc._build_chat_messages(sid, "你好")[0]["content"]
+        sys_short = "\n".join(m["content"] for m in svc._build_chat_messages(sid, "你好") if m.get("role") == "system")
         self.assertIn("回复长度", sys_short)
         self.assertIn("1 到 2 句", sys_short)
         # 非法预设当作不限制
@@ -2743,6 +2761,10 @@ class ServiceTestCase(unittest.TestCase):
                 return {"choices": [{"message": {"content": "给你看~"}}]}
 
             svc._call_llm_messages = fake_msgs
+            # 预处理（life profile / location extract / long memory）会调 LLM，干扰计数；mock 掉。
+            svc._ensure_life_profile = AsyncMock(return_value={})
+            svc._update_character_place_from_text = AsyncMock()
+            svc._extract_long_term_memories = AsyncMock()
             svc.tool_generate_image = AsyncMock(return_value="图片已生成并发送")
             svc._judge_image_moment = AsyncMock(return_value={"intent": "x"})
             svc.send_message = AsyncMock(); svc.send_action = AsyncMock()
@@ -3025,3 +3047,502 @@ class ServiceTestCase(unittest.TestCase):
         self.assertNotIn("solo", pos_lower)
         self.assertIn("first-person pov", pos_lower)
         self.assertIn("partial male body visible", pos_lower)
+
+
+class CheckpointTrimTestCase(ServiceTestCase):
+    """TODO #9.4: checkpoint 裁剪测试 — 51+ messages 后 checkpoint，窗口 10 messages，不能 assistant 开头。"""
+
+    def test_checkpoint_trims_to_keep_and_never_starts_with_assistant(self):
+        async def run():
+            svc = self.make_service()
+            # _context_window_message_limit 最小值是 10（max(10, ...)），设 10 写 12 条触发 checkpoint
+            svc.config["context_window_message_limit"] = "10"
+            svc.config["checkpoint_keep_message_limit"] = "2"
+            svc.config["checkpoint_hard_limit_chars"] = "9999"
+            sid = "telegram:1"
+            key = svc._context_character_key(sid)
+            # 写入 12 条消息（user/assistant 交替，最后是 assistant）
+            messages = []
+            for i in range(6):
+                messages.append({"role": "user", "content": f"用户消息 {i}"})
+                messages.append({"role": "assistant", "content": f"角色回复 {i}"})
+            ids = svc.app_store.append_messages(sid, key, messages)
+            self.assertEqual(len(ids), 12)
+
+            # 手动跑 checkpoint（mock LLM 摘要，避免真实调用）
+            async def fake_summarize(session_id, previous, msgs):
+                return "CHECKPOINT SUMMARY"
+            svc._summarize_checkpoint = fake_summarize
+            svc._extract_long_term_memories_from_messages = AsyncMock()
+
+            await svc._run_context_checkpoint(sid, key, keep=2)
+
+            # chat_history 应被裁剪到 keep 条，且开头是 user（不是 assistant）
+            state = svc._get_session_state(sid)
+            history = state.get("chat_history", [])
+            self.assertLessEqual(len(history), 2)
+            if history:
+                self.assertEqual(history[0].get("role"), "user",
+                                 "裁剪后窗口不应从 assistant 半轮开始")
+            # checkpoint_summary 已写入
+            self.assertEqual(state.get("checkpoint_summary"), "CHECKPOINT SUMMARY")
+
+        asyncio.run(run())
+
+
+class DreamManualMemoryTestCase(ServiceTestCase):
+    """TODO #9.5: dream 记忆整理测试 — manual 记忆不被 update/delete。"""
+
+    def test_dream_memory_organize_skips_manual(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = "test-character"
+            # 写入一条 manual 记忆和一条自动记忆
+            svc.memory.add_memory(sid, "manual", "手动记忆-不应被改", character=key, importance=5, tags=["手动"], source="manual")
+            svc.memory.add_memory(sid, "preference", "自动记忆-可被整理", character=key, importance=3, tags=["auto"], source="chat")
+            memories = svc.memory.list_memories(sid, character=key, limit=10)
+            manual_id = next(m["id"] for m in memories if m.get("kind") == "manual")
+            auto_id = next(m["id"] for m in memories if m.get("kind") == "preference")
+
+            # mock LLM 返回 ops：尝试 delete manual 和 update auto
+            async def fake_call_llm(system, user, **kw):
+                return json.dumps({"ops": [
+                    {"op": "delete", "id": manual_id},
+                    {"op": "update", "id": manual_id, "summary": "被改了"},
+                    {"op": "update", "id": auto_id, "summary": "自动记忆已更新"},
+                ]})
+            svc._call_llm = fake_call_llm
+            svc.has_llm_config = lambda purpose, session_id="": True
+
+            await svc._organize_memories_after_dream(sid, key)
+
+            # manual 记忆应仍存在且内容不变
+            memories_after = svc.memory.list_memories(sid, character=key, limit=10)
+            manual_after = next((m for m in memories_after if m["id"] == manual_id), None)
+            self.assertIsNotNone(manual_after, "manual 记忆不应被删除")
+            self.assertEqual(manual_after.get("summary"), "手动记忆-不应被改",
+                             "manual 记忆不应被 update")
+            self.assertEqual(manual_after.get("kind"), "manual")
+
+        asyncio.run(run())
+
+
+class GitUpdatePermissionTestCase(ServiceTestCase):
+    """TODO #9: Git 更新权限测试 — 仅管理员可触发。"""
+
+    def test_is_admin_chat_uses_admin_chat_ids_first(self):
+        svc = self.make_service()
+        svc.config["admin_chat_ids"] = ["111", "222"]
+        svc.config["allowed_chat_ids"] = ["333"]
+        self.assertTrue(svc._is_admin_chat(111))
+        self.assertTrue(svc._is_admin_chat("222"))
+        self.assertFalse(svc._is_admin_chat(333))  # 在 allowed 但不在 admin
+
+    def test_is_admin_chat_falls_back_to_allowed_when_admin_empty(self):
+        svc = self.make_service()
+        svc.config["admin_chat_ids"] = []
+        svc.config["allowed_chat_ids"] = ["444"]
+        self.assertTrue(svc._is_admin_chat(444))  # 回退到 allowed
+        self.assertFalse(svc._is_admin_chat(999))
+
+    def test_git_proxy_env_converts_socks5_to_socks5h(self):
+        svc = self.make_service()
+        svc.config["telegram_proxy_enabled"] = True
+        svc.config["telegram_proxy_url"] = "socks5://127.0.0.1:7891"
+        env = svc._git_proxy_env()
+        self.assertEqual(env.get("ALL_PROXY"), "socks5h://127.0.0.1:7891")
+
+    def test_git_proxy_env_http_proxy(self):
+        svc = self.make_service()
+        svc.config["telegram_proxy_enabled"] = True
+        svc.config["telegram_proxy_url"] = "http://127.0.0.1:7890"
+        env = svc._git_proxy_env()
+        self.assertEqual(env.get("HTTP_PROXY"), "http://127.0.0.1:7890")
+        self.assertEqual(env.get("HTTPS_PROXY"), "http://127.0.0.1:7890")
+
+    def test_git_update_rejects_non_admin(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["admin_chat_ids"] = ["111"]
+            svc.send_message = AsyncMock()
+            await svc.cmd_git_update(999, "telegram:999", "")
+            msg = svc.send_message.await_args.args[1]
+            self.assertIn("无权限", msg)
+        asyncio.run(run())
+
+
+class ExternalProxyTestCase(ServiceTestCase):
+    """外部 POI 请求复用 Telegram 代理配置。"""
+
+    def test_external_http_proxy_disabled(self):
+        svc = self.make_service()
+        svc.config["telegram_proxy_enabled"] = False
+        proxy, connector = svc._external_http_proxy()
+        self.assertIsNone(proxy)
+        self.assertIsNone(connector)
+
+    def test_external_http_proxy_http(self):
+        svc = self.make_service()
+        svc.config["telegram_proxy_enabled"] = True
+        svc.config["telegram_proxy_url"] = "http://127.0.0.1:7890"
+        proxy, connector = svc._external_http_proxy()
+        self.assertEqual(proxy, "http://127.0.0.1:7890")
+        self.assertIsNone(connector)
+
+    def test_external_http_proxy_socks(self):
+        svc = self.make_service()
+        svc.config["telegram_proxy_enabled"] = True
+        svc.config["telegram_proxy_url"] = "socks5://127.0.0.1:7891"
+        try:
+            from aiohttp_socks import ProxyConnector
+        except ImportError:
+            self.skipTest("aiohttp_socks not installed")
+        proxy, connector = svc._external_http_proxy()
+        self.assertIsNone(proxy)
+        self.assertIsInstance(connector, ProxyConnector)
+
+
+class LLMUsageTestCase(ServiceTestCase):
+    """LLM usage 记录与看板接口测试。"""
+
+    def test_record_usage_from_response_with_cache_hit_tokens(self):
+        svc = self.make_service()
+        resolved = {
+            "profile_id": "deepseek",
+            "model": "deepseek-v4",
+            "api_key": "k",
+        }
+        data = {
+            "usage": {
+                "prompt_tokens": 1234,
+                "completion_tokens": 567,
+                "total_tokens": 1801,
+                "prompt_cache_hit_tokens": 1000,
+                "prompt_cache_miss_tokens": 234,
+            }
+        }
+        svc._record_llm_usage_from_response(data, resolved, tag="plan", purpose="image", session_id="telegram:1")
+        rows = svc.app_store.aggregate_llm_usage(after=0, group_by=("profile_id", "model", "purpose", "tag"))
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["profile_id"], "deepseek")
+        self.assertEqual(row["model"], "deepseek-v4")
+        self.assertEqual(row["purpose"], "image")
+        self.assertEqual(row["tag"], "plan")
+        self.assertEqual(row["requests"], 1)
+        self.assertEqual(row["prompt_tokens"], 1234)
+        self.assertEqual(row["completion_tokens"], 567)
+        self.assertEqual(row["cached_tokens"], 1000)
+        self.assertEqual(row["total_tokens"], 1801)
+
+    def test_record_usage_from_response_with_cached_tokens_fallback(self):
+        svc = self.make_service()
+        resolved = {"profile_id": "", "model": "gpt-4o", "api_key": "k"}
+        data = {
+            "usage": {
+                "prompt_tokens": 800,
+                "completion_tokens": 200,
+                "prompt_cached_tokens": 600,
+            }
+        }
+        svc._record_llm_usage_from_response(data, resolved, tag="chat", purpose="chat")
+        rows = svc.app_store.aggregate_llm_usage(after=0, group_by=("profile_id", "model", "purpose", "tag"))
+        row = next(r for r in rows if r["tag"] == "chat")
+        self.assertEqual(row["cached_tokens"], 600)
+        self.assertEqual(row["total_tokens"], 1000)
+
+    def test_record_usage_from_response_cache_miss_inference(self):
+        svc = self.make_service()
+        resolved = {"profile_id": "ds", "model": "deepseek-chat", "api_key": "k"}
+        data = {
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 100,
+                "prompt_cache_miss_tokens": 300,
+            }
+        }
+        svc._record_llm_usage_from_response(data, resolved, tag="translate", purpose="image")
+        rows = svc.app_store.aggregate_llm_usage(after=0, group_by=("profile_id", "model"))
+        row = rows[0]
+        self.assertEqual(row["cached_tokens"], 700)
+        self.assertEqual(row["prompt_tokens"], 1000)
+
+    def test_aggregate_usage_by_time_range(self):
+        svc = self.make_service()
+        now = time.time()
+        svc.app_store.record_llm_usage(profile_id="p1", model="m1", purpose="chat", tag="reply", prompt_tokens=100, completion_tokens=50, total_tokens=150)
+        svc.app_store.record_llm_usage(profile_id="p1", model="m1", purpose="chat", tag="reply", prompt_tokens=200, completion_tokens=100, total_tokens=300)
+        svc.app_store.record_llm_usage(profile_id="p2", model="m2", purpose="image", tag="plan", prompt_tokens=300, completion_tokens=50, total_tokens=350)
+        rows = svc.app_store.aggregate_llm_usage(after=now - 60, before=now + 60, group_by=("profile_id", "purpose"))
+        self.assertEqual(len(rows), 2)
+        p1 = next(r for r in rows if r["profile_id"] == "p1")
+        self.assertEqual(p1["requests"], 2)
+        self.assertEqual(p1["total_tokens"], 450)
+        p2 = next(r for r in rows if r["profile_id"] == "p2")
+        self.assertEqual(p2["requests"], 1)
+        self.assertEqual(p2["total_tokens"], 350)
+        # 过滤旧数据
+        old_rows = svc.app_store.aggregate_llm_usage(after=now + 10, before=now + 60)
+        self.assertEqual(old_rows, [])
+
+    def test_cache_hit_rate_calculation(self):
+        svc = self.make_service()
+        svc.app_store.record_llm_usage(profile_id="p", model="m", purpose="chat", tag="t", prompt_tokens=1000, cached_tokens=250, total_tokens=1200)
+        rows = svc.app_store.aggregate_llm_usage(after=0, group_by=("profile_id",))
+        self.assertEqual(rows[0]["cached_tokens"], 250)
+        self.assertEqual(rows[0]["prompt_tokens"], 1000)
+
+    def test_webui_llm_usage_requires_admin(self):
+        from aiohttp import web
+        from telegram_comfyui_selfie.webui import api_admin_llm_usage
+
+        async def run():
+            svc = self.make_service()
+            app = web.Application()
+            app["service"] = svc
+            req = make_mock_request(app, "/api/admin/llm-usage", method="GET")
+            # 非管理员请求应 403
+            with self.assertRaises(web.HTTPForbidden):
+                await api_admin_llm_usage(req)
+
+        asyncio.run(run())
+
+    def test_webui_llm_usage_returns_summary(self):
+        from aiohttp import web
+        from telegram_comfyui_selfie.webui import api_admin_llm_usage
+
+        async def run():
+            svc = self.make_service()
+            svc.app_store.record_llm_usage(profile_id="p", model="m", purpose="chat", tag="t", prompt_tokens=100, completion_tokens=50, cached_tokens=20, total_tokens=150)
+            app = web.Application()
+            app["service"] = svc
+            req = make_mock_request(app, "/api/admin/llm-usage", method="GET", admin=True)
+            resp = await api_admin_llm_usage(req)
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.text)
+            self.assertTrue(data.get("ok"))
+            summary = data.get("summary", {})
+            self.assertEqual(summary.get("requests"), 1)
+            self.assertEqual(summary.get("prompt_tokens"), 100)
+            self.assertEqual(summary.get("cached_tokens"), 20)
+            self.assertEqual(summary.get("cache_hit_rate"), 0.2)
+            groups = data.get("groups", [])
+            self.assertEqual(len(groups), 1)
+            self.assertEqual(groups[0].get("profile_id"), "p")
+
+        asyncio.run(run())
+
+
+class ModelProfileTestCase(ServiceTestCase):
+    """模型 profile 固定思考、去 kimi 等配置测试。"""
+
+    def test_default_profiles_contain_only_expected_models(self):
+        from telegram_comfyui_selfie.defaults import DEFAULT_CONFIG
+
+        profiles = DEFAULT_CONFIG["global_model_profiles"]
+        ids = set(profiles.keys())
+        self.assertEqual(ids, {"deepseek-pro", "deepseek-flash", "glm"})
+        for pid, profile in profiles.items():
+            self.assertTrue(profile.get("thinking_fixed"), f"{pid} 应声明 thinking_fixed")
+
+    def test_thinking_fixed_ignores_user_settings(self):
+        async def run():
+            svc = self.make_service()
+            # 默认 chat=deepseek-pro（固定开）、fast=deepseek-flash（固定关）
+            svc.app_store.update_user_model_settings(
+                "1", chat_profile_id="deepseek-pro", chat_thinking=False,
+                fast_profile_id="deepseek-flash", fast_thinking=True,
+            )
+            _, _, chat_thinking = svc._resolve_llm_profile("chat", "telegram:1")
+            _, _, fast_thinking = svc._resolve_llm_profile("image", "telegram:1")
+            self.assertTrue(chat_thinking, "deepseek-pro 思考固定开启，用户设置关闭应被忽略")
+            self.assertFalse(fast_thinking, "deepseek-flash 思考固定关闭，用户设置开启应被忽略")
+
+            # 切到 glm（固定关）
+            svc.app_store.update_user_model_settings("1", fast_profile_id="glm", fast_thinking=True)
+            _, _, glm_thinking = svc._resolve_llm_profile("image", "telegram:1")
+            self.assertFalse(glm_thinking, "glm 思考固定关闭")
+
+        asyncio.run(run())
+
+    def test_non_fixed_profile_allows_user_thinking_override(self):
+        async def run():
+            svc = self.make_service()
+            svc.app_store.upsert_model_profile("1", "custom", {
+                "name": "Custom", "base_url": "http://localhost/v1", "api_key": "k",
+                "model": "custom-model", "timeout": 120,
+            })
+            svc.app_store.update_user_model_settings("1", chat_profile_id="custom", chat_thinking=True)
+            _, _, thinking = svc._resolve_llm_profile("chat", "telegram:1")
+            self.assertTrue(thinking, "未声明 thinking_fixed 的自定义模型应允许用户覆盖思考开关")
+
+        asyncio.run(run())
+
+    def test_resolved_config_honors_fixed_thinking_for_glm(self):
+        async def run():
+            svc = self.make_service()
+            svc.app_store.update_user_model_settings("1", chat_profile_id="glm")
+            resolved = svc._resolved_llm_config("chat", "telegram:1")
+            self.assertFalse(resolved["thinking"])
+            self.assertEqual(resolved["thinking_control"], "param")
+
+        asyncio.run(run())
+
+
+class ConfigStoreTestCase(unittest.TestCase):
+    """config_store YAML 解析器测试。"""
+
+    def test_load_nested_model_profiles(self):
+        from telegram_comfyui_selfie.config_store import load_simple_yaml, flatten_config
+
+        yml = """
+models:
+  default_chat_model_profile: "deepseek-pro"
+  global_model_profiles:
+    deepseek-pro:
+      name: "DeepSeek V4 Pro"
+      api_key: "k"
+      base_url: "https://opencode.ai/zen/go/v1"
+      model: "deepseek-v4-pro"
+      timeout: 300
+      disable_thinking: false
+      thinking_fixed: true
+    glm:
+      name: "GLM 5.2"
+      api_key: "k"
+      base_url: "https://opencode.ai/zen/go/v1"
+      model: "glm-5.2"
+      timeout: 300
+      disable_thinking: true
+      thinking_fixed: true
+""".strip()
+        path = Path(self.make_temp_dir()) / "config.yml"
+        path.write_text(yml, encoding="utf-8")
+        flat = flatten_config(load_simple_yaml(path))
+        self.assertEqual(set(flat["global_model_profiles"].keys()), {"deepseek-pro", "glm"})
+        self.assertTrue(flat["global_model_profiles"]["deepseek-pro"]["thinking_fixed"])
+        self.assertTrue(flat["global_model_profiles"]["glm"]["disable_thinking"])
+
+    def test_yaml_roundtrip_preserves_nested_dicts_and_literal_blocks(self):
+        from telegram_comfyui_selfie.config_store import load_simple_yaml, flatten_config, dump_simple_yaml
+
+        yml = """
+role_defaults:
+  outfit_keywords: |
+    dress
+    shirt
+  current_style: "@00 gx4"
+models:
+  global_model_profiles:
+    glm:
+      name: "GLM 5.2"
+      disable_thinking: true
+""".strip()
+        base = Path(self.make_temp_dir())
+        path = base / "config.yml"
+        path.write_text(yml, encoding="utf-8")
+        loaded = load_simple_yaml(path)
+        dumped = dump_simple_yaml(flatten_config(loaded))
+        (base / "config2.yml").write_text(dumped, encoding="utf-8")
+        rt = load_simple_yaml(base / "config2.yml")
+        self.assertEqual(
+            flatten_config(loaded)["global_model_profiles"],
+            flatten_config(rt)["global_model_profiles"],
+        )
+        self.assertIn("\n", flatten_config(rt)["outfit_keywords"])
+
+    def make_temp_dir(self) -> str:
+        import tempfile
+        return tempfile.mkdtemp()
+
+
+class SessionStateMigrationTestCase(ServiceTestCase):
+    """state.json -> SQLite 迁移测试。"""
+
+    def test_state_json_migrates_to_sqlite_on_first_load(self):
+        import tempfile
+        import json as _json
+
+        tmp = Path(tempfile.mkdtemp())
+        config_path = tmp / "config.yml"
+        config_path.write_text("telegram:\n  telegram_bot_token: \"t\"\n", encoding="utf-8")
+        state_path = tmp / "state.json"
+
+        # 写一个旧版 state.json
+        old_state = {
+            "sessions": {
+                "telegram:42": {
+                    "custom_character": "迁移测试角色",
+                    "custom_bot_name": "迁移测试",
+                    "purity": 7,
+                    "sent_photos_history": [],
+                    "chat_history": [],
+                },
+            },
+            "city_place_catalogs": {
+                "shanghai": {
+                    "city": "上海",
+                    "updated_at": 1000,
+                    "places": {"home": ["家"]},
+                    "source": "test",
+                },
+            },
+        }
+        state_path.write_text(_json.dumps(old_state, ensure_ascii=False), encoding="utf-8")
+
+        svc = TelegramComfyUIService(config_path, state_path)
+
+        # 迁移后应从 SQLite 读取
+        self.assertEqual(svc.sessions["telegram:42"]["custom_character"], "迁移测试角色")
+        self.assertEqual(svc.sessions["telegram:42"]["purity"], 7)
+        self.assertEqual(svc.city_place_catalogs["shanghai"]["city"], "上海")
+
+        # SQLite 应有数据
+        self.assertTrue(svc.app_store.has_session_states())
+        sqlite_state = svc.app_store.load_session_state("telegram:42")
+        self.assertEqual(sqlite_state["custom_character"], "迁移测试角色")
+
+        # city_catalogs 也应在 SQLite
+        sqlite_catalog = svc.app_store.load_city_catalog("shanghai")
+        self.assertEqual(sqlite_catalog["city"], "上海")
+
+    def test_save_and_load_session_state_via_sqlite(self):
+        svc = self.make_service()
+        sid = "telegram:99"
+        state = svc._get_session_state(sid)
+        state["custom_character"] = "SQLite测试"
+        state["purity"] = 3
+        svc._save_session_state(sid, state)
+
+        # 重新加载
+        svc2 = TelegramComfyUIService(svc.config_path, svc.state_path)
+        loaded = svc2._get_session_state(sid)
+        self.assertEqual(loaded["custom_character"], "SQLite测试")
+        self.assertEqual(loaded["purity"], 3)
+
+    def test_delete_session_removes_from_sqlite(self):
+        svc = self.make_service()
+        sid = "telegram:77"
+        state = svc._get_session_state(sid)
+        state["custom_character"] = "待删除"
+        svc._save_session_state(sid, state)
+        self.assertIsNotNone(svc.app_store.load_session_state(sid))
+
+        svc.sessions.pop(sid, None)
+        svc.app_store.delete_session_state(sid)
+        self.assertIsNone(svc.app_store.load_session_state(sid))
+
+    def test_city_catalog_persists_to_sqlite(self):
+        svc = self.make_service()
+        svc._store_city_catalog("beijing", "北京", {"home": ["家"], "park": ["朝阳公园"]}, "test")
+        # 内存中有
+        self.assertEqual(svc.city_place_catalogs["beijing"]["city"], "北京")
+        # SQLite 中也有
+        catalog = svc.app_store.load_city_catalog("beijing")
+        self.assertEqual(catalog["city"], "北京")
+        self.assertEqual(catalog["places"]["park"], ["朝阳公园"])
+
+        # 重新加载
+        svc2 = TelegramComfyUIService(svc.config_path, svc.state_path)
+        self.assertEqual(svc2.city_place_catalogs["beijing"]["city"], "北京")

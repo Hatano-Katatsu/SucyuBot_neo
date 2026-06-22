@@ -59,7 +59,7 @@ class ChatContextMixin:
 
         self._save_session_state(session_id, state)
 
-        if not self.has_llm_config("chat"):
+        if not self.has_llm_config("chat", session_id):
             await self.send_message(chat_id, "聊天与角色扮演模型未配置，聊天和工具触发不可用。命令功能仍可使用。")
             return
 
@@ -67,7 +67,10 @@ class ChatContextMixin:
         reply = await self.run_roleplay_chat(chat_id, session_id, text)
         if reply:
             self._ulog(session_id, "BOT", reply)
-            await self.send_message(chat_id, reply)
+            split = str(self.config.get("chat_split_paragraphs", "true")).lower() in ("true", "1", "yes")
+            await self.send_message(chat_id, reply, split_paragraphs=split)
+        else:
+            await self.send_message(chat_id, "回复生成失败，请稍后重试。")
 
     async def run_roleplay_chat(self, chat_id: int | str, session_id: str, user_text: str) -> str:
         state = self._get_session_state(session_id)
@@ -87,9 +90,11 @@ class ChatContextMixin:
                 tag="chat",
                 purpose="chat",
                 temp=float(self._get_llm_value("chat", "temperature", "0.9")),
+                session_id=session_id,
             )
         except Exception as exc:
-            return f"LLM 请求失败: {exc}"
+            logger.warning("LLM request failed: %s", exc)
+            return ""
 
         assistant = result.get("choices", [{}])[0].get("message", {})
         content = (assistant.get("content") or "").strip()
@@ -110,7 +115,7 @@ class ChatContextMixin:
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call.get("id", "tool"),
-                        "content": "（系统提示：当前处于配图冷却期，本次不发图。请用文字自然回应，不要再请求配图，也不要在文字里描述照片。）",
+                        "content": "Skipped: image cooldown.",
                     })
                     continue
                 tool_result = await self._execute_tool_call(chat_id, session_id, call)
@@ -129,6 +134,7 @@ class ChatContextMixin:
                     tag="chat-final",
                     purpose="chat",
                     temp=float(self._get_llm_value("chat", "temperature", "0.9")),
+                    session_id=session_id,
                 )
                 final_msg = final.get("choices", [{}])[0].get("message", {})
                 content = (final_msg.get("content") or content or "").strip()
@@ -167,11 +173,18 @@ class ChatContextMixin:
             asyncio.create_task(_bg_extract())
 
         history = state.get("chat_history", [])
-        history.append({"role": "user", "content": user_text})
+        new_messages = [{"role": "user", "content": user_text}]
         if content:
-            history.append({"role": "assistant", "content": content})
-        state["chat_history"] = history[-50:]
+            new_messages.append({"role": "assistant", "content": content})
+        history.extend(new_messages)
+        try:
+            self.app_store.append_messages(session_id, self._context_character_key(session_id), new_messages)
+        except Exception:
+            logger.warning("chat message sqlite append failed", exc_info=True)
+        full_snapshot = list(history)
+        state["chat_history"] = self._trim_history_preserve_turns(history, self._context_window_message_limit())
         self._save_session_state(session_id, state)
+        self._queue_checkpoint_if_needed(session_id, full_snapshot)
         if judge_decision:
             self._ulog(session_id, "JUDGE", f"配图时机=发 intent={judge_decision.get('intent','')[:60]}")
             asyncio.create_task(self.tool_generate_image(
@@ -197,6 +210,24 @@ class ChatContextMixin:
         relationship = self._get_session_cfg(session_id, "spatial_relationship", "")
         rel_line = f"你和用户的关系: {str(relationship).strip()}。\n" if str(relationship).strip() else ""
 
+        # ── 静态前缀（变化极低频：角色切换/配置变更才动）──
+        # 放在 messages[0]，最大化 DeepSeek 服务端 prefix cache 命中率。
+        system_static = (
+            f"{persona}\n\n"
+            f"你当前扮演的角色是「{bot_name}」（{role_name}）。除非用户明确要求换角色，否则你就是「{bot_name}」，"
+            f"不要声称自己是其他角色或默认角色。对话中按角色习惯使用「{bot_self_name}」或自然第一人称作为自称，"
+            "不要不自然地反复报全名。\n"
+            f"{rel_line}"
+            "当用户明示或暗示想看你的样子、照片、穿着或当前场景时，应调用 generate_roleplay_image。"
+            "工具调用只需要描述这张图要回应的对话意图、情绪和必要元素；"
+            "最终画面会由生图辅助模型结合完整上下文整合。不要把工具名、函数调用或内部指令写进聊天文字。"
+            "\n换装持久化（重要）：当剧情里角色换上、脱下或更换了服装/配饰/发型时，必须调用 change_appearance 工具记录这次变化，"
+            "这样你会一直记得自己穿着什么、之后的配图也保持一致。不要只在文字里描述换装却不调用工具。"
+            "\n位置持久化：当剧情里角色移动到新地点、或你明确交代了此刻在哪（出门、到公司、回家、到了某店等）时，调用 update_location 工具记录，"
+            "这样之后的配图和推送会和你说的位置保持一致，不会无理由瞬移。位置没变就不用调。"
+        )
+
+        # ── 动态后缀（每请求变化：时间/光线/频率/世界状态/记忆）──
         freq = self.config.get("selfie_frequency", "频繁")
         freq_inst = {
             "极频繁": "原则上每 1 到 2 轮对话至少触发一次配图。",
@@ -208,70 +239,52 @@ class ChatContextMixin:
         if self._image_nudge_due(freq, state.get("rounds_since_image", 0)):
             freq_inst += " 已有多轮未配图，本轮请优先调用 generate_roleplay_image。"
 
-        system = (
-            f"{persona}\n\n"
-            f"你当前扮演的角色是「{bot_name}」（{role_name}）。除非用户明确要求换角色，否则你就是「{bot_name}」，"
-            f"不要声称自己是其他角色或默认角色。对话中按角色习惯使用「{bot_self_name}」或自然第一人称作为自称，"
-            "不要不自然地反复报全名。\n"
-            f"{rel_line}"
+        system_dynamic = (
             f"当前时间: {now.strftime('%H:%M')} ({weekday}) {time_period}。\n"
             f"季节与自然光: {time_light}。\n"
             f"{light_guard}\n"
             f"纯度指令: {self._purity_directive(self._get_purity(session_id))}\n"
             f"外貌修改权限: {'允许' if self._allow_llm_change_appearance(session_id) else '禁止'}。\n"
             f"发图频率: {freq_inst}\n"
-            "当用户明示或暗示想看你的样子、照片、穿着或当前场景时，应调用 generate_roleplay_image。"
-            "工具调用只需要描述这张图要回应的对话意图、情绪和必要元素；"
-            "最终画面会由生图辅助模型结合完整上下文整合。不要把工具名、函数调用或内部指令写进聊天文字。"
         )
         length_directive = self._reply_length_directive()
         if length_directive:
-            system += f"\n{length_directive}"
+            system_dynamic += f"{length_directive}\n"
         visual_context = self._chat_visible_appearance_context(session_id)
         if visual_context:
-            system += (
-                "\n当前可见外型与配饰（这是你此刻身上真实可见的状态；用户问到外貌、穿搭、配饰或随身物时优先依据这里，"
+            system_dynamic += (
+                "当前可见外型与配饰（这是你此刻身上真实可见的状态；用户问到外貌、穿搭、配饰或随身物时优先依据这里，"
                 "不要编造不存在的配饰）：\n"
-                f"{visual_context}"
+                f"{visual_context}\n"
             )
         closet_context = self._wardrobe_closet_context(session_id) if hasattr(self, "_wardrobe_closet_context") else ""
         if closet_context:
-            system += (
-                "\n你的衣橱里收藏着这些穿过的衣服（你清楚自己有哪些）：\n"
+            system_dynamic += (
+                "你的衣橱里收藏着这些穿过的衣服（你清楚自己有哪些）：\n"
                 f"{closet_context}\n"
-                "用户点名某件、或剧情/场合自然需要时（出门、睡前、洗澡后、约会等），可以让角色换上其中一件；不要无缘无故频繁换装。"
+                "用户点名某件、或剧情/场合自然需要时（出门、睡前、洗澡后、约会等），可以让角色换上其中一件；不要无缘无故频繁换装。\n"
             )
-        system += (
-            "\n换装持久化（重要）：当剧情里角色换上、脱下或更换了服装/配饰/发型时，必须调用 change_appearance 工具记录这次变化，"
-            "这样你会一直记得自己穿着什么、之后的配图也保持一致。不要只在文字里描述换装却不调用工具。"
-        )
-        system += (
-            "\n位置持久化：当剧情里角色移动到新地点、或你明确交代了此刻在哪（出门、到公司、回家、到了某店等）时，调用 update_location 工具记录，"
-            "这样之后的配图和推送会和你说的位置保持一致，不会无理由瞬移。位置没变就不用调。"
-        )
         # 对话进行中：对话已建立的场景优先，动线只作背景；只有冷启动/刚换场景才以动线引导，
-        # 避免角色随现实时间被算法“传送”（家→公园这类飘移）。对话态不钉死时钟地点（pin_location=False）。
-        active_dialog = bool(self._active_chat_history(state, self._short_context_history_limit()))
+        # 避免角色随现实时间被算法"传送"（家→公园这类飘移）。对话态不钉死时钟地点（pin_location=False）。
+        active_dialog = bool(self._active_chat_history(state, self._context_window_message_limit()))
         world_context = self._format_world_context(
             session_id, user_text, mode="chat", pin_location=not active_dialog
         )
         if world_context:
             if active_dialog:
-                system += (
-                    "\n\n"
-                    f"{world_context}\n"
+                system_dynamic += (
+                    f"\n{world_context}\n"
                     "以上是你的日常动线背景参考。当前正在进行的对话场景优先级最高："
                     "如果对话里你已经处在某个地点（在家、在车站、在仓库等），或刚说过自己在哪，就保持那个地点不变，"
                     "不要因为上面动线显示的时间点不同，就擅自把自己挪到别处。"
                     "只有在开启全新话题、对话出现明显时间跳跃、或需要交代你独自近况时，才依据动线更新所在地。"
-                    "无论如何不要无理由瞬移；与用户不在同一地点时，用消息、自拍、电话或约定见面推进。"
+                    "无论如何不要无理由瞬移；与用户不在同一地点时，用消息、自拍、电话或约定见面推进。\n"
                 )
             else:
-                system += (
-                    "\n\n"
-                    f"{world_context}\n"
-                    "聊天时可参考这个世界状态自然提及所在与去向（例如“我现在在公司”“等会儿要去逛商场”），但不要机械地报地点。"
-                    "不要让角色无理由瞬移；如果用户和角色不在同一地点，优先用消息、自拍、电话或约定见面推进。"
+                system_dynamic += (
+                    f"\n{world_context}\n"
+                    "聊天时可参考这个世界状态自然提及所在与去向（例如“我现在在公司”、“等会儿要去逛商场”），但不要机械地报地点。"
+                    "不要让角色无理由瞬移；如果用户和角色不在同一地点，优先用消息、自拍、电话或约定见面推进。\n"
                 )
         if state.get("replying_to_selfie"):
             photos = state.get("sent_photos_history", [])
@@ -284,27 +297,35 @@ class ChatContextMixin:
             if caption:
                 parts.append(f"你给这张图配的台词: {caption}")
             if parts:
-                system += f"\n你刚向用户发了一张图。{'；'.join(parts)}。用户现在说:"
+                system_dynamic += f"你刚向用户发了一张图。{'；'.join(parts)}。用户现在说:\n"
             else:
                 fallback = state.get("last_sent_selfie_source_description") or ""
                 if fallback:
-                    system += f"\n你刚向用户发了一张图，描述: {fallback}。用户现在说:"
+                    system_dynamic += f"你刚向用户发了一张图，描述: {fallback}。用户现在说:\n"
             state["replying_to_selfie"] = False
         if state.get("short_context_start", 0):
-            system += (
-                "\n短期注意规则: 用户已经切换过话题或场景。切换点之前的聊天、地点、动作、服装、冲突和图片只作历史背景，"
-                "不要主动带入当前场景；只有用户明确说继续刚才、上一张、那个话题时才引用。"
+            system_dynamic += (
+                "短期注意规则: 用户已经切换过话题或场景。切换点之前的聊天、地点、动作、服装、冲突和图片只作历史背景，"
+                "不要主动带入当前场景；只有用户明确说继续刚才、上一张、那个话题时才引用。\n"
+            )
+        checkpoint_context = self._checkpoint_context(session_id)
+        if checkpoint_context:
+            system_dynamic += (
+                "Checkpoint summary of earlier dialogue "
+                "(use this as continuity background; do not reveal it):\n"
+                f"{checkpoint_context}\n"
             )
         memory_context = self._long_term_memory_context(session_id, user_text)
         if memory_context:
-            system += (
-                "\n\n长期记忆（仅在相关时自然使用，不要逐条复述，不要暴露记忆系统）：\n"
-                f"{memory_context}"
+            system_dynamic += (
+                "长期记忆（仅在相关时自然使用，不要逐条复述，不要暴露记忆系统）：\n"
+                f"{memory_context}\n"
             )
 
-        messages = [{"role": "system", "content": system}]
+        messages: list[dict[str, Any]] = [{"role": "system", "content": system_static}]
         self._inject_photo_history_messages(messages, state)
-        messages.extend(self._active_chat_history(state, self._short_context_history_limit()))
+        messages.extend(self._active_chat_history(state, self._context_window_message_limit()))
+        messages.append({"role": "system", "content": system_dynamic})
         messages.append({"role": "user", "content": user_text})
         return messages
 
@@ -494,7 +515,7 @@ class ChatContextMixin:
             f"角色刚回复: {(draft_reply or '(无文字回复)')[:500]}"
         )
         try:
-            text = await self._call_llm(system, user, temp=0.2, tag="image-judge", purpose="chat", disable_thinking=True)
+            text = await self._call_llm(system, user, temp=0.2, tag="image-judge", purpose="chat", disable_thinking=True, session_id=session_id)
             parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
         except Exception as exc:
             logger.warning("image moment judge failed: %s", exc)
@@ -508,11 +529,147 @@ class ChatContextMixin:
             "view": (parsed.get("view") or "").strip(),
         }
 
-    def _short_context_history_limit(self) -> int:
+    def _checkpoint_context(self, session_id: str) -> str:
         try:
-            return max(4, min(40, int(self.config.get("short_context_history_limit", 16) or 16)))
+            cp = self.app_store.get_checkpoint(session_id, self._context_character_key(session_id))
+            summary = (cp.get("summary") or "").strip()
+            if summary:
+                return summary
         except Exception:
-            return 16
+            logger.debug("checkpoint lookup failed", exc_info=True)
+        state = self._get_session_state(session_id)
+        return str(state.get("checkpoint_summary") or "").strip()
+
+    def _context_character_key(self, session_id: str) -> str:
+        return self._memory_character(session_id) if hasattr(self, "_memory_character") else ""
+
+    def _context_window_message_limit(self) -> int:
+        try:
+            return max(10, int(self.config.get("context_window_message_limit", "50") or 50))
+        except Exception:
+            return 50
+
+    def _checkpoint_keep_message_limit(self) -> int:
+        try:
+            return max(2, int(self.config.get("checkpoint_keep_message_limit", "10") or 10))
+        except Exception:
+            return 10
+
+    @staticmethod
+    def _trim_history_preserve_turns(history: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+        if len(history) <= limit:
+            return list(history)
+        trimmed = list(history[-limit:])
+        while trimmed and trimmed[0].get("role") != "user":
+            trimmed.pop(0)
+        return trimmed or list(history[-limit:])
+
+    def _queue_checkpoint_if_needed(self, session_id: str, history_snapshot: list[dict[str, Any]] | None = None):
+        if not session_id:
+            return
+        key = self._context_character_key(session_id)
+        scope = f"{session_id}\n{key}"
+        task = getattr(self, "_checkpoint_tasks", {}).get(scope)
+        if task and not task.done():
+            return
+        limit = self._context_window_message_limit()
+        keep = self._checkpoint_keep_message_limit()
+        try:
+            checkpoint = self.app_store.get_checkpoint(session_id, key)
+            pending = self.app_store.list_messages(session_id, key, after_id=int(checkpoint.get("source_until_id") or 0))
+            msg_over = len(pending) > limit
+            char_over = not msg_over and sum(len(str(m.get("content") or "")) for m in pending) > 30000
+            if not msg_over and not char_over:
+                return
+        except Exception:
+            if not history_snapshot:
+                return
+            msg_over = len(history_snapshot) > limit
+            char_over = not msg_over and sum(len(str(m.get("content") or "")) for m in history_snapshot) > 30000
+            if not msg_over and not char_over:
+                return
+        self._checkpoint_tasks[scope] = asyncio.create_task(self._run_context_checkpoint(session_id, key, keep))
+
+    async def _run_context_checkpoint(self, session_id: str, character_key: str, keep: int):
+        try:
+            checkpoint = self.app_store.get_checkpoint(session_id, character_key)
+            pending = self.app_store.list_messages(session_id, character_key, after_id=int(checkpoint.get("source_until_id") or 0))
+            if len(pending) <= self._context_window_message_limit() and sum(len(str(m.get("content") or "")) for m in pending) <= 30000:
+                return
+            overflow = pending[:-keep]
+            if not overflow:
+                return
+            previous = checkpoint.get("summary") or ""
+            merged = await self._summarize_checkpoint(session_id, previous, overflow)
+            hard = self._checkpoint_hard_limit_chars()
+            if len(merged) > hard:
+                merged = merged[-hard:]
+            until_id = int(overflow[-1]["id"])
+            # Extract stable long-term memories from the overflow before committing checkpoint.
+            try:
+                await self._extract_long_term_memories_from_messages(session_id, overflow, source_type="checkpoint")
+            except Exception:
+                logger.warning("checkpoint memory extraction failed", exc_info=True)
+            self.app_store.upsert_checkpoint(session_id, character_key, merged, until_id)
+            state = self._get_session_state(session_id)
+            state["checkpoint_summary"] = merged
+            state["checkpoint_message_id"] = until_id
+            state["last_checkpoint_at"] = time.time()
+            # Trim only after the summary has been committed.
+            state["chat_history"] = self._trim_history_preserve_turns(state.get("chat_history", []), keep)
+            self._save_session_state(session_id, state)
+            self._ulog(session_id, "CHECKPOINT", f"until=#{until_id} chars={len(merged)}")
+        except Exception:
+            logger.warning("context checkpoint failed", exc_info=True)
+
+    def _checkpoint_hard_limit_chars(self) -> int:
+        try:
+            return max(500, int(self.config.get("checkpoint_hard_limit_chars", "3000") or 3000))
+        except Exception:
+            return 3000
+
+    async def _summarize_checkpoint(self, session_id: str, previous: str, messages: list[dict[str, Any]]) -> str:
+        soft = str(self.config.get("checkpoint_soft_limit_chars", "2000") or "2000")
+        dialog = self._format_store_messages(messages, limit_chars=18000)
+        if not self.has_llm_config("image", session_id):
+            if not self.has_llm_config("chat", session_id):
+                combined = (previous + "\n" if previous else "") + dialog
+                return combined[-int(soft):]
+            # 回退到 chat 模型
+            system = (
+                "You are a checkpoint summarizer for a long roleplay chat. Merge the existing checkpoint "
+                "and the overflowed dialogue into one continuous background summary. Keep relationships, "
+                "promises, unresolved events, important emotions, places, and confirmed facts. "
+                f"Soft limit: {soft} Chinese characters. Output only the summary text."
+            )
+            user = f"Existing checkpoint:\n{previous or 'none'}\n\nOverflow dialogue:\n{dialog}"
+            return await self._call_llm(system, user, temp=0.1, tag="checkpoint", purpose="chat", disable_thinking=True, session_id=session_id)
+        system = (
+            "You are a checkpoint summarizer for a long roleplay chat. Merge the existing checkpoint "
+            "and the overflowed dialogue into one continuous background summary. Keep relationships, "
+            "promises, unresolved events, important emotions, places, and confirmed facts. "
+            f"Soft limit: {soft} Chinese characters. Output only the summary text."
+        )
+        user = f"Existing checkpoint:\n{previous or 'none'}\n\nOverflow dialogue:\n{dialog}"
+        return await self._call_llm(system, user, temp=0.1, tag="checkpoint", purpose="image", disable_thinking=True, session_id=session_id)
+
+    @staticmethod
+    def _format_store_messages(messages: list[dict[str, Any]], limit_chars: int = 50000) -> str:
+        lines = []
+        for msg in messages:
+            role = msg.get("role") or ""
+            name = "User" if role == "user" else "Assistant" if role == "assistant" else role
+            content = str(msg.get("content") or "").strip()
+            if content:
+                lines.append(f"{name}: {content}")
+        text = "\n".join(lines)
+        return text[-limit_chars:] if len(text) > limit_chars else text
+
+    async def _extract_long_term_memories_from_messages(self, session_id: str, messages: list[dict[str, Any]], source_type: str = "checkpoint"):
+        if not messages or not hasattr(self, "_extract_long_term_memories"):
+            return
+        dialog = self._format_store_messages(messages, limit_chars=20000)
+        await self._extract_long_term_memories(session_id, f"[{source_type}]\n{dialog}", "")
 
     def _short_context_reset_reason(self, text: str, previous_interaction: float = 0) -> str:
         if SHORT_CONTEXT_RESET_RE.search(text or ""):

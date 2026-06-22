@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import re
 import time
@@ -126,6 +127,23 @@ class CommandHandlersMixin:
             "redo": "重答",
             "重新生成": "重答",
             "重新回答": "重答",
+            "fullmenu": "完整菜单",
+            "full": "完整菜单",
+            "完整菜单": "完整菜单",
+            "webpass": "web密码",
+            "web密码": "web密码",
+            "webui": "webui",
+            "model": "模型",
+            "models": "模型",
+            "模型": "模型",
+            "modify-character": "修改角色",
+            "modify_character": "修改角色",
+            "修改角色": "修改角色",
+            "update": "更新",
+            "git-update": "更新",
+            "gitupdate": "更新",
+            "git更新": "更新",
+            "更新": "更新",
         }
         command = aliases.get(command, command)
         handlers = {
@@ -162,6 +180,12 @@ class CommandHandlersMixin:
             "重答": self.cmd_regenerate,
             "调度": self.cmd_sched,
             "管理": self.cmd_management,
+            "完整菜单": self.cmd_full_menu,
+            "web密码": self.cmd_web_password,
+            "webui": self.cmd_webui,
+            "模型": self.cmd_model,
+            "修改角色": self.cmd_modify_character,
+            "更新": self.cmd_git_update,
         }
         handler = handlers.get(command)
         if not handler:
@@ -301,6 +325,153 @@ class CommandHandlersMixin:
         lines += [f"  {examples[m]}" for m in missing if m in examples]
         return "\n".join(lines)
 
+    async def cmd_full_menu(self, chat_id, session_id, arg):
+        sections = []
+        for key, body in MENU_TOPICS.items():
+            sections.append(f"## {key}\n{body}")
+        await self.send_message(chat_id, "Full menu\n\n" + "\n\n".join(sections))
+
+    async def cmd_web_password(self, chat_id, session_id, arg):
+        password = (arg or "").strip()
+        if not password:
+            await self.send_message(chat_id, "用法：/web密码 <密码>")
+            return
+        user_id = self._user_id_for_session(session_id)
+        info = self.app_store.set_web_password(user_id, password)
+        url = self._web_access_url(info["token"])
+        await self.send_message(
+            chat_id,
+            f"WebUI 密码已更新。\n账号：{user_id}\n密码：{password}\n持久免登录链接：{url}",
+        )
+
+    async def cmd_webui(self, chat_id, session_id, arg):
+        user_id = self._user_id_for_session(session_id)
+        token = self.app_store.get_or_create_web_token(user_id)
+        url = self._web_access_url(token)
+        password_hint = "可用 /web密码 <密码> 设置"
+        await self.send_message(
+            chat_id,
+            f"WebUI 访问方式\n账号：{user_id}\n密码：{password_hint}\n持久免登录链接：{url}",
+        )
+
+    def _web_access_url(self, token: str) -> str:
+        host = str(self.config.get("web_public_host") or self.config.get("web_host", "127.0.0.1") or "127.0.0.1")
+        if host in {"0.0.0.0", "::"}:
+            host = "127.0.0.1"
+        port = int(self.config.get("web_port", 8787) or 8787)
+        return f"http://{host}:{port}/?token={token}"
+
+    async def cmd_model(self, chat_id, session_id, arg):
+        text = (arg or "").strip()
+        user_id = self._user_id_for_session(session_id)
+        settings = self.app_store.get_user_model_settings(user_id)
+        profiles = {**self._global_model_profiles(), **self.app_store.list_model_profiles(user_id)}
+        if not text:
+            names = ", ".join(profiles.keys()) or "none"
+            chat_profile = settings.get("chat_profile_id") or self.config.get("default_chat_model_profile")
+            fast_profile = settings.get("fast_profile_id") or self.config.get("default_fast_model_profile")
+            await self.send_message(
+                chat_id,
+                "可用模型：" + names +
+                f"\nchat={chat_profile} fast={fast_profile}" +
+                "\n用法：/模型 chat <id> | /模型 fast <id> | /模型 think on/off | "
+                "/model fastthink on/off | /model add <id> <json>",
+            )
+            return
+        parts = text.split(None, 2)
+        action = parts[0].lower()
+        if action in ("chat", "fast") and len(parts) >= 2:
+            profile_id = parts[1]
+            if profile_id not in profiles:
+                await self.send_message(chat_id, f"Unknown profile: {profile_id}")
+                return
+            if action == "chat":
+                self.app_store.update_user_model_settings(user_id, chat_profile_id=profile_id)
+            else:
+                self.app_store.update_user_model_settings(user_id, fast_profile_id=profile_id)
+            await self.send_message(chat_id, f"{action} model switched to {profile_id}")
+            return
+        if action in ("think", "thinking", "fastthink") and len(parts) >= 2:
+            purpose = "fast" if action == "fastthink" else "chat"
+            profile_id, profile, _ = self._resolve_llm_profile(purpose, session_id)
+            if profile.get("thinking_fixed"):
+                fixed_state = "关闭" if profile.get("disable_thinking") else "开启"
+                await self.send_message(chat_id, f"当前 {purpose} 模型 {profile_id} 的思考已固定为{fixed_state}，无法手动切换")
+                return
+            value = parts[1].lower() in ("on", "true", "1", "yes")
+            if action == "fastthink":
+                self.app_store.update_user_model_settings(user_id, fast_thinking=value)
+            else:
+                self.app_store.update_user_model_settings(user_id, chat_thinking=value)
+            await self.send_message(chat_id, f"{action} set to {value}")
+            return
+        if action == "add" and len(parts) >= 3:
+            profile_id = parts[1]
+            try:
+                data = json.loads(parts[2])
+            except Exception as exc:
+                await self.send_message(chat_id, f"Invalid JSON: {exc}")
+                return
+            if not isinstance(data, dict):
+                await self.send_message(chat_id, "Profile JSON must be an object.")
+                return
+            self.app_store.upsert_model_profile(user_id, profile_id, data)
+            await self.send_message(chat_id, f"Profile saved: {profile_id}")
+            return
+        await self.send_message(chat_id, "Usage: /model chat <id> | fast <id> | think on/off | fastthink on/off | add <id> <json>")
+
+    async def cmd_modify_character(self, chat_id, session_id, arg):
+        text = (arg or "").strip()
+        if not text:
+            await self.send_message(chat_id, "用法：/修改角色 <自然语言修改要求>")
+            return
+        state = self._get_session_state(session_id)
+        before = self._character_export_payload(state)
+        allowed = sorted(before.keys())
+        if not self.has_llm_config("chat", session_id):
+            await self.send_message(chat_id, "聊天模型未配置。")
+            return
+        system = (
+            "你是一名中文角色配置专家，负责按用户自然语言要求修改角色档案。"
+            "只输出严格 JSON 对象，键名必须是允许字段之一，只包含需要变更的字段，不要输出未改动的字段。"
+            "字段值用中文或英文 tag 写清楚（外观/画风用英文 danbooru tag，人设/关系用中文）。"
+            "不要修改用户没提到的字段。允许字段: " + "、".join(allowed)
+        )
+        user = (
+            "当前角色档案 JSON:\n"
+            + json.dumps(before, ensure_ascii=False, indent=2)
+            + "\n\n用户的修改要求:\n"
+            + text
+        )
+        try:
+            raw = await self._call_llm(
+                system,
+                user,
+                temp=0.1,
+                tag="modify-character",
+                purpose="chat",
+                disable_thinking=True,
+                session_id=session_id,
+            )
+            patch = json.loads(raw)
+        except Exception as exc:
+            await self.send_message(chat_id, f"修改失败：{exc}")
+            return
+        if not isinstance(patch, dict):
+            await self.send_message(chat_id, "模型没有返回 JSON 对象。")
+            return
+        self._apply_character_payload(state, {**before, **{k: v for k, v in patch.items() if k in before}})
+        self._snapshot_character(state)
+        self._save_session_state(session_id, state)
+        after = self._character_export_payload(state)
+        await self.send_message(
+            chat_id,
+            "修改前：\n"
+            + json.dumps(before, ensure_ascii=False, indent=2)[:1800]
+            + "\n\n修改后：\n"
+            + json.dumps(after, ensure_ascii=False, indent=2)[:1800],
+        )
+
     async def cmd_create_oc(self, chat_id, session_id, arg):
         text = (arg or "").strip()
         if not text:
@@ -354,6 +525,7 @@ class CommandHandlersMixin:
         persona_text = persona.strip()
 
         if switching:
+            self._save_current_character_context(state)
             self._snapshot_character(state)
 
         state["custom_count"] = gender
@@ -378,7 +550,7 @@ class CommandHandlersMixin:
         applied_style = self._apply_intake_style(state, intake)
         state.pop("life_profile", None)
         if switching:
-            self._clear_conversation_context(state)
+            self._restore_character_context(session_id, state)
 
         self._snapshot_character(state)
         saved = state.setdefault("saved_characters", {})
@@ -573,7 +745,8 @@ class CommandHandlersMixin:
         reply = await self.run_roleplay_chat(chat_id, session_id, last_user)
         if reply:
             self._ulog(session_id, "REGEN", reply)
-            await self.send_message(chat_id, reply)
+            split = str(self.config.get("chat_split_paragraphs", "true")).lower() in ("true", "1", "yes")
+            await self.send_message(chat_id, reply, split_paragraphs=split)
 
     async def cmd_weather(self, chat_id, session_id, arg):
         city = arg.strip()
@@ -645,7 +818,8 @@ class CommandHandlersMixin:
         )
         if not scene:
             scene, caption = random.choice(SCENES)
-            view = "selfie"
+        # /自拍 命令明确要求自拍视角，强制 view=selfie，不受场景生成器偶然返回的 third 影响。
+        view = "selfie"
         english = await self._translate_to_tags(scene, session_id=session_id, view=view)
         ok, imgs, err = await self._do_generate(english, session_id=session_id, one_shot_appearance=new_app or "")
         if not ok or not imgs:
@@ -748,11 +922,12 @@ class CommandHandlersMixin:
         self.config["style_pool"] = "\n".join(pool)
         if self.config.get("current_style") == removed:
             self.config["current_style"] = pool[0]
-        for state in self.sessions.values():
+        for sid, state in self.sessions.items():
             if state.get("custom_current_style") == removed:
                 state["custom_current_style"] = ""
+                self._mark_dirty(sid)
         self.save_config()
-        self._write_state()
+        self._flush_sessions(force=True)
         await self.send_message(chat_id, f"已删除 {removed}。")
 
     async def cmd_switch_style(self, chat_id, session_id, arg):
@@ -898,6 +1073,8 @@ class CommandHandlersMixin:
         """清掉会带着旧人设/旧画面回流进提示词的对话上下文。"""
         state["chat_history"] = []
         state["recent_message_history"] = []
+        state["checkpoint_summary"] = ""
+        state["checkpoint_message_id"] = 0
         state["sent_photos_history"] = []
         state["short_context_start"] = 0
         state["short_context_reset_time"] = 0
@@ -913,6 +1090,97 @@ class CommandHandlersMixin:
         state["character_place_updated_at"] = 0
         state["character_place_history"] = []
         state["rounds_since_location"] = 0
+
+    @staticmethod
+    def _character_context_key_from_state(state: dict[str, Any]) -> str:
+        return (state.get("custom_character") or state.get("custom_bot_name") or "__default__").strip() or "__default__"
+
+    @staticmethod
+    def _conversation_context_payload(state: dict[str, Any]) -> dict[str, Any]:
+        keys = (
+            "chat_history", "recent_message_history", "checkpoint_summary", "checkpoint_message_id",
+            "last_checkpoint_at", "sent_photos_history", "short_context_start",
+            "short_context_reset_time", "short_context_reset_reason", "replying_to_selfie",
+            "last_sent_selfie_time", "last_sent_selfie_caption", "last_sent_selfie_source_description",
+            "last_sent_selfie_replied", "rounds_since_image", "character_place",
+            "character_place_label", "character_place_text", "character_place_updated_at",
+            "character_place_confidence", "character_place_history", "rounds_since_location",
+        )
+        return {key: state.get(key) for key in keys}
+
+    def _save_current_character_context(self, state: dict[str, Any]):
+        key = self._character_context_key_from_state(state)
+        state.setdefault("character_contexts", {})[key] = self._conversation_context_payload(state)
+
+    def _restore_character_context(self, session_id: str, state: dict[str, Any]):
+        key = self._character_context_key_from_state(state)
+        payload = (state.get("character_contexts") or {}).get(key)
+        if isinstance(payload, dict):
+            self._clear_conversation_context(state)
+            for ctx_key, value in payload.items():
+                state[ctx_key] = value
+        else:
+            self._clear_conversation_context(state)
+        try:
+            checkpoint = self.app_store.get_checkpoint(session_id, self._context_character_key(session_id))
+            if checkpoint.get("summary"):
+                state["checkpoint_summary"] = checkpoint.get("summary") or ""
+                state["checkpoint_message_id"] = int(checkpoint.get("source_until_id") or 0)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _character_export_payload(state: dict[str, Any]) -> dict[str, Any]:
+        key = (state.get("custom_character") or state.get("custom_bot_name") or "default").strip() or "default"
+        return {
+            "id": key,
+            "character": state.get("custom_character", ""),
+            "series": state.get("custom_series", ""),
+            "role_name": state.get("custom_role_name", ""),
+            "bot_name": state.get("custom_bot_name", ""),
+            "bot_self_name": state.get("custom_bot_self_name", ""),
+            "visual_character": state.get("custom_visual_character", ""),
+            "visual_series": state.get("custom_visual_series", ""),
+            "persona": state.get("custom_scheduled_persona", ""),
+            "appearance": state.get("custom_positive_prefix", ""),
+            "count": state.get("custom_count", ""),
+            "age_stage": state.get("custom_character_age_stage", ""),
+            "occupation": state.get("custom_character_occupation", ""),
+            "day_anchor": state.get("custom_character_day_anchor", ""),
+            "relationship": state.get("custom_spatial_relationship", ""),
+            "scene_preference": state.get("custom_scene_preference", ""),
+            "selfie_preference": state.get("custom_selfie_preference", ""),
+            "style": state.get("custom_current_style", ""),
+            "purity": state.get("purity"),
+        }
+
+    @staticmethod
+    def _apply_character_payload(state: dict[str, Any], data: dict[str, Any]):
+        mapping = {
+            "character": "custom_character",
+            "series": "custom_series",
+            "role_name": "custom_role_name",
+            "bot_name": "custom_bot_name",
+            "bot_self_name": "custom_bot_self_name",
+            "visual_character": "custom_visual_character",
+            "visual_series": "custom_visual_series",
+            "persona": "custom_scheduled_persona",
+            "appearance": "custom_positive_prefix",
+            "count": "custom_count",
+            "age_stage": "custom_character_age_stage",
+            "occupation": "custom_character_occupation",
+            "day_anchor": "custom_character_day_anchor",
+            "relationship": "custom_spatial_relationship",
+            "scene_preference": "custom_scene_preference",
+            "selfie_preference": "custom_selfie_preference",
+            "style": "custom_current_style",
+        }
+        for src, dst in mapping.items():
+            if src in data:
+                state[dst] = "" if data[src] is None else str(data[src])
+        if "purity" in data:
+            state["purity"] = data.get("purity")
+            state["purity_user_set"] = data.get("purity") is not None
 
     @staticmethod
     def _snapshot_character(state: dict[str, Any]):
@@ -1041,6 +1309,36 @@ class CommandHandlersMixin:
                 return
             await self.send_message(chat_id, "已保存角色\n" + "\n".join(f"{k}: {v.get('character', k)}" for k, v in saved.items()))
             return
+        if sub in ("export", "导出"):
+            payload = self._character_export_payload(state)
+            await self.send_message(chat_id, json.dumps(payload, ensure_ascii=False, indent=2))
+            return
+        if sub in ("import", "导入"):
+            if not sub_arg:
+                await self.send_message(chat_id, "用法：/角色 import <json> 或 /角色 导入 <json>")
+                return
+            try:
+                payload = json.loads(sub_arg)
+            except Exception as exc:
+                await self.send_message(chat_id, f"JSON 无效：{exc}")
+                return
+            if not isinstance(payload, dict):
+                await self.send_message(chat_id, "角色 JSON 必须是对象。")
+                return
+            key = str(payload.get("id") or payload.get("character") or payload.get("bot_name") or "").strip()
+            if not key:
+                await self.send_message(chat_id, "角色 JSON 必须包含 id 或 character。")
+                return
+            self._save_current_character_context(state)
+            self._snapshot_character(state)
+            self._apply_character_payload(state, payload)
+            if not state.get("custom_character"):
+                state["custom_character"] = key
+            saved[key] = {k: v for k, v in payload.items() if k != "id"}
+            self._restore_character_context(session_id, state)
+            self._save_session_state(session_id, state)
+            await self.send_message(chat_id, f"已导入并切换到角色：{key}")
+            return
         if sub == "load" and sub_arg:
             data = saved.get(sub_arg)
             if not data:
@@ -1048,6 +1346,7 @@ class CommandHandlersMixin:
                 return
             switching = (data.get("character", "") or "") != (state.get("custom_character") or "")
             if switching:
+                self._save_current_character_context(state)
                 self._snapshot_character(state)
             state["custom_character"] = data.get("character", "")
             state["custom_series"] = data.get("series", "")
@@ -1070,7 +1369,7 @@ class CommandHandlersMixin:
             if data.get("purity") is not None and not state.get("purity_user_set"):
                 state["purity"] = data.get("purity")
             if switching:
-                self._clear_conversation_context(state)  # 换角色：避免上一个角色的对话/画面串味
+                self._restore_character_context(session_id, state)
                 state["dynamic_appearance"] = ""  # 不继承上一个角色的临时穿搭
             state.pop("life_profile", None)
             self._save_session_state(session_id, state)
@@ -1087,6 +1386,9 @@ class CommandHandlersMixin:
             # 写回 saved_characters，表现为"删了又出现"。这里只复用字段清理原语，不动其它角色。
             is_current = (state.get("custom_character") or "") == sub_arg
             note = ""
+            contexts = state.get("character_contexts")
+            if isinstance(contexts, dict):
+                contexts.pop(sub_arg, None)
             if is_current:
                 for key in SESSION_CUSTOM_RESET_KEYS:
                     state[key] = ""
@@ -1124,6 +1426,7 @@ class CommandHandlersMixin:
             name = result.get("name", text)
             switching = name != (state.get("custom_character") or "")
             if switching:
+                self._save_current_character_context(state)
                 self._snapshot_character(state)
             raw_appearance = (result.get("appearance") or "").strip()
             count_tag = ""
@@ -1160,7 +1463,7 @@ class CommandHandlersMixin:
                     pass
             self._snapshot_character(state)
             if switching:
-                self._clear_conversation_context(state)  # 换角色：避免上一个角色的对话/画面串味
+                self._restore_character_context(session_id, state)
             self._save_session_state(session_id, state)
             self._ulog(session_id, "SWITCH", f"设定角色 {name}" + ("（已清空对话上下文）" if switching else ""))
             visual_note = ""

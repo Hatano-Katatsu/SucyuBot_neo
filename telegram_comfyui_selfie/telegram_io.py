@@ -38,16 +38,26 @@ class TelegramIOMixin:
             raise RuntimeError("HTTP session not initialized")
         token = self.config["telegram_bot_token"]
         url = f"https://api.telegram.org/bot{token}/{method}"
-        async with self.http.post(url, data=data or {}) as resp:
+        kwargs = {"data": data or {}}
+        proxy = self._telegram_http_proxy() if hasattr(self, "_telegram_http_proxy") else ""
+        if proxy:
+            kwargs["proxy"] = proxy
+        async with self.http.post(url, **kwargs) as resp:
             payload = await resp.json(content_type=None)
             if not payload.get("ok"):
                 raise RuntimeError(f"Telegram {method} failed: {payload}")
             return payload
 
-    async def send_message(self, chat_id: int | str, text: str):
-        chunks = self._split_text(text, 3900)
-        for chunk in chunks:
-            await self.tg_api("sendMessage", {"chat_id": str(chat_id), "text": chunk})
+    async def send_message(self, chat_id: int | str, text: str, *, split_paragraphs: bool = False):
+        if split_paragraphs:
+            paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+        else:
+            paragraphs = [text]
+        for i, para in enumerate(paragraphs):
+            if i > 0:
+                await asyncio.sleep(1)
+            for chunk in self._split_text(para, 3900):
+                await self.tg_api("sendMessage", {"chat_id": str(chat_id), "text": chunk})
 
     async def send_photo(self, chat_id: int | str, image_bytes: bytes, caption: str = ""):
         if self.http is None:
@@ -59,7 +69,11 @@ class TelegramIOMixin:
         if caption:
             form.add_field("caption", caption[:1024])
         form.add_field("photo", image_bytes, filename="selfie.png", content_type="image/png")
-        async with self.http.post(url, data=form) as resp:
+        kwargs = {"data": form}
+        proxy = self._telegram_http_proxy() if hasattr(self, "_telegram_http_proxy") else ""
+        if proxy:
+            kwargs["proxy"] = proxy
+        async with self.http.post(url, **kwargs) as resp:
             payload = await resp.json(content_type=None)
             if not payload.get("ok"):
                 raise RuntimeError(f"Telegram sendPhoto failed: {payload}")

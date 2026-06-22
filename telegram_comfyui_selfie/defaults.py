@@ -1,51 +1,28 @@
 WEEKDAY_NAMES = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
 
 MENU_BODY = (
-    "第一次使用：\n"
-    "  /初始化              查看上手向导\n"
-    "  /角色 <角色名>       使用现成动漫/游戏角色\n"
-    "  /创建OC              创建原创角色模板和示例\n"
-    "  /天气设置 <城市>     设置城市、天气和时区\n"
-    "  /纯良度 0~10|auto    控制角色边界；数字越高越保守\n\n"
-    "日常聊天与生图：\n"
-    "  /自拍                按当前情境生成一张图\n"
-    "  /外型 <描述>         临时修改穿搭、发型、配饰\n"
-    "  /人格 <描述>         修改说话方式、性格和习惯\n"
-    "  /关系 <描述>         设置你和角色的空间/关系设定\n"
-    "  /新场景              切掉上一轮话题，避免旧场景串进来\n\n"
-    "角色管理：\n"
-    "  /角色 list           列出角色档案\n"
-    "  /角色 load <名称>    切换角色并清空短期对话\n"
-    "  /角色 delete <名称>  删除角色档案\n"
-    "  /角色 reset          恢复默认并清空角色池/对话\n\n"
-    "记忆与推送：\n"
-    "  /记忆                查看当前角色长期记忆\n"
-    "  /记住 <内容>         手动写入长期记忆\n"
-    "  /忘记 <ID或关键词>   删除长期记忆\n"
-    "  /推送频率 <次数>     每天主动发图次数；0 为关闭\n"
-    "  /调度                查看今日推送计划\n\n"
-    "详细帮助：/菜单 设置 /菜单 角色 /菜单 生图 /菜单 记忆 /菜单 推送 /菜单 动线\n\n"
-    "检查：/人设查看 /提示词 /生图状态 /测试生图 <文本> /管理"
+    "高频指令\n"
+    "  /自拍                  根据当前上下文生成一张图\n"
+    "  /角色                  查看、切换、导入或导出角色\n"
+    "  /修改角色 <自然语言>   一次性调整当前角色设定，并展示修改前后 JSON\n"
+    "  /记忆                  查看和管理当前角色记忆\n"
+    "  /推送频率 <次数>       设置每天主动推送次数，0 表示关闭\n"
+    "  /webui                 获取 WebUI 持久免登录链接和账号信息\n"
+    "  /web密码 <密码>        设置当前 Telegram 用户的 WebUI 密码\n"
+    "  /完整菜单              查看按功能聚合的完整命令"
 )
 
 INIT_GUIDE = (
     "初始化向导\n\n"
-    "你想怎么开始？\n\n"
-    "A. 使用现成动漫/游戏角色\n"
-    "  发送：/角色 角色名\n"
-    "  例：/角色 天童爱丽丝\n\n"
-    "B. 创建原创角色 OC\n"
-    "  发送：/创建OC\n"
-    "  我会给你一份可复制填写的模板。\n\n"
-    "C. 先用默认角色聊天\n"
-    "  直接发消息即可。\n\n"
-    "建议再设置：\n"
-    "  /天气设置 你的城市\n"
-    "  /纯良度 0~10\n"
-    "  /关系 你和角色的关系\n"
-    "    例：/关系 同城暧昧对象，周末经常一起出门\n\n"
-    "随时发送 /help 查看全部常用命令。"
+    "我会用连续对话的方式帮你完成初始设置。你可以直接按自然语言回答，也可以用命令精确设置：\n"
+    "1. 先告诉我你想扮演的角色或原创角色设定。\n"
+    "2. 再补充角色性格、关系、城市、纯良度和推送频率。\n"
+    "3. 需要 WebUI 时，用 /web密码 <密码> 设置密码，再用 /webui 获取持久免登录链接。\n"
+    "4. 后续想改角色，直接用 /修改角色 <自然语言要求>。\n\n"
+    "常用命令：/角色 <角色名>、/创建OC、/天气设置 <城市>、/纯良度 <0-10|auto>、/推送频率 <次数>。\n"
+    "发送 /完整菜单 查看全部细节命令。"
 )
+
 
 OC_CREATE_HELP = (
     "创建原创角色 OC\n\n"
@@ -254,37 +231,69 @@ SCENES = [
     ("厨房晨光里端着咖啡，宽松衬衫滑落到肩头，刚睡醒一样眯着眼笑", "早安，今天也先从我开始吧。"),
 ]
 
+
+GLOBAL_MODEL_PROFILES = {
+    "deepseek-pro": {
+        "name": "DeepSeek V4 Pro",
+        "api_key": "",
+        "base_url": "https://opencode.ai/zen/go/v1",
+        "model": "deepseek-v4-pro",
+        "timeout": 300,
+        "disable_thinking": False,
+        "thinking_fixed": True,
+        "thinking_control": "param_always",
+    },
+    "deepseek-flash": {
+        "name": "DeepSeek V4 Flash",
+        "api_key": "",
+        "base_url": "https://opencode.ai/zen/go/v1",
+        "model": "deepseek-v4-flash",
+        "timeout": 300,
+        "disable_thinking": True,
+        "thinking_fixed": True,
+        "thinking_control": "param",
+    },
+    "glm": {
+        "name": "GLM 5.2",
+        "api_key": "",
+        "base_url": "https://opencode.ai/zen/go/v1",
+        "model": "glm-5.2",
+        "timeout": 300,
+        "disable_thinking": True,
+        "thinking_fixed": True,
+        "thinking_control": "param",
+    },
+}
+
 DEFAULT_CONFIG = {
     "telegram_bot_token": "",
     "allowed_chat_ids": [],
+    "telegram_proxy_enabled": False,
+    "telegram_proxy_url": "socks5://127.0.0.1:7891",
     "web_enabled": True,
-    "web_host": "127.0.0.1",
+    "web_host": "0.0.0.0",
     "web_port": 8787,
+    "web_public_host": "",
+    "web_admin_username": "admin",
+    "web_admin_password": "admin",
     "comfyui_url": "http://127.0.0.1:8188",
     "comfyui_workflow_file": "",
+    "image_backend": "native",
+    "animatool_turbo_steps": "10",
+    "animatool_turbo_cfg": "1.0",
+    "animatool_filename_prefix": "sucyubot_turbo",
     "unet_model": "anima-preview3-base.safetensors",
     "clip_model": "qwen_3_06b_base.safetensors",
     "vae_model": "qwen_image_vae.safetensors",
     "turbo_lora_model": "anima-turbo-lora-v0.2.safetensors",
-    "llm_api_base": "https://api.deepseek.com/v1",
-    "llm_api_key": "",
-    "llm_model": "deepseek-chat",
-    "llm_max_tokens": "4096",
-    "llm_disable_thinking": False,
+    "comfyui_local_socket_port": "7789",
+    "default_chat_model_profile": "deepseek-pro",
+    "default_fast_model_profile": "deepseek-flash",
+    "global_model_profiles": GLOBAL_MODEL_PROFILES,
     "llm_temperature_scene": "0.95",
     "llm_temperature_translate": "0.3",
     "llm_temperature_classify": "0.1",
-    "chat_llm_api_base": "",
-    "chat_llm_api_key": "",
-    "chat_llm_model": "",
-    "chat_llm_max_tokens": "",
     "chat_llm_temperature": "0.9",
-    "chat_llm_disable_thinking": False,
-    "image_llm_api_base": "",
-    "image_llm_api_key": "",
-    "image_llm_model": "",
-    "image_llm_max_tokens": "",
-    "image_llm_disable_thinking": False,
     "image_llm_temperature_scene": "",
     "image_llm_temperature_translate": "",
     "image_llm_temperature_classify": "",
@@ -292,11 +301,18 @@ DEFAULT_CONFIG = {
     "long_memory_extract_enabled": True,
     "long_memory_db_path": "",
     "long_memory_context_limit": "8",
-    "short_context_history_limit": "16",
+    "context_window_message_limit": "30",
+    "checkpoint_keep_message_limit": "10",
+    "checkpoint_soft_limit_chars": "2000",
+    "checkpoint_hard_limit_chars": "3000",
+    "dream_source_hard_limit_chars": "50000",
+    "dream_morning_hour": "8",
+    "dream_idle_hours": "2",
     "short_context_reset_gap_hours": "6",
     "user_log_enabled": True,
     "user_log_dir": "",
     "chat_reply_length": "",
+    "chat_split_paragraphs": "true",
     "width": "1024",
     "height": "1024",
     "steps": "30",
@@ -322,7 +338,6 @@ DEFAULT_CONFIG = {
     "allow_llm_change_appearance": True,
     "style_pool": "@00 gx4",
     "current_style": "@00 gx4",
-    "skill_md_path": "",
     "selfie_frequency": "频繁",
     "daily_selfie_limit": "3",
     "location": "上海",
