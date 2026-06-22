@@ -254,7 +254,6 @@ async def plan_roleplay_image(
     purity = service._get_purity(session_id)
     dynamic = service._effective_dynamic_appearance(session_id) if hasattr(service, "_effective_dynamic_appearance") else (state.get("dynamic_appearance") or service.config.get("dynamic_appearance", ""))
     prompt_prefs = service._prompt_scene_preferences(session_id) if hasattr(service, "_prompt_scene_preferences") else {}
-    quirk = service._get_session_cfg(session_id, "character_quirk_rule", "")
     spatial = service._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])
     spatial_line = f"默认物理空间关系: {spatial}\n" if str(spatial).strip() else ""
     if hasattr(service, "_session_role_identity"):
@@ -357,8 +356,6 @@ async def plan_roleplay_image(
         )
     if location_trail:
         system += f"\n近期位置轨迹（连续性参考，按时间正序）: {location_trail}。可据此判断动线方向。"
-    if quirk:
-        system += f"\n角色专属画面修补规则: {quirk}"
     system += (
         "\n场景类型自判: 只要角色与用户有贴身性接触（性交、骑乘、交合、爱抚、拥抱贴身、亲吻、前戏，"
         "或任何用户身体会与角色贴合入画的性暗示情形），都判为亲密场景 is_intimate=true；纯日常、无身体接触才是 false。"
@@ -402,7 +399,7 @@ async def plan_roleplay_image(
         "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。"
         "selfie/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。"
         "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。"
-        "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third\",\"new_appearance_tags\":\"...\",\"character_location\":\"...\",\"user_location\":\"...\",\"co_located\":true,\"is_intimate\":false,\"partner_in_frame\":false,\"device_in_frame\":false}。"
+        "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third\",\"new_appearance_tags\":\"...\",\"clothing_off\":\"...\",\"character_location\":\"...\",\"user_location\":\"...\",\"co_located\":true,\"is_intimate\":false,\"partner_in_frame\":false,\"device_in_frame\":false}。"
         "character_location 填角色此刻所在场所的英文枚举（取值同 user_location，但不含 with_user/unknown）：若上面给出了角色地点约束，必须填那个枚举值；没有约束时按动线与对话自行判断。"
         "is_intimate 是布尔值，按上面的场景类型自判规则给出。"
         "partner_in_frame、device_in_frame 都是布尔值，按上面单人构图硬规则里的定义给出。"
@@ -413,6 +410,10 @@ async def plan_roleplay_image(
         "聊天模型已经给出文字回复，这张图只配画面、不需要任何台词或配文，不要输出 caption 字段。"
         "new_appearance_tags 只填这张图需要额外强调的一次性服装、配饰、临时发型或发色瞳色变化，英文标签逗号分隔；"
         "这些标签只用于本次生图，不会写入长期外型。不要把姿势、表情、动作、场景、灯光写进去。没有一次性外观补充时留空。"
+        "clothing_off 填这张图里【应当从角色当前着装中去掉/已脱下/未穿】的服装或配饰（英文标签逗号分隔，如 'cardigan, jacket'），"
+        "或填裸露状态词 'nude'/'topless'/'bottomless'/'completely nude' 表示相应程度的裸体；"
+        "只要叙事表明此刻角色脱了某件、在试穿前脱下原装、正在裸体或性爱中褪去衣物，就据对话如实填写。"
+        "这是一次性的、只影响本图，绝不写入长期衣柜（事后会自动恢复原着装）。没有脱衣/裸露时留空。"
     )
 
     if str(service.config.get("image_backend", "native") or "native").lower() == "animatool":
@@ -504,6 +505,7 @@ async def plan_roleplay_image(
         "scene": scene,
         "view": final_view,
         "new_appearance_tags": (parsed.get("new_appearance_tags") or "").strip(),
+        "clothing_off": (parsed.get("clothing_off") or "").strip(),
         "is_intimate": is_intimate,
         "partner_in_frame": partner_in_frame,
         "device_in_frame": device_in_frame,
@@ -577,9 +579,32 @@ async def plan_animatool_slots(
     slot_text = "\n".join(f"- {k}: {v}" for k, v in slot_info.items() if v)
 
     state = service._get_session_state(session_id) if session_id else {}
-    purity = service._get_purity(session_id) if session_id else 1
-    purity_map = {1: "safe", 3: "safe", 5: "sensitive", 7: "sensitive", 9: "nsfw", 10: "explicit"}
-    safety_tag = purity_map.get(purity, "safe")
+    # 评级与旧管线一致：纯良度越低越露骨。用 effective safety（含时段调整）映射 Anima 四级评级。
+    # 旧 purity_map 把低纯良度错映成 "safe"，导致默认出图变 SFW——这里按 level 正向分档修正。
+    if session_id:
+        safety = service._get_effective_safety(session_id)
+        level = int(safety.get("level", service._get_purity(session_id)))
+    else:
+        level = 1
+    if level <= 0:
+        safety_tag = "explicit"
+    elif level <= 2:
+        safety_tag = "nsfw"
+    elif level <= 5:
+        safety_tag = "sensitive"
+    else:
+        safety_tag = "safe"
+
+    # 时间与光线：在最终写 tags 的这步重新注入。scene 经过多次 LLM 改写后时段/光线易丢，
+    # 而这步是决定最终 tags 的唯一出口——必须让它确保画面光线与当前时段一致。
+    time_period = time_light = light_guard = ""
+    if session_id:
+        try:
+            time_period = service._get_time_context(session_id).get("period") or ""
+            time_light = service._format_time_context(session_id) or ""
+            light_guard = service._format_light_guard(session_id) or ""
+        except Exception:
+            logger.debug("time/light context for animatool tags failed", exc_info=True)
 
     system = (
         "你是 AnimaTool Turbo 的专用提示词工程师。\n"
@@ -596,8 +621,14 @@ async def plan_animatool_slots(
         "- effective_appearance + one_shot_appearance → appearance\n"
         "- style_artist → artist（@ 开头，为空留空）\n"
         "- style_general → style\n"
-        "- scene → tags（英文自然语言，至少 2-3 句）\n"
+        "- scene → tags（改写成 3-5 句完整英文，把末尾的逗号标签堆融进句子，不要保留 Danbooru 逗号串）\n"
         "- negative → neg\n\n"
+        "## 时间与光线（重要，必须体现）\n"
+        f"当前时段: {time_period or '未知'}；光线参考: {time_light or '未知'}\n"
+        f"{light_guard}\n"
+        "tags 必须自然体现当前时段与光线（如黄昏金色斜光、夜晚人工灯光、正午自然光）；"
+        "室内场景也要让窗外天光/室内灯光与当前时段一致。"
+        "绝不要画出与当前时段矛盾的光线（如深夜出现正午阳光、白天出现夕阳）。\n\n"
         "只输出 JSON，不要 ```json``` 包装。\n"
     )
 
@@ -628,12 +659,34 @@ async def plan_animatool_slots(
     if "quality_meta_year_safe" in properties:
         q = parsed.get("quality_meta_year_safe", "")
         if not q:
-            parsed["quality_meta_year_safe"] = f"masterpiece, best quality, {safety_tag}"
+            parsed["quality_meta_year_safe"] = f"masterpiece, best quality, highres, newest, year 2025, {safety_tag}"
         elif safety_tag not in str(q).lower():
             parsed["quality_meta_year_safe"] = f"{q}, {safety_tag}"
 
     if "count" in properties and not parsed.get("count"):
         parsed["count"] = slots.count or "1girl"
+
+    # neg：executor 不兜底默认负向，必须给全。补 Anima 质量负向 + 按评级联动（见 turbo_expert）。
+    neg = str(parsed.get("neg") or slots.negative or "").strip()
+    neg_low = neg.lower()
+
+    def _add_neg(*tags: str):
+        nonlocal neg, neg_low
+        for t in tags:
+            if t.lower() not in neg_low:
+                neg = f"{neg}, {t}" if neg else t
+                neg_low = neg.lower()
+
+    _add_neg("worst quality", "low quality", "score_1", "score_2", "score_3")
+    if safety_tag in ("safe", "sensitive"):
+        _add_neg("nsfw", "explicit")
+    else:
+        # nsfw/explicit：先剔除 LLM 照搬 turbo_expert 误加的 "uncensored"
+        # （它进负向 = 排斥无码、反而促成打码，与露骨内容矛盾），再补齐"要无码"的负向。
+        neg = ", ".join(t for t in (p.strip() for p in neg.split(",")) if t and t.lower() != "uncensored")
+        neg_low = neg.lower()
+        _add_neg("safe", "sensitive", "censored", "mosaic censoring", "pixel censoring", "bar censoring")
+    parsed["neg"] = neg
 
     # character/series 对 OC 必须为空
     if not slots.character:

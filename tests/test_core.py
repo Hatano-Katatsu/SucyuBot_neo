@@ -1914,6 +1914,7 @@ class ServiceTestCase(unittest.TestCase):
                 is_intimate=False,
                 partner_in_frame=False,
                 device_in_frame=False,
+                clothing_off="",
             )
             # 聊天途中的配图不带配文（聊天模型已经在文字里回复了）
             svc.send_photo.assert_awaited_once_with(123, b"image", "")
@@ -2345,6 +2346,65 @@ class ServiceTestCase(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_default_character_edit_writes_back_to_config(self):
+        """卡编辑器改默认角色 → 写回 config（不进 saved_characters），且默认卡读取反映新值。"""
+        svc = self.make_service()
+        default_id = svc._default_character_payload()["id"]
+        svc._apply_default_character_payload({
+            "id": default_id,
+            "persona": "新的人格",
+            "appearance": "succubus, silver hair, red eyes",
+            "role_name": "魅魔",
+            "bot_self_name": "本座",
+            "style": "@rurudo",
+            "relationship": "同居恋人",
+        })
+        # 卡片字段映射到 config 键
+        self.assertEqual(svc.config["scheduled_persona"], "新的人格")
+        self.assertEqual(svc.config["positive_prefix"], "succubus, silver hair, red eyes")
+        self.assertEqual(svc.config["bot_self_name"], "本座")
+        self.assertEqual(svc.config["current_style"], "@rurudo")
+        self.assertEqual(svc.config["spatial_relationship"], "同居恋人")
+        # 默认卡读取反映写回值；appearance 与 positive_prefix 1:1
+        card = svc._default_character_payload()
+        self.assertEqual(card["appearance"], "succubus, silver hair, red eyes")
+        self.assertEqual(card["persona"], "新的人格")
+        # 不创建 saved_characters 条目
+        sid = "telegram:1"
+        self.assertEqual(svc._get_session_state(sid).get("saved_characters") or {}, {})
+
+    def test_default_character_is_a_loadable_card(self):
+        """内置默认角色（蕾伊）以正常角色卡形态存在：list 可见、可 load 回到隐式默认、不可删除。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.send_message = AsyncMock()
+            default_id = svc._default_character_payload()["id"]
+
+            # 角色池为空时，list 也始终展示系统默认角色
+            await svc.cmd_character(1, sid, "list")
+            self.assertIn(default_id, svc.send_message.await_args.args[1])
+
+            # 先切到一个 OC，再 load 默认角色 → 回到隐式默认态（custom_character 清空、非角色态）
+            state = svc._get_session_state(sid)
+            state.update({
+                "custom_character": "小雨",
+                "custom_scheduled_persona": "你是小雨。",
+                "saved_characters": {"小雨": {"character": "小雨", "persona": "你是小雨。"}},
+            })
+            svc._save_session_state(sid, state)
+            await svc.cmd_character(1, sid, f"load {default_id}")
+            after = svc._get_session_state(sid)
+            self.assertEqual(after.get("custom_character"), "")
+            self.assertFalse(svc._is_character_set(sid))
+            self.assertIn(svc.config["scheduled_persona"], svc._get_effective_persona(sid))
+
+            # 系统默认角色不可删除
+            await svc.cmd_character(1, sid, f"delete {default_id}")
+            self.assertIn("不可删除", svc.send_message.await_args.args[1])
+
+        asyncio.run(run())
+
     def test_switching_character_clears_conversation_context(self):
         async def run():
             svc = self.make_service()
@@ -2534,6 +2594,39 @@ class ServiceTestCase(unittest.TestCase):
         pos, _ = svc._build_prompt("standing", session_id=sid)
         # 身体特征为空时回退全局默认，绝不产出无身体特征的提示词。
         self.assertIn("black long flowing hair", pos.lower())
+
+    def test_default_wardrobe_outfit_renders_for_default_character(self):
+        svc = self.make_service()
+        # config 里的默认装扮（默认角色的初始穿搭）
+        svc.config["dynamic_appearance"] = "black silk slip dress, cotton knit cardigan"
+        sid = "telegram:1"
+        # 默认角色：未设角色、衣柜为空 → 应回退注入 config 默认装扮到 appearance
+        pos, _ = svc._build_prompt("standing in the living room", session_id=sid)
+        self.assertIn("slip dress", pos.lower())
+        self.assertIn("cardigan", pos.lower())
+
+    def test_clothing_off_strips_named_garment_for_this_image_only(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["dynamic_appearance"] = "cotton knit cardigan, black silk slip dress"
+        pos, _ = svc._build_prompt("standing by the window", session_id=sid, clothing_off="cardigan")
+        self.assertNotIn("cardigan", pos.lower())   # 脱掉的开衫被剥离
+        self.assertIn("slip dress", pos.lower())     # 没脱的还在
+        # 持久衣柜/dynamic_appearance 不受影响（事后自动复原）
+        self.assertEqual(state["dynamic_appearance"], "cotton knit cardigan, black silk slip dress")
+
+    def test_clothing_off_nude_strips_all_outfit_and_frees_negative(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["dynamic_appearance"] = "cotton knit cardigan, black silk slip dress"
+        pos, neg = svc._build_prompt("on the bed", session_id=sid, clothing_off="nude")
+        self.assertNotIn("cardigan", pos.lower())
+        self.assertNotIn("slip dress", pos.lower())
+        self.assertIn("nude", pos.lower())
+        self.assertNotIn("nude", neg.lower())        # 负向不再压制裸体
+        self.assertEqual(state["dynamic_appearance"], "cotton knit cardigan, black silk slip dress")
 
     def test_legacy_character_state_does_not_fall_back_to_default_identity(self):
         svc = self.make_service()

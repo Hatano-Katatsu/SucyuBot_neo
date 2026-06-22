@@ -1274,12 +1274,15 @@ class CommandHandlersMixin:
         lower = text.lower()
         if not text or lower in ("查看", "show"):
             lines = ["当前角色设定"]
-            lines.append(f"角色: {state.get('custom_character') or '（未设定）'}")
+            default_id = self._default_character_payload().get("id") or ""
+            on_default = not (state.get("custom_character") or state.get("persona_user_set"))
+            lines.append(f"角色: {state.get('custom_character') or (f'{default_id}（默认）' if on_default and default_id else '（未设定）')}")
             if state.get("custom_series"):
                 lines.append(f"作品: {state['custom_series']}")
             lines.append(f"人设: {(state.get('custom_scheduled_persona') or '（未设定）')[:300]}")
             lines.append(f"身体特征: {(state.get('custom_positive_prefix') or '（未设定）')[:300]}")
-            lines.append(f"已保存角色: {', '.join(saved.keys()) or '无'}")
+            pool = ([f"{default_id}(默认)"] if default_id and default_id not in saved else []) + list(saved.keys())
+            lines.append(f"已保存角色: {', '.join(pool) or '无'}")
             lines.append("\n用法: /角色 <角色名> | /角色 load <名称> | /角色 list | /角色 delete <名称>")
             lines.append("/角色 reset 仅清空对话上下文 | /角色 clearup 恢复全局默认（清角色/人设/角色池）")
             await self.send_message(chat_id, "\n".join(lines))
@@ -1304,10 +1307,14 @@ class CommandHandlersMixin:
             await self.send_message(chat_id, CLEARUP_DONE_MSG)
             return
         if sub in ("list", "ls"):
-            if not saved:
-                await self.send_message(chat_id, "暂无已保存角色。")
-                return
-            await self.send_message(chat_id, "已保存角色\n" + "\n".join(f"{k}: {v.get('character', k)}" for k, v in saved.items()))
+            default = self._default_character_payload()
+            default_id = default.get("id") or ""
+            on_default = not (state.get("custom_character") or state.get("persona_user_set"))
+            lines = []
+            if default_id:
+                lines.append(f"{default_id}: 系统默认角色" + ("（当前）" if on_default else ""))
+            lines += [f"{k}: {v.get('character', k)}" for k, v in saved.items() if k != default_id]
+            await self.send_message(chat_id, "角色列表\n" + "\n".join(lines))
             return
         if sub in ("export", "导出"):
             payload = self._character_export_payload(state)
@@ -1341,6 +1348,9 @@ class CommandHandlersMixin:
             return
         if sub == "load" and sub_arg:
             data = saved.get(sub_arg)
+            if not data and sub_arg == (self._default_character_payload().get("id") or ""):
+                # 系统默认角色（蕾伊）不落进 saved_characters：现取现合成，加载即回到隐式默认态。
+                data = self._default_character_payload()
             if not data:
                 await self.send_message(chat_id, f"未找到角色 {sub_arg}。")
                 return
@@ -1377,6 +1387,9 @@ class CommandHandlersMixin:
             await self.send_message(chat_id, f"已载入角色 {sub_arg}。")
             return
         if sub == "delete" and sub_arg:
+            if sub_arg == (self._default_character_payload().get("id") or ""):
+                await self.send_message(chat_id, "系统默认角色不可删除。")
+                return
             if sub_arg not in saved:
                 await self.send_message(chat_id, f"未找到角色 {sub_arg}。")
                 return

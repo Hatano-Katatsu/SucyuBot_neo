@@ -329,7 +329,6 @@ DEFAULT_CONFIG = {
     "default_purity": "",
     "outfit_keywords": "dress\nshirt\nskirt\npants\njeans\nshorts\nuniform\nsuit\nblazer\njacket\ncoat\nhoodie\nsweater\ncheongsam\nkimono\nbikini\nlingerie\nswimsuit\nrobe\ngown\nbodysuit\npajama\nnightgown\nsleepwear\noutfit\nattire\ncostume\ngarment\nwear\nclothes\nclothing",
     "accessory_keywords": "glasses\nnecklace\nearring\nbracelet\nring\nhair clip\nhairpin\nhair ribbon\nscarf\ncollar\nchoker\nhat\ncap\ncrown\ntiara\nwatch\nbelt\nbag\nribbon\nbow\nglove\nmask\nveil",
-    "character_quirk_rule": "",
     "role_name": "魅魔",
     "bot_name": "蕾伊",
     "bot_self_name": "我",

@@ -518,6 +518,64 @@ class TelegramComfyUIService(
             state.setdefault(key, val)
         return state
 
+    def _default_character_payload(self) -> dict[str, Any]:
+        """从全局默认值构建系统默认角色卡（蕾伊），用于在角色池中始终展示、可选中加载。
+
+        character 留空：加载它即 custom_character="" 回到隐式默认态，由全局配置渲染，
+        因此无需把发/瞳烘焙进 appearance（隐式默认态下 default_hair/default_eyes 正常回落）。
+        与 webui 的角色池默认条目共用此唯一来源。
+        """
+        cfg = self.config
+        bot_name = str(cfg.get("bot_name", "蕾伊") or "蕾伊").strip()
+        return {
+            "id": bot_name,
+            "is_default": True,
+            "character": "",
+            "series": "",
+            "role_name": str(cfg.get("role_name", "魅魔") or "").strip(),
+            "bot_name": bot_name,
+            "bot_self_name": str(cfg.get("bot_self_name", "我") or "").strip(),
+            "visual_character": "",
+            "visual_series": "",
+            "persona": str(cfg.get("scheduled_persona", "") or "").strip(),
+            "appearance": str(cfg.get("positive_prefix", "") or "").strip(),
+            "count": "",
+            "age_stage": str(cfg.get("character_age_stage", "") or "").strip(),
+            "occupation": "",
+            "day_anchor": str(cfg.get("character_day_anchor", "") or "").strip(),
+            "relationship": str(cfg.get("spatial_relationship", "") or "").strip(),
+            "scene_preference": "",
+            "selfie_preference": "",
+            "style": str(cfg.get("current_style", "") or "").strip(),
+            "purity": None,
+        }
+
+    # 卡片字段 → config 键的映射：默认角色以 config 为存储，编辑卡片即写回 config。
+    # appearance↔positive_prefix 是 1:1（发/瞳已折进 positive_prefix，与非默认角色同构，无需拆分）。
+    _DEFAULT_CARD_TO_CONFIG = {
+        "role_name": "role_name",
+        "bot_name": "bot_name",
+        "bot_self_name": "bot_self_name",
+        "persona": "scheduled_persona",
+        "appearance": "positive_prefix",
+        "style": "current_style",
+        "relationship": "spatial_relationship",
+        "age_stage": "character_age_stage",
+        "day_anchor": "character_day_anchor",
+    }
+
+    def _apply_default_character_payload(self, payload: dict[str, Any]) -> None:
+        """把卡编辑器对默认角色的修改写回 config（不进 saved_characters，不动 custom_*）。"""
+        if not isinstance(payload, dict):
+            return
+        for src, dst in self._DEFAULT_CARD_TO_CONFIG.items():
+            if src in payload:
+                self.config[dst] = "" if payload[src] is None else str(payload[src]).strip()
+        if "purity" in payload:
+            p = payload.get("purity")
+            self.config["default_purity"] = "" if p in (None, "") else str(p)
+        self.save_config()
+
     def _get_session_cfg(self, session_id: str, key: str, default=None):
         if session_id:
             state = self._get_session_state(session_id)
@@ -1290,10 +1348,12 @@ class TelegramComfyUIService(
         is_intimate: bool = False,
         partner_in_frame: bool = False,
         device_in_frame: bool = False,
+        clothing_off: str = "",
     ) -> tuple[str, str]:
         return image_generation.build_prompt(
             self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
             is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
+            clothing_off=clothing_off,
         )
 
     def _format_last_prompt_slots(self, session_id: str = "") -> str:
@@ -1695,10 +1755,12 @@ class TelegramComfyUIService(
         is_intimate: bool = False,
         partner_in_frame: bool = False,
         device_in_frame: bool = False,
+        clothing_off: str = "",
     ) -> tuple[bool, list[bytes], str]:
         return await image_generation.do_generate(
             self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
             is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
+            clothing_off=clothing_off,
         )
 
     async def _do_generate_locked(
@@ -1710,10 +1772,12 @@ class TelegramComfyUIService(
         is_intimate: bool = False,
         partner_in_frame: bool = False,
         device_in_frame: bool = False,
+        clothing_off: str = "",
     ) -> tuple[bool, list[bytes], str]:
         return await image_generation.do_generate_locked(
             self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
             is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
+            clothing_off=clothing_off,
         )
 
     # ---------------------------------------------------------------------
@@ -1752,6 +1816,7 @@ class TelegramComfyUIService(
             return "缺少图片意图"
         final_view = (plan.get("view") or "").strip()
         new_app = (plan.get("new_appearance_tags") or "").strip()
+        clothing_off = (plan.get("clothing_off") or "").strip()
         is_intimate = bool(plan.get("is_intimate"))
         partner_in_frame = bool(plan.get("partner_in_frame"))
         device_in_frame = bool(plan.get("device_in_frame"))
@@ -1761,6 +1826,7 @@ class TelegramComfyUIService(
         ok, imgs, err = await self._do_generate(
             english, session_id=session_id, one_shot_appearance=new_app or "",
             is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
+            clothing_off=clothing_off,
         )
         if not ok or not imgs:
             self._ulog(session_id, "ERROR", f"工具生图失败: {err}")

@@ -38,7 +38,7 @@ CONFIG_GROUPS: dict[str, list[str]] = {
     "role_defaults": [
         "positive_prefix", "default_hair", "default_eyes", "negative_prompt",
         "dynamic_appearance", "default_purity", "outfit_keywords", "accessory_keywords",
-        "character_quirk_rule", "role_name", "bot_name", "bot_self_name",
+        "role_name", "bot_name", "bot_self_name",
         "scheduled_persona", "spatial_relationship", "allow_llm_change_appearance",
         "style_pool", "current_style", "selfie_frequency", "daily_selfie_limit",
         "location", "timezone_offset", "character_age_stage", "character_day_anchor",

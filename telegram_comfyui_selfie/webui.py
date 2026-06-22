@@ -308,32 +308,6 @@ def service_from(request: web.Request):
     return request.app["service"]
 
 
-def _default_character_payload(config: dict[str, Any]) -> dict[str, Any]:
-    """从全局默认值构建系统默认角色档案，用于在角色池中始终展示并可编辑。"""
-    bot_name = str(config.get("bot_name", "蕾伊") or "蕾伊").strip()
-    role_name = str(config.get("role_name", "魅魔") or "").strip()
-    return {
-        "id": bot_name,
-        "is_default": True,
-        "character": "",
-        "series": "",
-        "role_name": role_name,
-        "bot_name": bot_name,
-        "bot_self_name": str(config.get("bot_self_name", "我") or "").strip(),
-        "visual_character": "",
-        "visual_series": "",
-        "persona": str(config.get("scheduled_persona", "") or "").strip(),
-        "appearance": str(config.get("positive_prefix", "") or "").strip(),
-        "count": "",
-        "age_stage": str(config.get("character_age_stage", "") or "").strip(),
-        "occupation": "",
-        "day_anchor": str(config.get("character_day_anchor", "") or "").strip(),
-        "relationship": str(config.get("spatial_relationship", "") or "").strip(),
-        "scene_preference": "",
-        "selfie_preference": "",
-        "style": str(config.get("current_style", "") or "").strip(),
-        "purity": None,
-    }
 def json_ok(data: dict[str, Any] | None = None):
     payload = {"ok": True}
     if data:
@@ -821,7 +795,7 @@ async def api_characters(request: web.Request):
         if current.get("character") or current.get("bot_name") or current.get("role_name"):
             characters[active_id] = current
     # 始终注入系统默认角色（来自 config 默认值），保证可被选中和编辑，但不可删除
-    default_char = _default_character_payload(service.config)
+    default_char = service._default_character_payload()
     default_id = default_char.get("id") or default_char.get("bot_name") or "default"
     if default_id and default_id not in characters:
         characters[default_id] = default_char
@@ -845,6 +819,15 @@ async def api_save_character(request: web.Request):
     key = str(payload.get("id") or payload.get("character") or payload.get("bot_name") or "").strip()
     if not key:
         return json_error("角色 JSON 必须包含 id 或 character")
+    # 默认角色以 config 为存储：编辑它就写回 config，不建 saved_characters 条目、不动当前会话角色态。
+    if key == (service._default_character_payload().get("id") or ""):
+        service._apply_default_character_payload(payload)
+        return json_ok({
+            "active_id": state.get("custom_character") or "",
+            "current": service._character_export_payload(state),
+            "characters": state.get("saved_characters") or {},
+            "default": service._default_character_payload(),
+        })
     active_id = state.get("custom_character") or state.get("custom_bot_name") or ""
     force_activate = parse_bool(payload.get("activate")) if "activate" in payload else False
     if hasattr(service, "_apply_character_payload"):
@@ -863,7 +846,7 @@ async def api_delete_character(request: web.Request):
     if not _session_allowed(request, sid):
         return json_error("无权访问此会话", status=403)
     character_id = request.match_info["character_id"]
-    default_id = _default_character_payload(service.config).get("id") or ""
+    default_id = service._default_character_payload().get("id") or ""
     if character_id == default_id:
         return json_error("系统默认角色不能删除", status=403)
     state = service._get_session_state(sid)

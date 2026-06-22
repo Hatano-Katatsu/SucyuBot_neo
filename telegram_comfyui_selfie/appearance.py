@@ -281,6 +281,15 @@ def inject_appearance(service: Any, char: str, session_id: str = "") -> str:
     slots = parse_appearance(state.get("dynamic_appearance", "") or "", outfit_kw, accessory_kw)
     char_set = service._is_character_set(session_id)
 
+    # 默认角色（非角色态）若没有自定义衣柜，用全局 dynamic_appearance 作为初始穿搭回退：
+    # 否则 config 里的默认装扮（吊带裙/开衫等）只进场景规划、不进 appearance 标签，导致画不出来。
+    # 发色/瞳色已在下方 resolve() 各自回退全局默认；这里补齐 outfit/accessory/other。
+    if not char_set and not (slots["outfit"] or slots["accessory"] or slots["other"]):
+        fb = parse_appearance(service.config.get("dynamic_appearance", "") or "", outfit_kw, accessory_kw)
+        for s in ("outfit", "accessory", "other"):
+            if fb[s]:
+                slots[s] = fb[s]
+
     def resolve(slot, custom_key, global_key, default):
         if slots[slot]:
             return ", ".join(slots[slot]), True

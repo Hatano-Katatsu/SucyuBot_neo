@@ -83,7 +83,6 @@ class SchedulerRuntimeMixin:
         prompt_prefs = self._prompt_scene_preferences(session_id) if hasattr(self, "_prompt_scene_preferences") else {}
         purity = self._get_purity(session_id)
         safety = self._get_effective_safety(session_id)
-        quirk = self._get_session_cfg(session_id, "character_quirk_rule", "")
         world_context = ""
         if hasattr(self, "_ensure_life_profile"):
             try:
@@ -122,8 +121,6 @@ class SchedulerRuntimeMixin:
             )
         if continuity_context:
             system += f"\n{continuity_context}"
-        if quirk:
-            system += f"\n角色专属画面修补规则: {quirk}"
         system += (
             "\n画面主体规则: 图片主体默认必须是角色，不要把“你/用户”写成画面中被观看的主角。"
             "用户只能作为视角来源、互动对象或少量局部元素出现；只有用户明确要求双人同框时，才允许用户作为第二主体。"

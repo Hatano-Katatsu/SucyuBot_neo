@@ -345,6 +345,57 @@ def _strip_conflicting_scene_appearance(
     return scene_desc
 
 
+_FULL_NUDE_RE = re.compile(
+    r"\b(nude|naked|fully undressed|completely undressed|stark naked|no clothes|nothing on)\b",
+    re.IGNORECASE,
+)
+_NUDE_STATE_WORDS = (
+    "topless", "bottomless", "barefoot", "no panties", "no bra",
+    "exposed breasts", "exposed nipples", "bare shoulders",
+)
+
+
+def _apply_clothing_off(service: Any, clothing_off: str, effective_appearance: str, neg: str, worn_tags: list[str]) -> tuple[str, str]:
+    """按规划器的一次性"脱衣/裸露"指令，从本次渲染的外观里剥离服装。
+
+    只改这张图的 effective_appearance（持久的衣柜/dynamic_appearance 不动），实现"场景内
+    暂时脱衣、场景结束随规划器重新判断而自动复原"。这是修复"叙事脱了衣服但图里还在"的核心：
+    让规划器的逐图判断覆盖陈旧的持久着装，而不是反过来。
+
+    worn_tags 是"当前所穿"的服饰标签（来自 dynamic_appearance/一次性外观）——按它做标签级匹配，
+    不依赖关键词分类，避免漏掉未登记在 outfit_keywords 里的衣物（如 cardigan）。
+    """
+    raw = (clothing_off or "").strip()
+    if not raw:
+        return effective_appearance, neg
+    appearance = effective_appearance
+    worn = [w for w in (worn_tags or []) if w and w.strip()]
+    if _FULL_NUDE_RE.search(raw):
+        for tag in worn:
+            appearance = service._remove_tag(appearance, tag)
+        if "nude" not in appearance.lower():
+            appearance = f"{appearance}, completely nude" if appearance.strip() else "completely nude"
+    else:
+        extra: list[str] = []
+        for tok in [t.strip() for t in re.split(r"[,;]+", raw) if t.strip()]:
+            tl = tok.lower()
+            if tl in _NUDE_STATE_WORDS:
+                extra.append(tok)
+                continue
+            # 双向子串匹配，容忍 "cardigan" 对 "cotton knit cardigan"
+            for tag in worn:
+                tagl = tag.lower()
+                if tl and (tl in tagl or tagl in tl):
+                    appearance = service._remove_tag(appearance, tag)
+        for w in extra:
+            if w.lower() not in appearance.lower():
+                appearance = f"{appearance}, {w}" if appearance.strip() else w
+    appearance = normalize_appearance_text(appearance)
+    # 这张图既然要露，负向别再压制裸体（仅去裸体相关词，不动评级词，避免和评级系统打架）
+    neg = _remove_negatives(neg, "nude", "naked", "nudity", "topless", "bottomless", "completely nude", "revealing clothes")
+    return appearance, neg
+
+
 def _strip_conflicting_scene_light(service: Any, session_id: str, scene_desc: str) -> str:
     if not session_id or not hasattr(service, "_get_time_context"):
         return scene_desc
@@ -709,6 +760,7 @@ def build_prompt(
     is_intimate: bool = False,
     partner_in_frame: bool = False,
     device_in_frame: bool = False,
+    clothing_off: str = "",
 ) -> tuple[str, str]:
     raw_scene_desc = scene_desc
     state = service._get_session_state(session_id) if session_id else {}
@@ -759,7 +811,7 @@ def build_prompt(
         or (scene_has_partner and not is_ntr_scene)
     )
 
-    quality = "masterpiece, best quality, absurdres, score_9, score_8, anime coloring, clean lineart, soft cel shading, detailed illustration"
+    quality = "masterpiece, best quality, highres, absurdres, newest, year 2025, anime coloring, clean lineart, soft cel shading, detailed illustration"
     if safety.get("tag"):
         quality += f", {safety['tag']}"
     count = "1boy, solo" if male else "1girl, solo"
@@ -869,6 +921,13 @@ def build_prompt(
     effective_appearance = char
     if appearance_override:
         effective_appearance = f"{effective_appearance}, {appearance_override}" if effective_appearance else appearance_override
+    # 一次性脱衣/裸露：让规划器的逐图判断剥离本次着装（不落盘），覆盖陈旧持久态。
+    # "当前所穿"标签取自生效的 dynamic_appearance + 本次一次性外观，按标签匹配剥离。
+    worn_src = service._effective_dynamic_appearance(session_id) if session_id else (state.get("dynamic_appearance") or "")
+    worn_tags = [t.strip() for t in str(worn_src).split(",") if t.strip()]
+    if one_shot_appearance:
+        worn_tags += [t.strip() for t in str(one_shot_appearance).split(",") if t.strip()]
+    effective_appearance, neg = _apply_clothing_off(service, clothing_off, effective_appearance, neg, worn_tags)
     slots = PromptSlots(
         raw_scene=raw_scene_desc,
         scene=scene_desc,
@@ -1337,6 +1396,7 @@ async def do_generate(
     is_intimate: bool = False,
     partner_in_frame: bool = False,
     device_in_frame: bool = False,
+    clothing_off: str = "",
 ) -> tuple[bool, list[bytes], str]:
     async with service._gen_lock:
         service._generating = True
@@ -1344,6 +1404,7 @@ async def do_generate(
             return await do_generate_locked(
                 service, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
                 is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
+                clothing_off=clothing_off,
             )
         finally:
             service._generating = False
@@ -1358,11 +1419,13 @@ async def do_generate_locked(
     is_intimate: bool = False,
     partner_in_frame: bool = False,
     device_in_frame: bool = False,
+    clothing_off: str = "",
 ) -> tuple[bool, list[bytes], str]:
     ensure_comfy_session(service)
     positive, negative = build_prompt(
         service, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
         is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
+        clothing_off=clothing_off,
     )
     seed = random.randint(0, 2**63 - 1)
     if session_id and hasattr(service, "_ulog"):
