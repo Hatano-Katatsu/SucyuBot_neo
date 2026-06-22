@@ -1090,6 +1090,14 @@ class CommandHandlersMixin:
         state["character_place_updated_at"] = 0
         state["character_place_history"] = []
         state["rounds_since_location"] = 0
+        # 用户位置也一并清（修复原先 CC 漏清 user_place 的不对称）：换角色/clearup 是硬重置，
+        # 用户上一段对话里声明的所在不应渗进新角色上下文，由新对话重新确立。
+        state["user_place"] = ""
+        state["user_place_label"] = ""
+        state["user_place_text"] = ""
+        state["user_place_updated_at"] = 0
+        state["user_place_confidence"] = 0
+        state["user_co_located"] = False
 
     @staticmethod
     def _character_context_key_from_state(state: dict[str, Any]) -> str:

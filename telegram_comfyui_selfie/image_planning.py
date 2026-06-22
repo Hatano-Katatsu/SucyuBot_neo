@@ -178,9 +178,8 @@ def format_dialog_context(service: Any, state: dict[str, Any], session_id: str =
         lines.append(f"{role}: {content}")
 
     recent = []
-    now_ts = time.time()
     for msg in state.get("recent_message_history", []):
-        if now_ts - msg.get("time", 0) < 3 * 3600:
+        if service._within(msg.get("time", 0), 3 * 3600):
             dt = datetime.fromtimestamp(msg["time"], service._session_tz(session_id))
             recent.append(f"[{dt.strftime('%H:%M')}] 用户: {msg.get('text', '')}")
     if recent:
@@ -192,7 +191,7 @@ def format_sent_photo_context(service: Any, state: dict[str, Any], session_id: s
     reset_time = float(state.get("short_context_reset_time", 0) or 0)
     photos = [
         photo for photo in state.get("sent_photos_history", [])
-        if not reset_time or photo.get("timestamp", 0) >= reset_time
+        if service._within(photo.get("timestamp", 0), since=reset_time)
     ][-limit:]
     if not photos:
         return None

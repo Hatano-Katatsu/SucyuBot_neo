@@ -46,7 +46,7 @@ class ChatContextMixin:
         state["recent_message_history"] = (state.get("recent_message_history", []) + [{"text": text, "time": time.time()}])[-5:]
 
         if state.get("last_sent_selfie_time", 0) and not state.get("last_sent_selfie_replied", False):
-            if time.time() - state["last_sent_selfie_time"] < 12 * 3600:
+            if self._within(state["last_sent_selfie_time"], 12 * 3600):
                 state["replying_to_selfie"] = True
             state["last_sent_selfie_replied"] = True
 
@@ -713,17 +713,17 @@ class ChatContextMixin:
             return f"距离上次互动超过 {gap_hours:g} 小时，开启新的短期上下文"
         return ""
 
-    @staticmethod
-    def _reset_short_context(state: dict[str, Any], reason: str):
+    def _reset_short_context(self, state: dict[str, Any], reason: str):
+        # 短期/新场景重置：注意力边界前移 + 清空轻量近期 buffer，但**位置不硬清空**（连续而非瞬移）：
+        #   · user_place：交给 4h TTL 自然老化（B 方案）——换话题不代表用户物理移动；
+        #   · character_place：降级为 weak（见 _demote_character_place），新场景不钉死生图、仍作背景，
+        #     等新场景的位置声明覆盖或 TTL 过期。
+        # 两个位置字段在本路径**对称处理**（都不清空），消除原先“SR 清 user 不清 character”的不对称。
         state["short_context_start"] = len(state.get("chat_history", []))
         state["short_context_reset_time"] = time.time()
         state["short_context_reset_reason"] = reason
         state["recent_message_history"] = []
-        state["user_place"] = ""
-        state["user_place_label"] = ""
-        state["user_place_text"] = ""
-        state["user_place_updated_at"] = 0
-        state["user_place_confidence"] = 0
+        self._demote_character_place(state)
 
     @staticmethod
     def _active_chat_history(state: dict[str, Any], limit: int = 16) -> list[dict[str, Any]]:
@@ -758,12 +758,10 @@ class ChatContextMixin:
         if not photos:
             return
         existing = "\n".join(m.get("content", "") for m in state.get("chat_history", []) if isinstance(m.get("content"), str))
-        now = time.time()
         reset_time = float(state.get("short_context_reset_time", 0) or 0)
         for photo in photos[-3:]:
-            if now - photo.get("timestamp", 0) > 12 * 3600:
-                continue
-            if reset_time and photo.get("timestamp", 0) < reset_time:
+            # 12h 内 且 晚于短期重置边界（视觉时效绑定注意力边界——见 ④，刻意为之）。
+            if not self._within(photo.get("timestamp", 0), 12 * 3600, since=reset_time):
                 continue
             scene = photo.get("scene", "")
             if scene and scene in existing:

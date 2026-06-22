@@ -1381,6 +1381,62 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("厨房里准备晚饭", photos)
         self.assertNotIn("办公室灯下自拍", photos)
 
+    def test_short_context_reset_demotes_character_place_keeps_user_place(self):
+        """① 连续重置（B 方案）：SR 不硬清位置——character_place 降级为 weak（非清空、非 strong、非 None），
+        user_place 完全不动（交给 4h TTL）。消除原先 SR 清 user 不清 character 的不对称。"""
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        # 新鲜的强 pin（对话刚确立）+ 用户自报位置
+        svc._set_character_place(sid, "home", "在家", 0.95, source="tool")
+        state["user_place"] = "mall"
+        state["user_place_label"] = "商场"
+        state["user_place_updated_at"] = time.time()
+        state["user_place_confidence"] = 0.85
+        self.assertEqual(svc._active_character_place(state)["authority"], "strong")
+
+        svc._reset_short_context(state, "用户显式切换或结束上一话题/场景")
+
+        active = svc._active_character_place(state)
+        self.assertIsNotNone(active, "character_place 不应被清空（连续，非失忆）")
+        self.assertEqual(active["key"], "home", "地点保留，仅降级")
+        self.assertEqual(active["authority"], "weak", "降级为 weak：生图不再钉死，仅作背景")
+        # user_place 原样保留（B 方案：换话题不代表用户物理移动）
+        self.assertEqual(state["user_place"], "mall")
+        self.assertEqual(state["user_place_confidence"], 0.85)
+
+    def test_clear_conversation_context_clears_both_places(self):
+        """① 硬重置对称：换角色/clearup 的 _clear_conversation_context 同时清空 character_place 和
+        user_place（修复原先漏清 user_place、用户所在渗进新角色的不对称）。"""
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        svc._set_character_place(sid, "home", "在家", 0.95, source="tool")
+        state["user_place"] = "mall"
+        state["user_place_label"] = "商场"
+        state["user_place_updated_at"] = time.time()
+        state["user_place_confidence"] = 0.85
+        state["user_co_located"] = True
+
+        svc._clear_conversation_context(state)
+
+        self.assertEqual(state["character_place"], "")
+        self.assertEqual(state["user_place"], "")
+        self.assertEqual(state["user_place_updated_at"], 0)
+        self.assertEqual(state["user_place_confidence"], 0)
+        self.assertFalse(state["user_co_located"])
+
+    def test_within_primitive_semantics(self):
+        """② 薄时效原语：年龄上限 + 可选 since 切点；ttl=None 表示只按 since 过滤。"""
+        svc = self.make_service()
+        now = time.time()
+        self.assertTrue(svc._within(now - 10, 3600))          # 新鲜
+        self.assertFalse(svc._within(now - 7200, 3600))       # 超 ttl
+        self.assertFalse(svc._within(0, 3600))                # 无时间戳
+        self.assertTrue(svc._within(now, None))               # 无 ttl 上限
+        self.assertFalse(svc._within(now - 5, 3600, since=now))   # 早于 since 切点
+        self.assertTrue(svc._within(now, 3600, since=now - 5))    # 晚于 since 切点
+
     def test_translate_to_tags_uses_anima_mixed_prompt_with_fixed_view(self):
         async def run():
             svc = self.make_service()

@@ -657,13 +657,32 @@ class WorldRuntimeMixin:
                 break
         return candidates
 
+    @staticmethod
+    def _within(updated_at: float, ttl_seconds: float | None = None, *, since: float = 0) -> bool:
+        """统一的时效原语：判断 updated_at 是否仍“新鲜”。
+
+        - `ttl_seconds=None`：不设年龄上限，只按 `since` 切点过滤（如照片只受短期重置边界约束）。
+        - `since>0`：要求 updated_at 晚于该时刻（短期重置软边界）。
+
+        刻意只做“算年龄/在不在窗口内”这一步——pin 的 strong/weak 分档、过滤条数上限、窗口
+        策略等仍由各调用点自行决定（见 ②：薄原语不上收策略）。
+        """
+        ts = float(updated_at or 0)
+        if not ts:
+            return False
+        if ttl_seconds is not None and time.time() - ts > ttl_seconds:
+            return False
+        if since and ts < float(since):
+            return False
+        return True
+
     def _active_user_place(self, state: dict[str, Any]) -> dict[str, Any] | None:
         try:
             ttl = max(0.25, float(self.config.get("world_user_place_ttl_hours", "4") or "4")) * 3600
         except Exception:
             ttl = 4 * 3600
         updated = float(state.get("user_place_updated_at", 0) or 0)
-        if updated and time.time() - updated > ttl:
+        if updated and not self._within(updated, ttl):
             return None
         if state.get("user_co_located"):
             return {
@@ -722,7 +741,7 @@ class WorldRuntimeMixin:
         except Exception:
             ttl = 4 * 3600
         updated = float(state.get("character_place_updated_at", 0) or 0)
-        if not updated or time.time() - updated > ttl:
+        if not self._within(updated, ttl):
             return None
         key = (state.get("character_place") or "").strip()
         if key not in PLACE_TYPES:
@@ -792,6 +811,26 @@ class WorldRuntimeMixin:
             state["character_place_history"] = history[-20:]
         self._mark_dirty(session_id)
         return True
+
+    def _demote_character_place(self, state: dict[str, Any]):
+        """把角色位置降级为 weak（不清空）：短期重置/新场景时不再钉死生图，但仍作背景，靠 4h TTL 自然老化。
+
+        手段是把 `character_place_updated_at` 往后推到“strong 边界”（now - strong_hours），使
+        `_active_character_place` 立刻判成 weak、但仍在硬 TTL 内。用 min() 保证只后移、绝不前移
+        （已经陈旧的 pin 不会被刷新）。这样新场景的第一句位置声明会以高置信覆盖它，在覆盖前旧地点
+        作为 weak 背景延续——连续过渡，而非瞬移或失忆。
+        """
+        updated = float(state.get("character_place_updated_at", 0) or 0)
+        if not updated:
+            return
+        try:
+            strong_hours = max(0.0, float(self.config.get("world_character_place_strong_hours", "1.0") or "1.0"))
+        except Exception:
+            strong_hours = 1.0
+        # 后移到 strong 边界之外（-1s 余量：strong 判定用 age<=边界，Windows time.time() 分辨率粗，
+        # 不留余量时 demote 后立即判定可能 age 恰等于边界而误判 strong）。confidence/TTL 不动——
+        # 我们仍“确信”角色刚才在哪，只是这地点对新场景不再 fresh、不钉死生图；靠 4h TTL 自然老化。
+        state["character_place_updated_at"] = min(updated, time.time() - strong_hours * 3600 - 1.0)
 
     async def _update_character_place_from_text(self, session_id: str, text: str) -> bool:
         """用 LLM 从角色（助手）回复里判断角色此刻所在的具体地点并持久化。
