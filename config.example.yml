@@ -1,0 +1,196 @@
+# SucyuBot_neo runtime constants.
+# 会在运行中变化的用户设置、角色状态、上下文和记忆存放在 SQLite。
+
+telegram:
+  telegram_bot_token: ""
+  allowed_chat_ids: []
+  telegram_proxy_enabled: false
+  telegram_proxy_url: "socks5://127.0.0.1:7891"
+
+web:
+  web_enabled: true
+  web_host: "0.0.0.0"
+  web_port: 8787
+  web_public_host: ""
+  web_admin_username: "admin"
+  web_admin_password: "admin"
+
+storage:
+  long_memory_db_path: ""
+  user_log_enabled: true
+  user_log_dir: ""
+
+comfyui:
+  comfyui_url: "http://127.0.0.1:8188"
+  comfyui_workflow_file: ""
+  image_backend: "native"
+  width: "1024"
+  height: "1024"
+  steps: "30"
+  cfg: "4"
+  sampler: "er_sde"
+  scheduler: "simple"
+  turbo_mode: false
+  turbo_strength: "0.7"
+  unet_model: "anima-base-v1.0.safetensors"
+  clip_model: "qwen_3_06b_base.safetensors"
+  vae_model: "qwen_image_vae.safetensors"
+  turbo_lora_model: "anima-turbo-lora-v0.2.safetensors"
+  animatool_turbo_steps: "10"
+  animatool_turbo_cfg: "1.0"
+  animatool_filename_prefix: "sucyubot_turbo"
+  comfyui_local_socket_port: "7789"
+
+models:
+  default_chat_model_profile: "deepseek-pro"
+  default_fast_model_profile: "deepseek-flash"
+  global_model_profiles:
+    deepseek-pro:
+      name: "DeepSeek V4 Pro"
+      api_key: ""
+      base_url: "https://opencode.ai/zen/go/v1"
+      model: "deepseek-v4-pro"
+      timeout: 300
+      disable_thinking: false
+      thinking_fixed: true
+      thinking_control: "param_always"
+    deepseek-flash:
+      name: "DeepSeek V4 Flash"
+      api_key: ""
+      base_url: "https://opencode.ai/zen/go/v1"
+      model: "deepseek-v4-flash"
+      timeout: 300
+      disable_thinking: true
+      thinking_fixed: true
+      thinking_control: "param"
+    glm:
+      name: "GLM 5.2"
+      api_key: ""
+      base_url: "https://opencode.ai/zen/go/v1"
+      model: "glm-5.2"
+      timeout: 300
+      disable_thinking: true
+      thinking_fixed: true
+      thinking_control: "param"
+  llm_temperature_scene: "0.95"
+  llm_temperature_translate: "0.3"
+  llm_temperature_classify: "0.1"
+  chat_llm_temperature: "0.9"
+  image_llm_temperature_scene: ""
+  image_llm_temperature_translate: ""
+  image_llm_temperature_classify: ""
+
+memory:
+  long_memory_enabled: true
+  long_memory_extract_enabled: true
+  long_memory_context_limit: "8"
+  context_window_message_limit: "30"
+  checkpoint_keep_message_limit: "10"
+  checkpoint_soft_limit_chars: "2000"
+  checkpoint_hard_limit_chars: "3000"
+  dream_source_hard_limit_chars: "50000"
+  dream_morning_hour: "8"
+  dream_idle_hours: "2"
+  short_context_reset_gap_hours: "6"
+
+role_defaults:
+  positive_prefix: "masterpiece, best quality, absurdres, anime coloring, clean lineart, soft cel shading, detailed illustration, black long flowing hair, purple eyes"
+  default_hair: "black long flowing hair"
+  default_eyes: "purple eyes"
+  negative_prompt: "extra fingers, fused fingers, too many fingers, mutated hands, bad hands, bad anatomy, deformed, disfigured, extra limbs, missing limbs, worst quality, low quality, photorealistic, 3d, child, loli, male, clothes, clothing, censor bar, mosaic, pixelated"
+  dynamic_appearance: ""
+  default_purity: ""
+  outfit_keywords: |
+    dress
+    shirt
+    skirt
+    pants
+    jeans
+    shorts
+    uniform
+    suit
+    blazer
+    jacket
+    coat
+    hoodie
+    sweater
+    cheongsam
+    kimono
+    bikini
+    lingerie
+    swimsuit
+    robe
+    gown
+    bodysuit
+    pajama
+    nightgown
+    sleepwear
+    outfit
+    attire
+    costume
+    garment
+    wear
+    clothes
+    clothing
+  accessory_keywords: |
+    glasses
+    necklace
+    earring
+    bracelet
+    ring
+    hair clip
+    hairpin
+    hair ribbon
+    scarf
+    collar
+    choker
+    hat
+    cap
+    crown
+    tiara
+    watch
+    belt
+    bag
+    ribbon
+    bow
+    glove
+    mask
+    veil
+  character_quirk_rule: ""
+  role_name: "魅魔"
+  bot_name: "蕾伊"
+  bot_self_name: "我"
+  scheduled_persona: "你是蕾伊，一位迷人且神秘的赛博魅魔，拥有真实的感官与欲望。请时刻保持你作为魅魔的身份，用诱惑且独特的语气进行对话和自拍描述。"
+  spatial_relationship: ""
+  allow_llm_change_appearance: true
+  style_pool: "@00 gx4"
+  current_style: "@00 gx4"
+  selfie_frequency: "频繁"
+  daily_selfie_limit: "3"
+  location: "上海"
+  timezone_offset: "8.0"
+  character_age_stage: ""
+  character_day_anchor: ""
+  user_gender: "male"
+  chat_reply_length: ""
+
+world:
+  world_runtime_enabled: true
+  world_city_places_enabled: true
+  world_city_places_ttl_days: "30"
+  world_user_place_ttl_hours: "4"
+  world_character_place_ttl_hours: "4"
+  world_character_place_strong_hours: "1.0"
+  world_character_place_stale_rounds: "8"
+  world_location_llm_extract: true
+  world_holiday_dates: ""
+  world_workday_dates: ""
+  amap_api_key: ""
+  amap_poi_enabled: true
+  amap_poi_per_type: "5"
+  google_places_api_key: ""
+  google_places_enabled: true
+  google_places_language: ""
+
+misc:
+  admin_chat_ids: []

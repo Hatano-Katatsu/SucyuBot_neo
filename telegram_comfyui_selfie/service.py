@@ -15,11 +15,14 @@ import aiohttp
 from . import appearance as appearance_rules
 from . import generation as image_generation
 from . import prompt_intake
+from .app_store import AppStateStore
+from .config_store import dump_simple_yaml, flatten_config, load_simple_yaml
 from .defaults import DEFAULT_CONFIG
 from .image_planning import VALID_VIEWS, plan_roleplay_image
 from .memory import LongTermMemoryStore
 from .chat_context import ChatContextMixin
 from .commands import CommandHandlersMixin
+from .git_update import GitUpdateMixin
 from .memory_policy import MemoryPolicyMixin
 from .process_restart import ProcessRestartMixin
 from .scheduler_runtime import SchedulerRuntimeMixin
@@ -90,12 +93,18 @@ class TelegramComfyUIService(
     MemoryPolicyMixin,
     SchedulerRuntimeMixin,
     WorldRuntimeMixin,
+    GitUpdateMixin,
 ):
     def __init__(self, config_path: str | Path = "data/config.json", state_path: str | Path = "data/state.json"):
         self.config_path = Path(config_path)
+        if self.config_path.suffix.lower() == ".json":
+            yml_path = self.config_path.with_suffix(".yml")
+            if yml_path.exists() and not self.config_path.exists():
+                self.config_path = yml_path
         self.state_path = Path(state_path)
         self.config = self._load_config()
         self.memory = LongTermMemoryStore(self._memory_db_path())
+        self.app_store = AppStateStore(self.memory.path)
         self.sessions: dict[str, dict[str, Any]] = {}
         self.city_place_catalogs: dict[str, dict[str, Any]] = {}
         self._load_state()
@@ -113,6 +122,8 @@ class TelegramComfyUIService(
         self._bot_username = ""
         self._offset = 0
         self._bot_tasks: list[asyncio.Task] = []
+        self._checkpoint_tasks: dict[str, asyncio.Task] = {}
+        self._dream_tasks: dict[str, asyncio.Task] = {}
         self._web_runner: Any = None
         self._stop_event: asyncio.Event | None = None
         self.process_started_at = time.time()
@@ -140,6 +151,30 @@ class TelegramComfyUIService(
             await self.stop_web_console()
             await self.close()
 
+    def _telegram_proxy_url(self) -> str:
+        enabled = self.config.get("telegram_proxy_enabled", False)
+        if isinstance(enabled, str):
+            enabled = enabled.strip().lower() in ("true", "1", "yes", "on")
+        if not enabled:
+            return ""
+        return str(self.config.get("telegram_proxy_url") or "").strip()
+
+    def _telegram_proxy_connector(self):
+        proxy = self._telegram_proxy_url()
+        if not proxy or not proxy.lower().startswith(("socks5://", "socks4://")):
+            return None
+        try:
+            from aiohttp_socks import ProxyConnector
+        except ImportError as exc:
+            raise RuntimeError("telegram_proxy_url uses SOCKS proxy, please install aiohttp_socks") from exc
+        return ProxyConnector.from_url(proxy)
+
+    def _telegram_http_proxy(self) -> str:
+        proxy = self._telegram_proxy_url()
+        if proxy.lower().startswith(("http://", "https://")):
+            return proxy
+        return ""
+
     async def start_bot(self):
         if self.is_bot_running:
             return
@@ -147,7 +182,8 @@ class TelegramComfyUIService(
         if not token:
             raise RuntimeError("telegram_bot_token 未配置")
         timeout = aiohttp.ClientTimeout(total=620)
-        self.http = aiohttp.ClientSession(timeout=timeout, trust_env=True)
+        connector = self._telegram_proxy_connector()
+        self.http = aiohttp.ClientSession(timeout=timeout, trust_env=(connector is None), connector=connector)
         me = await self.tg_api("getMe")
         self._bot_username = (me.get("result") or {}).get("username", "")
         self._bot_tasks = [
@@ -210,20 +246,29 @@ class TelegramComfyUIService(
         cfg = dict(DEFAULT_CONFIG)
         if self.config_path.exists():
             try:
-                loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
+                if self.config_path.suffix.lower() in (".yml", ".yaml"):
+                    loaded = flatten_config(load_simple_yaml(self.config_path))
+                else:
+                    loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict):
                     cfg.update(loaded)
             except Exception as exc:
-                raise RuntimeError(f"读取配置失败: {self.config_path}: {exc}") from exc
+                raise RuntimeError(f"配置文件读取失败: {self.config_path}: {exc}") from exc
         else:
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            self.config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-            logger.warning("配置文件不存在，已生成默认配置: %s", self.config_path)
+            if self.config_path.suffix.lower() in (".yml", ".yaml"):
+                self.config_path.write_text(dump_simple_yaml(cfg), encoding="utf-8")
+            else:
+                self.config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+            logger.warning("配置文件不存在，已写入默认配置: %s", self.config_path)
         return cfg
 
     def save_config(self):
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        self.config_path.write_text(json.dumps(self.config, ensure_ascii=False, indent=2), encoding="utf-8")
+        if self.config_path.suffix.lower() in (".yml", ".yaml"):
+            self.config_path.write_text(dump_simple_yaml(self.config), encoding="utf-8")
+        else:
+            self.config_path.write_text(json.dumps(self.config, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _memory_db_path(self) -> Path:
         raw = str(self.config.get("long_memory_db_path") or "").strip()
@@ -235,9 +280,26 @@ class TelegramComfyUIService(
         return path
 
     def _load_state(self):
+        """从 SQLite 加载会话状态和城市目录。
+
+        首次启动时如果 SQLite 无数据但 state.json 存在，自动迁移旧数据。
+        """
         self.sessions = {}
-        if not self.state_path.exists():
-            return
+        self.city_place_catalogs = {}
+        try:
+            if self.app_store.has_session_states():
+                self.sessions = self.app_store.load_all_session_states()
+                logger.info("Loaded %d sessions from SQLite", len(self.sessions))
+            elif self.state_path.exists():
+                self._migrate_from_state_json()
+            # 城市目录独立加载（可能先于会话写入）
+            self.city_place_catalogs = self.app_store.load_all_city_catalogs()
+        except Exception as exc:
+            logger.warning("加载状态失败，使用空状态: %s", exc)
+        self._migrate_legacy_personas()
+
+    def _migrate_from_state_json(self):
+        """从旧版 state.json 迁移数据到 SQLite。"""
         try:
             raw = self.state_path.read_text(encoding="utf-8")
             if not raw.strip():
@@ -246,13 +308,18 @@ class TelegramComfyUIService(
             sessions = data.get("sessions", {})
             if isinstance(sessions, dict):
                 self.sessions = sessions
-                logger.info("Loaded %d sessions from %s", len(self.sessions), self.state_path)
+                for sid, state in sessions.items():
+                    if isinstance(state, dict):
+                        self.app_store.save_session_state(sid, state)
+                logger.info("Migrated %d sessions from %s to SQLite", len(sessions), self.state_path)
             catalogs = data.get("city_place_catalogs", {})
             if isinstance(catalogs, dict):
                 self.city_place_catalogs = catalogs
-            self._migrate_legacy_personas()
+                for key, catalog in catalogs.items():
+                    if isinstance(catalog, dict):
+                        self.app_store.save_city_catalog(key, catalog)
         except Exception as exc:
-            logger.warning("加载状态失败，使用空状态: %s", exc)
+            logger.warning("state.json 迁移失败: %s", exc)
 
     # 老数据迁移：早期把身份/关系焊进了 custom_scheduled_persona，现已改为读时组装。
     # 启动时把这两类前缀剥掉，让人设串退化成纯人格描述（幂等，剥干净后不再变动）。
@@ -287,22 +354,20 @@ class TelegramComfyUIService(
                         changed = True
         if changed:
             try:
-                self._write_state()
+                for sid, state in self.sessions.items():
+                    self.app_store.save_session_state(sid, state)
                 logger.info("已清洗历史人设串里焊死的身份/关系前缀")
             except Exception:
                 logger.warning("历史人设迁移写回失败", exc_info=True)
 
     def _write_state(self):
-        state = {
-            "sessions": self.sessions,
-            "character_registry": self._build_character_registry(),
-            "location_registry": self._build_location_registry(),
-            "city_place_catalogs": self.city_place_catalogs,
-        }
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.state_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self.state_path)
+        """将所有脏会话写入 SQLite（替代旧版全量 JSON 写入）。"""
+        for session_id in self._dirty_sessions:
+            state = self.sessions.get(session_id)
+            if state is not None:
+                self.app_store.save_session_state(session_id, state)
+        self._dirty_sessions.clear()
+        self._last_state_write = time.time()
 
     def _mark_dirty(self, session_id: str):
         if session_id:
@@ -312,18 +377,16 @@ class TelegramComfyUIService(
         now = time.time()
         if not force and now - self._last_state_write < self._state_write_interval:
             return
-        if not self._dirty_sessions and self.state_path.exists():
+        if not self._dirty_sessions:
             return
         self._write_state()
-        self._last_state_write = now
-        self._dirty_sessions.clear()
 
     def _save_session_state(self, session_id: str, state: dict[str, Any]):
         if not session_id:
             return
         self.sessions[session_id] = state
-        self._mark_dirty(session_id)
-        self._flush_sessions(force=True)
+        self.app_store.save_session_state(session_id, state)
+        self._dirty_sessions.discard(session_id)
 
     # ---------------------------------------------------------------------
     # Per-user activity log (data/logs/telegram_<chat_id>.log)
@@ -388,6 +451,11 @@ class TelegramComfyUIService(
             "daily_triggered_times": [],
             "recent_message_history": [],
             "chat_history": [],
+            "checkpoint_summary": "",
+            "checkpoint_message_id": 0,
+            "last_checkpoint_at": 0,
+            "last_dream_at": 0,
+            "last_dream_message_id": 0,
             "sent_photos_history": [],
             "dynamic_appearance": "",
             "wardrobe": {},
@@ -435,6 +503,8 @@ class TelegramComfyUIService(
             "custom_character_day_anchor": "",
             "persona_user_set": False,
             "saved_characters": {},
+            "character_contexts": {},
+            "init_flow": {},
             "purity": None,
             "purity_user_set": False,
             "ntr_stage_reached": 0,
@@ -485,6 +555,12 @@ class TelegramComfyUIService(
             )
             bot_self_name = state.get("custom_bot_self_name") or "我"
             return role_name, bot_name, bot_self_name
+        # 角色态但 custom_character 为空（persona_user_set=True 但未填角色名）：用 neutral 占位，
+        # 避免回退到全局默认魅魔/蕾伊串到其他 OC 角色。
+        if session_id and self._is_character_set(session_id):
+            bot = state.get("custom_bot_name") or self.config.get("bot_name", "角色")
+            role = state.get("custom_role_name") or state.get("custom_series") or "角色"
+            return role, bot, state.get("custom_bot_self_name") or "我"
         return (
             self._get_session_cfg(session_id, "role_name", "魅魔"),
             self._get_session_cfg(session_id, "bot_name", "蕾伊"),
@@ -592,7 +668,8 @@ class TelegramComfyUIService(
         关系、职业——这些是字段单源，由本函数（身份）和各 prompt 的身份行/关系行实时拼。
         """
         state = self._get_session_state(session_id)
-        if self._is_character_set(session_id):
+        char_set = self._is_character_set(session_id)
+        if char_set:
             base = state.get("custom_scheduled_persona", "")
             if state.get("custom_character"):
                 base = self._persona_with_character_identity(
@@ -603,8 +680,15 @@ class TelegramComfyUIService(
         else:
             base = self._get_session_cfg(session_id, "scheduled_persona", DEFAULT_CONFIG["scheduled_persona"])
         if not base:
-            # 兜底：角色态但人设被清空（半重置残留）时回退全局默认，绝不返回空人设。
-            base = self.config.get("scheduled_persona") or DEFAULT_CONFIG["scheduled_persona"]
+            # 角色态下人设为空时，用角色名构造最小身份，避免回退到全局默认（魅魔蕾伊）串到其他 OC 角色。
+            # 非角色态（无角色/全局默认）才回退到全局 scheduled_persona。
+            if char_set and state.get("custom_character"):
+                base = f"你是{state['custom_character']}。"
+            elif char_set:
+                bot = state.get("custom_bot_name") or self.config.get("bot_name", "角色")
+                base = f"你是{bot}。"
+            else:
+                base = self.config.get("scheduled_persona") or DEFAULT_CONFIG["scheduled_persona"]
         additional = self._effective_dynamic_appearance(session_id)
         return f"{base}\n\n[当前附加人设/短期穿搭与配饰: {additional}]" if additional else base
 
@@ -785,13 +869,6 @@ class TelegramComfyUIService(
             f"view={(view or '').strip().lower() or '?'} caption={caption or '-'} scene={scene}",
         )
 
-    def _build_character_registry(self) -> dict[str, Any]:
-        registry = {}
-        for sid, state in self.sessions.items():
-            if state.get("saved_characters"):
-                registry[sid] = state["saved_characters"]
-        return registry
-
     @staticmethod
     def _identity_key(value: Any) -> str:
         return re.sub(r"\s+", " ", str(value or "").strip()).lower()
@@ -876,13 +953,14 @@ class TelegramComfyUIService(
                     updates.append(f"{sid} saved:{key}: {data.get('visual_character') or '(blank)'} / {data.get('visual_series') or '(blank)'}")
 
         backup_path = ""
-        if (sessions_updated or saved_updated) and create_backup and self.state_path.exists():
-            backup = self.state_path.with_name(f"{self.state_path.stem}.visual-tags-backup-{int(time.time())}{self.state_path.suffix}")
-            backup.write_bytes(self.state_path.read_bytes())
+        if (sessions_updated or saved_updated) and create_backup and self.app_store.path.exists():
+            backup = self.app_store.path.with_name(f"{self.app_store.path.stem}.visual-tags-backup-{int(time.time())}{self.app_store.path.suffix}")
+            backup.write_bytes(self.app_store.path.read_bytes())
             backup_path = str(backup)
         if sessions_updated or saved_updated:
-            self._write_state()
-            self._dirty_sessions.clear()
+            for sid in self.sessions:
+                self._mark_dirty(sid)
+            self._flush_sessions(force=True)
         return {
             "sessions_updated": sessions_updated,
             "saved_characters_updated": saved_updated,
@@ -1039,9 +1117,9 @@ class TelegramComfyUIService(
             backup = self.config_path.with_name(f"{self.config_path.stem}.prompt-prefix-backup-{stamp}{self.config_path.suffix}")
             backup.write_bytes(self.config_path.read_bytes())
             result["backup_paths"].append(str(backup))
-        if create_backup and state_changed and self.state_path.exists():
-            backup = self.state_path.with_name(f"{self.state_path.stem}.prompt-prefix-backup-{stamp}{self.state_path.suffix}")
-            backup.write_bytes(self.state_path.read_bytes())
+        if create_backup and state_changed and self.app_store.path.exists():
+            backup = self.app_store.path.with_name(f"{self.app_store.path.stem}.prompt-prefix-backup-{stamp}{self.app_store.path.suffix}")
+            backup.write_bytes(self.app_store.path.read_bytes())
             result["backup_paths"].append(str(backup))
 
         touched_sessions: set[str] = set()
@@ -1088,22 +1166,13 @@ class TelegramComfyUIService(
         if config_changed:
             self.save_config()
         if touched_sessions:
-            self._write_state()
-            self._dirty_sessions.clear()
+            for sid in touched_sessions:
+                self._mark_dirty(sid)
+            self._flush_sessions(force=True)
         result["sessions_updated"] = len(touched_sessions)
         result["saved_characters_updated"] = touched_saved
         result["count_migrated"] = count_migrated
         return result
-
-    def _build_location_registry(self) -> dict[str, Any]:
-        registry = {}
-        for sid, state in self.sessions.items():
-            if state.get("custom_location") or state.get("custom_timezone_offset"):
-                registry[sid] = {
-                    "city": state.get("custom_location") or f"(全局: {self.config.get('location', '—')})",
-                    "timezone": state.get("custom_timezone_offset") or f"(全局: {self.config.get('timezone_offset', '—')})",
-                }
-        return registry
 
     # ---------------------------------------------------------------------
     # Appearance / prompt
@@ -1257,6 +1326,118 @@ class TelegramComfyUIService(
     # ---------------------------------------------------------------------
     # LLM / ComfyUI
     # ---------------------------------------------------------------------
+    @staticmethod
+    def _llm_profile_model_name(profile: dict[str, Any], thinking: bool) -> tuple[str, str, str]:
+        """按 ref/app.py 的 profile 结构解析思考/非思考模型。"""
+        if thinking and profile.get("model_think"):
+            return profile.get("model_think") or "", profile.get("base_url") or "", profile.get("api_key") or ""
+        if not thinking and profile.get("model_no_think"):
+            return (
+                profile.get("model_no_think") or "",
+                profile.get("base_url_no_think") or profile.get("base_url") or "",
+                profile.get("api_key_no_think") or profile.get("api_key") or "",
+            )
+        return profile.get("model") or profile.get("model_no_think") or profile.get("model_think") or "", profile.get("base_url") or "", profile.get("api_key") or ""
+
+    def _user_id_for_session(self, session_id: str = "") -> str:
+        return str(session_id or "").removeprefix("telegram:")
+
+    def _global_model_profiles(self) -> dict[str, dict[str, Any]]:
+        profiles = self.config.get("global_model_profiles") or {}
+        return profiles if isinstance(profiles, dict) else {}
+
+    def _resolve_llm_profile(self, purpose: str, session_id: str = "") -> tuple[str, dict[str, Any], bool]:
+        """解析当前会话实际使用的 LLM profile。
+
+        chat 使用 chat_profile_id，image/fast 使用 fast_profile_id；缺省回退到 YAML 全局配置。
+        """
+        user_id = self._user_id_for_session(session_id)
+        settings = self.app_store.get_user_model_settings(user_id) if user_id else {}
+        user_profiles = self.app_store.list_model_profiles(user_id) if user_id else {}
+        global_profiles = self._global_model_profiles()
+        if purpose == "chat":
+            profile_id = settings.get("chat_profile_id") or self.config.get("default_chat_model_profile") or ""
+            thinking_value = settings.get("chat_thinking")
+        else:
+            profile_id = settings.get("fast_profile_id") or self.config.get("default_fast_model_profile") or ""
+            thinking_value = settings.get("fast_thinking")
+        profile = user_profiles.get(profile_id) or global_profiles.get(profile_id) or {}
+        if not profile and global_profiles:
+            profile_id, profile = next(iter(global_profiles.items()))
+        # 如果模型 profile 声明了 thinking_fixed，则强制使用 profile 中的思考开关，忽略用户 settings 覆盖。
+        if profile.get("thinking_fixed"):
+            disable = profile.get("disable_thinking", False)
+            if isinstance(disable, str):
+                disable = disable.lower() in ("true", "1", "yes", "on")
+            thinking = not bool(disable)
+        elif thinking_value is None:
+            disable = profile.get("disable_thinking", self._get_llm_value(purpose, "disable_thinking", False))
+            if isinstance(disable, str):
+                disable = disable.lower() in ("true", "1", "yes", "on")
+            thinking = not bool(disable)
+        else:
+            thinking = bool(thinking_value)
+        return str(profile_id or ""), dict(profile or {}), thinking
+
+    def _resolved_llm_config(self, purpose: str, session_id: str = "", disable_thinking: bool | None = None) -> dict[str, Any]:
+        profile_id, profile, thinking = self._resolve_llm_profile(purpose, session_id)
+        if disable_thinking is not None:
+            thinking = not bool(disable_thinking)
+        model, api_base, api_key = self._llm_profile_model_name(profile, thinking)
+        if not api_base:
+            api_base = self._get_llm_value(purpose, "api_base", "https://api.deepseek.com/v1") or "https://api.deepseek.com/v1"
+        if not api_key:
+            api_key = self._get_llm_value(purpose, "api_key", "") or ""
+        if not model:
+            model = self._get_llm_value(purpose, "model", "deepseek-chat") or "deepseek-chat"
+        return {
+            "profile_id": profile_id,
+            "profile": profile,
+            "thinking": thinking,
+            "api_base": str(api_base).rstrip("/"),
+            "api_key": api_key,
+            "model": model,
+            "max_tokens": profile.get("max_tokens") or self._get_llm_value(purpose, "max_tokens", "4096") or "4096",
+            "timeout": profile.get("timeout") or 120,
+            "thinking_control": profile.get("thinking_control", "model_name"),
+        }
+
+    def _record_llm_usage_from_response(
+        self,
+        data: dict[str, Any],
+        resolved: dict[str, Any],
+        *,
+        tag: str = "",
+        purpose: str = "",
+        session_id: str = "",
+    ):
+        """从 LLM 返回的 usage 字段提取 token 消耗并写入数据库。"""
+        usage = data.get("usage") or {} if isinstance(data, dict) else {}
+        if not usage:
+            return
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
+        # 缓存命中：DeepSeek 用 prompt_cache_hit_tokens，其他厂商可能用 prompt_cached_tokens
+        cached_tokens = int(
+            usage.get("prompt_cache_hit_tokens")
+            or usage.get("prompt_cached_tokens")
+            or 0
+        )
+        if not cached_tokens and "prompt_cache_miss_tokens" in usage and prompt_tokens:
+            cached_tokens = max(0, prompt_tokens - int(usage.get("prompt_cache_miss_tokens") or 0))
+        self.app_store.record_llm_usage(
+            profile_id=str(resolved.get("profile_id") or ""),
+            model=str(resolved.get("model") or ""),
+            purpose=str(purpose or ""),
+            tag=str(tag or ""),
+            session_id=str(session_id or ""),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
+            total_tokens=total_tokens or prompt_tokens + completion_tokens,
+        )
+
     def _get_llm_value(self, purpose: str, name: str, default=None):
         prefix = "chat_llm" if purpose == "chat" else "image_llm"
         value = self.config.get(f"{prefix}_{name}")
@@ -1280,49 +1461,76 @@ class TelegramComfyUIService(
                 return legacy_value
         return default
 
-    def has_llm_config(self, purpose: str) -> bool:
-        return bool(self._get_llm_value(purpose, "api_key", ""))
+    def has_llm_config(self, purpose: str, session_id: str = "") -> bool:
+        return bool(self._resolved_llm_config(purpose, session_id).get("api_key"))
 
-    async def _call_llm_messages(self, messages: list[dict[str, Any]], tools=None, tool_choice=None, tag: str = "", temp: float | None = None, purpose: str = "image", disable_thinking: bool | None = None) -> dict[str, Any]:
-        api_base = (self._get_llm_value(purpose, "api_base", "https://api.deepseek.com/v1") or "https://api.deepseek.com/v1").rstrip("/")
-        api_key = self._get_llm_value(purpose, "api_key", "")
+    async def _call_llm_messages(
+        self,
+        messages: list[dict[str, Any]],
+        tools=None,
+        tool_choice=None,
+        tag: str = "",
+        temp: float | None = None,
+        purpose: str = "image",
+        disable_thinking: bool | None = None,
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        resolved = self._resolved_llm_config(purpose, session_id, disable_thinking=disable_thinking)
+        api_base = resolved["api_base"]
+        api_key = resolved["api_key"]
         if not api_key:
-            label = "聊天与角色扮演模型" if purpose == "chat" else "生图辅助模型"
-            raise RuntimeError(f"{label} API Key 未配置")
+            label = "chat model" if purpose == "chat" else "fast model"
+            raise RuntimeError(f"{label} API Key is not configured")
         body = {
-            "model": self._get_llm_value(purpose, "model", "deepseek-chat") or "deepseek-chat",
+            "model": resolved["model"],
             "messages": messages,
-            "max_tokens": int(self._get_llm_value(purpose, "max_tokens", "4096") or "4096"),
+            "max_tokens": int(resolved.get("max_tokens") or "4096"),
             "temperature": float(self._get_llm_value(purpose, "temperature", "0.95")) if temp is None else temp,
         }
         if tools is not None:
             body["tools"] = tools
         if tool_choice is not None:
             body["tool_choice"] = tool_choice
-        if disable_thinking is None:
-            disable = self._get_llm_value(purpose, "disable_thinking", False)
-            if isinstance(disable, str):
-                disable = disable.lower() in ("true", "1", "yes", "on")
-        else:
-            disable = bool(disable_thinking)
-        if disable:
+        thinking = bool(resolved.get("thinking"))
+        control = str(resolved.get("thinking_control") or "model_name")
+        if control == "param_always":
+            body["thinking"] = {"type": "enabled" if thinking else "disabled"}
+        elif control == "param" and not thinking:
             body["thinking"] = {"type": "disabled"}
-        async with aiohttp.ClientSession(trust_env=True, timeout=aiohttp.ClientTimeout(total=120)) as s:
+        elif control == "enable_thinking" and not thinking:
+            body["enable_thinking"] = False
+        elif disable_thinking:
+            body["thinking"] = {"type": "disabled"}
+        async with aiohttp.ClientSession(
+            trust_env=True,
+            timeout=aiohttp.ClientTimeout(total=float(resolved.get("timeout") or 120)),
+            headers={"Accept-Encoding": "gzip, deflate"},
+        ) as s:
             async with s.post(
                 f"{api_base}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept-Encoding": "gzip, deflate"},
                 json=body,
             ) as resp:
                 if resp.status != 200:
-                    raise RuntimeError(f"LLM 请求失败: {resp.status} {await resp.text()}")
-                return await resp.json()
+                    raise RuntimeError(f"LLM request failed: {resp.status} {await resp.text()}")
+                data = await resp.json()
+        # 记录 token 消耗（不阻塞主链路，解析失败仅记录日志）。
+        try:
+            self._record_llm_usage_from_response(data, resolved, tag=tag, purpose=purpose, session_id=session_id)
+        except Exception as exc:
+            logger.debug("record llm usage failed: %s", exc)
+        return data
 
-    async def _call_llm(self, system: str, user: str, temp: float = 0.3, tag: str = "", purpose: str = "image", disable_thinking: bool | None = None) -> str:
+    async def _call_llm(self, system: str, user: str, temp: float = 0.3, tag: str = "", purpose: str = "image", disable_thinking: bool | None = None, session_id: str = "") -> str:
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-        data = await self._call_llm_messages(messages, tag=tag, temp=temp, purpose=purpose, disable_thinking=disable_thinking)
+        data = await self._call_llm_messages(messages, tag=tag, temp=temp, purpose=purpose, disable_thinking=disable_thinking, session_id=session_id)
         msg = data.get("choices", [{}])[0].get("message", {})
-        text = (msg.get("content") or msg.get("reasoning_content") or "").strip()
-        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        text = (msg.get("content") or "").strip()
+        if not text:
+            text = (msg.get("reasoning_content") or "").strip()
+        text = re.sub(r"^\s*<thinking>.*?</thinking>\s*", "", text, flags=re.DOTALL).strip()
+        text = re.sub(r"^\s*<reasoning>.*?</reasoning>\s*", "", text, flags=re.DOTALL).strip()
+        text = re.sub(r"^\s*<analysis>.*?</analysis>\s*", "", text, flags=re.DOTALL).strip()
         text = re.sub(r"^```[a-zA-Z]*\n", "", text)
         text = re.sub(r"\n```$", "", text).strip()
         if not text:

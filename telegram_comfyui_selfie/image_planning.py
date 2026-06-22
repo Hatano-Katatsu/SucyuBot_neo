@@ -7,11 +7,103 @@ import time
 from datetime import datetime
 from typing import Any
 
+import aiohttp
+
 from .defaults import DEFAULT_CONFIG, WEEKDAY_NAMES
 
 logger = logging.getLogger(__name__)
 
 VALID_VIEWS = {"selfie", "mirror", "pov", "third"}
+
+# AnimaTool turbo knowledge/schema 缓存（按 comfyui_url 分键）
+_animatool_turbo_knowledge_cache: dict[str, tuple[dict[str, Any], float]] = {}
+_animatool_turbo_schema_cache: dict[str, tuple[dict[str, Any], float]] = {}
+_ANIMATOOL_KNOWLEDGE_TTL = 300.0
+
+
+async def _fetch_animatool_turbo_knowledge(service: Any, ttl: float = _ANIMATOOL_KNOWLEDGE_TTL) -> dict[str, Any]:
+    """从 AnimaTool 动态获取 turbo 画图知识规范。"""
+    url = str(service.config.get("comfyui_url", "http://127.0.0.1:8188")).rstrip("/")
+    now = time.monotonic()
+    cached = _animatool_turbo_knowledge_cache.get(url)
+    if cached and (now - cached[1]) < ttl:
+        return cached[0]
+    knowledge: dict[str, Any] = {}
+    try:
+        from .generation import ensure_comfy_session
+
+        ensure_comfy_session(service)
+        async with service.comfy_session.get(
+            f"{url}/anima/knowledge_turbo", timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
+            if resp.status == 200:
+                knowledge = await resp.json(content_type=None) or {}
+    except Exception as exc:
+        logger.debug("fetch animatool turbo knowledge failed: %s", exc)
+    _animatool_turbo_knowledge_cache[url] = (knowledge, now)
+    return knowledge
+
+
+async def _fetch_animatool_turbo_schema(service: Any, ttl: float = _ANIMATOOL_KNOWLEDGE_TTL) -> dict[str, Any]:
+    """从 AnimaTool 动态获取 turbo 接口 JSON schema。"""
+    url = str(service.config.get("comfyui_url", "http://127.0.0.1:8188")).rstrip("/")
+    now = time.monotonic()
+    cached = _animatool_turbo_schema_cache.get(url)
+    if cached and (now - cached[1]) < ttl:
+        return cached[0]
+    schema: dict[str, Any] = {}
+    try:
+        from .generation import ensure_comfy_session
+
+        ensure_comfy_session(service)
+        async with service.comfy_session.get(
+            f"{url}/anima/schema_turbo", timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
+            if resp.status == 200:
+                schema = await resp.json(content_type=None) or {}
+    except Exception as exc:
+        logger.debug("fetch animatool turbo schema failed: %s", exc)
+    _animatool_turbo_schema_cache[url] = (schema, now)
+    return schema
+
+
+def _build_animatool_turbo_hint(knowledge: dict[str, Any], schema: dict[str, Any]) -> str:
+    """根据动态获取的 knowledge/schema 生成给 image planner 的追加规则。"""
+    params = schema.get("parameters", {}) if isinstance(schema, dict) else {}
+    properties = params.get("properties", {}) if isinstance(params, dict) else {}
+    required = params.get("required", []) if isinstance(params, dict) else []
+
+    # 过滤掉固定超参数
+    _HYPER_KEYS = {"steps", "cfg", "width", "height", "batch_size", "filename_prefix", "seed", "aspect_ratio"}
+    content_fields = [k for k in properties if k not in _HYPER_KEYS]
+    content_required = [k for k in required if k not in _HYPER_KEYS]
+
+    # knowledge 关键段落直接注入
+    knowledge_sections = []
+    for key in ("turbo_expert", "turbo_examples"):
+        val = str(knowledge.get(key, "")).strip()
+        if val:
+            if len(val) > 3000:
+                val = val[:3000] + "\n...（截断）"
+            knowledge_sections.append(val)
+    knowledge_text = "\n\n".join(knowledge_sections) if knowledge_sections else ""
+
+    # schema 内容字段定义
+    field_hint = "\n".join(
+        f"- {name}: {properties[name].get('description', '')}"
+        for name in content_fields
+        if name in properties
+    )
+
+    return (
+        "\n【AnimaTool Turbo】（由 /anima/knowledge_turbo + /anima/schema_turbo 动态获取）\n"
+        "以下规则覆盖通用画面描述规则。\n"
+        + (f"\n{knowledge_text}\n" if knowledge_text else "")
+        + ("\n内容字段:\n" + field_hint + "\n" if field_hint else "")
+        + ("必填: " + ", ".join(content_required) + "\n" if content_required else "")
+        + "你的 scene → tags（英文自然语言），new_appearance_tags → appearance（danbooru 标签）。"
+        + " 角色身份 → character/series（仅已知公开角色；OC 留空）。"
+    )
 
 INTIMATE_CONTEXT_ZH = frozenset({
     "交合", "做爱", "插入", "进入她", "抽插", "骑乘", "后入", "结合",
@@ -323,6 +415,17 @@ async def plan_roleplay_image(
         "这些标签只用于本次生图，不会写入长期外型。不要把姿势、表情、动作、场景、灯光写进去。没有一次性外观补充时留空。"
     )
 
+    if str(service.config.get("image_backend", "native") or "native").lower() == "animatool":
+        try:
+            knowledge = await _fetch_animatool_turbo_knowledge(service)
+            schema = await _fetch_animatool_turbo_schema(service)
+        except Exception:
+            knowledge = {}
+            schema = {}
+        turbo_hint = _build_animatool_turbo_hint(knowledge, schema)
+        if turbo_hint:
+            system += turbo_hint
+
     user = (
         f"当前天气: {weather}\n"
         f"图片意图: {intent or '未提供'}\n"
@@ -405,3 +508,141 @@ async def plan_roleplay_image(
         "partner_in_frame": partner_in_frame,
         "device_in_frame": device_in_frame,
     }
+
+
+async def plan_animatool_slots(
+    service: Any,
+    session_id: str,
+    slots: "PromptSlots",
+    *,
+    intent: str = "",
+    mood: str = "",
+) -> dict[str, Any] | None:
+    """把已算好的 PromptSlots 槽位交给 LLM，让它根据 AnimaTool schema 直出最终 JSON。
+
+    返回 dict（可直接 POST /anima/generate_turbo + seed/steps/cfg/filename_prefix），
+    失败时返回 None，调用方应回退到旧逻辑。
+    """
+    if not service.has_llm_config("image"):
+        return None
+
+    try:
+        knowledge = await _fetch_animatool_turbo_knowledge(service)
+        schema = await _fetch_animatool_turbo_schema(service)
+    except Exception:
+        logger.debug("fetch animatool schema/knowledge failed", exc_info=True)
+        return None
+
+    params = schema.get("parameters", {}) if isinstance(schema, dict) else {}
+    properties = params.get("properties", {}) if isinstance(params, dict) else {}
+    required = params.get("required", []) if isinstance(params, dict) else []
+    if not properties:
+        return None
+
+    # 过滤掉固定超参数，只列出内容字段
+    _HYPER_KEYS = {"steps", "cfg", "width", "height", "batch_size", "filename_prefix", "seed", "aspect_ratio"}
+    content_fields = [k for k in properties if k not in _HYPER_KEYS]
+    content_required = [k for k in required if k not in _HYPER_KEYS]
+
+    # knowledge 注入：把整个 knowledge 对象的关键字段原样注入
+    knowledge_sections = []
+    for key in ("turbo_expert", "turbo_examples", "artist_list"):
+        val = str(knowledge.get(key, "")).strip()
+        if val:
+            # 截断过长内容
+            if len(val) > 4000:
+                val = val[:4000] + "\n...（截断）"
+            knowledge_sections.append(f"### {key}\n{val}")
+    knowledge_text = "\n\n".join(knowledge_sections) if knowledge_sections else "（未获取到 knowledge）"
+
+    # schema 内容字段定义
+    schema_text = json.dumps(
+        {k: properties[k] for k in content_fields},
+        ensure_ascii=False, indent=2,
+    ) if content_fields else "（无内容字段）"
+
+    # 槽位信息
+    slot_info = {
+        "quality": slots.quality or "",
+        "count": slots.count or "",
+        "character": slots.character or "",
+        "series": slots.series or "",
+        "effective_appearance": slots.effective_appearance or "",
+        "style_artist": slots.style_artist or "",
+        "style_general": slots.style_general or "",
+        "scene": slots.scene or "",
+        "one_shot_appearance": slots.one_shot_appearance or "",
+        "negative": slots.negative or "",
+    }
+    slot_text = "\n".join(f"- {k}: {v}" for k, v in slot_info.items() if v)
+
+    state = service._get_session_state(session_id) if session_id else {}
+    purity = service._get_purity(session_id) if session_id else 1
+    purity_map = {1: "safe", 3: "safe", 5: "sensitive", 7: "sensitive", 9: "nsfw", 10: "explicit"}
+    safety_tag = purity_map.get(purity, "safe")
+
+    system = (
+        "你是 AnimaTool Turbo 的专用提示词工程师。\n"
+        "用户给你已计算好的提示词槽位，你需要把它们映射到 AnimaTool turbo API 的 JSON 字段中。\n"
+        "steps/cfg/width/height/batch_size/filename_prefix/seed/aspect_ratio 由系统注入，不要输出。\n\n"
+        f"## Knowledge\n{knowledge_text}\n\n"
+        f"## Schema 内容字段\n{schema_text}\n\n"
+        f"## 必填字段: {', '.join(content_required) if content_required else '（未指定）'}\n\n"
+        "## 槽位→字段\n"
+        "- quality → quality_meta_year_safe（末尾追加 safe/sensitive/nsfw/explicit）\n"
+        "- count → count\n"
+        "- character → character（仅已知公开角色；OC 留空）\n"
+        "- series → series（仅已知公开角色；OC 留空）\n"
+        "- effective_appearance + one_shot_appearance → appearance\n"
+        "- style_artist → artist（@ 开头，为空留空）\n"
+        "- style_general → style\n"
+        "- scene → tags（英文自然语言，至少 2-3 句）\n"
+        "- negative → neg\n\n"
+        "只输出 JSON，不要 ```json``` 包装。\n"
+    )
+
+    user = f"## 槽位\n{slot_text}\n\n安全等级: {safety_tag}"
+    if intent:
+        user += f"\n用户意图: {intent}"
+    if mood:
+        user += f"\n情绪: {mood}"
+
+    try:
+        text = await service._call_llm(
+            system,
+            user,
+            temp=float(service._get_llm_value("image", "temperature_scene", "0.95")),
+            tag="animatool-slots-plan",
+            purpose="image",
+            session_id=session_id,
+        )
+        parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
+    except Exception as exc:
+        logger.error("animatool slots planning failed: %s", exc)
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+
+    # 后处理：确保必填字段存在
+    if "quality_meta_year_safe" in properties:
+        q = parsed.get("quality_meta_year_safe", "")
+        if not q:
+            parsed["quality_meta_year_safe"] = f"masterpiece, best quality, {safety_tag}"
+        elif safety_tag not in str(q).lower():
+            parsed["quality_meta_year_safe"] = f"{q}, {safety_tag}"
+
+    if "count" in properties and not parsed.get("count"):
+        parsed["count"] = slots.count or "1girl"
+
+    # character/series 对 OC 必须为空
+    if not slots.character:
+        parsed.pop("character", None)
+    if not slots.series:
+        parsed.pop("series", None)
+
+    # 清理空值和超参数泄漏
+    cleaned = {k: v for k, v in parsed.items() if v not in (None, "") and k not in _HYPER_KEYS}
+
+    logger.info("ANIMATOOL_SLOTS_LLM: %s", json.dumps(cleaned, ensure_ascii=False)[:600])
+    return cleaned

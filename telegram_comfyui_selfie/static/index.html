@@ -11,19 +11,41 @@
   <div class="shell">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-mark">CS</div>
+        <div class="brand-mark">SC</div>
         <div>
-          <h1>Selfie Console</h1>
-          <p>Telegram + ComfyUI</p>
+          <h1>Sucyubot</h1>
+          <p>Console</p>
         </div>
       </div>
       <nav>
-        <button class="nav active" data-view="overview">总览</button>
-        <button class="nav" data-view="settings">设置</button>
-        <button class="nav" data-view="sessions">会话</button>
-        <button class="nav" data-view="world">动线</button>
-        <button class="nav" data-view="logs">日志</button>
-        <button class="nav" data-view="actions">操作</button>
+        <button class="nav active" data-view="overview">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          总览
+        </button>
+        <button class="nav" data-view="settings">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+          设置
+        </button>
+        <button class="nav" data-view="characters">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          角色
+        </button>
+        <button class="nav" data-view="world">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
+          动线
+        </button>
+        <button class="nav" data-view="logs">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+          日志
+        </button>
+        <button class="nav" data-view="usage">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          用量
+        </button>
+        <button class="nav" data-view="actions">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          操作
+        </button>
       </nav>
     </aside>
 
@@ -34,9 +56,11 @@
           <p id="view-subtitle">服务状态、连接测试和快捷入口</p>
         </div>
         <div class="top-actions">
-          <button id="refresh-btn" class="icon-btn" title="刷新">↻</button>
-          <button id="service-restart-btn" class="primary">重启服务</button>
-          <button id="service-stop-btn" class="danger">关闭服务</button>
+          <select id="session-select" class="session-select" title="选择会话"></select>
+          <span id="session-select-fixed" class="session-select-fixed" hidden></span>
+          <button id="refresh-btn" class="icon-btn" title="刷新">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+          </button>
         </div>
       </header>
 
@@ -44,7 +68,7 @@
 
       <section class="view active" id="view-overview">
         <div class="status-grid">
-          <div class="metric">
+          <div class="metric" id="metric-bot-card">
             <span>机器人</span>
             <strong id="metric-bot">-</strong>
           </div>
@@ -52,11 +76,11 @@
             <span>会话</span>
             <strong id="metric-sessions">-</strong>
           </div>
-          <div class="metric">
+          <div class="metric" id="metric-generate-card">
             <span>生图</span>
             <strong id="metric-generate">-</strong>
           </div>
-          <div class="metric">
+          <div class="metric" id="metric-llm-card">
             <span>LLM</span>
             <strong id="metric-llm">-</strong>
           </div>
@@ -85,9 +109,18 @@
               <h3>检查</h3>
             </div>
             <div class="button-row">
-              <button data-action="test-comfyui">测试 ComfyUI</button>
-              <button data-action="test-chat-llm">测试聊天模型</button>
-              <button data-action="test-image-llm">测试生图辅助模型</button>
+              <button data-action="test-comfyui">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                测试 ComfyUI
+              </button>
+              <button data-action="test-chat-llm">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                测试聊天模型
+              </button>
+              <button data-action="test-image-llm">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 0 0-9 9v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2v-4H7V12a5 5 0 0 1 10 0v5h-4v4a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-7a9 9 0 0 0-9-9z"/></svg>
+                测试生图辅助模型
+              </button>
             </div>
             <pre id="test-output" class="logbox"></pre>
           </section>
@@ -98,33 +131,73 @@
         <form id="config-form" class="settings-form"></form>
       </section>
 
-      <section class="view" id="view-sessions">
-        <div class="session-layout">
-          <section class="panel">
+      <section class="view" id="view-characters">
+        <div class="character-layout">
+          <section class="panel character-pool-panel">
             <div class="panel-head">
-              <h3>会话列表</h3>
-              <button id="reload-sessions" class="icon-btn" title="刷新会话">↻</button>
+              <div>
+                <h3>角色池</h3>
+                <p class="muted">选择角色以编辑其设定</p>
+              </div>
+              <button id="character-refresh" class="icon-btn" title="刷新角色池">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+              </button>
             </div>
-            <div id="session-list" class="session-list"></div>
+            <div id="character-pool" class="character-pool">
+              <div class="empty-state">请从右上角选择会话。</div>
+            </div>
+            <div class="character-pool-actions">
+              <button id="character-add" type="button">新建角色</button>
+              <button id="character-import" type="button">导入 JSON</button>
+            </div>
           </section>
-          <section class="panel">
+          <section class="panel character-editor-panel">
             <div class="panel-head">
-              <h3>会话设置</h3>
-              <span id="selected-session-label" class="muted">未选择</span>
+              <div>
+                <h3 id="character-editor-title">角色设定</h3>
+                <p id="character-editor-subtitle" class="muted">从左侧角色池选择一个角色</p>
+              </div>
+              <div class="button-row">
+                <button id="character-activate" type="button" class="primary">设为当前</button>
+              </div>
             </div>
-            <form id="session-form" class="session-form"></form>
+            <form id="character-form" class="character-form">
+              <div class="empty-state">请从左侧角色池选择一个角色。</div>
+            </form>
           </section>
         </div>
-        <section class="panel prompt-slot-panel">
+        <section class="panel memory-diary-panel">
           <div class="panel-head">
-            <div>
-              <h3>Prompt 槽位编辑</h3>
-              <p class="muted">按生图槽位编辑当前用户的外观、画风和场景偏好</p>
+            <div class="tab-bar">
+              <button class="tab active" data-tab="memory" type="button">长期记忆</button>
+              <button class="tab" data-tab="diary" type="button">日记</button>
             </div>
-            <button id="prompt-slot-refresh">刷新预览</button>
+            <button id="memory-diary-refresh" class="icon-btn" title="刷新">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+            </button>
           </div>
-          <div id="prompt-slot-content" class="prompt-slot-content">
-            <div class="empty-state">请先从上方选择一个会话。</div>
+          <div id="memory-tab" class="tab-panel active">
+            <div id="memory-manager" class="manager-box">
+              <div class="empty-state">选择角色后查看记忆。</div>
+            </div>
+          </div>
+          <div id="diary-tab" class="tab-panel">
+            <div id="diary-manager" class="manager-box">
+              <div class="empty-state">选择角色后查看日记。</div>
+            </div>
+          </div>
+        </section>
+        <section class="panel model-config-panel">
+          <div class="panel-head collapsible" data-collapse="model-config">
+            <h3>用户模型配置</h3>
+            <button id="model-refresh" class="icon-btn" title="刷新">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+            </button>
+          </div>
+          <div id="model-config-body" class="collapse-body">
+            <div id="model-manager" class="manager-box">
+              <div class="empty-state">加载中...</div>
+            </div>
           </div>
         </section>
       </section>
@@ -134,7 +207,9 @@
           <section class="panel">
             <div class="panel-head">
               <h3>用户</h3>
-              <button id="reload-world-sessions" class="icon-btn" title="刷新用户">↻</button>
+              <button id="reload-world-sessions" class="icon-btn" title="刷新用户">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+              </button>
             </div>
             <div id="world-session-list" class="session-list"></div>
           </section>
@@ -145,8 +220,14 @@
                 <p id="world-subtitle" class="muted">选择左侧用户后查看当前状态与今日预览</p>
               </div>
               <div class="button-row">
-                <button id="world-refresh">刷新</button>
-                <button id="world-refresh-places">刷新城市地点</button>
+                <button id="world-refresh">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+                  刷新
+                </button>
+                <button id="world-refresh-places">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                  刷新城市地点
+                </button>
               </div>
             </div>
             <div id="world-content" class="world-content">
@@ -161,7 +242,9 @@
           <section class="panel">
             <div class="panel-head">
               <h3>用户日志</h3>
-              <button id="reload-logs" class="icon-btn" title="刷新列表">↻</button>
+              <button id="reload-logs" class="icon-btn" title="刷新列表">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+              </button>
             </div>
             <div id="log-list" class="session-list"></div>
           </section>
@@ -169,12 +252,88 @@
             <div class="panel-head">
               <h3 id="log-title">日志内容</h3>
               <div class="button-row">
-                <button id="log-refresh">刷新</button>
-                <button id="log-clear" class="danger">清空此日志</button>
+                <button id="log-refresh">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+                  刷新
+                </button>
+                <button id="log-clear" class="danger">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                  清空此日志
+                </button>
               </div>
             </div>
             <pre id="log-content" class="logbox">选择左侧用户查看日志。</pre>
           </section>
+        </div>
+      </section>
+
+      <section class="view" id="view-usage">
+        <div class="panel admin-panel">
+          <div class="panel-head">
+            <div>
+              <h3>LLM 用量看板</h3>
+              <p class="muted">按模型 profile 和任务维度统计 token 消耗与缓存命中率</p>
+            </div>
+            <div class="button-row">
+              <select id="usage-range">
+                <option value="86400">最近 24 小时</option>
+                <option value="604800">最近 7 天</option>
+                <option value="2592000">最近 30 天</option>
+                <option value="0">全部</option>
+              </select>
+              <button id="usage-refresh">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+                刷新
+              </button>
+            </div>
+          </div>
+          <div class="status-grid" id="usage-summary">
+            <div class="metric"><span>请求数</span><strong>-</strong></div>
+            <div class="metric"><span>Prompt Tokens</span><strong>-</strong></div>
+            <div class="metric"><span>Completion Tokens</span><strong>-</strong></div>
+            <div class="metric"><span>缓存命中</span><strong>-</strong></div>
+            <div class="metric"><span>缓存命中率</span><strong>-</strong></div>
+            <div class="metric"><span>Total Tokens</span><strong>-</strong></div>
+          </div>
+          <div class="usage-filter-bar">
+            <input id="usage-filter-text" type="text" placeholder="搜索 Profile / Model / Purpose / Tag">
+            <select id="usage-filter-profile"><option value="">全部 Profile</option></select>
+            <select id="usage-filter-model"><option value="">全部 Model</option></select>
+            <select id="usage-filter-purpose"><option value="">全部 Purpose</option></select>
+            <select id="usage-filter-tag"><option value="">全部 Tag</option></select>
+            <select id="usage-sort">
+              <option value="last_used-desc" selected>按最新时间降序</option>
+              <option value="last_used-asc">按最新时间升序</option>
+              <option value="total_tokens-desc">按 Total 降序</option>
+              <option value="total_tokens-asc">按 Total 升序</option>
+              <option value="requests-desc">按请求数降序</option>
+              <option value="requests-asc">按请求数升序</option>
+              <option value="prompt_tokens-desc">按 Prompt 降序</option>
+              <option value="completion_tokens-desc">按 Completion 降序</option>
+              <option value="cache_hit_rate-desc">按命中率降序</option>
+            </select>
+          </div>
+          <div class="table-wrap">
+            <table class="usage-table">
+              <thead>
+                <tr>
+                  <th>Profile</th>
+                  <th>Model</th>
+                  <th>Purpose</th>
+                  <th>Tag</th>
+                  <th>请求数</th>
+                  <th>Prompt</th>
+                  <th>Completion</th>
+                  <th>Cached</th>
+                  <th>命中率</th>
+                  <th>Total</th>
+                </tr>
+              </thead>
+              <tbody id="usage-table-body">
+                <tr><td colspan="10" class="empty-cell">暂无数据</td></tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </section>
 
@@ -187,7 +346,10 @@
               <label>命令<select name="command"></select></label>
               <p id="command-help" class="command-help"></p>
               <label>参数<textarea name="arg" rows="4"></textarea></label>
-              <button class="primary" type="submit">执行</button>
+              <button class="primary" type="submit">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                执行
+              </button>
             </form>
           </section>
           <section class="panel">
@@ -195,7 +357,10 @@
             <form id="message-form" class="action-form">
               <label>Chat ID<input name="chat_id" autocomplete="off"></label>
               <label>内容<textarea name="text" rows="6"></textarea></label>
-              <button type="submit">发送</button>
+              <button type="submit">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                发送
+              </button>
             </form>
           </section>
         </div>
@@ -206,11 +371,32 @@
               <p class="muted">清理老数据里混进身体特征 Prompt 的质量词和画风词</p>
             </div>
             <div class="button-row">
-              <button id="prompt-cleanup-preview">预览 Prompt 清理</button>
-              <button id="prompt-cleanup-apply" class="danger">备份并执行清理</button>
+              <button id="prompt-cleanup-preview">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                预览 Prompt 清理
+              </button>
+              <button id="prompt-cleanup-apply" class="danger">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/></svg>
+                备份并执行清理
+              </button>
             </div>
           </div>
           <pre id="prompt-cleanup-output" class="logbox">尚未运行清理。</pre>
+        </section>
+        <section class="panel admin-panel">
+          <div class="panel-head">
+            <div>
+              <h3>Git 更新与重启</h3>
+              <p class="muted">从远端拉取最新代码并自动重启服务（管理员）</p>
+            </div>
+            <div class="button-row">
+              <button id="git-update-btn" class="primary">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                拉取更新并重启
+              </button>
+            </div>
+          </div>
+          <pre id="git-update-output" class="logbox">尚未执行 Git 更新。</pre>
         </section>
       </section>
     </main>

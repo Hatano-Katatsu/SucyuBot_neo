@@ -1122,6 +1122,19 @@ class WorldRuntimeMixin:
             ttl = 30 * 86400
         return time.time() - float(catalog.get("updated_at", 0) or 0) < ttl
 
+    def _external_http_proxy(self) -> tuple[str | None, aiohttp.BaseConnector | None]:
+        """把 Telegram 代理配置复用到外部 HTTP 请求（高德/谷歌 POI）。
+
+        返回 (proxy_url, connector)。HTTP(S) 代理直接传给请求参数；SOCKS 代理使用
+        ProxyConnector。未启用代理时返回 (None, None)，由 trust_env 读取环境变量兜底。
+        """
+        proxy = self._telegram_proxy_url()
+        if not proxy:
+            return None, None
+        if proxy.lower().startswith(("http://", "https://")):
+            return proxy, None
+        return None, self._telegram_proxy_connector()
+
     def _amap_enabled(self) -> bool:
         return bool(str(self.config.get("amap_api_key", "") or "").strip()) and self._bool_config("amap_poi_enabled", True)
 
@@ -1149,7 +1162,7 @@ class WorldRuntimeMixin:
             }
             try:
                 async with sem:
-                    async with session.get(base, params=params) as resp:
+                    async with session.get(base, params=params, **kwargs) as resp:
                         if resp.status != 200:
                             return
                         data = await resp.json(content_type=None)
@@ -1170,7 +1183,11 @@ class WorldRuntimeMixin:
                 results[place_key] = names
 
         timeout = aiohttp.ClientTimeout(total=25)
-        async with aiohttp.ClientSession(trust_env=True, timeout=timeout) as session:
+        proxy, connector = self._external_http_proxy()
+        kwargs: dict[str, Any] = {"proxy": proxy} if proxy else {}
+        async with aiohttp.ClientSession(
+            connector=connector, trust_env=(proxy is None and connector is None), timeout=timeout
+        ) as session:
             await asyncio.gather(*(fetch_one(session, k, kw) for k, kw in AMAP_KEYWORDS.items()))
         return results
 
@@ -1238,7 +1255,7 @@ class WorldRuntimeMixin:
                 body["languageCode"] = lang
             try:
                 async with sem:
-                    async with session.post(url, json=body, headers=headers) as resp:
+                    async with session.post(url, json=body, headers=headers, **kwargs) as resp:
                         if resp.status != 200:
                             logger.debug("google places http %s %s/%s", resp.status, city, place_key)
                             return
@@ -1257,20 +1274,25 @@ class WorldRuntimeMixin:
                 results[place_key] = names
 
         timeout = aiohttp.ClientTimeout(total=25)
-        async with aiohttp.ClientSession(trust_env=True, timeout=timeout) as session:
+        proxy, connector = self._external_http_proxy()
+        kwargs = {"proxy": proxy} if proxy else {}
+        async with aiohttp.ClientSession(
+            connector=connector, trust_env=(proxy is None and connector is None), timeout=timeout
+        ) as session:
             await asyncio.gather(*(fetch_one(session, k, kw) for k, kw in GOOGLE_KEYWORDS.items()))
         return results
 
     def _store_city_catalog(self, key: str, city: str, places: dict[str, list[str]], source: str):
         if not hasattr(self, "city_place_catalogs"):
             self.city_place_catalogs = {}
-        self.city_place_catalogs[key] = {
+        catalog = {
             "city": city,
             "updated_at": time.time(),
             "places": places,
             "source": source,
         }
-        self._write_state()
+        self.city_place_catalogs[key] = catalog
+        self.app_store.save_city_catalog(key, catalog)
 
     async def _ensure_city_place_catalog(self, city: str, force: bool = False) -> dict[str, Any]:
         city = (city or "").strip()

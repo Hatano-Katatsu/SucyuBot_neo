@@ -5,6 +5,7 @@ import json
 import logging
 import random
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,8 @@ EMPTY_IDENTITY_MARKERS = {"", "unknown", "none", "n/a", "na", "null", "-"}
 VISIBLE_PHONE_NEGATIVES = (
     "holding phone", "visible phone", "phone in hand", "hand holding phone",
     "phone visible in frame", "visible smartphone", "smartphone in hand",
+    "camera frame", "phone interface", "viewfinder", "screen border", "UI overlay",
+    "camera UI", "phone screen", "selfie frame", "record button", "shutter button",
 )
 
 
@@ -35,6 +38,8 @@ class PromptSlots:
     quality: str = ""
     count: str = ""
     identity: str = ""
+    character: str = ""  # 角色名视觉 tag（AnimaTool character 字段）
+    series: str = ""     # 作品名视觉 tag（AnimaTool series 字段）
     base_appearance: str = ""
     effective_appearance: str = ""
     style_artist: str = ""
@@ -870,6 +875,8 @@ def build_prompt(
         quality=quality,
         count=count,
         identity=identity,
+        character=character,
+        series=series,
         base_appearance=prefix_parts.base,
         effective_appearance=effective_appearance,
         style_artist=", ".join(part for part in (artist, legacy_style) if part),
@@ -951,6 +958,371 @@ def build_anima_workflow(service: Any, positive: str, negative: str, seed: int) 
     return wf
 
 
+# AnimaTool turbo schema 缓存（按 comfyui_url 分键，避免多个服务互相覆盖）
+_animatool_turbo_schema_cache: dict[str, tuple[dict[str, Any], float]] = {}
+_ANIMATOOL_SCHEMA_TTL = 300.0
+
+
+async def _fetch_animatool_turbo_schema(service: Any, ttl: float = _ANIMATOOL_SCHEMA_TTL) -> dict[str, Any]:
+    """从 AnimaTool 动态获取 turbo 接口的 JSON schema，带缓存。"""
+    url = str(service.comfyui_url).rstrip("/")
+    now = time.monotonic()
+    cached = _animatool_turbo_schema_cache.get(url)
+    if cached and (now - cached[1]) < ttl:
+        return cached[0]
+    schema: dict[str, Any] = {}
+    try:
+        ensure_comfy_session(service)
+        async with service.comfy_session.get(f"{url}/anima/schema_turbo", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status == 200:
+                schema = await resp.json(content_type=None) or {}
+    except Exception as exc:
+        logger.debug("fetch animatool turbo schema failed: %s", exc)
+    _animatool_turbo_schema_cache[url] = (schema, now)
+    return schema
+
+
+def _schema_type_convert(name: str, value: Any, prop: dict[str, Any]) -> Any:
+    """按 schema 属性将值转为正确类型。"""
+    if value is None:
+        return None
+    schema_type = prop.get("type")
+    if schema_type == "integer":
+        try:
+            v = int(float(value))
+            minimum = prop.get("minimum")
+            maximum = prop.get("maximum")
+            if minimum is not None:
+                v = max(int(minimum), v)
+            if maximum is not None:
+                v = min(int(maximum), v)
+            return v
+        except (TypeError, ValueError):
+            return prop.get("default")
+    if schema_type == "number":
+        try:
+            v = float(value)
+            minimum = prop.get("minimum")
+            maximum = prop.get("maximum")
+            if minimum is not None:
+                v = max(float(minimum), v)
+            if maximum is not None:
+                v = min(float(maximum), v)
+            return v
+        except (TypeError, ValueError):
+            return prop.get("default")
+    if schema_type == "string":
+        v = str(value)
+        enum = prop.get("enum")
+        if enum and v not in enum:
+            # 不在枚举中时使用默认值
+            default = prop.get("default")
+            return default if default is not None else v
+        return v
+    if schema_type == "boolean":
+        return bool(value)
+    return value
+
+
+def _build_animatool_turbo_payload(
+    service: Any,
+    slots: PromptSlots | None,
+    positive: str,
+    negative: str,
+    seed: int,
+    schema: dict[str, Any],
+) -> dict[str, Any]:
+    """根据 AnimaTool turbo schema 字段构建请求体；schema 为空时按原来的字段映射兜底。"""
+    params = schema.get("parameters", {}) if isinstance(schema, dict) else {}
+    properties = params.get("properties", {}) if isinstance(params, dict) else {}
+    required = set(params.get("required", []) if isinstance(params, dict) else [])
+
+    # 槽位到 schema 候选字段的映射（按优先级）
+    # AnimaTool turbo 规范：
+    # - tags 是英文自然语言场景描述，对应项目里的 scene；
+    # - appearance 是逗号分隔的英文 danbooru 标签，对应 effective_appearance + one_shot_appearance；
+    # - positive 字段会覆盖结构化字段，只在 schema 不支持 tags 时才发送。
+    slot_candidates: dict[str, list[str]] = {
+        "quality": ["quality_meta_year_safe"],
+        "count": ["count"],
+        "character": ["character"],
+        "series": ["series"],
+        "style_artist": ["artist"],
+        "style_general": ["style"],
+        "effective_appearance": ["appearance"],
+        "scene": ["tags"],
+        "one_shot_appearance": ["appearance"],
+        "positive": ["positive"],
+        "negative": ["neg", "negative"],
+    }
+
+    payload: dict[str, Any] = {
+        "filename_prefix": service.config.get("animatool_filename_prefix", "sucyubot_turbo"),
+        "seed": seed,
+        "steps": int(float(service.config.get("animatool_turbo_steps", "10") or 10)),
+        "cfg": float(service.config.get("animatool_turbo_cfg", "1.0") or 1.0),
+    }
+
+    aspect = _aspect_ratio_from_dimensions(service)
+    if aspect:
+        payload["aspect_ratio"] = aspect
+
+    if "neg" in properties or "negative" in properties:
+        neg_field = "neg" if "neg" in properties else "negative"
+        payload[neg_field] = negative
+    if "width" in properties:
+        try:
+            payload["width"] = int(service.config.get("width", "1024") or 1024)
+        except Exception:
+            pass
+    if "height" in properties:
+        try:
+            payload["height"] = int(service.config.get("height", "1024") or 1024)
+        except Exception:
+            pass
+    if "batch_size" in properties:
+        try:
+            payload["batch_size"] = max(1, int(service.config.get("batch_size", "1") or 1))
+        except Exception:
+            payload["batch_size"] = 1
+
+    if isinstance(slots, PromptSlots):
+        # 从槽位填充 schema 支持的字段
+        for slot_name, schema_names in slot_candidates.items():
+            for field_name in schema_names:
+                if field_name not in properties or field_name in payload:
+                    continue
+                value = getattr(slots, slot_name, None)
+                if value in (None, ""):
+                    continue
+                prop = properties[field_name]
+                if field_name in ("character", "series") and not value:
+                    continue
+                # character/series 为空串时跳过，避免污染 schema
+                if field_name == "tags" and not value:
+                    # tags 必填，后面兜底
+                    continue
+                payload[field_name] = _schema_type_convert(field_name, value, prop)
+        # 一次性外观补充追加到 appearance（不覆盖有效外貌，只追加）
+        one_shot = (getattr(slots, "one_shot_appearance", None) or "").strip()
+        if one_shot and "appearance" in properties and "appearance" in payload:
+            existing = str(payload["appearance"]).strip()
+            if existing:
+                combined = f"{existing}, {one_shot}"
+            else:
+                combined = one_shot
+            payload["appearance"] = _schema_type_convert("appearance", combined, properties["appearance"])
+    else:
+        # 无槽位时，若 schema 支持 positive 就放正面提示词
+        if "positive" in properties:
+            payload["positive"] = positive
+
+    # 必填字段兜底
+    if "quality_meta_year_safe" in required:
+        if "quality_meta_year_safe" not in payload or not payload["quality_meta_year_safe"]:
+            payload["quality_meta_year_safe"] = (
+                getattr(slots, "quality", "") or "masterpiece, best quality, highres, newest, year 2025, safe"
+            )
+    if "count" in required:
+        if "count" not in payload or not payload["count"]:
+            payload["count"] = getattr(slots, "count", "") or "1girl"
+    if "tags" in required:
+        if "tags" not in payload or not payload["tags"]:
+            # tags 兜底：依次用场景、自然语言正面提示词
+            tags_value = (
+                getattr(slots, "scene", "")
+                or positive
+                or ""
+            )
+            payload["tags"] = tags_value
+
+    # 如果 schema 支持 tags 且我们已经提供了结构化 tags，就不要再发送 positive（positive 会覆盖结构化字段）
+    if "tags" in properties and "tags" in payload and payload["tags"]:
+        payload.pop("positive", None)
+
+    # 最终按 schema 类型转换并过滤掉 None/空串
+    cleaned: dict[str, Any] = {}
+    for k, v in payload.items():
+        if v in (None, ""):
+            continue
+        if k in properties:
+            cleaned[k] = _schema_type_convert(k, v, properties[k])
+        else:
+            cleaned[k] = v
+    return cleaned
+
+
+async def _do_generate_animatool(
+    service: Any,
+    scene_desc: str,
+    session_id: str,
+    seed: int,
+) -> tuple[bool, list[bytes], str]:
+    """AnimaTool 生图：把槽位交给 LLM 直出 animatool JSON，失败回退旧逻辑。"""
+    from .image_planning import plan_animatool_slots
+
+    slots = getattr(service, "_last_prompt_slots", None)
+    intent = scene_desc or ""
+
+    # 尝试新流程：LLM 直出 animatool JSON
+    llm_payload = None
+    if isinstance(slots, PromptSlots):
+        llm_payload = await plan_animatool_slots(
+            service, session_id, slots, intent=intent,
+        )
+
+    if llm_payload:
+        # 补充固定超参数
+        llm_payload["seed"] = seed
+        llm_payload["filename_prefix"] = service.config.get("animatool_filename_prefix", "sucyubot_turbo")
+        llm_payload["steps"] = int(float(service.config.get("animatool_turbo_steps", "10") or 10))
+        llm_payload["cfg"] = float(service.config.get("animatool_turbo_cfg", "1.0") or 1.0)
+        aspect = _aspect_ratio_from_dimensions(service)
+        if aspect:
+            llm_payload["aspect_ratio"] = aspect
+        # 去掉 schema 不支持的内容字段（超参数保留）
+        schema = await _fetch_animatool_turbo_schema(service)
+        props = {}
+        if isinstance(schema, dict):
+            params = schema.get("parameters", {})
+            props = params.get("properties", {}) if isinstance(params, dict) else {}
+        if props:
+            hyper_keys = {"seed", "filename_prefix", "steps", "cfg", "aspect_ratio", "width", "height", "batch_size"}
+            llm_payload = {k: v for k, v in llm_payload.items() if k in props or k in hyper_keys}
+        return await _post_animatool(service, session_id, slots, seed, llm_payload)
+
+    # 回退：旧逻辑
+    logger.info("animatool slots LLM failed, falling back to legacy payload builder")
+    return await submit_animatool_turbo(service, slots.positive if isinstance(slots, PromptSlots) else "", slots.negative if isinstance(slots, PromptSlots) else "", seed)
+
+
+async def _post_animatool(
+    service: Any,
+    session_id: str,
+    slots: Any,
+    seed: int,
+    payload: dict[str, Any],
+) -> tuple[bool, list[bytes], str]:
+    """POST /anima/generate_turbo 并下载图片。"""
+    try:
+        if hasattr(service, "_ulog") and isinstance(slots, PromptSlots):
+            service._ulog(
+                session_id,
+                "ANIMATOOL_TURBO_PAYLOAD",
+                f"seed={seed} payload={json.dumps(payload, ensure_ascii=False)}",
+            )
+        async with service.comfy_session.post(f"{service.comfyui_url}/anima/generate_turbo", json=payload) as resp:
+            data = await resp.json(content_type=None)
+            if resp.status >= 400:
+                return False, [], f"AnimaTool turbo failed: {resp.status} {data}"
+        images = data.get("images", []) if isinstance(data, dict) else []
+        result: list[bytes] = []
+        for img in images:
+            filename = img.get("filename")
+            if not filename:
+                continue
+            params = {"filename": filename, "type": img.get("type", "output")}
+            if img.get("subfolder"):
+                params["subfolder"] = img.get("subfolder")
+            async with service.comfy_session.get(f"{service.comfyui_url}/view", params=params) as view_resp:
+                if view_resp.status == 200:
+                    result.append(await view_resp.read())
+        if not result:
+            return False, [], f"AnimaTool turbo returned no images: {data}"
+        return True, result, ""
+    except Exception as exc:
+        return False, [], f"AnimaTool turbo exception: {exc}"
+
+
+async def submit_animatool_turbo(service: Any, positive: str, negative: str, seed: int) -> tuple[bool, list[bytes], str]:
+    slots = getattr(service, "_last_prompt_slots", None)
+    schema = await _fetch_animatool_turbo_schema(service)
+    if not schema:
+        # schema 获取失败时回退到原来的硬编码字段，但尽量去掉 schema 中不存在的字段
+        logger.warning("animatool turbo schema not available, falling back to hardcoded fields")
+        payload = {
+            "filename_prefix": service.config.get("animatool_filename_prefix", "sucyubot_turbo"),
+            "seed": seed,
+            "steps": int(float(service.config.get("animatool_turbo_steps", "10") or 10)),
+            "cfg": float(service.config.get("animatool_turbo_cfg", "1.0") or 1.0),
+            "neg": negative,
+        }
+        aspect = _aspect_ratio_from_dimensions(service)
+        if aspect:
+            payload["aspect_ratio"] = aspect
+        if isinstance(slots, PromptSlots):
+            appearance = slots.effective_appearance
+            one_shot = (slots.one_shot_appearance or "").strip()
+            if one_shot and appearance:
+                appearance = f"{appearance}, {one_shot}"
+            elif one_shot:
+                appearance = one_shot
+            payload.update({
+                "quality_meta_year_safe": slots.quality,
+                "count": slots.count,
+                "character": slots.character or slots.identity,
+                "series": slots.series,
+                "artist": slots.style_artist,
+                "appearance": appearance,
+                "tags": slots.scene or "",
+            })
+        else:
+            payload["positive"] = positive
+        cleaned = {k: v for k, v in payload.items() if v not in (None, "")}
+    else:
+        cleaned = _build_animatool_turbo_payload(service, slots, positive, negative, seed, schema)
+    try:
+        if hasattr(service, "_ulog") and isinstance(slots, PromptSlots):
+            service._ulog(
+                getattr(slots, "session_id", ""),
+                "ANIMATOOL_TURBO_PAYLOAD",
+                f"seed={seed} payload={json.dumps(cleaned, ensure_ascii=False)}",
+            )
+        async with service.comfy_session.post(f"{service.comfyui_url}/anima/generate_turbo", json=cleaned) as resp:
+            data = await resp.json(content_type=None)
+            if resp.status >= 400:
+                return False, [], f"AnimaTool turbo failed: {resp.status} {data}"
+        images = data.get("images", []) if isinstance(data, dict) else []
+        result: list[bytes] = []
+        for img in images:
+            filename = img.get("filename")
+            if not filename:
+                continue
+            params = {"filename": filename, "type": img.get("type", "output")}
+            if img.get("subfolder"):
+                params["subfolder"] = img.get("subfolder")
+            async with service.comfy_session.get(f"{service.comfyui_url}/view", params=params) as view_resp:
+                if view_resp.status == 200:
+                    result.append(await view_resp.read())
+        if not result:
+            return False, [], f"AnimaTool turbo returned no images: {data}"
+        return True, result, ""
+    except Exception as exc:
+        return False, [], f"AnimaTool turbo exception: {exc}"
+
+
+def _aspect_ratio_from_dimensions(service: Any) -> str:
+    """从全局 width/height 推算最接近的 AnimaTool aspect_ratio。
+
+    AnimaTool turbo 模式按 aspect_ratio 自动推算宽高（约 1MP），不接受 width/height。
+    这里把项目的 width/height 映射到 schema 支持的比例字符串。
+    """
+    try:
+        w = int(service.config.get("width", "1024") or 1024)
+        h = int(service.config.get("height", "1024") or 1024)
+    except Exception:
+        return "1:1"
+    ratio = w / h if h else 1.0
+    # ref/app.py 支持的比例及其数值
+    candidates = [
+        ("21:9", 21 / 9), ("2:1", 2.0), ("16:9", 16 / 9), ("16:10", 16 / 10),
+        ("5:3", 5 / 3), ("3:2", 3 / 2), ("4:3", 4 / 3), ("1:1", 1.0),
+        ("3:4", 3 / 4), ("2:3", 2 / 3), ("3:5", 3 / 5), ("10:16", 10 / 16),
+        ("9:16", 9 / 16), ("1:2", 1 / 2), ("9:21", 9 / 21),
+    ]
+    best = min(candidates, key=lambda item: abs(item[1] - ratio))
+    return best[0]
+
 def ensure_comfy_session(service: Any):
     if service.comfy_session is None or service.comfy_session.closed:
         service.comfy_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=600), trust_env=True)
@@ -1006,6 +1378,8 @@ async def do_generate_locked(
             "PROMPT",
             f"seed={seed} scene={scene_desc} positive={positive} negative={negative}",
         )
+    if str(service.config.get("image_backend", "native") or "native").lower() == "animatool":
+        return await _do_generate_animatool(service, scene_desc, session_id, seed)
     workflow = build_workflow(service, positive, negative, seed)
     try:
         async with service.comfy_session.post(f"{service.comfyui_url}/prompt", json={"prompt": workflow}) as resp:
@@ -1013,7 +1387,7 @@ async def do_generate_locked(
         if "prompt_id" not in data:
             err = data.get("error", {})
             msg = err.get("message", str(data)) if isinstance(err, dict) else str(data)
-            return False, [], f"ComfyUI 提交失败: {msg}"
+            return False, [], f"ComfyUI submit failed: {msg}"
         prompt_id = data["prompt_id"]
         for _ in range(int(600 / 1.5)):
             await asyncio.sleep(1.5)
@@ -1029,11 +1403,11 @@ async def do_generate_locked(
             for img in images:
                 params = {"filename": img["filename"]}
                 if img.get("subfolder"):
-                    params["subfolder"] = img["subfolder"]
+                    params["subfolder"] = img.get("subfolder")
                 async with service.comfy_session.get(f"{service.comfyui_url}/view", params=params) as resp:
                     if resp.status == 200:
                         result.append(await resp.read())
             return True, result, ""
-        return False, [], "超时"
+        return False, [], "timeout"
     except Exception as exc:
-        return False, [], f"异常: {exc}"
+        return False, [], f"exception: {exc}"

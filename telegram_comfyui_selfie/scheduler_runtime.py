@@ -7,7 +7,7 @@ import random
 import re
 import time
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
@@ -150,6 +150,10 @@ class SchedulerRuntimeMixin:
             view = (parsed.get("view") or "").strip().lower()
             if view not in VALID_VIEWS:
                 view = "pov" if mode == "morning" else "selfie"
+            # normal 模式定时推送是角色主动发给用户的消息，应避免使用 third 第三人称
+            # （那样会失去“角色主动分享自己视角”的推送感），统一回退到 selfie。
+            if mode == "normal" and view == "third":
+                view = "selfie"
             scene = normalize_scene_visual_subject(parsed.get("scene") or "")
             if scene_implies_mirror_selfie(scene):
                 view = "mirror"
@@ -244,6 +248,127 @@ class SchedulerRuntimeMixin:
     def _is_bad_weather(w) -> bool:
         return bool(w and w.get("code", "0") in {"200", "299", "300", "399", "500", "599", "600", "699", "700", "799"})
 
+    def _dream_idle_seconds(self) -> float:
+        try:
+            return max(0.0, float(self.config.get("dream_idle_hours", "2") or 2) * 3600)
+        except Exception:
+            return 7200.0
+
+    def _dream_morning_hour(self) -> int:
+        try:
+            return max(0, min(23, int(self.config.get("dream_morning_hour", "8") or 8)))
+        except Exception:
+            return 8
+
+    def _dream_diary_date(self, local_dt: datetime, *, force_previous_day: bool = False) -> str:
+        if force_previous_day or local_dt.hour < self._dream_morning_hour():
+            return (local_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+        return local_dt.strftime("%Y-%m-%d")
+
+    def _should_run_dream_before_push(self, session_id: str, state: dict[str, Any]) -> bool:
+        last = float(state.get("last_interaction", 0) or 0)
+        if not last or time.time() - last < self._dream_idle_seconds():
+            return False
+        key = self._context_character_key(session_id) if hasattr(self, "_context_character_key") else self._memory_character(session_id)
+        try:
+            meta = self.app_store.get_context_meta(session_id, key)
+        except Exception:
+            return False
+        return int(meta.get("last_checkpoint_message_id") or 0) > int(meta.get("last_dream_message_id") or 0)
+
+    async def _run_dream(self, session_id: str, local_dt: datetime, *, reason: str, force: bool = False):
+        if not session_id:
+            return
+        key = self._context_character_key(session_id) if hasattr(self, "_context_character_key") else self._memory_character(session_id)
+        scope = f"{session_id}\n{key}"
+        task = getattr(self, "_dream_tasks", {}).get(scope)
+        if task and not task.done():
+            if force:
+                await task
+            return
+
+        async def runner():
+            try:
+                await self._dream_once(session_id, key, local_dt, reason=reason)
+            except Exception:
+                logger.warning("dream task failed", exc_info=True)
+
+        task = asyncio.create_task(runner())
+        self._dream_tasks[scope] = task
+        if force:
+            await task
+
+    async def _dream_once(self, session_id: str, character_key: str, local_dt: datetime, *, reason: str):
+        meta = self.app_store.get_context_meta(session_id, character_key)
+        from_id = int(meta.get("last_dream_message_id") or 0)
+        to_id = self.app_store.latest_message_id(session_id, character_key)
+        messages = self.app_store.list_messages(session_id, character_key, after_id=from_id, before_or_equal_id=to_id)
+        source_limit = max(1000, int(self.config.get("dream_source_hard_limit_chars", "50000") or 50000))
+        source_text = self._format_store_messages(messages, limit_chars=source_limit) if hasattr(self, "_format_store_messages") else ""
+        diary_date = self._dream_diary_date(local_dt, force_previous_day=(reason == "morning"))
+        existing = self.app_store.get_diary(session_id, character_key, diary_date) or {}
+        diary = await self._write_dream_diary(session_id, diary_date, source_text, existing.get("content", ""), reason=reason)
+        self.app_store.upsert_diary(session_id, character_key, diary_date, diary, from_message_id=from_id + 1, to_message_id=to_id)
+        await self._organize_memories_after_dream(session_id, character_key)
+        self.app_store.mark_dream(session_id, character_key, to_id)
+        state = self._get_session_state(session_id)
+        state["last_dream_at"] = time.time()
+        state["last_dream_message_id"] = to_id
+        self._save_session_state(session_id, state)
+        self._ulog(session_id, "DREAM", f"reason={reason} date={diary_date} messages={len(messages)}")
+
+    async def _write_dream_diary(self, session_id: str, diary_date: str, source_text: str, existing_diary: str = "", *, reason: str = "") -> str:
+        if not source_text and existing_diary:
+            return existing_diary
+        if not self.has_llm_config("chat", session_id):
+            base = (existing_diary + "\n" if existing_diary else "") + (source_text or "No new dialogue.")
+            return base[-4000:]
+        system = (
+            "You write a private roleplay diary for the character. Consolidate the existing diary and "
+            "new dialogue into a coherent diary entry for the given date. Preserve emotional continuity, "
+            "relationship progress, promises, unresolved events, and important facts. Output Chinese diary text only."
+        )
+        user = f"Diary date: {diary_date}\nReason: {reason}\n\nExisting diary:\n{existing_diary or 'none'}\n\nNew dialogue since last dream:\n{source_text or 'none'}"
+        return await self._call_llm(system, user, temp=0.2, tag="dream-diary", purpose="chat", disable_thinking=True, session_id=session_id)
+
+    async def _organize_memories_after_dream(self, session_id: str, character_key: str):
+        diaries = self.app_store.recent_diaries(session_id, character_key, limit=2)
+        if not diaries or not self.has_llm_config("chat", session_id):
+            return
+        checkpoint = self.app_store.get_checkpoint(session_id, character_key).get("summary", "")
+        current = self._format_store_messages(self._active_chat_history(self._get_session_state(session_id), self._checkpoint_keep_message_limit()), limit_chars=12000)
+        memories = self.memory.list_memories(session_id, character=character_key, limit=120)
+        editable = [m for m in memories if m.get("kind") != "manual"]
+        if not editable:
+            return
+        system = (
+            "You maintain long-term memories for a roleplay bot. Based on recent diaries, current context, "
+            "and checkpoint, decide how to update non-manual memories. Never modify manual memories. "
+            "Return strict JSON: {\"ops\":[{\"op\":\"add|update|delete\",\"id\":123,\"kind\":\"profile|preference|relationship|setting|boundary|visual|event|correction\",\"summary\":\"...\",\"importance\":1-5,\"tags\":[\"...\"]}]}"
+        )
+        diary_text = "\n\n".join(f"[{d.get('diary_date')}]\n{d.get('content','')}" for d in diaries)
+        mem_text = "\n".join(f"{m['id']}. [{m.get('kind')}] {m.get('summary')}" for m in editable)
+        user = f"Recent diaries:\n{diary_text}\n\nCheckpoint:\n{checkpoint or 'none'}\n\nCurrent window:\n{current or 'none'}\n\nEditable memories:\n{mem_text or 'none'}"
+        try:
+            raw = await self._call_llm(system, user, temp=0.1, tag="dream-memory", purpose="chat", disable_thinking=True, session_id=session_id)
+            parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", raw).strip())
+        except Exception:
+            logger.warning("dream memory organize failed", exc_info=True)
+            return
+        ops = parsed.get("ops") if isinstance(parsed, dict) else None
+        if not isinstance(ops, list):
+            return
+        for op in ops[:30]:
+            if not isinstance(op, dict):
+                continue
+            action = str(op.get("op") or "").lower()
+            if action == "add" and op.get("summary"):
+                self.memory.add_memory(session_id, op.get("kind", "event"), op.get("summary", ""), character=character_key, importance=op.get("importance", 3), tags=op.get("tags") or [], source="dream")
+            elif action == "update" and op.get("id") and op.get("summary"):
+                self.memory.update_memory(session_id, int(op.get("id")), character=character_key, summary=op.get("summary"), kind=op.get("kind"), importance=op.get("importance"), tags=op.get("tags") or [], source="dream")
+            elif action == "delete" and op.get("id"):
+                self.memory.deactivate_non_manual_memory(session_id, int(op.get("id")), character=character_key)
+
     async def scheduler_loop(self):
         await asyncio.sleep(10)
         while True:
@@ -337,6 +462,10 @@ class SchedulerRuntimeMixin:
                 mode = "ntr"
             if mode == "normal" and purity <= 0 and random.random() < 0.4:
                 mode = "ntr"
+            if mode == "morning":
+                await self._run_dream(session_id, local_dt, reason="morning", force=True)
+            elif self._should_run_dream_before_push(session_id, state):
+                await self._run_dream(session_id, local_dt, reason=f"push-{mode}", force=False)
             self._ulog(session_id, "PUSH", f"触发 mode={mode}")
             w = await self._fetch_weather(session_id=session_id)
             weather = f"{w['desc']} {w['temp']} C" if w else "未知"

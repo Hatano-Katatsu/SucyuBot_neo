@@ -1,8 +1,6 @@
 @echo off
-setlocal
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Start-SucyuBot.ps1"
-if errorlevel 1 (
-  echo.
-  echo SucyuBot failed to start. Check logs\service.err.log for details.
-  pause
-)
+rem === SucyuBot Launcher ===
+rem Quick: just run  run.cmd
+rem Advanced: Start-SucyuBot.ps1  (Python detection + auto open browser)
+start "" cmd /c "%~dp0run.cmd"
+exit /b 0

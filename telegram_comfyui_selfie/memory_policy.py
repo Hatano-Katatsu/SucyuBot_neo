@@ -116,7 +116,7 @@ class MemoryPolicyMixin:
         return True
 
     def _queue_long_memory_extraction(self, session_id: str, user_text: str, assistant_text: str):
-        if not session_id or not self._long_memory_extract_enabled() or not self.has_llm_config("chat"):
+        if not session_id or not self._long_memory_extract_enabled() or not self.has_llm_config("chat", session_id):
             return
         if not (user_text or assistant_text):
             return
@@ -142,7 +142,7 @@ class MemoryPolicyMixin:
             f"本轮对话:\n用户: {user_text}\n角色: {assistant_text or '（无文字回复）'}"
         )
         try:
-            text = await self._call_llm(system, user, temp=0.1, tag="memory-extract", purpose="chat")
+            text = await self._call_llm(system, user, temp=0.1, tag="memory-extract", purpose="chat", session_id=session_id)
             parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
         except Exception as exc:
             logger.warning("long memory extraction failed: %s", exc)

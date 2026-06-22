@@ -1,1 +1,2 @@
 aiohttp>=3.9
+aiohttp_socks>=0.10

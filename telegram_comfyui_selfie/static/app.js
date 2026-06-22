@@ -1,22 +1,27 @@
 const state = {
+  auth: null,
   status: null,
   config: null,
   secretPresent: {},
   sessions: [],
   selectedSession: null,
+  selectedCharacter: null,
+  characterData: null,
+  memoryDiaryTab: "memory",
   selectedWorldSession: null,
   worldPreview: null,
-  promptSlots: null,
   logs: [],
   selectedLog: null,
+  profiles: {},
 };
 
 const viewMeta = {
   overview: ["总览", "服务状态、连接测试和快捷入口"],
   settings: ["设置", "连接、模型、生图和推送参数"],
-  sessions: ["会话", "每个 Telegram 会话的角色与推送状态"],
+  characters: ["角色", "角色池、角色设定、长期记忆与日记"],
   world: ["动线", "按用户查看角色每日动线、城市地点和用户位置"],
   logs: ["日志", "按用户查看活动日志"],
+  usage: ["用量", "LLM 模型按任务维度的 token 消耗与缓存命中率"],
   actions: ["操作", "向指定 Chat ID 发送命令或文字"],
 };
 
@@ -24,33 +29,17 @@ const configSections = [
   ["连接", [
     ["telegram_bot_token", "Telegram Bot Token", "secret"],
     ["allowed_chat_ids", "允许的 Chat ID", "list"],
-    ["comfyui_url", "ComfyUI 地址", "text"],
+    ["telegram_proxy_enabled", "启用 Telegram 代理", "bool"],
+    ["telegram_proxy_url", "Telegram 代理地址", "text"],
   ]],
-  ["聊天与角色扮演模型（回复用户、保持人设、决定何时调用发图工具）", [
-    ["chat_llm_api_base", "API Base", "text"],
-    ["chat_llm_api_key", "API Key", "secret"],
-    ["chat_llm_model", "模型名", "text"],
-    ["chat_llm_temperature", "回复温度", "text"],
+  ["模型运行参数（模型 profile 在角色页按用户配置；生图后端/模型只读 YAML）", [
+    ["default_chat_model_profile", "默认对话模型 profile", "model_select"],
+    ["default_fast_model_profile", "默认快速模型 profile", "model_select"],
     ["chat_reply_length", "回复长度", "select:,简短,适中,详细"],
-    ["chat_llm_max_tokens", "Max Tokens", "number"],
-    ["chat_llm_disable_thinking", "关闭 Thinking", "bool"],
-  ]],
-  ["生图辅助模型（写推送场景、翻译 tags、分析角色和外型、识别时区）", [
-    ["image_llm_api_base", "API Base", "text"],
-    ["image_llm_api_key", "API Key", "secret"],
-    ["image_llm_model", "模型名", "text"],
-    ["image_llm_max_tokens", "Max Tokens", "number"],
-    ["image_llm_disable_thinking", "关闭 Thinking", "bool"],
+    ["chat_llm_temperature", "回复温度", "text"],
     ["image_llm_temperature_scene", "推送场景温度", "text"],
     ["image_llm_temperature_translate", "Tags 翻译温度", "text"],
     ["image_llm_temperature_classify", "角色分析温度", "text"],
-  ]],
-  ["通用模型兜底（可选；上面对应项目留空时使用）", [
-    ["llm_api_base", "API Base", "text"],
-    ["llm_api_key", "API Key", "secret"],
-    ["llm_model", "模型名", "text"],
-    ["llm_max_tokens", "Max Tokens", "number"],
-    ["llm_disable_thinking", "关闭 Thinking", "bool"],
     ["llm_temperature_scene", "默认场景温度", "text"],
     ["llm_temperature_translate", "默认翻译温度", "text"],
     ["llm_temperature_classify", "默认分析温度", "text"],
@@ -73,17 +62,10 @@ const configSections = [
     ["current_style", "全局当前画风", "text"],
     ["width", "宽度", "number"],
     ["height", "高度", "number"],
-    ["steps", "步数", "number"],
-    ["cfg", "CFG", "text"],
     ["sampler", "Sampler", "text"],
     ["scheduler", "Scheduler", "text"],
     ["turbo_mode", "Turbo", "bool"],
     ["turbo_strength", "Turbo 强度", "text"],
-    ["unet_model", "UNet 模型", "text"],
-    ["clip_model", "CLIP 模型", "text"],
-    ["vae_model", "VAE 模型", "text"],
-    ["turbo_lora_model", "Turbo LoRA", "text"],
-    ["comfyui_workflow_file", "自定义工作流文件", "text"],
   ]],
   ["推送与本地控制台", [
     ["selfie_frequency", "聊天生图频率", "select:极频繁,频繁,适度,偶尔,关闭"],
@@ -112,7 +94,6 @@ const configSections = [
     ["long_memory_db_path", "长期记忆数据库", "text"],
     ["user_log_enabled", "分用户活动日志", "bool"],
     ["user_log_dir", "日志目录（留空=data/logs）", "text"],
-    ["short_context_history_limit", "短期场景历史条数", "number"],
     ["short_context_reset_gap_hours", "短期场景超时小时", "text"],
     ["web_enabled", "启用控制台", "bool"],
     ["web_host", "控制台 Host", "text"],
@@ -120,44 +101,68 @@ const configSections = [
   ]],
 ];
 
-const sessionFields = [
-  ["custom_character", "角色", "text"],
-  ["custom_series", "作品/系列", "text"],
-  ["custom_visual_character", "生图角色Tag", "text"],
-  ["custom_visual_series", "生图作品Tag", "text"],
-  ["custom_scheduled_persona", "会话人格", "textarea"],
-  ["custom_count", "人数", "text"],
-  ["custom_positive_prefix", "身体特征", "textarea"],
-  ["dynamic_appearance", "临时外型", "textarea"],
-  ["custom_scene_preference", "场景偏好", "textarea"],
-  ["custom_selfie_preference", "自拍偏好", "textarea"],
-  ["custom_role_name", "角色类型", "text"],
-  ["custom_bot_name", "角色名", "text"],
-  ["custom_bot_self_name", "自称", "text"],
-  ["custom_spatial_relationship", "空间关系", "textarea"],
-  ["custom_location", "城市", "text"],
-  ["custom_timezone_offset", "时区偏移", "text"],
-  ["custom_character_age_stage", "年龄段覆盖", "select:,minor,adult"],
-  ["custom_character_occupation", "职业", "text"],
-  ["custom_character_day_anchor", "白天去向覆盖(自动)", "select:,company,school,factory,farm,construction,medical,retail,delivery,driver,home,flexible"],
-  ["custom_current_style", "画风", "text"],
-  ["custom_daily_selfie_limit", "每日推送覆盖", "text"],
-  ["purity", "纯良度", "number"],
-  ["custom_allow_llm_change_appearance", "模型改外型", "select:,true,false"],
-];
-
-const promptSlotFields = [
-  ["custom_count", "人数 (1girl/1boy)", "text"],
-  ["custom_positive_prefix", "基础外观", "textarea"],
-  ["custom_default_hair", "默认发色/发型", "text"],
-  ["custom_default_eyes", "默认瞳色", "text"],
-  ["custom_current_style", "画风", "text"],
-  ["dynamic_appearance", "临时穿搭/配饰", "textarea"],
-  ["custom_scene_preference", "场景偏好", "textarea"],
-  ["custom_selfie_preference", "自拍偏好", "textarea"],
+const characterFieldSections = [
+  ["身份", [
+    ["character", "角色名", "text"],
+    ["series", "作品/系列", "text"],
+    ["role_name", "角色类型", "text"],
+    ["bot_name", "对话称呼", "text"],
+    ["bot_self_name", "自称", "text"],
+    ["visual_character", "生图角色 Tag", "text"],
+    ["visual_series", "生图作品 Tag", "text"],
+  ]],
+  ["人格", [
+    ["persona", "人格描述", "textarea"],
+  ]],
+  ["外貌", [
+    ["count", "人数标签", "text"],
+    ["appearance", "身体特征", "textarea"],
+    ["style", "画风", "text"],
+  ]],
+  ["关系与背景", [
+    ["relationship", "空间关系", "textarea"],
+    ["age_stage", "年龄段", "select:,minor,adult"],
+    ["occupation", "职业", "text"],
+    ["day_anchor", "白天去向", "select:,company,school,factory,farm,construction,medical,retail,delivery,driver,home,flexible"],
+  ]],
+  ["偏好", [
+    ["scene_preference", "场景偏好", "textarea"],
+    ["selfie_preference", "自拍偏好", "textarea"],
+  ]],
+  ["边界", [
+    ["purity", "纯良度", "number"],
+  ]],
 ];
 
 const commands = ["初始化", "菜单", "帮助", "创建OC", "自拍", "天气", "天气设置", "画风", "角色", "外型", "人格", "纯良度", "新场景", "记忆", "记住", "忘记", "推送频率", "调度", "测试推送", "测试生图", "提示词", "生图状态", "管理", "turbo"];
+
+const memoryKindMap = {
+  manual: "手动",
+  event: "事件",
+  fact: "事实",
+  profile: "资料",
+  preference: "偏好",
+  relationship: "关系",
+  setting: "设定",
+  boundary: "边界",
+  visual: "外貌",
+  correction: "纠正",
+  diary: "日记",
+  location: "地点",
+  schedule: "日程",
+  tag: "标签",
+  self: "自我",
+  system: "系统",
+  auto: "自动",
+};
+
+const memoryKindOptions = (selected = "") => {
+  return Object.entries(memoryKindMap).map(([value, label]) => {
+    const sel = value === selected ? " selected" : "";
+    return `<option value="${escapeHtml(value)}"${sel}>${escapeHtml(label)}</option>`;
+  }).join("");
+};
+
 const commandHelp = {
   "初始化": ["查看新用户上手向导。", ""],
   "菜单": ["打开快速菜单或某个详细分区。", "设置 / 角色 / 生图 / 记忆 / 推送 / 动线 / 上下文 / 调试 / 全部"],
@@ -238,35 +243,131 @@ function switchView(name) {
   $("#view-subtitle").textContent = viewMeta[name][1];
   if (name === "world") loadWorldSessions();
   if (name === "logs") loadLogs();
+  if (name === "usage") loadUsage();
+  if (name === "characters") loadCharacterPage();
 }
 
 async function loadAll() {
-  const [status, config, sessions] = await Promise.all([
-    api("/api/status"),
-    api("/api/config"),
-    api("/api/sessions"),
-  ]);
+  // 先获取身份，决定是否加载管理员专属数据
+  try {
+    const me = await api("/api/auth/me");
+    state.auth = me.auth || {};
+  } catch (err) {
+    state.auth = {};
+  }
+  const isAdmin = state.auth.role === "admin";
+  const userId = state.auth.user_id || "";
+  // 非 admin 隐藏管理员面板和导航入口
+  document.querySelectorAll(".admin-panel").forEach(el => {
+    el.style.display = isAdmin ? "" : "none";
+  });
+  document.querySelectorAll('.nav[data-view="usage"]').forEach(el => {
+    el.style.display = isAdmin ? "" : "none";
+  });
+
+  // 管理员才请求 /api/config（非 admin 调用会 403）
+  const tasks = [api("/api/status"), api("/api/sessions")];
+  if (isAdmin) tasks.push(api("/api/config"));
+  const results = await Promise.all(tasks);
+  const status = results[0];
+  const sessions = results[1];
+  const config = results[2];
   state.status = status.status;
-  state.config = config.config.values;
-  state.secretPresent = config.config.secret_present || {};
-  state.sessions = sessions.sessions || [];
+  if (config && config.config) {
+    state.config = config.config.values;
+    state.secretPresent = config.config.secret_present || {};
+  } else {
+    state.config = state.config || {};
+    state.secretPresent = state.secretPresent || {};
+  }
+  state.sessions = (sessions && sessions.sessions) || [];
+  // 普通用户固定为自己的会话；若后端尚无该会话，也占位显示
+  if (!isAdmin && userId) {
+    const fixedSid = `telegram:${userId}`;
+    if (!state.sessions.some(s => s.session_id === fixedSid)) {
+      state.sessions.unshift({ session_id: fixedSid, chat_id: userId, character: "", last_interaction: 0, last_interaction_ago: "无记录" });
+    }
+  }
+  renderSessionSelector();
+  // 获取模型 profile 列表供配置页下拉框使用
+  try {
+    const modelData = await api("/api/models");
+    state.profiles = { ...(modelData.global_profiles || {}), ...(modelData.user_profiles || {}) };
+  } catch (err) {
+    state.profiles = state.profiles || {};
+  }
   renderStatus();
-  renderConfig();
-  renderSessions();
+  if (isAdmin) renderConfig();
   renderWorldSessionList();
+  if (document.querySelector('.nav[data-view="characters"].active')) {
+    loadCharacterPage();
+  }
+}
+
+function renderSessionSelector() {
+  const select = $("#session-select");
+  const fixed = $("#session-select-fixed");
+  const isAdmin = state.auth.role === "admin";
+  if (!isAdmin) {
+    select.hidden = true;
+    fixed.hidden = false;
+    const userId = state.auth.user_id || "";
+    const fixedSid = userId ? `telegram:${userId}` : "";
+    fixed.textContent = fixedSid ? `当前会话: ${fixedSid}` : "未登录";
+    if (state.selectedSession !== fixedSid) {
+      state.selectedSession = fixedSid;
+    }
+    return;
+  }
+  select.hidden = false;
+  fixed.hidden = true;
+  // 管理员默认选中第一个会话，避免角色页空白
+  if (!state.selectedSession && state.sessions.length) {
+    state.selectedSession = state.sessions[0].session_id;
+  }
+  const opts = ['<option value="">选择会话...</option>'];
+  state.sessions.forEach(item => {
+    const selected = item.session_id === state.selectedSession ? " selected" : "";
+    const label = item.character ? `${item.character} · ${item.chat_id}` : String(item.chat_id || item.session_id);
+    opts.push(`<option value="${escapeHtml(item.session_id)}"${selected}>${escapeHtml(label)}</option>`);
+  });
+  select.innerHTML = opts.join("");
+  // 确保选中状态与 state 一致
+  select.value = state.selectedSession || "";
+}
+
+async function selectSession(sessionId) {
+  if (!sessionId) return;
+  state.selectedSession = sessionId;
+  renderSessionSelector();
+  if (document.querySelector('.nav[data-view="characters"].active')) {
+    await loadCharacterPage();
+  }
+}
+
+function sessionLabel(sessionId) {
+  const item = state.sessions.find(s => s.session_id === sessionId);
+  return item ? (item.character || item.chat_id || sessionId) : sessionId;
 }
 
 function renderStatus() {
   const s = state.status;
+  const botCard = $("#metric-bot-card");
+  const genCard = $("#metric-generate-card");
+  const llmCard = $("#metric-llm-card");
+  botCard.className = "metric " + (s.bot_running ? "status-on" : "status-off");
   $("#metric-bot").textContent = s.bot_running ? "运行中" : "未启动";
   $("#metric-sessions").textContent = String(s.sessions_count);
+  genCard.className = "metric " + (s.generating ? "status-busy" : "status-on");
   $("#metric-generate").textContent = s.generating ? "生成中" : "空闲";
   const llmReady = Number(Boolean(s.chat_llm_configured)) + Number(Boolean(s.image_llm_configured));
+  const llmClass = llmReady === 2 ? "status-on" : llmReady === 0 ? "status-off" : "status-partial";
+  llmCard.className = "metric " + llmClass;
   $("#metric-llm").textContent = `${llmReady}/2 已配置`;
   $("#bot-name").textContent = s.bot_username ? `@${s.bot_username}` : (s.token_configured ? "Token 已填写" : "Token 未填写");
   $("#status-web-url").textContent = s.web_url;
   $("#status-config-path").textContent = s.config_path;
-  $("#status-state-path").textContent = s.state_path;
+  $("#status-state-path").textContent = s.state_db_path || "-";
   $("#status-process").textContent = s.process_id ? `PID ${s.process_id}` : "-";
   $("#status-launch-script").textContent = s.launch_script || "-";
   $("#status-comfyui").textContent = s.comfyui_url || "-";
@@ -291,6 +392,17 @@ function inputFor([key, label, type], values) {
     input = document.createElement("select");
     const options = type.slice(7).split(",");
     input.innerHTML = options.map(opt => `<option value="${opt}">${opt || "默认"}</option>`).join("");
+    input.value = value ?? "";
+  } else if (type === "model_select") {
+    input = document.createElement("select");
+    const profileIds = Object.keys(state.profiles || {});
+    const opts = ['<option value="">默认</option>'];
+    profileIds.forEach(id => {
+      const p = state.profiles[id];
+      const label = `${escapeHtml(id)} · ${escapeHtml(p?.name || p?.model || "")}`;
+      opts.push(`<option value="${escapeHtml(id)}">${label}</option>`);
+    });
+    input.innerHTML = opts.join("");
     input.value = value ?? "";
   } else {
     input = document.createElement("input");
@@ -329,146 +441,135 @@ function formValues(form) {
   return values;
 }
 
-function renderSessions() {
-  const list = $("#session-list");
-  list.innerHTML = "";
-  if (!state.sessions.length) {
-    list.innerHTML = `<div class="empty-state">暂无会话。机器人收到 Telegram 消息后会自动出现。</div>`;
-  } else {
-    state.sessions.forEach(item => {
-      const btn = document.createElement("button");
-      btn.className = "session-item";
-      btn.dataset.sid = item.session_id;
-      btn.innerHTML = `<div class="session-title">${item.character || item.chat_id}</div><div class="session-meta">${item.last_interaction_ago} · 纯良度 ${item.purity}/10 · 推送 ${item.daily_push}</div>`;
-      btn.onclick = () => selectSession(item.session_id);
-      list.appendChild(btn);
-    });
-  }
-  if (state.selectedSession) {
-    $all(".session-item").forEach(btn => btn.classList.toggle("active", btn.dataset.sid === state.selectedSession));
-  }
-}
-
-async function selectSession(sessionId) {
-  state.selectedSession = sessionId;
-  const data = await api(`/api/sessions/${encodeURIComponent(sessionId)}`);
-  renderSessionForm(data.state, data.session);
-  renderSessions();
-  await loadPromptSlots();
-}
-
-function renderSessionForm(sessionState, summary) {
-  $("#selected-session-label").textContent = summary.session_id;
-  const form = $("#session-form");
-  form.innerHTML = "";
-  const grid = document.createElement("div");
-  grid.className = "field-grid";
-  const values = { ...sessionState, purity: sessionState.purity ?? "", custom_allow_llm_change_appearance: sessionState.custom_allow_llm_change_appearance ?? "" };
-  sessionFields.forEach(field => grid.appendChild(inputFor(field, values)));
-  form.appendChild(grid);
-  const actions = document.createElement("div");
-  actions.className = "form-actions";
-  actions.innerHTML = `<button type="button" class="danger" id="delete-session">删除会话</button><button class="primary" type="submit">保存会话</button>`;
-  form.appendChild(actions);
-  $("#delete-session").onclick = async () => {
-    await api(`/api/sessions/${encodeURIComponent(state.selectedSession)}`, { method: "DELETE" });
-    state.selectedSession = null;
-    $("#session-form").innerHTML = "";
-    $("#selected-session-label").textContent = "未选择";
-    await loadAll();
-    toast("会话已删除");
-  };
-}
-
-function renderPromptSlotEditor(prompt) {
-  const box = $("#prompt-slot-content");
+async function loadCharacterPage() {
+  const pool = $("#character-pool");
+  const form = $("#character-form");
   if (!state.selectedSession) {
-    box.innerHTML = `<div class="empty-state">请先从上方选择一个会话。</div>`;
+    if (pool) pool.innerHTML = `<div class="empty-state">请从右上角选择会话。</div>`;
+    if (form) form.innerHTML = `<div class="empty-state">请从右上角选择会话。</div>`;
+    if ($("#memory-manager")) $("#memory-manager").innerHTML = `<div class="empty-state">请选择会话与角色。</div>`;
+    if ($("#diary-manager")) $("#diary-manager").innerHTML = `<div class="empty-state">请选择会话与角色。</div>`;
     return;
   }
-  const editable = prompt?.editable || {};
-  const effective = prompt?.effective || {};
-  const items = prompt?.items || [];
-  const notes = (prompt?.notes || []).map(note => `<li>${escapeHtml(note)}</li>`).join("");
-  const previewScene = prompt?.scene || "{场景描述}";
-  const slotRows = items.map(item => `
-    <div class="slot-row">
-      <strong>${escapeHtml(item.key)}</strong>
-      <span>${escapeHtml(item.value || "（空）")}</span>
-    </div>
-  `).join("");
-  const WARDROBE_SLOT_LABELS = {
-    hair: "发型/发色", eyes: "瞳色", dress: "连衣裙", top: "上衣", bottom: "下装",
-    outerwear: "外套", bra: "胸衣", panties: "内裤", legwear: "袜", footwear: "鞋",
-    accessory: "配饰", other: "其它",
-  };
-  const wardrobe = prompt?.wardrobe || {};
-  const wardrobeRows = Object.keys(WARDROBE_SLOT_LABELS)
-    .filter(slot => (wardrobe[slot] || "").trim())
-    .map(slot => `
-    <div class="slot-row">
-      <strong>${escapeHtml(WARDROBE_SLOT_LABELS[slot])}</strong>
-      <span>${escapeHtml(wardrobe[slot])}</span>
-    </div>
-  `).join("");
-  const closet = prompt?.closet || {};
-  const closetRows = Object.keys(closet).map(name => `
-    <div class="slot-row">
-      <strong>${escapeHtml(name)}</strong>
-      <span>${escapeHtml(closet[name]?.slot || "")} · ${escapeHtml(closet[name]?.tags || "")}</span>
-    </div>
-  `).join("");
+  await loadCharacters();
+  await Promise.all([loadMemories(), loadDiaries(), loadModels()]);
+}
 
-  box.innerHTML = `
-    <form id="prompt-slot-form" class="prompt-slot-form">
-      <div class="slot-edit-grid"></div>
-      <label class="preview-scene">预览场景<input name="preview_scene" value="${escapeHtml(previewScene)}"></label>
-      <div class="effective-grid">
-        <div><span>实际基础外观</span><strong>${escapeHtml(effective.positive_prefix || "（空）")}</strong></div>
-        <div><span>实际画风</span><strong>${escapeHtml(effective.current_style || "（空）")}</strong></div>
-        <div><span>实际默认发型</span><strong>${escapeHtml(effective.default_hair || "（空）")}</strong></div>
-        <div><span>实际默认瞳色</span><strong>${escapeHtml(effective.default_eyes || "（空）")}</strong></div>
-        <div><span>场景偏好</span><strong>${escapeHtml(effective.scene_preference || "（空）")}</strong></div>
-        <div><span>自拍偏好</span><strong>${escapeHtml(effective.selfie_preference || "（空）")}</strong></div>
-      </div>
-      <div class="form-actions">
-        <button type="button" id="prompt-slot-preview">刷新槽位预览</button>
-        <button class="primary" type="submit">保存槽位</button>
-      </div>
-    </form>
-    <div class="prompt-slot-preview">
-      <section>
-        <h4>当前衣柜（按槽位 · 只读）</h4>
-        <div class="slot-list">${wardrobeRows || `<div class="empty-state">衣柜为空（无附加外型）。</div>`}</div>
-      </section>
-      <section>
-        <h4>衣橱收藏（穿过的衣服 · 只读）</h4>
-        <div class="slot-list">${closetRows || `<div class="empty-state">衣橱为空。</div>`}</div>
-      </section>
-      <section>
-        <h4>槽位预览</h4>
-        <div class="slot-list">${slotRows || `<div class="empty-state">暂无槽位。</div>`}</div>
-      </section>
-      <section>
-        <h4>编辑说明</h4>
-        <ul class="constraint-list">${notes}</ul>
-      </section>
-    </div>
-  `;
-  const grid = box.querySelector(".slot-edit-grid");
-  promptSlotFields.forEach(field => grid.appendChild(inputFor(field, editable)));
-  $("#prompt-slot-preview").onclick = () => loadPromptSlots();
-  $("#prompt-slot-form").onsubmit = async (event) => {
+function renderCharacterPool() {
+  const pool = $("#character-pool");
+  if (!pool) return;
+  const data = state.characterData || {};
+  const characters = data.characters || {};
+  const activeId = data.active_id || "";
+  const ids = Object.keys(characters);
+  if (!ids.length) {
+    pool.innerHTML = `<div class="empty-state">当前会话没有保存角色。点击“新建角色”创建。</div>`;
+    return;
+  }
+  pool.innerHTML = ids.map(id => {
+    const char = characters[id];
+    const isActive = id === activeId;
+    const isDefault = char.is_default === true;
+    const activeBadge = isActive ? `<span class="active-badge">当前</span>` : "";
+    const defaultBadge = isDefault ? `<span class="default-badge">默认</span>` : "";
+    return `
+      <button class="character-card ${state.selectedCharacter === id ? "selected" : ""}" data-character-id="${escapeHtml(id)}" type="button">
+        <div class="character-card-title">${escapeHtml(char.character || id)}${activeBadge}${defaultBadge}</div>
+        <div class="character-card-meta">${escapeHtml(char.series || "")} · ${escapeHtml(char.role_name || "未设定角色类型")}</div>
+      </button>
+    `;
+  }).join("");
+  pool.querySelectorAll(".character-card").forEach(btn => {
+    btn.onclick = () => selectCharacter(btn.dataset.characterId);
+  });
+}
+
+function selectCharacter(characterId) {
+  state.selectedCharacter = characterId;
+  renderCharacterPool();
+  renderCharacterForm();
+  loadMemories();
+  loadDiaries();
+}
+
+function renderCharacterForm() {
+  const title = $("#character-editor-title");
+  const subtitle = $("#character-editor-subtitle");
+  const form = $("#character-form");
+  const activateBtn = $("#character-activate");
+  if (!form) return;
+  if (!state.selectedCharacter || !state.characterData) {
+    title.textContent = "角色设定";
+    subtitle.textContent = "从左侧角色池选择一个角色";
+    form.innerHTML = `<div class="empty-state">请从左侧角色池选择一个角色。</div>`;
+    if (activateBtn) activateBtn.disabled = true;
+    return;
+  }
+  const characters = state.characterData.characters || {};
+  const char = characters[state.selectedCharacter] || {};
+  const isActive = state.characterData.active_id === state.selectedCharacter;
+  const isDefault = char.is_default === true;
+  title.textContent = isActive ? `${char.character || state.selectedCharacter}（当前）` : (char.character || state.selectedCharacter);
+  if (isDefault) {
+    subtitle.textContent = `会话: ${state.selectedSession} · 系统默认角色（不可删除）`;
+  } else {
+    subtitle.textContent = `会话: ${state.selectedSession}`;
+  }
+  if (activateBtn) {
+    activateBtn.disabled = isActive;
+    activateBtn.textContent = isActive ? "已是当前" : "设为当前";
+  }
+
+  form.innerHTML = "";
+  characterFieldSections.forEach(([sectionTitle, fields], index) => {
+    const section = document.createElement("section");
+    section.className = "form-section character-section";
+    const collapsed = index > 1;
+    section.innerHTML = `<h3 class="section-toggle ${collapsed ? "collapsed" : ""}" type="button">${sectionTitle}</h3>`;
+    const grid = document.createElement("div");
+    grid.className = `field-grid ${collapsed ? "collapsed" : ""}`;
+    fields.forEach(field => grid.appendChild(inputFor(field, char)));
+    section.appendChild(grid);
+    form.appendChild(section);
+  });
+
+  const actions = document.createElement("div");
+  actions.className = "form-actions";
+  actions.innerHTML = `<button type="button" class="danger" id="delete-character" ${isDefault ? "disabled" : ""}>删除角色</button><button class="primary" type="submit">保存角色</button>`;
+  form.appendChild(actions);
+
+  form.querySelectorAll(".section-toggle").forEach(toggle => {
+    toggle.onclick = () => {
+      const grid = toggle.nextElementSibling;
+      grid.classList.toggle("collapsed");
+      toggle.classList.toggle("collapsed");
+    };
+  });
+
+  if (!isDefault) {
+    $("#delete-character").onclick = async () => {
+      if (!window.confirm(`确定要删除角色 ${state.selectedCharacter} 吗？`)) return;
+      const sid = encodeURIComponent(state.selectedSession);
+      await api(`/api/sessions/${sid}/characters/${encodeURIComponent(state.selectedCharacter)}`, { method: "DELETE" });
+      state.selectedCharacter = null;
+      await loadCharacters();
+      await loadAll();
+      toast("角色已删除");
+    };
+  }
+
+  form.onsubmit = async (event) => {
     event.preventDefault();
     const btn = event.submitter;
     setBusy(btn, true);
     try {
-      const values = formValues(event.currentTarget);
-      delete values.preview_scene;
-      await api(`/api/sessions/${encodeURIComponent(state.selectedSession)}`, { method: "PATCH", body: values });
-      await selectSession(state.selectedSession);
+      const values = formValues(form);
+      values.id = state.selectedCharacter;
+      const sid = encodeURIComponent(state.selectedSession);
+      await api(`/api/sessions/${sid}/characters`, { method: "POST", body: values });
+      await loadCharacters();
       await loadAll();
-      toast("Prompt 槽位已保存");
+      toast("角色已保存");
     } catch (err) {
       toast(err.message, "error");
     } finally {
@@ -477,22 +578,287 @@ function renderPromptSlotEditor(prompt) {
   };
 }
 
-async function loadPromptSlots() {
-  if (!state.selectedSession) {
-    renderPromptSlotEditor(null);
+async function loadCharacters() {
+  const pool = $("#character-pool");
+  if (!pool || !state.selectedSession) {
+    if (pool) pool.innerHTML = `<div class="empty-state">请选择会话。</div>`;
     return;
   }
-  const sceneInput = document.querySelector("#prompt-slot-form input[name=preview_scene]");
-  const scene = sceneInput ? sceneInput.value : "{场景描述}";
+  const sid = encodeURIComponent(state.selectedSession);
   try {
-    const sid = encodeURIComponent(state.selectedSession);
-    const data = await api(`/api/prompt-slots/${sid}?scene=${encodeURIComponent(scene)}`);
-    state.promptSlots = data.prompt;
-    renderPromptSlotEditor(data.prompt);
+    const data = await api(`/api/sessions/${sid}/characters`);
+    state.characterData = data;
+    renderCharacterPool();
+    const characters = data.characters || {};
+    const ids = Object.keys(characters);
+    if (!state.selectedCharacter || !characters[state.selectedCharacter]) {
+      state.selectedCharacter = data.active_id || ids[0] || "";
+    }
+    renderCharacterForm();
   } catch (err) {
-    $("#prompt-slot-content").innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
+    pool.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
     toast(err.message, "error");
   }
+}
+
+function bindRangeInputs(container) {
+  container.querySelectorAll('input[type="range"]').forEach(input => {
+    const update = () => {
+      const span = input.parentElement.querySelector(".range-value");
+      if (span) span.textContent = input.value;
+    };
+    input.oninput = update;
+    update();
+  });
+}
+
+async function loadMemories() {
+  const box = $("#memory-manager");
+  if (!box || !state.selectedSession || !state.selectedCharacter) {
+    if (box) box.innerHTML = `<div class="empty-state">请从左侧选择角色。</div>`;
+    return;
+  }
+  const sid = encodeURIComponent(state.selectedSession);
+  const charKey = encodeURIComponent(state.selectedCharacter);
+  try {
+    const data = await api(`/api/sessions/${sid}/memories?character_key=${charKey}`);
+    const rows = (data.memories || []).map(mem => `
+      <div class="manager-row memory-row">
+        <textarea data-memory-summary="${mem.id}" rows="1" placeholder="记忆内容">${escapeHtml(mem.summary || "")}</textarea>
+        <select data-memory-kind="${mem.id}" title="类型">${memoryKindOptions(mem.kind || "manual")}</select>
+        <div class="range-wrap" title="重要度 1-5">
+          <input type="range" data-memory-importance="${mem.id}" min="1" max="5" step="1" value="${escapeHtml(String(mem.importance ?? 3))}">
+          <span class="range-value">${escapeHtml(String(mem.importance ?? 3))}</span>
+        </div>
+        <button data-memory-save="${mem.id}" type="button">保存</button>
+        <button class="danger" data-memory-delete="${mem.id}" type="button">删除</button>
+      </div>
+    `).join("");
+    box.innerHTML = `
+      <form id="memory-add-form" class="inline-manager-form memory-add-form">
+        <textarea name="summary" placeholder="新增一条手动记忆" rows="1"></textarea>
+        <select name="kind">${memoryKindOptions("manual")}</select>
+        <div class="range-wrap">
+          <input type="range" name="importance" min="1" max="5" step="1" value="3">
+          <span class="range-value">3</span>
+        </div>
+        <button class="primary" type="submit">新增记忆</button>
+      </form>
+      <div class="manager-list">${rows || `<div class="empty-state">暂无记忆。</div>`}</div>
+    `;
+    bindRangeInputs(box);
+    $("#memory-add-form").onsubmit = async event => {
+      event.preventDefault();
+      await api(`/api/sessions/${sid}/memories?character_key=${charKey}`, { method: "POST", body: formValues(event.currentTarget) });
+      await loadMemories();
+      toast("记忆已新增");
+    };
+    box.querySelectorAll("[data-memory-save]").forEach(btn => {
+      btn.onclick = async () => {
+        const id = btn.dataset.memorySave;
+        await api(`/api/sessions/${sid}/memories/${id}?character_key=${charKey}`, {
+          method: "PATCH",
+          body: {
+            summary: box.querySelector(`[data-memory-summary="${id}"]`).value,
+            kind: box.querySelector(`[data-memory-kind="${id}"]`).value,
+            importance: box.querySelector(`[data-memory-importance="${id}"]`).value,
+          },
+        });
+        await loadMemories();
+        toast("记忆已保存");
+      };
+    });
+    box.querySelectorAll("[data-memory-delete]").forEach(btn => {
+      btn.onclick = async () => {
+        const id = btn.dataset.memoryDelete;
+        await api(`/api/sessions/${sid}/memories/${id}?character_key=${charKey}`, { method: "DELETE" });
+        await loadMemories();
+        toast("记忆已删除");
+      };
+    });
+  } catch (err) {
+    box.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
+    toast(err.message, "error");
+  }
+}
+
+async function loadDiaries() {
+  const box = $("#diary-manager");
+  if (!box || !state.selectedSession || !state.selectedCharacter) {
+    if (box) box.innerHTML = `<div class="empty-state">请从左侧选择角色。</div>`;
+    return;
+  }
+  const sid = encodeURIComponent(state.selectedSession);
+  const charKey = encodeURIComponent(state.selectedCharacter);
+  try {
+    const data = await api(`/api/sessions/${sid}/diaries?character_key=${charKey}&limit=30`);
+    renderDiaries(data.diaries || [], sid, charKey);
+  } catch (err) {
+    box.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
+    toast(err.message, "error");
+  }
+}
+
+function renderDiaries(diaries, sid, charKey) {
+  const box = $("#diary-manager");
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = diaries.map(diary => {
+    const date = diary.diary_date;
+    const updated = new Date(diary.updated_at * 1000).toLocaleString("zh-CN");
+    return `
+      <div class="manager-row diary-row">
+        <div class="diary-header">
+          <strong>${escapeHtml(date)}</strong>
+          <span class="muted">${escapeHtml(updated)}</span>
+        </div>
+        <textarea data-diary-date="${escapeHtml(date)}" rows="3">${escapeHtml(diary.content || "")}</textarea>
+        <div class="button-row">
+          <button data-diary-save="${escapeHtml(date)}" type="button">保存</button>
+          <button class="danger" data-diary-delete="${escapeHtml(date)}" type="button">删除</button>
+        </div>
+      </div>
+    `;
+  }).join("");
+  box.innerHTML = `
+    <form id="diary-add-form" class="inline-manager-form">
+      <input type="date" name="diary_date" value="${today}">
+      <textarea name="content" placeholder="新增或覆盖一条日记" rows="3"></textarea>
+      <button class="primary" type="submit">新增日记</button>
+    </form>
+    <div class="manager-list">${rows || `<div class="empty-state">暂无日记。</div>`}</div>
+  `;
+  $("#diary-add-form").onsubmit = async event => {
+    event.preventDefault();
+    const values = formValues(event.currentTarget);
+    if (!values.content || !values.diary_date) return;
+    await api(`/api/sessions/${sid}/diaries/${encodeURIComponent(values.diary_date)}?character_key=${charKey}`, { method: "POST", body: { content: values.content } });
+    await loadDiaries();
+    toast("日记已保存");
+  };
+  box.querySelectorAll("[data-diary-save]").forEach(btn => {
+    btn.onclick = async () => {
+      const date = btn.dataset.diarySave;
+      const content = box.querySelector(`[data-diary-date="${date}"]`).value;
+      await api(`/api/sessions/${sid}/diaries/${encodeURIComponent(date)}?character_key=${charKey}`, { method: "POST", body: { content } });
+      await loadDiaries();
+      toast("日记已保存");
+    };
+  });
+  box.querySelectorAll("[data-diary-delete]").forEach(btn => {
+    btn.onclick = async () => {
+      const date = btn.dataset.diaryDelete;
+      if (!window.confirm(`确定删除 ${date} 的日记吗？`)) return;
+      await api(`/api/sessions/${sid}/diaries/${encodeURIComponent(date)}?character_key=${charKey}`, { method: "DELETE" });
+      await loadDiaries();
+      toast("日记已删除");
+    };
+  });
+}
+
+function switchMemoryDiaryTab(tab) {
+  state.memoryDiaryTab = tab;
+  $all("#view-characters .tab").forEach(t => t.classList.toggle("active", t.dataset.tab === tab));
+  $all("#view-characters .tab-panel").forEach(p => p.classList.toggle("active", p.id === `${tab}-tab`));
+}
+
+async function activateSelectedCharacter() {
+  if (!state.selectedCharacter || !state.selectedSession) return;
+  const sid = encodeURIComponent(state.selectedSession);
+  const cid = encodeURIComponent(state.selectedCharacter);
+  await api(`/api/sessions/${sid}/characters/${cid}/activate`, { method: "POST" });
+  await loadCharacters();
+  await loadAll();
+  toast("已切换到该角色");
+}
+
+function addNewCharacter() {
+  if (!state.selectedSession) return;
+  const baseName = "新角色";
+  let id = baseName;
+  const chars = state.characterData?.characters || {};
+  let n = 1;
+  while (chars[id]) id = `${baseName} ${n++}`;
+  const payload = { id, character: id };
+  const sid = encodeURIComponent(state.selectedSession);
+  api(`/api/sessions/${sid}/characters`, { method: "POST", body: payload }).then(() => {
+    loadCharacters().then(() => {
+      selectCharacter(id);
+      toast("新角色已创建");
+    });
+  }).catch(err => toast(err.message, "error"));
+}
+
+function importCharacter() {
+  if (!state.selectedSession) return;
+  const raw = window.prompt("粘贴角色 JSON：");
+  if (!raw) return;
+  try {
+    const payload = JSON.parse(raw);
+    const sid = encodeURIComponent(state.selectedSession);
+    api(`/api/sessions/${sid}/characters`, { method: "POST", body: payload }).then(() => {
+      loadCharacters().then(() => {
+        const id = payload.id || payload.character || payload.bot_name;
+        if (id) selectCharacter(id);
+        toast("角色已导入");
+      });
+    }).catch(err => toast(err.message, "error"));
+  } catch (err) {
+    toast("JSON 无效：" + err.message, "error");
+  }
+}
+
+async function loadModels() {
+  const box = $("#model-manager");
+  if (!box) return;
+  const data = await api("/api/models");
+  const allProfiles = { ...(data.global_profiles || {}), ...(data.user_profiles || {}) };
+  const ids = Object.keys(allProfiles);
+  const settings = data.settings || {};
+  const chatProfileId = settings.chat_profile_id || data.default_chat_model_profile || "";
+  const fastProfileId = settings.fast_profile_id || data.default_fast_model_profile || "";
+  const chatProfile = allProfiles[chatProfileId] || {};
+  const fastProfile = allProfiles[fastProfileId] || {};
+  const options = ids.map(id => `<option value="${escapeHtml(id)}">${escapeHtml(id)} · ${escapeHtml(allProfiles[id]?.name || allProfiles[id]?.model || "")}</option>`).join("");
+  const thinkingLabel = profile => {
+    if (!profile || !profile.thinking_fixed) return "";
+    const disabled = profile.disable_thinking === true || profile.disable_thinking === "true" || profile.disable_thinking === 1;
+    return `（固定${disabled ? "关闭" : "开启"}）`;
+  };
+  const chatNote = thinkingLabel(chatProfile);
+  const fastNote = thinkingLabel(fastProfile);
+  const chatDisabled = chatNote ? "disabled" : "";
+  const fastDisabled = fastNote ? "disabled" : "";
+  box.innerHTML = `
+    <form id="model-settings-form" class="model-settings-form">
+      <label>对话模型<select name="chat_profile_id"><option value="">默认</option>${options}</select></label>
+      <label>快速模型<select name="fast_profile_id"><option value="">默认</option>${options}</select></label>
+      <label>对话思考<select name="chat_thinking" ${chatDisabled}><option value="">默认</option><option value="true">开启</option><option value="false">关闭</option></select> <span class="fixed-note">${chatNote}</span></label>
+      <label>快速思考<select name="fast_thinking" ${fastDisabled}><option value="">默认</option><option value="true">开启</option><option value="false">关闭</option></select> <span class="fixed-note">${fastNote}</span></label>
+      <button class="primary" type="submit">保存模型选择</button>
+    </form>
+    <form id="model-profile-form" class="inline-manager-form">
+      <input name="profile_id" placeholder="自定义 profile id">
+      <textarea name="json" placeholder='{"name":"DeepSeek","base_url":"...","api_key":"...","model_no_think":"deepseek-chat"}'></textarea>
+      <button type="submit">保存自定义模型</button>
+    </form>
+  `;
+  box.querySelector("[name=chat_profile_id]").value = settings.chat_profile_id || "";
+  box.querySelector("[name=fast_profile_id]").value = settings.fast_profile_id || "";
+  box.querySelector("[name=chat_thinking]").value = settings.chat_thinking === true ? "true" : settings.chat_thinking === false ? "false" : "";
+  box.querySelector("[name=fast_thinking]").value = settings.fast_thinking === true ? "true" : settings.fast_thinking === false ? "false" : "";
+  $("#model-settings-form").onsubmit = async event => {
+    event.preventDefault();
+    await api("/api/models/settings", { method: "PATCH", body: formValues(event.currentTarget) });
+    await loadModels();
+    toast("模型设置已保存");
+  };
+  $("#model-profile-form").onsubmit = async event => {
+    event.preventDefault();
+    const values = formValues(event.currentTarget);
+    await api(`/api/models/${encodeURIComponent(values.profile_id)}`, { method: "POST", body: JSON.parse(values.json) });
+    await loadModels();
+    toast("自定义模型已保存");
+  };
 }
 
 function worldSessionTitle(item) {
@@ -709,6 +1075,126 @@ async function loadLogs() {
   }
 }
 
+function formatNumber(n) {
+  return Number(n || 0).toLocaleString("zh-CN");
+}
+
+function formatRate(n) {
+  if (!n && n !== 0) return "-";
+  return `${(Number(n) * 100).toFixed(1)}%`;
+}
+
+async function loadUsage() {
+  if (state.auth.role !== "admin") {
+    $("#usage-table-body").innerHTML = `<tr><td colspan="10" class="empty-cell">需要管理员权限查看用量</td></tr>`;
+    return;
+  }
+  const range = $("#usage-range");
+  const seconds = range ? Number(range.value || "86400") : 86400;
+  const now = Math.floor(Date.now() / 1000);
+  const after = seconds > 0 ? now - seconds : 0;
+  try {
+    const data = await api(`/api/admin/llm-usage?after=${after}&before=${now}&group_by=profile_id,model,purpose,tag`);
+    state.usage = data;
+    populateUsageFilters(data.groups || []);
+    renderUsage(data);
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+function populateUsageFilters(rows) {
+  const map = [
+    ["profile_id", "profile", "Profile"],
+    ["model", "model", "Model"],
+    ["purpose", "purpose", "Purpose"],
+    ["tag", "tag", "Tag"],
+  ];
+  map.forEach(([field, id, label]) => {
+    const sel = $(`#usage-filter-${id}`);
+    if (!sel) return;
+    const current = sel.value;
+    const values = new Set(rows.map(r => r[field] || "").filter(Boolean));
+    sel.innerHTML = `<option value="">全部 ${label}</option>` +
+      Array.from(values).sort().map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("");
+    if (values.has(current)) sel.value = current;
+  });
+}
+
+function renderUsage(data) {
+  const summary = data.summary || {};
+  const summaryBox = $("#usage-summary");
+  if (summaryBox) {
+    summaryBox.innerHTML = `
+      <div class="metric"><span>请求数</span><strong>${formatNumber(summary.requests)}</strong></div>
+      <div class="metric"><span>Prompt Tokens</span><strong>${formatNumber(summary.prompt_tokens)}</strong></div>
+      <div class="metric"><span>Completion Tokens</span><strong>${formatNumber(summary.completion_tokens)}</strong></div>
+      <div class="metric"><span>缓存命中</span><strong>${formatNumber(summary.cached_tokens)}</strong></div>
+      <div class="metric"><span>缓存命中率</span><strong>${formatRate(summary.cache_hit_rate)}</strong></div>
+      <div class="metric"><span>Total Tokens</span><strong>${formatNumber(summary.total_tokens)}</strong></div>
+    `;
+  }
+  const tbody = $("#usage-table-body");
+  let rows = (data.groups || []).map(row => ({ ...row, hitRate: row.prompt_tokens ? (row.cached_tokens / row.prompt_tokens) : 0 }));
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="10" class="empty-cell">该时间范围内暂无 LLM 调用记录</td></tr>`;
+    return;
+  }
+
+  const textFilter = (($("#usage-filter-text")?.value || "").toLowerCase().trim());
+  const profileFilter = $("#usage-filter-profile")?.value || "";
+  const modelFilter = $("#usage-filter-model")?.value || "";
+  const purposeFilter = $("#usage-filter-purpose")?.value || "";
+  const tagFilter = $("#usage-filter-tag")?.value || "";
+
+  if (textFilter) {
+    rows = rows.filter(row =>
+      [row.profile_id, row.model, row.purpose, row.tag].some(v => (v || "").toLowerCase().includes(textFilter))
+    );
+  }
+  if (profileFilter) rows = rows.filter(row => row.profile_id === profileFilter);
+  if (modelFilter) rows = rows.filter(row => row.model === modelFilter);
+  if (purposeFilter) rows = rows.filter(row => row.purpose === purposeFilter);
+  if (tagFilter) rows = rows.filter(row => row.tag === tagFilter);
+
+  const sort = $("#usage-sort")?.value || "last_used-desc";
+  const [sortKey, sortDir] = sort.split("-");
+  rows.sort((a, b) => {
+    let va, vb;
+    if (sortKey === "cache_hit_rate") {
+      va = a.hitRate;
+      vb = b.hitRate;
+    } else if (sortKey === "last_used" || sortKey === "first_used") {
+      va = a[sortKey] || 0;
+      vb = b[sortKey] || 0;
+    } else {
+      va = a[sortKey] ?? 0;
+      vb = b[sortKey] ?? 0;
+    }
+    return sortDir === "asc" ? va - vb : vb - va;
+  });
+
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="10" class="empty-cell">没有符合筛选条件的记录</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = rows.map(row => `
+    <tr>
+      <td>${escapeHtml(row.profile_id || "-")}</td>
+      <td>${escapeHtml(row.model || "-")}</td>
+      <td>${escapeHtml(row.purpose || "-")}</td>
+      <td>${escapeHtml(row.tag || "-")}</td>
+      <td>${formatNumber(row.requests)}</td>
+      <td>${formatNumber(row.prompt_tokens)}</td>
+      <td>${formatNumber(row.completion_tokens)}</td>
+      <td>${formatNumber(row.cached_tokens)}</td>
+      <td>${formatRate(row.hitRate)}</td>
+      <td>${formatNumber(row.total_tokens)}</td>
+    </tr>
+  `).join("");
+}
+
 function renderLogList(meta) {
   const list = $("#log-list");
   list.innerHTML = "";
@@ -812,7 +1298,6 @@ async function runPromptCleanup(applyChanges, button) {
 async function initEvents() {
   $all(".nav").forEach(btn => btn.onclick = () => switchView(btn.dataset.view));
   $("#refresh-btn").onclick = () => loadAll().then(() => toast("已刷新"));
-  $("#reload-sessions").onclick = () => loadAll().then(() => toast("会话已刷新"));
   $("#reload-world-sessions").onclick = () => loadWorldSessions().then(() => toast("动线用户已刷新"));
   $("#world-refresh").onclick = () => loadWorldRoute().then(() => toast("动线已刷新"));
   $("#world-refresh-places").onclick = async (event) => {
@@ -828,6 +1313,16 @@ async function initEvents() {
   };
   $("#reload-logs").onclick = () => loadLogs().then(() => toast("日志列表已刷新"));
   $("#log-refresh").onclick = () => { if (state.selectedLog) selectLog(state.selectedLog); };
+  $("#usage-refresh").onclick = (event) => {
+    const btn = event.currentTarget;
+    setBusy(btn, true);
+    loadUsage().then(() => toast("用量已刷新")).finally(() => setBusy(btn, false));
+  };
+  $("#usage-range").onchange = () => loadUsage();
+  ["usage-filter-text", "usage-filter-profile", "usage-filter-model", "usage-filter-purpose", "usage-filter-tag", "usage-sort"].forEach(id => {
+    const el = $(`#${id}`);
+    if (el) el.oninput = el.onchange = () => { if (state.usage) renderUsage(state.usage); };
+  });
   $("#log-clear").onclick = async () => {
     if (!state.selectedLog) return;
     try {
@@ -840,36 +1335,6 @@ async function initEvents() {
     }
   };
 
-  $("#service-restart-btn").onclick = async (event) => {
-    if (!window.confirm("这会重启整个 Python 服务进程，当前 Web 控制台会短暂断开。继续吗？")) return;
-    const btn = event.currentTarget;
-    const oldPid = state.status?.process_id;
-    setBusy(btn, true);
-    try {
-      const data = await api("/api/service/restart", { method: "POST" });
-      const restart = data.restart || {};
-      toast("正在重启服务，控制台会自动重新连接...");
-      await waitForServiceRestart(restart.old_pid || oldPid);
-    } catch (err) {
-      toast(err.message, "error");
-    } finally {
-      setBusy(btn, false);
-    }
-  };
-
-  $("#service-stop-btn").onclick = async (event) => {
-    if (!window.confirm("这会完全关闭服务进程（机器人和 Web 控制台都会停止，需要在服务器上重新启动）。继续吗？")) return;
-    const btn = event.currentTarget;
-    setBusy(btn, true);
-    try {
-      await api("/api/service/stop", { method: "POST" });
-      toast("服务正在关闭，Web 控制台即将断开。");
-    } catch (err) {
-      toast(err.message, "error");
-      setBusy(btn, false);
-    }
-  };
-
   $("#config-form").onsubmit = async (event) => {
     event.preventDefault();
     const btn = event.submitter;
@@ -878,23 +1343,6 @@ async function initEvents() {
       await api("/api/config", { method: "POST", body: { values: formValues(event.currentTarget) } });
       await loadAll();
       toast("设置已保存");
-    } catch (err) {
-      toast(err.message, "error");
-    } finally {
-      setBusy(btn, false);
-    }
-  };
-
-  $("#session-form").onsubmit = async (event) => {
-    event.preventDefault();
-    if (!state.selectedSession) return;
-    const btn = event.submitter;
-    setBusy(btn, true);
-    try {
-      await api(`/api/sessions/${encodeURIComponent(state.selectedSession)}`, { method: "PATCH", body: formValues(event.currentTarget) });
-      await selectSession(state.selectedSession);
-      await loadAll();
-      toast("会话已保存");
     } catch (err) {
       toast(err.message, "error");
     } finally {
@@ -934,8 +1382,96 @@ async function initEvents() {
     }
   };
 
+  $("#session-select").onchange = (event) => selectSession(event.currentTarget.value);
+
+  $("#character-refresh").onclick = async (event) => {
+    if (!state.selectedSession) return;
+    const btn = event.currentTarget;
+    setBusy(btn, true);
+    try {
+      await loadCharacters();
+      toast("角色池已刷新");
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+    }
+  };
+  $("#character-add").onclick = () => addNewCharacter();
+  $("#character-import").onclick = () => importCharacter();
+  $("#character-activate").onclick = async (event) => {
+    const btn = event.currentTarget;
+    setBusy(btn, true);
+    try {
+      await activateSelectedCharacter();
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+    }
+  };
+  $all("#view-characters .tab").forEach(tab => {
+    tab.onclick = () => switchMemoryDiaryTab(tab.dataset.tab);
+  });
+  $("#memory-diary-refresh").onclick = async (event) => {
+    if (!state.selectedSession || !state.selectedCharacter) return;
+    const btn = event.currentTarget;
+    setBusy(btn, true);
+    try {
+      if (state.memoryDiaryTab === "memory") await loadMemories();
+      else await loadDiaries();
+      toast("已刷新");
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+    }
+  };
+  $("#model-refresh").onclick = async (event) => {
+    const btn = event.currentTarget;
+    setBusy(btn, true);
+    try {
+      await loadModels();
+      toast("模型配置已刷新");
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+    }
+  };
+  $all(".panel-head.collapsible").forEach(head => {
+    head.onclick = () => {
+      const body = head.nextElementSibling;
+      if (body) body.classList.toggle("collapsed");
+      head.classList.toggle("collapsed");
+    };
+  });
+
   $("#prompt-cleanup-preview").onclick = (event) => runPromptCleanup(false, event.currentTarget);
   $("#prompt-cleanup-apply").onclick = (event) => runPromptCleanup(true, event.currentTarget);
+
+  $("#git-update-btn").onclick = async (event) => {
+    if (!window.confirm("这会从远端 Git 拉取最新代码并自动重启服务。继续吗？")) return;
+    const btn = event.currentTarget;
+    const out = $("#git-update-output");
+    setBusy(btn, true);
+    out.textContent = "正在执行 Git 更新...";
+    try {
+      const data = await api("/api/admin/git-update", { method: "POST" });
+      out.textContent = data.report || JSON.stringify(data, null, 2);
+      if (data.result && data.result.pulled) {
+        toast("已拉取更新，服务正在重启，控制台会自动重新连接...");
+        await waitForServiceRestart(data.restart?.old_pid || state.status?.process_id);
+      } else {
+        toast("Git 更新完成（无新提交或拉取失败）");
+      }
+    } catch (err) {
+      out.textContent = err.message;
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+    }
+  };
 }
 
 async function waitForServiceRestart(oldPid) {

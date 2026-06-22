@@ -262,6 +262,86 @@ class LongTermMemoryStore:
             )
             conn.commit()
 
+
+    def update_memory(self, session_id: str, memory_id: int, *, character: str | None = None, summary: str | None = None, kind: str | None = None, importance: Any = None, tags: Any = None, source: str | None = None) -> bool:
+        scope, params = self._scope_clause(session_id, character)
+        fields = []
+        values: list[Any] = []
+        if summary is not None:
+            fields.append("summary = ?")
+            values.append(str(summary or "").strip()[:600])
+        if kind is not None:
+            fields.append("kind = ?")
+            values.append(normalize_kind(kind))
+        if importance is not None:
+            fields.append("importance = ?")
+            values.append(clamp_importance(importance))
+        if tags is not None:
+            fields.append("tags = ?")
+            values.append(json.dumps(normalize_tags(tags), ensure_ascii=False))
+        if source is not None:
+            fields.append("source = ?")
+            values.append(str(source or "")[:800])
+        if not fields:
+            return False
+        fields.append("updated_at = ?")
+        values.append(time.time())
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                f"SELECT kind FROM memories WHERE {scope} AND id = ? AND status = 'active'",
+                (*params, int(memory_id)),
+            ).fetchone()
+            if not row or row["kind"] == "manual":
+                return False
+            cur = conn.execute(
+                f"UPDATE memories SET {', '.join(fields)} WHERE {scope} AND id = ? AND status = 'active'",
+                (*values, *params, int(memory_id)),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def edit_memory(self, session_id: str, memory_id: int, *, character: str | None = None, summary: str | None = None, kind: str | None = None, importance: Any = None, tags: Any = None, source: str | None = None) -> bool:
+        """用户显式编辑记忆时使用；允许修改 manual 记忆。"""
+        scope, params = self._scope_clause(session_id, character)
+        fields = []
+        values: list[Any] = []
+        if summary is not None:
+            fields.append("summary = ?")
+            values.append(str(summary or "").strip()[:600])
+        if kind is not None:
+            fields.append("kind = ?")
+            values.append(normalize_kind(kind))
+        if importance is not None:
+            fields.append("importance = ?")
+            values.append(clamp_importance(importance))
+        if tags is not None:
+            fields.append("tags = ?")
+            values.append(json.dumps(normalize_tags(tags), ensure_ascii=False))
+        if source is not None:
+            fields.append("source = ?")
+            values.append(str(source or "")[:800])
+        if not fields:
+            return False
+        fields.append("updated_at = ?")
+        values.append(time.time())
+        with closing(self._connect()) as conn:
+            cur = conn.execute(
+                f"UPDATE memories SET {', '.join(fields)} WHERE {scope} AND id = ? AND status = 'active'",
+                (*values, *params, int(memory_id)),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def deactivate_non_manual_memory(self, session_id: str, memory_id: int, *, character: str | None = None) -> bool:
+        scope, params = self._scope_clause(session_id, character)
+        with closing(self._connect()) as conn:
+            cur = conn.execute(
+                f"UPDATE memories SET status = 'deleted', updated_at = ? WHERE {scope} AND id = ? AND status = 'active' AND kind <> 'manual'",
+                (time.time(), *params, int(memory_id)),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
     def deactivate_memory(self, session_id: str, memory_id: int, *, character: str | None = None) -> bool:
         scope, params = self._scope_clause(session_id, character)
         with closing(self._connect()) as conn:

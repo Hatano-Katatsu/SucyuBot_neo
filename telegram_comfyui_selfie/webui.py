@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 import os
 import time
 from pathlib import Path
@@ -11,7 +12,17 @@ from aiohttp import web
 from .world_runtime import PLACE_TYPES
 
 
-SECRET_KEYS = {"telegram_bot_token", "llm_api_key", "chat_llm_api_key", "image_llm_api_key", "amap_api_key", "google_places_api_key"}
+SECRET_KEYS = {
+    "telegram_bot_token", "llm_api_key", "chat_llm_api_key", "image_llm_api_key",
+    "amap_api_key", "google_places_api_key",
+}
+YAML_ONLY_CONFIG_KEYS = {
+    "comfyui_url", "image_backend", "animatool_turbo_steps", "animatool_turbo_cfg",
+    "animatool_filename_prefix", "unet_model", "clip_model", "vae_model",
+    "turbo_lora_model", "comfyui_workflow_file", "steps", "cfg",
+    # 全局模型 profile 只允许 YAML 配置，不允许 WebUI/命令修改
+    "global_model_profiles", "default_chat_model_profile", "default_fast_model_profile",
+}
 WORLD_TIMELINE_HOURS = (6, 8, 11, 13, 16, 18, 20, 23)
 
 
@@ -27,20 +38,87 @@ async def _no_cache_assets(request: web.Request, handler):
     return resp
 
 
+def _auth_from_request(request: web.Request) -> dict[str, Any] | None:
+    service = service_from(request)
+    token = (
+        request.query.get("token")
+        or request.headers.get("X-Web-Token")
+        or request.cookies.get("web_session")
+        or ""
+    ).strip()
+    if token:
+        user_id = service.app_store.user_for_token(token)
+        if user_id:
+            return {"role": "user", "user_id": user_id, "token": token}
+        sessions = getattr(service, "_web_admin_sessions", set())
+        if token in sessions:
+            return {"role": "admin", "user_id": "admin", "token": token}
+    return None
+
+
+def _is_admin(request: web.Request) -> bool:
+    return (request.get("web_auth") or {}).get("role") == "admin"
+
+
+def _session_allowed(request: web.Request, session_id: str) -> bool:
+    if _is_admin(request):
+        return True
+    auth = request.get("web_auth") or {}
+    return auth.get("user_id") == service_from(request)._user_id_for_session(session_id)
+
+
+def _require_admin(request: web.Request):
+    if not _is_admin(request):
+        raise web.HTTPForbidden(text="需要管理员权限")
+
+
+@web.middleware
+async def _auth_middleware(request: web.Request, handler):
+    if request.path.startswith("/static/") or request.path in {"/login", "/api/auth/login"}:
+        return await handler(request)
+    auth = _auth_from_request(request)
+    if auth:
+        request["web_auth"] = auth
+        return await handler(request)
+    if request.path.startswith("/api/"):
+        return json_error("未登录", status=401)
+    return await login_page(request)
+
+
 def create_web_app(service) -> web.Application:
-    app = web.Application(client_max_size=2 * 1024 * 1024, middlewares=[_no_cache_assets])
+    app = web.Application(client_max_size=2 * 1024 * 1024, middlewares=[_auth_middleware, _no_cache_assets])
     app["service"] = service
     static_dir = Path(__file__).with_name("static")
 
     app.router.add_get("/", index)
+    app.router.add_post("/login", web_login)
+    app.router.add_post("/api/auth/login", api_auth_login)
+    app.router.add_get("/api/auth/me", api_auth_me)
     app.router.add_static("/static/", static_dir)
     app.router.add_get("/api/status", api_status)
     app.router.add_get("/api/config", api_config)
     app.router.add_post("/api/config", api_save_config)
     app.router.add_get("/api/sessions", api_sessions)
-    app.router.add_get("/api/sessions/{session_id:.+}", api_session_detail)
-    app.router.add_patch("/api/sessions/{session_id:.+}", api_update_session)
-    app.router.add_delete("/api/sessions/{session_id:.+}", api_delete_session)
+    # 具体子资源路由先注册，避免被下面 {session_id:.+} 贪婪匹配吞掉
+    app.router.add_get("/api/sessions/{session_id:.+}/memories", api_memories)
+    app.router.add_post("/api/sessions/{session_id:.+}/memories", api_add_memory)
+    app.router.add_patch(r"/api/sessions/{session_id:.+}/memories/{memory_id:\d+}", api_update_memory)
+    app.router.add_delete(r"/api/sessions/{session_id:.+}/memories/{memory_id:\d+}", api_delete_memory)
+    app.router.add_get("/api/sessions/{session_id:.+}/characters", api_characters)
+    app.router.add_post("/api/sessions/{session_id:.+}/characters", api_save_character)
+    app.router.add_delete("/api/sessions/{session_id:.+}/characters/{character_id:.+}", api_delete_character)
+    app.router.add_post("/api/sessions/{session_id:.+}/characters/{character_id:.+}/activate", api_activate_character)
+    app.router.add_get("/api/sessions/{session_id:.+}/diaries", api_diaries)
+    app.router.add_get("/api/sessions/{session_id:.+}/diaries/{diary_date:.+}", api_diary_detail)
+    app.router.add_post("/api/sessions/{session_id:.+}/diaries/{diary_date:.+}", api_save_diary)
+    app.router.add_delete("/api/sessions/{session_id:.+}/diaries/{diary_date:.+}", api_delete_diary)
+    # 通用会话路由放在最后，且只匹配不含 / 的 session_id（session_id 含 : 但不含 /）
+    app.router.add_get("/api/sessions/{session_id:[^/]+}", api_session_detail)
+    app.router.add_patch("/api/sessions/{session_id:[^/]+}", api_update_session)
+    app.router.add_delete("/api/sessions/{session_id:[^/]+}", api_delete_session)
+    app.router.add_get("/api/models", api_model_profiles)
+    app.router.add_post("/api/models/{profile_id}", api_save_model_profile)
+    app.router.add_patch("/api/models/settings", api_update_model_settings)
     app.router.add_get("/api/prompt-slots/{session_id:.+}", api_prompt_slots)
     app.router.add_post("/api/world/{session_id:.+}/places/refresh", api_world_refresh_places)
     app.router.add_get("/api/world/{session_id:.+}", api_world_route)
@@ -48,8 +126,10 @@ def create_web_app(service) -> web.Application:
     app.router.add_post("/api/bot/stop", api_bot_stop)
     app.router.add_post("/api/service/restart", api_service_restart)
     app.router.add_post("/api/service/stop", api_service_stop)
+    app.router.add_get("/api/admin/llm-usage", api_admin_llm_usage)
     app.router.add_post("/api/admin/migrate-visual-tags", api_migrate_visual_tags)
     app.router.add_post("/api/admin/cleanup-prompt-prefix", api_cleanup_prompt_prefix)
+    app.router.add_post("/api/admin/git-update", api_admin_git_update)
     app.router.add_get("/api/logs", api_logs)
     app.router.add_get("/api/logs/{chat_id:.+}", api_log_detail)
     app.router.add_delete("/api/logs/{chat_id:.+}", api_log_clear)
@@ -61,13 +141,199 @@ def create_web_app(service) -> web.Application:
 
 
 async def index(request: web.Request):
+    service = service_from(request)
+    token = (request.query.get("token") or "").strip()
+    if token:
+        # 普通用户 token：app_store 持久化，长期 cookie。
+        if service.app_store.user_for_token(token):
+            resp = web.HTTPFound("/")
+            resp.set_cookie("web_session", token, max_age=365 * 24 * 3600, httponly=True, samesite="Lax")
+            raise resp
+        # 管理员 token：内存会话集合，短期 cookie（与登录 API 一致 24h）。
+        admin_sessions = getattr(service, "_web_admin_sessions", set())
+        if token in admin_sessions:
+            resp = web.HTTPFound("/")
+            resp.set_cookie("web_session", token, max_age=24 * 3600, httponly=True, samesite="Lax")
+            raise resp
     return web.FileResponse(Path(__file__).with_name("static") / "index.html")
+
+
+async def login_page(request: web.Request):
+    html = """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sucyubot Console 登录</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      font-family: "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #f8fafc;
+      color: #0f172a;
+    }
+    .card {
+      width: min(380px, calc(100vw - 32px));
+      background: white;
+      border: 1px solid #e2e8f0;
+      border-radius: 18px;
+      padding: 32px;
+      box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.08), 0 4px 6px -4px rgba(15, 23, 42, 0.04);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 24px;
+    }
+    .brand-mark {
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, #0d9488, #14b8a6);
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+      font-size: 16px;
+      color: white;
+      box-shadow: 0 4px 12px rgba(13, 148, 136, 0.35);
+    }
+    .brand h1 { margin: 0; font-size: 20px; font-weight: 700; }
+    .brand p { margin: 2px 0 0; color: #64748b; font-size: 13px; }
+    label { display: block; margin: 14px 0 6px; font-size: 13px; color: #475569; font-weight: 500; }
+    input {
+      box-sizing: border-box;
+      width: 100%;
+      padding: 11px 14px;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      font-size: 15px;
+      transition: all 0.15s ease;
+    }
+    input:focus {
+      outline: none;
+      border-color: #0d9488;
+      box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.08);
+    }
+    button {
+      margin-top: 22px;
+      width: 100%;
+      border: 0;
+      border-radius: 10px;
+      padding: 12px 14px;
+      background: #0d9488;
+      color: white;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      box-shadow: 0 2px 6px rgba(13, 148, 136, 0.25);
+    }
+    button:hover {
+      background: #0f766e;
+      box-shadow: 0 4px 10px rgba(13, 148, 136, 0.3);
+      transform: translateY(-1px);
+    }
+    p.note { margin: 18px 0 0; color: #64748b; font-size: 13px; line-height: 1.55; }
+  </style>
+</head>
+<body>
+  <form method="post" action="/login" class="card">
+    <div class="brand">
+      <div class="brand-mark">SC</div>
+      <div>
+        <h1>Sucyubot Console</h1>
+        <p>登录以继续</p>
+      </div>
+    </div>
+    <label>账号</label>
+    <input name="username" autocomplete="username" required>
+    <label>密码</label>
+    <input name="password" type="password" autocomplete="current-password" required>
+    <button type="submit">登录</button>
+    <p class="note">Telegram 用户账号为你的 TG 数字 ID，密码用 bot 命令 /web密码 设置。管理员账号密码来自配置文件。</p>
+  </form>
+</body>
+</html>"""
+    return web.Response(text=html, content_type="text/html")
+
+
+async def _login_with_credentials(request: web.Request, username: str, password: str) -> web.Response:
+    service = service_from(request)
+    admin_user = str(service.config.get("web_admin_username") or "admin")
+    admin_password = str(service.config.get("web_admin_password") or "admin")
+    if username == admin_user and password == admin_password:
+        token = secrets.token_urlsafe(32)
+        sessions = getattr(service, "_web_admin_sessions", None)
+        if sessions is None:
+            sessions = set()
+            service._web_admin_sessions = sessions
+        sessions.add(token)
+        resp = web.HTTPFound("/")
+        resp.set_cookie("web_session", token, max_age=24 * 3600, httponly=True, samesite="Lax")
+        return resp
+    if service.app_store.verify_user_password(username, password):
+        token = service.app_store.get_or_create_web_token(username)
+        resp = web.HTTPFound("/")
+        resp.set_cookie("web_session", token, max_age=365 * 24 * 3600, httponly=True, samesite="Lax")
+        return resp
+    raise web.HTTPUnauthorized(text="账号或密码错误")
+
+
+async def web_login(request: web.Request):
+    data = await request.post()
+    return await _login_with_credentials(request, str(data.get("username") or ""), str(data.get("password") or ""))
+
+
+async def api_auth_login(request: web.Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    username = str(payload.get("username") or "")
+    password = str(payload.get("password") or "")
+    resp = await _login_with_credentials(request, username, password)
+    return json_ok({"redirect": "/"}) if not isinstance(resp, web.HTTPFound) else resp
+
+
+async def api_auth_me(request: web.Request):
+    return json_ok({"auth": request.get("web_auth") or {}})
 
 
 def service_from(request: web.Request):
     return request.app["service"]
 
 
+def _default_character_payload(config: dict[str, Any]) -> dict[str, Any]:
+    """从全局默认值构建系统默认角色档案，用于在角色池中始终展示并可编辑。"""
+    bot_name = str(config.get("bot_name", "蕾伊") or "蕾伊").strip()
+    role_name = str(config.get("role_name", "魅魔") or "").strip()
+    return {
+        "id": bot_name,
+        "is_default": True,
+        "character": "",
+        "series": "",
+        "role_name": role_name,
+        "bot_name": bot_name,
+        "bot_self_name": str(config.get("bot_self_name", "我") or "").strip(),
+        "visual_character": "",
+        "visual_series": "",
+        "persona": str(config.get("scheduled_persona", "") or "").strip(),
+        "appearance": str(config.get("positive_prefix", "") or "").strip(),
+        "count": "",
+        "age_stage": str(config.get("character_age_stage", "") or "").strip(),
+        "occupation": "",
+        "day_anchor": str(config.get("character_day_anchor", "") or "").strip(),
+        "relationship": str(config.get("spatial_relationship", "") or "").strip(),
+        "scene_preference": "",
+        "selfie_preference": "",
+        "style": str(config.get("current_style", "") or "").strip(),
+        "purity": None,
+    }
 def json_ok(data: dict[str, Any] | None = None):
     payload = {"ok": True}
     if data:
@@ -89,6 +355,14 @@ def masked_config(service) -> dict[str, Any]:
         else:
             values[key] = value
     return {"values": values, "secret_present": secret_present}
+
+
+def visible_sessions(request: web.Request) -> list[tuple[str, dict[str, Any]]]:
+    service = service_from(request)
+    if _is_admin(request):
+        return list(service.sessions.items())
+    user_id = (request.get("web_auth") or {}).get("user_id", "")
+    return [(sid, state) for sid, state in service.sessions.items() if service._user_id_for_session(sid) == user_id]
 
 
 def parse_bool(value) -> bool:
@@ -323,25 +597,33 @@ def serialize_prompt_slots(service, session_id: str, scene: str = "{场景描述
 async def api_status(request: web.Request):
     service = service_from(request)
     config = service.config
-    sessions = [session_summary(service, sid, state) for sid, state in service.sessions.items()]
+    sessions = [session_summary(service, sid, state) for sid, state in visible_sessions(request)]
+    chat_profile_id, chat_profile, chat_thinking = service._resolve_llm_profile("chat", "")
+    chat_model, chat_api_base, _ = service._llm_profile_model_name(chat_profile, chat_thinking)
+    image_profile_id, image_profile, image_thinking = service._resolve_llm_profile("image", "")
+    image_model, image_api_base, _ = service._llm_profile_model_name(image_profile, image_thinking)
+    public_host = str(config.get("web_public_host") or config.get("web_host", "127.0.0.1") or "127.0.0.1")
+    if public_host in {"0.0.0.0", "::"}:
+        public_host = "127.0.0.1"
+    port = int(config.get("web_port", 8787) or 8787)
     data = {
         "bot_running": service.is_bot_running,
         "bot_username": service._bot_username,
         "process_id": os.getpid(),
         "process_started_at": service.process_started_at,
-        "web_url": f"http://{config.get('web_host', '127.0.0.1')}:{config.get('web_port', 8787)}",
+        "web_url": f"http://{public_host}:{port}",
         "config_path": str(service.config_path),
-        "state_path": str(service.state_path),
+        "state_db_path": str(service.app_store.path),
         "launch_script": str(Path.cwd() / "Start-SucyuBot.cmd"),
         "token_configured": bool(config.get("telegram_bot_token")),
         "llm_configured": service.has_llm_config("chat") and service.has_llm_config("image"),
         "chat_llm_configured": service.has_llm_config("chat"),
         "image_llm_configured": service.has_llm_config("image"),
         "comfyui_url": config.get("comfyui_url", ""),
-        "chat_llm_model": service._get_llm_value("chat", "model", ""),
-        "chat_llm_api_base": service._get_llm_value("chat", "api_base", ""),
-        "image_llm_model": service._get_llm_value("image", "model", ""),
-        "image_llm_api_base": service._get_llm_value("image", "api_base", ""),
+        "chat_llm_model": chat_model or chat_profile_id,
+        "chat_llm_api_base": chat_api_base,
+        "image_llm_model": image_model or image_profile_id,
+        "image_llm_api_base": image_api_base,
         "generating": service._generating,
         "active_pushes": len(service._active_pushes),
         "sessions_count": len(service.sessions),
@@ -351,16 +633,20 @@ async def api_status(request: web.Request):
 
 
 async def api_config(request: web.Request):
+    _require_admin(request)
     return json_ok({"config": masked_config(service_from(request))})
 
 
 async def api_save_config(request: web.Request):
+    _require_admin(request)
     service = service_from(request)
     payload = await request.json()
     values = payload.get("values", payload)
     if not isinstance(values, dict):
         return json_error("配置数据格式不正确")
     for key, value in values.items():
+        if key in YAML_ONLY_CONFIG_KEYS:
+            continue
         if key in SECRET_KEYS and value in ("", None):
             continue
         old = service.config.get(key)
@@ -371,23 +657,24 @@ async def api_save_config(request: web.Request):
 
 async def api_sessions(request: web.Request):
     service = service_from(request)
-    sessions = [session_summary(service, sid, state) for sid, state in service.sessions.items()]
+    sessions = [session_summary(service, sid, state) for sid, state in visible_sessions(request)]
     return json_ok({"sessions": sessions})
 
 
 async def api_session_detail(request: web.Request):
     service = service_from(request)
     sid = request.match_info["session_id"]
-    if sid not in service.sessions:
-        return json_error("会话不存在", status=404)
-    return json_ok({"session": session_summary(service, sid, service.sessions[sid]), "state": service._get_session_state(sid)})
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    state = service._get_session_state(sid)
+    return json_ok({"session": session_summary(service, sid, state), "state": state})
 
 
 async def api_update_session(request: web.Request):
     service = service_from(request)
     sid = request.match_info["session_id"]
-    if sid not in service.sessions:
-        return json_error("会话不存在", status=404)
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
     payload = await request.json()
     state = service._get_session_state(sid)
     allowed = {
@@ -433,16 +720,321 @@ async def api_update_session(request: web.Request):
 async def api_delete_session(request: web.Request):
     service = service_from(request)
     sid = request.match_info["session_id"]
+    if sid not in service.sessions:
+        return json_error("会话不存在", status=404)
+    if not _session_allowed(request, sid):
+        return json_error("无权删除此会话", status=403)
     service.sessions.pop(sid, None)
-    service._write_state()
+    service.app_store.delete_session_state(sid)
     return json_ok()
+
+
+async def api_memories(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    if "character_key" in request.query:
+        char = request.query.get("character_key") or ""
+    else:
+        char = service._memory_character(sid) if hasattr(service, "_memory_character") else ""
+    try:
+        limit = max(1, min(200, int(request.query.get("limit", "80"))))
+    except ValueError:
+        limit = 80
+    memories = service.memory.list_memories(sid, character=char, limit=limit)
+    return json_ok({"memories": memories, "character": char})
+
+
+async def api_add_memory(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    payload = await request.json()
+    summary = str(payload.get("summary") or "").strip()
+    if not summary:
+        return json_error("记忆内容不能为空")
+    char = request.query.get("character_key") or (service._memory_character(sid) if hasattr(service, "_memory_character") else "")
+    memory_id = service.memory.add_memory(
+        sid,
+        payload.get("kind") or "manual",
+        summary,
+        character=char,
+        importance=payload.get("importance", 5),
+        tags=payload.get("tags") or ["手动"],
+        source="webui",
+    )
+    memories = service.memory.list_memories(sid, character=char, limit=80)
+    return json_ok({"id": memory_id, "memories": memories, "character": char})
+
+
+async def api_update_memory(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    payload = await request.json()
+    char = request.query.get("character_key") or (service._memory_character(sid) if hasattr(service, "_memory_character") else "")
+    ok = service.memory.edit_memory(
+        sid,
+        int(request.match_info["memory_id"]),
+        character=char,
+        summary=payload.get("summary") if "summary" in payload else None,
+        kind=payload.get("kind") if "kind" in payload else None,
+        importance=payload.get("importance") if "importance" in payload else None,
+        tags=payload.get("tags") if "tags" in payload else None,
+        source=payload.get("source") if "source" in payload else None,
+    )
+    if not ok:
+        return json_error("记忆不存在或没有可更新字段", status=404)
+    memories = service.memory.list_memories(sid, character=char, limit=80)
+    return json_ok({"memories": memories, "character": char})
+
+
+async def api_delete_memory(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    char = request.query.get("character_key") or (service._memory_character(sid) if hasattr(service, "_memory_character") else "")
+    ok = service.memory.deactivate_memory(sid, int(request.match_info["memory_id"]), character=char)
+    if not ok:
+        return json_error("记忆不存在", status=404)
+    memories = service.memory.list_memories(sid, character=char, limit=80)
+    return json_ok({"memories": memories, "character": char})
+
+
+async def api_characters(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    state = service._get_session_state(sid)
+    if hasattr(service, "_snapshot_character"):
+        service._snapshot_character(state)
+    characters = dict(state.get("saved_characters") or {})
+    active_id = (state.get("custom_character") or state.get("custom_bot_name") or state.get("custom_role_name") or "").strip()
+    # 如果当前会话已有角色身份但尚未保存进角色池，自动把当前态注入为可编辑条目
+    if active_id and active_id not in characters:
+        current = service._character_export_payload(state) if hasattr(service, "_character_export_payload") else {}
+        if current.get("character") or current.get("bot_name") or current.get("role_name"):
+            characters[active_id] = current
+    # 始终注入系统默认角色（来自 config 默认值），保证可被选中和编辑，但不可删除
+    default_char = _default_character_payload(service.config)
+    default_id = default_char.get("id") or default_char.get("bot_name") or "default"
+    if default_id and default_id not in characters:
+        characters[default_id] = default_char
+    return json_ok({
+        "active_id": active_id,
+        "default_id": default_id,
+        "current": service._character_export_payload(state) if hasattr(service, "_character_export_payload") else {},
+        "characters": characters,
+    })
+
+
+async def api_save_character(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        return json_error("角色数据必须是 JSON 对象")
+    state = service._get_session_state(sid)
+    key = str(payload.get("id") or payload.get("character") or payload.get("bot_name") or "").strip()
+    if not key:
+        return json_error("角色 JSON 必须包含 id 或 character")
+    active_id = state.get("custom_character") or state.get("custom_bot_name") or ""
+    force_activate = parse_bool(payload.get("activate")) if "activate" in payload else False
+    if hasattr(service, "_apply_character_payload"):
+        if force_activate or not active_id or active_id == key:
+            service._apply_character_payload(state, payload)
+            if not state.get("custom_character"):
+                state["custom_character"] = key
+    state.setdefault("saved_characters", {})[key] = {k: v for k, v in payload.items() if k != "id"}
+    service._save_session_state(sid, state)
+    return json_ok({"active_id": state.get("custom_character") or "", "current": service._character_export_payload(state), "characters": state.get("saved_characters") or {}})
+
+
+async def api_delete_character(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    character_id = request.match_info["character_id"]
+    default_id = _default_character_payload(service.config).get("id") or ""
+    if character_id == default_id:
+        return json_error("系统默认角色不能删除", status=403)
+    state = service._get_session_state(sid)
+    saved = state.setdefault("saved_characters", {})
+    saved.pop(character_id, None)
+    if state.get("custom_character") == character_id and hasattr(service, "_clear_conversation_context"):
+        service._clear_conversation_context(state)
+    service._save_session_state(sid, state)
+    return json_ok({"active_id": state.get("custom_character") or "", "characters": saved})
+
+
+async def api_activate_character(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    character_id = request.match_info["character_id"]
+    state = service._get_session_state(sid)
+    saved = state.get("saved_characters") or {}
+    data = saved.get(character_id)
+    if not data:
+        return json_error("角色不存在", status=404)
+    switching = (data.get("character", "") or "") != (state.get("custom_character") or "")
+    if switching and hasattr(service, "_save_current_character_context"):
+        service._save_current_character_context(state)
+    if hasattr(service, "_snapshot_character"):
+        service._snapshot_character(state)
+    state["custom_character"] = data.get("character", "")
+    state["custom_series"] = data.get("series", "")
+    state["custom_role_name"] = data.get("role_name", "") if switching else (state.get("custom_role_name") or data.get("role_name", ""))
+    state["custom_bot_name"] = data.get("bot_name") or data.get("character", "")
+    state["custom_bot_self_name"] = data.get("bot_self_name", "") if switching else (state.get("custom_bot_self_name") or data.get("bot_self_name", ""))
+    state["custom_visual_character"] = data.get("visual_character", "")
+    state["custom_visual_series"] = data.get("visual_series", "")
+    state["custom_scheduled_persona"] = data.get("persona", "")
+    state["custom_positive_prefix"] = data.get("appearance", "")
+    state["custom_count"] = data.get("count", "")
+    state["custom_character_age_stage"] = data.get("age_stage", "")
+    state["custom_character_occupation"] = data.get("occupation", "")
+    state["custom_character_day_anchor"] = data.get("day_anchor", "")
+    state["custom_spatial_relationship"] = data.get("relationship", "") if switching else (state.get("custom_spatial_relationship") or data.get("relationship", ""))
+    state["custom_scene_preference"] = data.get("scene_preference", "")
+    state["custom_selfie_preference"] = data.get("selfie_preference", "")
+    if data.get("style"):
+        state["custom_current_style"] = data.get("style", "")
+    if data.get("purity") is not None and not state.get("purity_user_set"):
+        state["purity"] = data.get("purity")
+    if switching and hasattr(service, "_restore_character_context"):
+        service._restore_character_context(sid, state)
+        state["dynamic_appearance"] = ""
+    state.pop("life_profile", None)
+    service._save_session_state(sid, state)
+    return json_ok({"active_id": state.get("custom_character") or "", "current": service._character_export_payload(state), "characters": state.get("saved_characters") or {}})
+
+
+async def api_diaries(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    character_key = request.query.get("character_key") or ""
+    try:
+        limit = max(1, min(100, int(request.query.get("limit", "30"))))
+    except ValueError:
+        limit = 30
+    diaries = service.app_store.recent_diaries(sid, character_key, limit=limit)
+    return json_ok({"diaries": diaries, "character_key": character_key})
+
+
+async def api_diary_detail(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    character_key = request.query.get("character_key") or ""
+    diary_date = request.match_info["diary_date"]
+    diary = service.app_store.get_diary(sid, character_key, diary_date)
+    if not diary:
+        return json_error("日记不存在", status=404)
+    return json_ok({"diary": diary, "character_key": character_key})
+
+
+async def api_save_diary(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    payload = await request.json()
+    character_key = request.query.get("character_key") or str(payload.get("character_key") or "").strip()
+    diary_date = request.match_info["diary_date"]
+    content = str(payload.get("content") or "").strip()
+    if not content:
+        return json_error("日记内容不能为空")
+    service.app_store.upsert_diary(
+        sid,
+        character_key,
+        diary_date,
+        content,
+        from_message_id=int(payload.get("from_message_id") or 0),
+        to_message_id=int(payload.get("to_message_id") or 0),
+    )
+    diaries = service.app_store.recent_diaries(sid, character_key, limit=30)
+    return json_ok({"diaries": diaries, "character_key": character_key})
+
+
+async def api_delete_diary(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    character_key = request.query.get("character_key") or ""
+    diary_date = request.match_info["diary_date"]
+    service.app_store.delete_diary(sid, character_key, diary_date)
+    diaries = service.app_store.recent_diaries(sid, character_key, limit=30)
+    return json_ok({"diaries": diaries, "character_key": character_key})
+
+
+async def api_model_profiles(request: web.Request):
+    service = service_from(request)
+    user_id = (request.get("web_auth") or {}).get("user_id", "")
+    if _is_admin(request):
+        user_id = request.query.get("user_id") or user_id
+    settings = service.app_store.get_user_model_settings(user_id)
+    return json_ok({
+        "global_profiles": service._global_model_profiles(),
+        "user_profiles": service.app_store.list_model_profiles(user_id),
+        "settings": settings,
+        "user_id": user_id,
+        "default_chat_model_profile": service.config.get("default_chat_model_profile", ""),
+        "default_fast_model_profile": service.config.get("default_fast_model_profile", ""),
+    })
+
+
+async def api_save_model_profile(request: web.Request):
+    service = service_from(request)
+    user_id = (request.get("web_auth") or {}).get("user_id", "")
+    if not user_id:
+        return json_error("缺少用户身份", status=403)
+    profile_id = request.match_info["profile_id"].strip()
+    if not profile_id:
+        return json_error("profile_id 不能为空")
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        return json_error("模型配置必须是 JSON 对象")
+    service.app_store.upsert_model_profile(user_id, profile_id, payload)
+    return json_ok({"user_profiles": service.app_store.list_model_profiles(user_id)})
+
+
+async def api_update_model_settings(request: web.Request):
+    service = service_from(request)
+    user_id = (request.get("web_auth") or {}).get("user_id", "")
+    if not user_id:
+        return json_error("缺少用户身份", status=403)
+    payload = await request.json()
+    kwargs: dict[str, Any] = {}
+    for key in ("chat_profile_id", "fast_profile_id"):
+        if key in payload:
+            kwargs[key] = str(payload.get(key) or "")
+    for key in ("chat_thinking", "fast_thinking"):
+        if key in payload:
+            value = payload.get(key)
+            kwargs[key] = None if value in ("", None, "default") else parse_bool(value)
+    settings = service.app_store.update_user_model_settings(user_id, **kwargs)
+    return json_ok({"settings": settings})
 
 
 async def api_prompt_slots(request: web.Request):
     service = service_from(request)
     sid = request.match_info["session_id"]
-    if sid not in service.sessions:
-        return json_error("会话不存在", status=404)
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
     scene = request.query.get("scene", "{场景描述}")
     return json_ok({"prompt": serialize_prompt_slots(service, sid, scene=scene)})
 
@@ -450,8 +1042,8 @@ async def api_prompt_slots(request: web.Request):
 async def api_world_route(request: web.Request):
     service = service_from(request)
     sid = request.match_info["session_id"]
-    if sid not in service.sessions:
-        return json_error("会话不存在", status=404)
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
     try:
         weather = await service._fetch_weather("", sid)
     except Exception:
@@ -462,8 +1054,8 @@ async def api_world_route(request: web.Request):
 async def api_world_refresh_places(request: web.Request):
     service = service_from(request)
     sid = request.match_info["session_id"]
-    if sid not in service.sessions:
-        return json_error("会话不存在", status=404)
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
     city = service._get_session_cfg(sid, "location", service.config.get("location", ""))
     try:
         catalog = await service._ensure_city_place_catalog(city, force=True)
@@ -477,6 +1069,7 @@ async def api_world_refresh_places(request: web.Request):
 
 
 async def api_bot_start(request: web.Request):
+    _require_admin(request)
     service = service_from(request)
     try:
         await service.start_bot()
@@ -486,12 +1079,14 @@ async def api_bot_start(request: web.Request):
 
 
 async def api_bot_stop(request: web.Request):
+    _require_admin(request)
     service = service_from(request)
     await service.stop_bot()
     return json_ok()
 
 
 async def api_service_restart(request: web.Request):
+    _require_admin(request)
     service = service_from(request)
     try:
         restart = service.prepare_process_restart()
@@ -502,17 +1097,57 @@ async def api_service_restart(request: web.Request):
 
 
 async def api_service_stop(request: web.Request):
+    _require_admin(request)
     service = service_from(request)
     asyncio.create_task(service.shutdown_service())
     return json_ok({"stopping": True})
 
 
+async def api_admin_llm_usage(request: web.Request):
+    _require_admin(request)
+    service = service_from(request)
+    query = request.query
+    now = time.time()
+    # 默认最近 24 小时
+    try:
+        after = float(query.get("after") or 0) or (now - 86400)
+    except ValueError:
+        after = now - 86400
+    try:
+        before = float(query.get("before") or 0) or now
+    except ValueError:
+        before = now
+    group_by = [c.strip() for c in (query.get("group_by") or "profile_id,model,purpose,tag").split(",") if c.strip()]
+    valid_cols = {"profile_id", "model", "purpose", "tag", "session_id"}
+    group_by = [c for c in group_by if c in valid_cols]
+    if not group_by:
+        group_by = ["profile_id"]
+    rows = service.app_store.aggregate_llm_usage(after=after, before=before, group_by=tuple(group_by))
+    total = {
+        "requests": sum(r.get("requests", 0) or 0 for r in rows),
+        "prompt_tokens": sum(r.get("prompt_tokens", 0) or 0 for r in rows),
+        "completion_tokens": sum(r.get("completion_tokens", 0) or 0 for r in rows),
+        "cached_tokens": sum(r.get("cached_tokens", 0) or 0 for r in rows),
+        "total_tokens": sum(r.get("total_tokens", 0) or 0 for r in rows),
+    }
+    total["cache_hit_rate"] = (
+        round(total["cached_tokens"] / total["prompt_tokens"], 4) if total["prompt_tokens"] else 0
+    )
+    return json_ok({
+        "summary": total,
+        "groups": rows,
+        "time_range": {"after": after, "before": before, "group_by": group_by},
+    })
+
+
 async def api_migrate_visual_tags(request: web.Request):
+    _require_admin(request)
     service = service_from(request)
     return json_ok({"migration": service.migrate_visual_identity_tags()})
 
 
 async def api_cleanup_prompt_prefix(request: web.Request):
+    _require_admin(request)
     service = service_from(request)
     try:
         payload = await request.json()
@@ -521,6 +1156,24 @@ async def api_cleanup_prompt_prefix(request: web.Request):
     apply_changes = parse_bool(payload.get("apply", False)) if isinstance(payload, dict) else False
     cleanup = service.cleanup_prompt_prefix_slots(apply=apply_changes)
     return json_ok({"cleanup": cleanup})
+
+
+async def api_admin_git_update(request: web.Request):
+    _require_admin(request)
+    service = service_from(request)
+    try:
+        result = await service.run_git_update()
+    except Exception as exc:
+        return json_error(f"Git 更新异常: {exc}", status=502)
+    # 拉取成功且有更新 → 自重启
+    restart = None
+    if result.get("pulled"):
+        try:
+            restart = service.prepare_process_restart()
+            asyncio.create_task(service.shutdown_for_process_restart(delay=3.0))
+        except Exception as exc:
+            return json_error(f"Git 拉取成功但准备重启失败: {exc}", status=500)
+    return json_ok({"result": result, "report": service._format_git_update_report(result), "restart": restart})
 
 
 async def api_logs(request: web.Request):
@@ -535,6 +1188,8 @@ async def api_logs(request: web.Request):
             except OSError:
                 continue
             sid = service.session_id_for_chat(chat_id)
+            if not _session_allowed(request, sid):
+                continue
             state = service.sessions.get(sid, {})
             items.append({
                 "chat_id": chat_id,
@@ -551,7 +1206,10 @@ async def api_logs(request: web.Request):
 async def api_log_detail(request: web.Request):
     service = service_from(request)
     chat_id = request.match_info["chat_id"]
-    path = service._user_log_path(service.session_id_for_chat(chat_id))
+    sid = service.session_id_for_chat(chat_id)
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此日志", status=403)
+    path = service._user_log_path(sid)
     if not path.exists():
         return json_error("日志不存在", status=404)
     try:
@@ -570,7 +1228,10 @@ async def api_log_detail(request: web.Request):
 async def api_log_clear(request: web.Request):
     service = service_from(request)
     chat_id = request.match_info["chat_id"]
-    path = service._user_log_path(service.session_id_for_chat(chat_id))
+    sid = service.session_id_for_chat(chat_id)
+    if not _session_allowed(request, sid):
+        return json_error("无权清除此日志", status=403)
+    path = service._user_log_path(sid)
     try:
         if path.exists():
             path.unlink()
@@ -580,6 +1241,7 @@ async def api_log_clear(request: web.Request):
 
 
 async def api_test_comfyui(request: web.Request):
+    _require_admin(request)
     service = service_from(request)
     try:
         service._ensure_comfy_session()
@@ -617,6 +1279,8 @@ async def api_send_message(request: web.Request):
     text = str(payload.get("text", "")).strip()
     if not chat_id or not text:
         return json_error("需要 chat_id 和 text")
+    if not _session_allowed(request, service.session_id_for_chat(chat_id)):
+        return json_error("无权向此 Chat ID 发送消息", status=403)
     try:
         await service.send_message(chat_id, text)
     except Exception as exc:
@@ -635,6 +1299,8 @@ async def api_run_command(request: web.Request):
     if not chat_id or not command:
         return json_error("需要 chat_id 和 command")
     sid = service.session_id_for_chat(chat_id)
+    if not _session_allowed(request, sid):
+        return json_error("无权在此 Chat ID 运行命令", status=403)
     try:
         await asyncio.wait_for(service.dispatch_command(chat_id, sid, command, arg), timeout=900)
     except Exception as exc:
