@@ -1082,8 +1082,25 @@ class CommandHandlersMixin:
                 await self.send_message(chat_id, f"未找到角色 {sub_arg}。")
                 return
             del saved[sub_arg]
+            # 删的若是当前角色，必须同步清空当前角色态：否则下次 _snapshot_character（load/
+            # 切换/create_oc/设定角色都会触发）会用 state["custom_character"] 把刚删的角色重新
+            # 写回 saved_characters，表现为"删了又出现"。这里只复用字段清理原语，不动其它角色。
+            is_current = (state.get("custom_character") or "") == sub_arg
+            note = ""
+            if is_current:
+                for key in SESSION_CUSTOM_RESET_KEYS:
+                    state[key] = ""
+                state["dynamic_appearance"] = ""
+                state["wardrobe"] = {}
+                state["wardrobe_closet"] = {}
+                state["persona_user_set"] = False
+                state["purity"] = None
+                state["purity_user_set"] = False
+                self._clear_conversation_context(state)
+                self._ulog(session_id, "DELETE", f"删除当前角色 {sub_arg} 并回退全局默认")
+                note = "\n当前角色已回退到全局默认。"
             self._save_session_state(session_id, state)
-            await self.send_message(chat_id, f"已删除角色 {sub_arg}。")
+            await self.send_message(chat_id, f"已删除角色 {sub_arg}。{note}")
             return
         if sub in ("load", "delete"):
             await self.send_message(chat_id, f"用法: /角色 {sub} <名称>")

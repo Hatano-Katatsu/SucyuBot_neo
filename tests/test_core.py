@@ -2356,6 +2356,91 @@ class ServiceTestCase(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_delete_current_character_clears_state_and_does_not_revive(self):
+        # 删除当前角色：必须清空当前角色态，且后续 _snapshot_character 不能把它复活。
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            state = svc._get_session_state(sid)
+            state.update({
+                "custom_character": "角色A",
+                "custom_scheduled_persona": "我是A",
+                "custom_bot_name": "角色A",
+                "custom_positive_prefix": "black hair",
+                "persona_user_set": True,
+                "purity": 5,
+                "purity_user_set": True,
+                "dynamic_appearance": "red dress",
+                "wardrobe": {"红裙": ["red dress"]},
+                "wardrobe_closet": {"red dress": 1},
+                "saved_characters": {
+                    "角色A": {"character": "角色A", "persona": "我是A"},
+                    "角色B": {"character": "角色B", "persona": "我是B"},
+                },
+                "chat_history": [{"role": "assistant", "content": "A的专属台词"}],
+                "sent_photos_history": [{"timestamp": 9999999999, "scene": "A的画面", "view": "selfie"}],
+            })
+            svc._save_session_state(sid, state)
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_character(1, sid, "delete 角色A")
+
+            after = svc._get_session_state(sid)
+            # 池里 A 删掉、B 保留
+            self.assertNotIn("角色A", after["saved_characters"])
+            self.assertIn("角色B", after["saved_characters"])
+            # 当前角色态清空，回退全局默认
+            self.assertEqual(after.get("custom_character"), "")
+            self.assertEqual(after.get("custom_scheduled_persona"), "")
+            self.assertEqual(after.get("custom_bot_name"), "")
+            self.assertEqual(after.get("custom_positive_prefix"), "")
+            self.assertFalse(after.get("persona_user_set"))
+            self.assertIsNone(after.get("purity"))
+            self.assertFalse(after.get("purity_user_set"))
+            self.assertEqual(after.get("dynamic_appearance"), "")
+            self.assertEqual(after.get("wardrobe"), {})
+            self.assertEqual(after.get("wardrobe_closet"), {})
+            # 对话/照片上下文清空
+            self.assertEqual(after.get("chat_history"), [])
+            self.assertEqual(after.get("sent_photos_history"), [])
+            # 关键：后续快照不会把 A 写回 saved_characters（复活已修复）
+            svc._snapshot_character(after)
+            self.assertNotIn("角色A", after["saved_characters"])
+
+        asyncio.run(run())
+
+    def test_delete_non_current_character_keeps_current_state(self):
+        # 删除非当前角色：只删存档，当前角色态/对话上下文不动。
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            state = svc._get_session_state(sid)
+            state.update({
+                "custom_character": "角色A",
+                "custom_scheduled_persona": "我是A",
+                "custom_bot_name": "角色A",
+                "saved_characters": {
+                    "角色A": {"character": "角色A", "persona": "我是A"},
+                    "角色B": {"character": "角色B", "persona": "我是B"},
+                },
+                "chat_history": [{"role": "assistant", "content": "A的专属台词"}],
+            })
+            svc._save_session_state(sid, state)
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_character(1, sid, "delete 角色B")
+
+            after = svc._get_session_state(sid)
+            self.assertNotIn("角色B", after["saved_characters"])
+            self.assertIn("角色A", after["saved_characters"])
+            # 当前角色态不变
+            self.assertEqual(after.get("custom_character"), "角色A")
+            self.assertEqual(after.get("custom_scheduled_persona"), "我是A")
+            # 对话上下文不动
+            self.assertEqual(len(after.get("chat_history", [])), 1)
+
+        asyncio.run(run())
+
     def test_character_reset_is_the_only_full_reset_entry(self):
         async def run():
             svc = self.make_service()
