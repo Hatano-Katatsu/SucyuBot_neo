@@ -182,7 +182,9 @@ class ChatContextMixin:
         except Exception:
             logger.warning("chat message sqlite append failed", exc_info=True)
         full_snapshot = list(history)
-        state["chat_history"] = self._trim_history_preserve_turns(history, self._context_window_message_limit())
+        # 仅做存储兜底裁剪（远高于 checkpoint 周期，正常不触及），并同步 short_context_start。
+        # 发给模型的窗口由 _chat_prompt_history（checkpoint 锚定）决定，不在这里逐轮滑动。
+        self._apply_history_trim(state, self._history_storage_cap())
         self._save_session_state(session_id, state)
         self._queue_checkpoint_if_needed(session_id, full_snapshot)
         if judge_decision:
@@ -266,7 +268,7 @@ class ChatContextMixin:
             )
         # 对话进行中：对话已建立的场景优先，动线只作背景；只有冷启动/刚换场景才以动线引导，
         # 避免角色随现实时间被算法"传送"（家→公园这类飘移）。对话态不钉死时钟地点（pin_location=False）。
-        active_dialog = bool(self._active_chat_history(state, self._context_window_message_limit()))
+        active_dialog = bool(self._chat_prompt_history(state))
         world_context = self._format_world_context(
             session_id, user_text, mode="chat", pin_location=not active_dialog
         )
@@ -322,9 +324,13 @@ class ChatContextMixin:
                 f"{memory_context}\n"
             )
 
+        # 拼接顺序刻意为前缀缓存优化：
+        #   [静态 system] + [聊天历史] + [照片注入] + [动态 system] + [本轮 user]
+        # 静态前缀与逐轮追加的历史构成稳定前缀；照片注入每隔几轮就变，必须放在历史之后，
+        # 否则它一变就会作废后面整段历史的前缀缓存（checkpoint 攒下的命中红利会被清零）。
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_static}]
+        messages.extend(self._chat_prompt_history(state))
         self._inject_photo_history_messages(messages, state)
-        messages.extend(self._active_chat_history(state, self._context_window_message_limit()))
         messages.append({"role": "system", "content": system_dynamic})
         messages.append({"role": "user", "content": user_text})
         return messages
@@ -549,6 +555,14 @@ class ChatContextMixin:
         except Exception:
             return 50
 
+    def _history_storage_cap(self) -> int:
+        """chat_history 的存储兜底上限：取 checkpoint 周期阈值的 3 倍，远大于正常运行所需。
+
+        发给模型的窗口由 checkpoint 折叠 + _chat_prompt_history 决定，这里只在 checkpoint
+        长期失联（任务 hang、反复异常）时防止 chat_history 无限膨胀，正常运行永不触及。
+        """
+        return self._context_window_message_limit() * 3
+
     def _checkpoint_keep_message_limit(self) -> int:
         try:
             return max(2, int(self.config.get("checkpoint_keep_message_limit", "10") or 10))
@@ -563,6 +577,23 @@ class ChatContextMixin:
         while trimmed and trimmed[0].get("role") != "user":
             trimmed.pop(0)
         return trimmed or list(history[-limit:])
+
+    def _apply_history_trim(self, state: dict[str, Any], limit: int):
+        """把 chat_history 从头部裁到 limit 条，并同步下移 short_context_start。
+
+        short_context_start 是 chat_history 的下标（短期场景起点）。从头部删消息会让
+        所有下标左移，必须同量下移这个起点，否则 _chat_prompt_history 的切片会错位
+        （丢掉本应保留的当前场景消息，甚至取到空窗口）。
+        """
+        history = state.get("chat_history", [])
+        if len(history) <= limit:
+            return
+        trimmed = self._trim_history_preserve_turns(history, limit)
+        removed = len(history) - len(trimmed)
+        state["chat_history"] = trimmed
+        if removed > 0:
+            start = int(state.get("short_context_start", 0) or 0)
+            state["short_context_start"] = max(0, start - removed)
 
     def _queue_checkpoint_if_needed(self, session_id: str, history_snapshot: list[dict[str, Any]] | None = None):
         if not session_id:
@@ -615,8 +646,8 @@ class ChatContextMixin:
             state["checkpoint_summary"] = merged
             state["checkpoint_message_id"] = until_id
             state["last_checkpoint_at"] = time.time()
-            # Trim only after the summary has been committed.
-            state["chat_history"] = self._trim_history_preserve_turns(state.get("chat_history", []), keep)
+            # Trim only after the summary has been committed (同步 short_context_start)。
+            self._apply_history_trim(state, keep)
             self._save_session_state(session_id, state)
             self._ulog(session_id, "CHECKPOINT", f"until=#{until_id} chars={len(merged)}")
         except Exception:
@@ -704,6 +735,23 @@ class ChatContextMixin:
         if start < 0 or start > len(history):
             start = 0
         return history[start:][-limit:]
+
+    @staticmethod
+    def _chat_prompt_history(state: dict[str, Any]) -> list[dict[str, Any]]:
+        """聊天 prompt 的历史窗口：checkpoint 锚定，取短期场景起点之后的全部未折叠消息。
+
+        故意不做 [-N:] 逐轮滑动——长度由 checkpoint 折叠（每周期把溢出折进摘要、尾部裁到
+        keep）与 _history_storage_cap 兜底共同约束。这样两次 checkpoint 之间历史前缀只增不
+        移，最大化服务端 prefix cache 命中；只有 checkpoint 落地那一刻才发生一次前缀归位。
+        """
+        history = state.get("chat_history", [])
+        try:
+            start = int(state.get("short_context_start", 0) or 0)
+        except Exception:
+            start = 0
+        if start < 0 or start > len(history):
+            start = 0
+        return history[start:]
 
     def _inject_photo_history_messages(self, messages: list[dict[str, Any]], state: dict[str, Any]):
         photos = state.get("sent_photos_history", [])
