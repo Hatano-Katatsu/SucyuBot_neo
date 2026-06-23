@@ -1173,7 +1173,7 @@ select {
   align-items: center;
   gap: 5px;
   font-size: 13px;
-  padding: 6px 12px;
+  padding: 6px 8px;
   border-radius: 6px;
   border: 1px solid var(--line);
   background: var(--surface);
@@ -1183,6 +1183,11 @@ select {
   line-height: 1;
   height: 32px;
   box-sizing: border-box;
+}
+.panel-head-actions .icon-btn:has(span) {
+  padding: 6px 14px;
+  min-width: 90px;
+  justify-content: center;
 }
 .panel-head-actions .icon-btn:hover {
   background: var(--accent-ghost);
