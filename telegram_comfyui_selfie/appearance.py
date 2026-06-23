@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from . import session_schema
 from .defaults import DEFAULT_CONFIG
 
 
@@ -278,7 +279,7 @@ def inject_appearance(service: Any, char: str, session_id: str = "") -> str:
     state = service._get_session_state(session_id)
     outfit_kw = service._outfit_kw
     accessory_kw = service._accessory_kw
-    slots = parse_appearance(state.get("dynamic_appearance", "") or "", outfit_kw, accessory_kw)
+    slots = parse_appearance(session_schema.get_outfit(state), outfit_kw, accessory_kw)
     char_set = service._is_character_set(session_id)
 
     # 默认角色（非角色态）若没有自定义衣柜，用全局 dynamic_appearance 作为初始穿搭回退：

@@ -16,6 +16,7 @@ from . import appearance as appearance_rules
 from . import character_card
 from . import generation as image_generation
 from . import prompt_intake
+from . import session_schema
 from .app_store import AppStateStore
 from .config_store import dump_simple_yaml, flatten_config, load_simple_yaml
 from .defaults import DEFAULT_CONFIG
@@ -442,86 +443,13 @@ class TelegramComfyUIService(
 
     @staticmethod
     def _session_state_defaults() -> dict[str, Any]:
-        """会话 state 全部字段的默认值（单一来源）。
+        """会话 state 全部字段的默认值。
 
+        单一来源在 `session_schema.STATE_SCHEMA`（每字段声明 归属 + 默认值 + reset 保留）。
         既供 `_get_session_state` 做 setdefault，也供通用上下文清空按字段默认值复位
-        （见 commands._clear_conversation_context）。新增字段只在这里加一行即可。
+        （见 commands._clear_conversation_context）。新增字段在 STATE_SCHEMA 加一行即可。
         """
-        return {
-            "last_interaction": time.time(),
-            "last_morning_greet_date": "",
-            "daily_trigger_times": [],
-            "daily_trigger_date": "",
-            "daily_triggered_times": [],
-            "recent_message_history": [],
-            "chat_history": [],
-            "checkpoint_summary": "",
-            "checkpoint_message_id": 0,
-            "last_checkpoint_at": 0,
-            "last_dream_at": 0,
-            "last_dream_message_id": 0,
-            "sent_photos_history": [],
-            "dynamic_appearance": "",
-            "wardrobe": {},
-            "wardrobe_closet": {},
-            "replying_to_selfie": False,
-            "last_sent_selfie_time": 0,
-            "last_sent_selfie_caption": "",
-            "last_sent_selfie_source_description": "",
-            "last_sent_selfie_replied": False,
-            "custom_scheduled_persona": "",
-            "custom_role_name": "",
-            "custom_bot_name": "",
-            "custom_bot_self_name": "",
-            "custom_spatial_relationship": "",
-            "custom_location": "",
-            "custom_timezone_offset": "",
-            "user_place": "",
-            "user_place_label": "",
-            "user_place_text": "",
-            "user_place_updated_at": 0,
-            "user_place_confidence": 0,
-            "user_co_located": False,
-            "character_place": "",
-            "character_place_label": "",
-            "character_place_text": "",
-            "character_place_name": "",
-            "character_place_updated_at": 0,
-            "character_place_confidence": 0,
-            "character_place_history": [],
-            "rounds_since_location": 0,
-            "custom_count": "",
-            "custom_positive_prefix": "",
-            "custom_default_hair": "",
-            "custom_default_eyes": "",
-            "custom_current_style": "",
-            "custom_scene_preference": "",
-            "custom_selfie_preference": "",
-            "custom_raw_profile_text": "",
-            "custom_prompt_intake": {},
-            "custom_allow_llm_change_appearance": None,
-            "custom_character": "",
-            "custom_series": "",
-            "custom_visual_character": "",
-            "custom_visual_series": "",
-            "custom_character_age_stage": "",
-            "custom_character_occupation": "",
-            "custom_character_day_anchor": "",
-            "persona_user_set": False,
-            "saved_characters": {},
-            "character_contexts": {},
-            "init_flow": {},
-            "purity": None,
-            "purity_user_set": False,
-            "ntr_stage_reached": 0,
-            "ntr_reconcile_count": 0,
-            "frozen": False,
-            "frozen_at": 0,
-            "rounds_since_image": 0,
-            "short_context_start": 0,
-            "short_context_reset_time": 0,
-            "short_context_reset_reason": "",
-        }
+        return session_schema.state_defaults()
 
     def _get_session_state(self, session_id: str) -> dict[str, Any]:
         if session_id not in self.sessions:
@@ -529,6 +457,8 @@ class TelegramComfyUIService(
         state = self.sessions[session_id]
         for key, val in self._session_state_defaults().items():
             state.setdefault(key, val)
+        # clothing 字段已收进 state["clothing"] 盒；迁移旧扁平持久态并补齐子键。
+        session_schema.ensure_clothing_box(state)
         return state
 
     def _default_character_payload(self) -> dict[str, Any]:
@@ -776,7 +706,7 @@ class TelegramComfyUIService(
         一旦设了角色（OC/既有），就不再回退全局默认，避免默认服装串到东云绘名这类角色身上——
         既有角色没有自带初始穿搭时返回空，交给画面规划器按场景决定。"""
         state = self._get_session_state(session_id) if session_id else {}
-        own = (state.get("dynamic_appearance") or "").strip()
+        own = session_schema.get_outfit(state).strip() if state else ""
         if own:
             return own
         if session_id and self._is_character_set(session_id):
@@ -927,7 +857,7 @@ class TelegramComfyUIService(
             try:
                 appearance_snapshot = self._effective_visual_prompt_tags(session_id)
             except Exception:
-                appearance_snapshot = state.get("dynamic_appearance", "")
+                appearance_snapshot = session_schema.get_outfit(state)
         history.append({
             "timestamp": time.time(),
             "scene": scene,
@@ -1012,7 +942,7 @@ class TelegramComfyUIService(
                 "custom_visual_character",
                 "custom_visual_series",
                 state.get("custom_positive_prefix", ""),
-                state.get("dynamic_appearance", ""),
+                session_schema.get_outfit(state),
             ):
                 sessions_updated += 1
                 updates.append(f"{sid}: {state.get('custom_character') or '-'} -> {state.get('custom_visual_character') or '(blank)'} / {state.get('custom_visual_series') or '(blank)'}")
@@ -1860,7 +1790,7 @@ class TelegramComfyUIService(
             session_id,
             scene,
             "",
-            appearance=new_app or state.get("dynamic_appearance", ""),
+            appearance=new_app or session_schema.get_outfit(state),
             view=final_view,
             source_description=source_description,
         )
@@ -1869,10 +1799,8 @@ class TelegramComfyUIService(
     def _get_wardrobe(self, state: dict) -> dict:
         """取当前衣柜。衣柜与扁平 dynamic_appearance 不一致时（老数据无衣柜、或 webui 直接改了扁平串）
         以扁平串为准重新分槽——保证两者始终同步。"""
-        wardrobe = state.get("wardrobe")
-        if not isinstance(wardrobe, dict):
-            wardrobe = {}
-        dyn = (state.get("dynamic_appearance") or "").strip()
+        wardrobe = session_schema.get_wardrobe(state)
+        dyn = session_schema.get_outfit(state).strip()
         if not dyn:
             return {}
         if appearance_rules.render_wardrobe(wardrobe) != appearance_rules.normalize_appearance_text(dyn):
@@ -1882,7 +1810,7 @@ class TelegramComfyUIService(
     def _wardrobe_closet_context(self, session_id: str) -> str:
         """给聊天模型看的衣橱清单（按槽位的中文名），让角色知道自己有哪些衣服。"""
         state = self._get_session_state(session_id)
-        return appearance_rules.closet_summary(state.get("wardrobe_closet") or {})
+        return appearance_rules.closet_summary(session_schema.get_closet(state))
 
     async def _classify_wardrobe_change(self, description: str, current_summary: str = "", closet_brief: str = "") -> dict:
         """大模型把一次换装描述拆解到固定衣柜槽位（含穿/脱/换意图），返回结构化 JSON。
@@ -1915,13 +1843,13 @@ class TelegramComfyUIService(
         """把一次换装应用到 state（改 wardrobe + dynamic_appearance），不落盘——由调用方保存。"""
         desc = (description or "").strip()
         if desc.lower() in ("reset", "none", "clear", "无", "", "重置", "恢复", "默认"):
-            state["wardrobe"] = {}
-            state["dynamic_appearance"] = ""
+            session_schema.set_wardrobe(state, {})
+            session_schema.set_outfit(state, "")
             if session_id:
                 self._ulog(session_id, "WARDROBE", f'desc="{desc[:80]}" → reset 清空全部穿搭')
             return ""
         wardrobe = {} if replace else self._get_wardrobe(state)
-        closet = state.get("wardrobe_closet") if isinstance(state.get("wardrobe_closet"), dict) else {}
+        closet = session_schema.get_closet(state)
         change: dict = {}
         try:
             change = await self._classify_wardrobe_change(
@@ -1954,13 +1882,17 @@ class TelegramComfyUIService(
             tags = (wardrobe.get(slot) or "").strip()
             if tags:
                 closet = appearance_rules.closet_add(closet, names.get(slot, ""), slot, tags, now=now)
-        state["wardrobe_closet"] = closet
-        state["wardrobe"] = wardrobe
-        state["dynamic_appearance"] = appearance_rules.render_wardrobe(wardrobe)
+        session_schema.set_closet(state, closet)
+        session_schema.set_wardrobe(state, wardrobe)
+        rendered = appearance_rules.render_wardrobe(wardrobe)
+        session_schema.set_outfit(state, rendered)
+        # 她重新穿上了衣服 → 解除持久裸体态（换装是"穿回衣服"的明确叙事事件）。
+        if rendered.strip():
+            session_schema.clear_nudity(state)
         if session_id:
             slots = {k: v for k, v in change.items() if k != "names" and v not in ("", [], False, None)}
-            self._ulog(session_id, "WARDROBE", f'desc="{desc[:80]}" replace={replace} → 分槽={slots} | 结果="{(state["dynamic_appearance"] or "")[:140]}"')
-        return state["dynamic_appearance"]
+            self._ulog(session_id, "WARDROBE", f'desc="{desc[:80]}" replace={replace} → 分槽={slots} | 结果="{rendered[:140]}"')
+        return rendered
 
     async def _apply_wardrobe(self, session_id: str, description: str, *, replace: bool = False) -> str:
         """换装统一入口：分槽（LLM 主判，关键词兜底）→ 应用规则 → 渲染回 dynamic_appearance 并持久化。"""

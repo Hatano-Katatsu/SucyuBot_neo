@@ -11,6 +11,7 @@ from typing import Any
 from . import appearance as appearance_rules
 from . import character_card
 from . import prompt_intake
+from . import session_schema
 from .defaults import INIT_GUIDE, MENU_BODY, MENU_TOPICS, MENU_TOPIC_ALIASES, OC_CREATE_HELP, SCENES, WEEKDAY_NAMES
 from .memory import format_memory_lines
 
@@ -26,36 +27,18 @@ SESSION_CUSTOM_RESET_KEYS = (
     "custom_visual_character", "custom_visual_series",
     "custom_character_age_stage", "custom_character_occupation", "custom_character_day_anchor",
 )
-# ── 会话 state 字段归属分类（单一来源，根治 ③：三份手写名单各漏字段导致的串味/丢档）──
-# state 的键分三类，切角色时各走各的路：
-#   · 会话全局（SESSION_GLOBAL_STATE_KEYS）：属于这场会话/这个人，绝不随角色冻结/清空（计时、调度、
-#     NTR 进度、容器自身）。
+# ── 会话 state 字段归属分类 ──
+# 单一来源在 session_schema.STATE_SCHEMA（每字段声明 归属 + 默认值 + reset 保留）。此处仅
+# 再导出，保持调用方/测试的导入路径不变。state 键分三类，切角色时各走各的路：
+#   · 会话全局（SESSION_GLOBAL_STATE_KEYS）：属于这场会话/这个人，绝不随角色冻结/清空。
 #   · 角色配置（custom_* 前缀 + 少数显式项）：身份/人设/外貌设定，走 saved_characters 卡 schema。
 #   · 角色短期态（其余一切）：对话/位置/照片/穿搭等工作记忆，走 character_contexts 冻结/解冻。
 # 关键：短期态用「黑名单之外即是」反推——新增字段默认跟角色走，漏配的失败方向是“正确隔离”而非串味。
-SESSION_GLOBAL_STATE_KEYS = frozenset({
-    "last_interaction", "last_morning_greet_date",
-    "daily_trigger_times", "daily_trigger_date", "daily_triggered_times",
-    "saved_characters", "character_contexts", "init_flow",
-    "ntr_stage_reached", "ntr_reconcile_count", "ntr_affection_reset",
-    "frozen", "frozen_at",  # 用户/会话级冻结状态，与角色无关，切角色不得清
-})
-# custom_ 前缀之外的角色配置项（标志位/纯良度），同样不进短期态冻结。
-CHARACTER_CONFIG_EXTRA_KEYS = frozenset({"purity", "purity_user_set", "persona_user_set"})
-# 短期态里「/reset（清对话）要保留、只有切角色才清」的子集：当前外型/穿搭属于角色当下状态，
-# 不算“对话上下文”，轻量 reset 应保留它们；切角色才整体冻结/解冻/清空。
-RESET_PRESERVED_TRANSIENT_KEYS = frozenset({
-    "dynamic_appearance", "wardrobe", "wardrobe_closet", "life_profile",
-})
-
-
-def _is_character_config_key(key: str) -> bool:
-    return key.startswith("custom_") or key in CHARACTER_CONFIG_EXTRA_KEYS
-
-
-def _is_transient_state_key(key: str) -> bool:
-    """是否为「角色短期态」字段：既非会话全局、也非角色配置，即随角色冻结/解冻/清空。"""
-    return key not in SESSION_GLOBAL_STATE_KEYS and not _is_character_config_key(key)
+SESSION_GLOBAL_STATE_KEYS = session_schema.SESSION_GLOBAL_STATE_KEYS
+CHARACTER_CONFIG_EXTRA_KEYS = session_schema.CHARACTER_CONFIG_EXTRA_KEYS
+RESET_PRESERVED_TRANSIENT_KEYS = session_schema.RESET_PRESERVED_TRANSIENT_KEYS
+_is_character_config_key = session_schema.is_character_config_key
+_is_transient_state_key = session_schema.is_transient_state_key
 
 
 RESET_DONE_MSG = "对话上下文与照片历史已清空。角色设定与角色池保持不变。"
@@ -585,7 +568,7 @@ class CommandHandlersMixin:
         if switching:
             self._restore_character_context(session_id, state)
         # 新 OC 的初始穿搭在 restore（切角色会整体清空短期态）之后再设，避免被清掉。
-        state["dynamic_appearance"] = outfit_tags
+        session_schema.set_outfit(state, outfit_tags)
 
         self._snapshot_character(state)
         saved = state.setdefault("saved_characters", {})
@@ -872,7 +855,7 @@ class CommandHandlersMixin:
             session_id,
             scene,
             caption or "",
-            appearance=new_app or state.get("dynamic_appearance", ""),
+            appearance=new_app or session_schema.get_outfit(state),
             view=view,
             source_description=source,
         )
@@ -1068,8 +1051,8 @@ class CommandHandlersMixin:
             lines.append(f"生图识别: {state.get('custom_visual_character') or '（空）'}{('（' + state.get('custom_visual_series', '') + '）') if state.get('custom_visual_series') else ''}")
         lines.append(f"身体特征: {self._get_session_cfg(session_id, 'positive_prefix', '')[:300] or '（未设置）'}")
         lines.append(f"画风: {self._get_current_style(session_id)}")
-        if state.get("dynamic_appearance"):
-            lines.append(f"外型覆盖: {state['dynamic_appearance']}")
+        if session_schema.get_outfit(state):
+            lines.append(f"外型覆盖: {session_schema.get_outfit(state)}")
         purity = self._get_purity(session_id)
         lines.append(f"纯良度: {purity}/10 | NTR 周期: {self._compute_ntr_threshold(purity)}天")
         lines.append(f"城市: {self._get_session_cfg(session_id, 'location', '上海')} | 时区: UTC{float(self._get_session_cfg(session_id, 'timezone_offset', '8')):+g}")
@@ -1098,9 +1081,10 @@ class CommandHandlersMixin:
             state[key] = ""
         state.pop("custom_daily_selfie_limit", None)
         state["custom_allow_llm_change_appearance"] = None
-        state["dynamic_appearance"] = ""
-        state["wardrobe"] = {}
-        state["wardrobe_closet"] = {}
+        session_schema.set_outfit(state, "")
+        session_schema.set_wardrobe(state, {})
+        session_schema.set_closet(state, {})
+        session_schema.clear_nudity(state)
         state["persona_user_set"] = False
         state["purity"] = None
         state["purity_user_set"] = False
@@ -1379,9 +1363,10 @@ class CommandHandlersMixin:
             if is_current:
                 for key in SESSION_CUSTOM_RESET_KEYS:
                     state[key] = ""
-                state["dynamic_appearance"] = ""
-                state["wardrobe"] = {}
-                state["wardrobe_closet"] = {}
+                session_schema.set_outfit(state, "")
+                session_schema.set_wardrobe(state, {})
+                session_schema.set_closet(state, {})
+                session_schema.clear_nudity(state)
                 state["persona_user_set"] = False
                 state["purity"] = None
                 state["purity_user_set"] = False
@@ -1427,7 +1412,7 @@ class CommandHandlersMixin:
             state["custom_bot_name"] = name
             if switching:
                 state["custom_bot_self_name"] = ""
-                state["dynamic_appearance"] = ""  # 既有角色不继承上一个角色/默认的临时穿搭，初始服装交给画面规划器按场景决定
+                session_schema.set_outfit(state, "")  # 既有角色不继承上一个角色/默认的临时穿搭，初始服装交给画面规划器按场景决定
             state["custom_visual_character"] = result.get("prompt_name") or result.get("visual_name") or result.get("image_name") or ""
             state["custom_visual_series"] = result.get("prompt_series") or result.get("visual_series") or result.get("image_series") or ""
             state["custom_scheduled_persona"] = result.get("persona", "")
@@ -1636,7 +1621,7 @@ class CommandHandlersMixin:
 
     async def cmd_closet(self, chat_id, session_id, arg):
         state = self._get_session_state(session_id)
-        closet = state.get("wardrobe_closet") if isinstance(state.get("wardrobe_closet"), dict) else {}
+        closet = session_schema.get_closet(state)
         arg = (arg or "").strip()
         parts = arg.split(None, 1)
         sub = parts[0].lower() if parts else ""
@@ -1644,14 +1629,14 @@ class CommandHandlersMixin:
         if sub in ("删除", "删", "remove", "rm", "del"):
             if sub_arg in closet:
                 closet.pop(sub_arg, None)
-                state["wardrobe_closet"] = closet
+                session_schema.set_closet(state, closet)
                 self._save_session_state(session_id, state)
                 await self.send_message(chat_id, f"已从衣橱移除「{sub_arg}」。")
             else:
                 await self.send_message(chat_id, f"衣橱里没有「{sub_arg}」。用法: /衣橱 删除 <名称>")
             return
         if sub in ("清空", "clear", "reset"):
-            state["wardrobe_closet"] = {}
+            session_schema.set_closet(state, {})
             self._save_session_state(session_id, state)
             await self.send_message(chat_id, "已清空衣橱收藏。")
             return

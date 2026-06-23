@@ -7,6 +7,7 @@ import re
 import time
 from typing import Any
 
+from . import session_schema
 from .defaults import WEEKDAY_NAMES
 
 logger = logging.getLogger(__name__)
@@ -831,6 +832,7 @@ class ChatContextMixin:
         state["short_context_reset_reason"] = reason
         state["recent_message_history"] = []
         self._demote_character_place(state)
+        session_schema.clear_nudity(state)  # 新场景：不再续上上一幕的裸体态
 
     @staticmethod
     def _active_chat_history(state: dict[str, Any], limit: int = 16) -> list[dict[str, Any]]:

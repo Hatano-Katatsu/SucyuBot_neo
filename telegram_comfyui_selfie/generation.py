@@ -12,6 +12,7 @@ from typing import Any
 
 import aiohttp
 
+from . import session_schema
 from .appearance import infer_gender_from_count, infer_gender_from_prefix, inject_appearance, normalize_appearance_text
 from .defaults import DEFAULT_CONFIG
 
@@ -212,7 +213,7 @@ def _explicit_appearance_override(service: Any, state: dict[str, Any]) -> str:
     if not state:
         return ""
     parts: list[str] = []
-    dynamic_slots = service._parse_appearance(state.get("dynamic_appearance", "") or "")
+    dynamic_slots = service._parse_appearance(session_schema.get_outfit(state))
     for key in ("hair", "eyes", "outfit", "accessory", "other"):
         parts.extend(dynamic_slots.get(key, []))
     for key in ("custom_default_hair", "custom_default_eyes"):
@@ -223,7 +224,7 @@ def _explicit_appearance_override(service: Any, state: dict[str, Any]) -> str:
 
 
 def _explicit_hair_override(service: Any, state: dict[str, Any], char: str = "") -> list[str]:
-    dynamic_hair = service._parse_appearance(state.get("dynamic_appearance", "") or "").get("hair", [])
+    dynamic_hair = service._parse_appearance(session_schema.get_outfit(state)).get("hair", [])
     if dynamic_hair:
         return dynamic_hair
     custom_hair = (state.get("custom_default_hair") or "").strip()
@@ -235,7 +236,7 @@ def _explicit_hair_override(service: Any, state: dict[str, Any], char: str = "")
 
 
 def _explicit_eye_override(service: Any, state: dict[str, Any], char: str = "") -> list[str]:
-    dynamic_eyes = service._parse_appearance(state.get("dynamic_appearance", "") or "").get("eyes", [])
+    dynamic_eyes = service._parse_appearance(session_schema.get_outfit(state)).get("eyes", [])
     if dynamic_eyes:
         return dynamic_eyes
     custom_eyes = (state.get("custom_default_eyes") or "").strip()
@@ -247,7 +248,7 @@ def _explicit_eye_override(service: Any, state: dict[str, Any], char: str = "") 
 
 
 def _explicit_outfit_override(service: Any, state: dict[str, Any]) -> list[str]:
-    return service._parse_appearance(state.get("dynamic_appearance", "") or "").get("outfit", [])
+    return service._parse_appearance(session_schema.get_outfit(state)).get("outfit", [])
 
 
 def _strip_conflicting_scene_hair(scene_desc: str, hair_override: list[str]) -> str:
@@ -375,6 +376,9 @@ def _apply_clothing_off(service: Any, clothing_off: str, effective_appearance: s
             appearance = service._remove_tag(appearance, tag)
         if "nude" not in appearance.lower():
             appearance = f"{appearance}, completely nude" if appearance.strip() else "completely nude"
+        # 把刚脱掉的衣物压进负向：scene 里若仍残留"湿裙子贴着胸口"之类描述，靠它抵消，避免衣服被画回去。
+        if worn:
+            neg = _append_negatives(neg, *worn)
     else:
         extra: list[str] = []
         for tok in [t.strip() for t in re.split(r"[,;]+", raw) if t.strip()]:
@@ -689,7 +693,7 @@ def _visual_character_identity(state: dict[str, Any]) -> tuple[str, str]:
         fallback_source = ", ".join(
             part for part in [
                 state.get("custom_positive_prefix") or "",
-                state.get("dynamic_appearance") or "",
+                session_schema.get_outfit(state),
             ] if part
         )
         fallback_character, fallback_series = _appearance_identity_fallback(fallback_source)
@@ -934,7 +938,7 @@ def build_prompt(
         effective_appearance = f"{effective_appearance}, {appearance_override}" if effective_appearance else appearance_override
     # 一次性脱衣/裸露：让规划器的逐图判断剥离本次着装（不落盘），覆盖陈旧持久态。
     # "当前所穿"标签取自生效的 dynamic_appearance + 本次一次性外观，按标签匹配剥离。
-    worn_src = service._effective_dynamic_appearance(session_id) if session_id else (state.get("dynamic_appearance") or "")
+    worn_src = service._effective_dynamic_appearance(session_id) if session_id else session_schema.get_outfit(state)
     worn_tags = [t.strip() for t in str(worn_src).split(",") if t.strip()]
     if one_shot_appearance:
         worn_tags += [t.strip() for t in str(one_shot_appearance).split(",") if t.strip()]

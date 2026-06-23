@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import os
 import tempfile
@@ -11,7 +12,8 @@ from unittest.mock import AsyncMock, patch
 from telegram_comfyui_selfie import TelegramComfyUIService
 from telegram_comfyui_selfie import appearance as appearance_rules
 from telegram_comfyui_selfie import character_card
-from telegram_comfyui_selfie.image_planning import _detect_intimate_context, format_dialog_context, format_sent_photo_context, normalize_scene_visual_subject, plan_roleplay_image
+from telegram_comfyui_selfie import session_schema
+from telegram_comfyui_selfie.image_planning import _detect_intimate_context, _detect_nudity_context, format_dialog_context, format_sent_photo_context, normalize_scene_visual_subject, plan_roleplay_image
 from telegram_comfyui_selfie.commands import (
     SESSION_GLOBAL_STATE_KEYS,
     _is_character_config_key,
@@ -159,7 +161,7 @@ class ServiceTestCase(unittest.TestCase):
             self.assertNotIn("1girl", state["custom_positive_prefix"])
             self.assertIn("short black hair", state["custom_positive_prefix"])
             self.assertIn("short black hair", state["custom_positive_prefix"])
-            self.assertEqual(state["dynamic_appearance"], "white shirt, dark pleated skirt")
+            self.assertEqual(session_schema.get_outfit(state), "white shirt, dark pleated skirt")
             self.assertEqual(state["custom_character_age_stage"], "adult")
             self.assertEqual(state["custom_character_occupation"], "大学生")
             self.assertEqual(state["custom_character_day_anchor"], "school")
@@ -244,11 +246,11 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("black silk slip dress", svc._effective_dynamic_appearance(sid))
         # 设了既有角色且自己没穿搭：不回退默认穿搭（避免串到东云绘名身上）
         state["custom_character"] = "东云绘名"
-        state["dynamic_appearance"] = ""
+        session_schema.set_outfit(state, "")
         self.assertEqual(svc._effective_dynamic_appearance(sid), "")
         self.assertNotIn("black silk slip dress", svc._get_effective_persona(sid))
         # 角色有自己的临时穿搭时照常用
-        state["dynamic_appearance"] = "school uniform"
+        session_schema.set_outfit(state, "school uniform")
         self.assertEqual(svc._effective_dynamic_appearance(sid), "school uniform")
 
     def test_prompt_intake_splits_natural_oc_profile(self):
@@ -287,7 +289,7 @@ class ServiceTestCase(unittest.TestCase):
             self.assertEqual(state["custom_count"], "1girl")
             self.assertNotIn("1girl", state["custom_positive_prefix"])
             self.assertIn("blonde hair", state["custom_positive_prefix"])
-            self.assertEqual(state["dynamic_appearance"], "oversized white sweater")
+            self.assertEqual(session_schema.get_outfit(state), "oversized white sweater")
             self.assertEqual(state["custom_raw_profile_text"], "小雨，大学生，金发蓝眼，低马尾，穿宽松白毛衣，和用户是同城暧昧对象")
             self.assertIn("base_appearance", state["custom_prompt_intake"])
             self.assertIn("自动归档", svc.send_message.await_args.args[1])
@@ -311,7 +313,7 @@ class ServiceTestCase(unittest.TestCase):
             self.assertEqual(state["custom_count"], "1girl")
             self.assertNotIn("1girl", state["custom_positive_prefix"])
             self.assertIn("blonde hair", state["custom_positive_prefix"])
-            self.assertEqual(state["dynamic_appearance"], "white sweater")
+            self.assertEqual(session_schema.get_outfit(state), "white sweater")
             text = svc.send_message.await_args.args[1]
             self.assertIn("已按槽位自动归档", text)
             self.assertIn("基础外观", text)
@@ -329,8 +331,8 @@ class ServiceTestCase(unittest.TestCase):
 
             state = svc._get_session_state(sid)
             self.assertEqual(state["custom_positive_prefix"], "")
-            self.assertIn("white hair", state["dynamic_appearance"])
-            self.assertIn("glasses", state["dynamic_appearance"])
+            self.assertIn("white hair", session_schema.get_outfit(state))
+            self.assertIn("glasses", session_schema.get_outfit(state))
 
         asyncio.run(run())
 
@@ -428,7 +430,7 @@ class ServiceTestCase(unittest.TestCase):
         svc = self.make_service()
         sid = "telegram:1"
         state = svc._get_session_state(sid)
-        state["dynamic_appearance"] = "white hair, glasses"
+        session_schema.set_outfit(state, "white hair, glasses")
         state["custom_current_style"] = "@00 gx4"
         pos, neg = svc._build_prompt("sitting by window", session_id=sid)
         self.assertIn("white hair", pos)
@@ -496,7 +498,7 @@ class ServiceTestCase(unittest.TestCase):
         })
         before = svc._build_chat_messages(sid, "你好")[0]["content"]
         # 换一套穿搭
-        state["dynamic_appearance"] = "red dress, black coat"
+        session_schema.set_outfit(state, "red dress, black coat")
         after_msgs = svc._build_chat_messages(sid, "你好")
         # 静态前缀不随穿搭变化（缓存可命中）
         self.assertEqual(before, after_msgs[0]["content"])
@@ -654,7 +656,7 @@ class ServiceTestCase(unittest.TestCase):
             sid = "telegram:123"
             state = svc._get_session_state(sid)
             state["custom_character"] = "天童爱丽丝"
-            state["dynamic_appearance"] = "black camisole dress"
+            session_schema.set_outfit(state, "black camisole dress")
             state["custom_location"] = "上海"
             svc._call_llm = AsyncMock(return_value=json.dumps({
                 "memories": [
@@ -1289,8 +1291,7 @@ class ServiceTestCase(unittest.TestCase):
             svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
             svc.send_photo = AsyncMock()
             state = svc._get_session_state(sid)
-            state["dynamic_appearance"] = "black hoodie"
-
+            session_schema.set_outfit(state, "black hoodie")
             await svc._sched_fire(sid, fixed_now, mode_override="normal", skip_active_check=True)
 
             world_logs = [text for kind, text in logs if kind == "WORLD"]
@@ -1303,7 +1304,7 @@ class ServiceTestCase(unittest.TestCase):
                 session_id=sid,
                 one_shot_appearance="",
             )
-            self.assertEqual(state["dynamic_appearance"], "black hoodie")
+            self.assertEqual(session_schema.get_outfit(state), "black hoodie")
             svc.send_photo.assert_awaited_once()
 
         asyncio.run(run())
@@ -1630,8 +1631,7 @@ class ServiceTestCase(unittest.TestCase):
         state["custom_character"] = "天童爱丽丝"
         state["custom_series"] = "碧蓝档案"
         state["custom_positive_prefix"] = "1girl, long black hair, blue eyes"
-        state["dynamic_appearance"] = "aris (blue archive), school uniform"
-
+        session_schema.set_outfit(state, "aris (blue archive), school uniform")
         pos, _ = svc._build_prompt("天童爱丽丝 sits by a window", session_id=sid)
 
         self.assertIn("aris (blue archive)", pos)
@@ -1913,7 +1913,7 @@ class ServiceTestCase(unittest.TestCase):
             svc = self.make_service()
             sid = "telegram:123"
             state = svc._get_session_state(sid)
-            state["dynamic_appearance"] = "black hoodie"
+            session_schema.set_outfit(state, "black hoodie")
             svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
             svc._llm_write_scene = AsyncMock(return_value=("坐在窗边看向镜头", "给你看一眼。", "white dress", "selfie"))
             svc._translate_to_tags = AsyncMock(return_value="english prompt")
@@ -1928,7 +1928,7 @@ class ServiceTestCase(unittest.TestCase):
                 session_id=sid,
                 one_shot_appearance="white dress",
             )
-            self.assertEqual(state["dynamic_appearance"], "black hoodie")
+            self.assertEqual(session_schema.get_outfit(state), "black hoodie")
             self.assertEqual(state["sent_photos_history"][-1]["appearance"], "white dress")
 
         asyncio.run(run())
@@ -2029,7 +2029,7 @@ class ServiceTestCase(unittest.TestCase):
             )
             # 聊天途中的配图不带配文（聊天模型已经在文字里回复了）
             svc.send_photo.assert_awaited_once_with(123, b"image", "")
-            self.assertEqual(state.get("dynamic_appearance", ""), "")
+            self.assertEqual(session_schema.get_outfit(state), "")
             self.assertEqual(state["sent_photos_history"][-1]["caption"], "")
             self.assertEqual(state["sent_photos_history"][-1]["appearance"], "black camisole dress")
             self.assertIn("用户想看角色下班后在家等自己的样子", state["sent_photos_history"][-1]["source_description"])
@@ -2388,7 +2388,7 @@ class ServiceTestCase(unittest.TestCase):
             self.assertFalse(svc._is_character_set(sid))
             self.assertEqual(after.get("custom_character"), "")
             self.assertFalse(after.get("persona_user_set"))
-            self.assertEqual(after.get("dynamic_appearance"), "")
+            self.assertEqual(session_schema.get_outfit(after), "")
             persona = svc._get_effective_persona(sid)
             self.assertTrue(persona)
             self.assertEqual(persona, svc.config["scheduled_persona"])
@@ -2468,7 +2468,7 @@ class ServiceTestCase(unittest.TestCase):
             "outfit": "white shirt, dark pleated skirt",
             "allow_change_appearance": "false",
         })
-        self.assertEqual(state["dynamic_appearance"], "white shirt, dark pleated skirt")
+        self.assertEqual(session_schema.get_outfit(state), "white shirt, dark pleated skirt")
         self.assertIs(state["custom_allow_llm_change_appearance"], False)
         card = svc._character_export_payload(state)
         self.assertEqual(card["outfit"], "white shirt, dark pleated skirt")
@@ -2610,6 +2610,92 @@ class ServiceTestCase(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_state_schema_single_source_derives_sets(self):
+        """阶段1：归属集合 + 默认值表单一来源（session_schema.STATE_SCHEMA）。
+
+        锁死派生结果与重构前的手写值逐字段相等，防 schema 编辑误改分类/丢默认。
+        """
+        from telegram_comfyui_selfie import session_schema as ss
+        # 三个归属集合：逐字段锁定（== 重构前 commands.py 里的手写 frozenset）
+        self.assertEqual(set(ss.SESSION_GLOBAL_STATE_KEYS), {
+            "last_interaction", "last_morning_greet_date",
+            "daily_trigger_times", "daily_trigger_date", "daily_triggered_times",
+            "saved_characters", "character_contexts", "init_flow",
+            "ntr_stage_reached", "ntr_reconcile_count", "ntr_affection_reset",
+            "frozen", "frozen_at",
+        })
+        self.assertEqual(set(ss.CHARACTER_CONFIG_EXTRA_KEYS),
+                         {"purity", "purity_user_set", "persona_user_set"})
+        # clothing 三字段已收进 clothing 盒；reset 保留的短期态单元现为 clothing + life_profile。
+        self.assertEqual(set(ss.RESET_PRESERVED_TRANSIENT_KEYS),
+                         {"clothing", "life_profile"})
+        # 默认值表：代表性字段 + 无默认字段不进表
+        defaults = ss.state_defaults()
+        self.assertIn("last_interaction", defaults)          # 动态时间戳
+        self.assertEqual(defaults["custom_bot_name"], "")
+        self.assertIsNone(defaults["purity"])
+        self.assertEqual(defaults["clothing"]["wardrobe"], {})  # 衣柜在 clothing 盒内
+        self.assertNotIn("ntr_affection_reset", defaults)    # 动态产生，无默认
+        self.assertNotIn("life_profile", defaults)
+        # 每次调用产生独立可变对象，不跨会话共享引用
+        self.assertIsNot(ss.state_defaults()["chat_history"], ss.state_defaults()["chat_history"])
+        # 三类对 schema 内每个字段恰好命中一类（互斥且全覆盖）
+        for k in ss.STATE_SCHEMA:
+            hits = [
+                k in ss.SESSION_GLOBAL_STATE_KEYS,
+                ss.is_character_config_key(k),
+                ss.is_transient_state_key(k),
+            ]
+            self.assertEqual(hits.count(True), 1, f"{k} 必须恰好属于一类，实际命中 {hits}")
+
+    def test_clothing_box_migration_and_accessors(self):
+        """clothing box：旧扁平字段迁移进盒、访问器读写、子键补齐、幂等。"""
+        from telegram_comfyui_selfie import session_schema as ss
+        # box_for 归位
+        self.assertEqual(ss.box_for("clothing"), ss.BOX_CLOTHING)
+        self.assertEqual(ss.box_for("custom_bot_name"), ss.BOX_CHARACTER)
+        self.assertEqual(ss.box_for("user_place"), ss.BOX_PLACE)
+        self.assertEqual(ss.box_for("chat_history"), ss.BOX_CONTEXT)
+        self.assertEqual(ss.box_for("life_profile"), ss.BOX_CHARACTER)
+
+        # 旧扁平持久态：顶层有 dynamic_appearance/wardrobe/wardrobe_closet → 迁移进盒并删顶层
+        legacy = {
+            "dynamic_appearance": "red dress",
+            "wardrobe": {"dress": "red dress"},
+            "wardrobe_closet": {"套装A": {}},
+        }
+        box = ss.ensure_clothing_box(legacy)
+        self.assertNotIn("dynamic_appearance", legacy)   # 顶层已删
+        self.assertNotIn("wardrobe", legacy)
+        self.assertEqual(legacy["clothing"]["dynamic_appearance"], "red dress")
+        self.assertEqual(ss.get_outfit(legacy), "red dress")
+        self.assertEqual(ss.get_wardrobe(legacy), {"dress": "red dress"})
+        self.assertEqual(ss.get_closet(legacy), {"套装A": {}})
+        # 子键补齐 + 默认裸体态为空
+        self.assertEqual(ss.get_nudity(legacy), "")
+        self.assertEqual(box["nudity_at"], 0.0)
+
+        # 访问器读写
+        st = {}
+        ss.set_outfit(st, "black coat")
+        ss.set_wardrobe(st, {"coat": "black coat"})
+        self.assertEqual(ss.get_outfit(st), "black coat")
+        # get_wardrobe 返回真对象，可原地改并持久
+        ss.get_wardrobe(st)["hat"] = "beret"
+        self.assertEqual(st["clothing"]["wardrobe"]["hat"], "beret")
+        # 裸体态读写 + 清除
+        ss.set_nudity(st, "completely nude", at=1000.0)
+        self.assertEqual(ss.get_nudity(st), "completely nude")
+        self.assertEqual(ss.get_nudity_at(st), 1000.0)
+        ss.clear_nudity(st)
+        self.assertEqual(ss.get_nudity(st), "")
+        self.assertEqual(ss.get_nudity_at(st), 0.0)
+
+        # 幂等：再 ensure 一次不改变内容
+        before = copy.deepcopy(st["clothing"])
+        ss.ensure_clothing_box(st)
+        self.assertEqual(st["clothing"], before)
+
     def test_transient_state_partition_classifier(self):
         """字段单一来源（黑名单反推）：会话全局/角色配置/短期态三类不重叠，关键字段各归其位。
 
@@ -2662,12 +2748,12 @@ class ServiceTestCase(unittest.TestCase):
             # B 不继承 A 的任何短期态（含原先会串味的 wardrobe/dynamic_appearance/user_place）
             self.assertEqual(after_b["chat_history"], [])
             self.assertEqual(after_b["sent_photos_history"], [])
-            self.assertEqual(after_b["dynamic_appearance"], "")
-            self.assertEqual(after_b["wardrobe"], {})
+            self.assertEqual(session_schema.get_outfit(after_b), "")
+            self.assertEqual(session_schema.get_wardrobe(after_b), {})
             self.assertEqual(after_b["user_place"], "")
             # B 期间产生自己的短期态
             after_b["chat_history"] = [{"role": "assistant", "content": "B的台词"}]
-            after_b["dynamic_appearance"] = "B的西装"
+            session_schema.set_outfit(after_b, "B的西装")
             svc._save_session_state(sid, after_b)
 
             await svc.cmd_character(1, sid, "load 角色A")
@@ -2675,8 +2761,8 @@ class ServiceTestCase(unittest.TestCase):
             # 切回 A：A 离开时的全部短期态原样解冻
             self.assertEqual(after_a["chat_history"], [{"role": "assistant", "content": "A的台词"}])
             self.assertEqual(after_a["sent_photos_history"][0]["scene"], "A的画面")
-            self.assertEqual(after_a["dynamic_appearance"], "A的红裙")
-            self.assertEqual(after_a["wardrobe"], {"红裙": ["red dress"]})
+            self.assertEqual(session_schema.get_outfit(after_a), "A的红裙")
+            self.assertEqual(session_schema.get_wardrobe(after_a), {"红裙": ["red dress"]})
             self.assertEqual(after_a["user_place"], "mall")
 
         asyncio.run(run())
@@ -2722,9 +2808,9 @@ class ServiceTestCase(unittest.TestCase):
             self.assertFalse(after.get("persona_user_set"))
             self.assertIsNone(after.get("purity"))
             self.assertFalse(after.get("purity_user_set"))
-            self.assertEqual(after.get("dynamic_appearance"), "")
-            self.assertEqual(after.get("wardrobe"), {})
-            self.assertEqual(after.get("wardrobe_closet"), {})
+            self.assertEqual(session_schema.get_outfit(after), "")
+            self.assertEqual(session_schema.get_wardrobe(after), {})
+            self.assertEqual(session_schema.get_closet(after), {})
             # 对话/照片上下文清空
             self.assertEqual(after.get("chat_history"), [])
             self.assertEqual(after.get("sent_photos_history"), [])
@@ -2856,24 +2942,110 @@ class ServiceTestCase(unittest.TestCase):
         svc = self.make_service()
         sid = "telegram:1"
         state = svc._get_session_state(sid)
-        state["dynamic_appearance"] = "cotton knit cardigan, black silk slip dress"
+        session_schema.set_outfit(state, "cotton knit cardigan, black silk slip dress")
         pos, _ = svc._build_prompt("standing by the window", session_id=sid, clothing_off="cardigan")
         self.assertNotIn("cardigan", pos.lower())   # 脱掉的开衫被剥离
         self.assertIn("slip dress", pos.lower())     # 没脱的还在
         # 持久衣柜/dynamic_appearance 不受影响（事后自动复原）
-        self.assertEqual(state["dynamic_appearance"], "cotton knit cardigan, black silk slip dress")
+        self.assertEqual(session_schema.get_outfit(state), "cotton knit cardigan, black silk slip dress")
 
     def test_clothing_off_nude_strips_all_outfit_and_frees_negative(self):
         svc = self.make_service()
         sid = "telegram:1"
         state = svc._get_session_state(sid)
-        state["dynamic_appearance"] = "cotton knit cardigan, black silk slip dress"
+        session_schema.set_outfit(state, "cotton knit cardigan, black silk slip dress")
         pos, neg = svc._build_prompt("on the bed", session_id=sid, clothing_off="nude")
         self.assertNotIn("cardigan", pos.lower())
         self.assertNotIn("slip dress", pos.lower())
         self.assertIn("nude", pos.lower())
         self.assertNotIn("nude", neg.lower())        # 负向不再压制裸体
-        self.assertEqual(state["dynamic_appearance"], "cotton knit cardigan, black silk slip dress")
+        # 脱掉的衣物压进负向，抵消 scene 里可能残留的着装描述，防止被画回去
+        self.assertIn("cardigan", neg.lower())
+        self.assertIn("slip dress", neg.lower())
+        self.assertEqual(session_schema.get_outfit(state), "cotton knit cardigan, black silk slip dress")
+
+    def test_nudity_context_detector(self):
+        """裸体检测器只对强信号(性行为/明确脱光)命中，对暧昧词/日常不误触发。"""
+        self.assertTrue(_detect_nudity_context("两人做爱中"))
+        self.assertTrue(_detect_nudity_context("她全裸躺在床上"))
+        self.assertTrue(_detect_nudity_context("把衣服都脱了"))
+        # 暧昧/可能已重新着装的词不触发（宁可漏判不可误脱）
+        self.assertFalse(_detect_nudity_context("事后温存，相拥而眠"))
+        self.assertFalse(_detect_nudity_context("刚洗完澡出来"))
+        self.assertFalse(_detect_nudity_context("今天穿了新裙子"))
+        self.assertFalse(_detect_nudity_context(""))
+
+    def test_planner_nudity_fallback_fills_clothing_off(self):
+        """规划器漏填 clothing_off 但对话有明确裸体信号时，兜底补 completely nude；
+        无信号不补；规划器显式填了则不覆盖。"""
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            # 规划器返回里【没有】clothing_off 字段
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "床上贴身依偎", "view": "pov", "is_intimate": True,
+            }, ensure_ascii=False))
+
+            # 各 case 用独立会话，隔离持久裸体态（单独测试见 test_persistent_nudity_*）
+            # ① 意图含明确性爱/裸体 → 兜底补 nude
+            plan = await plan_roleplay_image(svc, "telegram:101", intent="做爱后想要一张全裸的照片")
+            self.assertEqual(plan["clothing_off"], "completely nude")
+
+            # ② 普通意图 → 不补
+            plan = await plan_roleplay_image(svc, "telegram:102", intent="看看你在客厅做什么")
+            self.assertEqual(plan["clothing_off"], "")
+
+            # ③ 规划器显式填了 clothing_off → 即使有裸体信号也不覆盖
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "脱了外套", "view": "pov", "clothing_off": "cardigan",
+            }, ensure_ascii=False))
+            plan = await plan_roleplay_image(svc, "telegram:103", intent="做爱前先脱掉外套")
+            self.assertEqual(plan["clothing_off"], "cardigan")
+
+        asyncio.run(run())
+
+    def test_persistent_nudity_continues_until_dressed_or_new_scene(self):
+        """持久裸体态（根治脱衣 bug）：一旦全裸，后续图自动续上；换装或新场景解除。"""
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "https://x",
+            })
+            sid = "telegram:1"
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            state = svc._get_session_state(sid)
+
+            # 图1：性爱意图 → 兜底全裸 + 持久化
+            svc._call_llm = AsyncMock(return_value=json.dumps({"scene": "床上", "view": "pov"}, ensure_ascii=False))
+            plan1 = await plan_roleplay_image(svc, sid, intent="两人做爱中")
+            self.assertEqual(plan1["clothing_off"], "completely nude")
+            self.assertEqual(session_schema.get_nudity(state), "completely nude")
+
+            # 图2：普通意图、规划器不判脱衣 → 仍续上裸体（不再被衣服画回去）
+            svc._call_llm = AsyncMock(return_value=json.dumps({"scene": "还躺在床上", "view": "pov"}, ensure_ascii=False))
+            plan2 = await plan_roleplay_image(svc, sid, intent="看看你现在的样子")
+            self.assertEqual(plan2["clothing_off"], "completely nude")
+
+            # 换装 → 解除裸体态
+            svc._classify_wardrobe_change = AsyncMock(return_value={"dress": "red dress", "names": {"dress": "红裙"}})
+            await svc._apply_wardrobe(sid, "穿上红裙")
+            self.assertEqual(session_schema.get_nudity(state), "")
+            plan3 = await plan_roleplay_image(svc, sid, intent="看看你现在的样子")
+            self.assertEqual(plan3["clothing_off"], "")  # 穿衣后不再续裸体
+
+            # 再次裸体后 /新场景 → 解除
+            svc._call_llm = AsyncMock(return_value=json.dumps({"scene": "床上", "view": "pov"}, ensure_ascii=False))
+            await plan_roleplay_image(svc, sid, intent="插入她")
+            self.assertEqual(session_schema.get_nudity(state), "completely nude")
+            svc._reset_short_context(state, "test-new-scene")
+            self.assertEqual(session_schema.get_nudity(state), "")
+
+        asyncio.run(run())
 
     def test_legacy_character_state_does_not_fall_back_to_default_identity(self):
         svc = self.make_service()
@@ -2973,7 +3145,7 @@ class ServiceTestCase(unittest.TestCase):
         state = svc._get_session_state(sid)
         state["custom_character"] = "骑士"
         state["custom_positive_prefix"] = "1girl, blonde hair, blue eyes, white and blue battle dress"
-        state["dynamic_appearance"] = "oversized white sweater"
+        session_schema.set_outfit(state, "oversized white sweater")
         pos, _ = svc._build_prompt("at home at night", session_id=sid)
         self.assertIn("oversized white sweater", pos.lower())
         self.assertNotIn("battle dress", pos.lower())   # 旧服装被换装替换
@@ -3003,8 +3175,7 @@ class ServiceTestCase(unittest.TestCase):
         sid = "telegram:1"
         state = svc._get_session_state(sid)
         state["custom_positive_prefix"] = "1girl, blonde hair, blue eyes"
-        state["dynamic_appearance"] = "silver hair, oversized white sweater"
-
+        session_schema.set_outfit(state, "silver hair, oversized white sweater")
         pos, _ = svc._build_prompt(
             "A woman with dark brown hair sits by a window, wearing a black fitted dress",
             session_id=sid,
@@ -3286,14 +3457,14 @@ class ServiceTestCase(unittest.TestCase):
             result = await svc._apply_wardrobe(sid, "换上红色旗袍")
             self.assertIn("red qipao", result)
             state = svc._get_session_state(sid)
-            self.assertEqual(state["wardrobe"].get("dress"), "red qipao")
-            self.assertIn("red qipao", state["dynamic_appearance"])
+            self.assertEqual(session_schema.get_wardrobe(state).get("dress"), "red qipao")
+            self.assertIn("red qipao", session_schema.get_outfit(state))
             # 再换胸罩：旗袍保留、bra 新增（衣柜持久）
             svc._classify_wardrobe_change = AsyncMock(return_value={"bra": "black bra"})
             await svc._apply_wardrobe(sid, "换个黑色胸罩")
             state = svc._get_session_state(sid)
-            self.assertEqual(state["wardrobe"].get("dress"), "red qipao")
-            self.assertEqual(state["wardrobe"].get("bra"), "black bra")
+            self.assertEqual(session_schema.get_wardrobe(state).get("dress"), "red qipao")
+            self.assertEqual(session_schema.get_wardrobe(state).get("bra"), "black bra")
 
         asyncio.run(run())
 
@@ -3302,14 +3473,14 @@ class ServiceTestCase(unittest.TestCase):
             svc = self.make_service()
             sid = "telegram:1"
             state = svc._get_session_state(sid)
-            state["dynamic_appearance"] = "red dress, black heels"  # 老数据，无 wardrobe
-            state["wardrobe"] = {}
+            session_schema.set_outfit(state, "red dress, black heels")  # 老数据，无 wardrobe
+            session_schema.set_wardrobe(state, {})
             # 只换鞋：旧 dress 应被迁移保留，footwear 被替换
             svc._classify_wardrobe_change = AsyncMock(return_value={"footwear": "white sneakers"})
             await svc._apply_wardrobe(sid, "换白色运动鞋")
             state = svc._get_session_state(sid)
-            self.assertEqual(state["wardrobe"].get("dress"), "red dress")
-            self.assertEqual(state["wardrobe"].get("footwear"), "white sneakers")
+            self.assertEqual(session_schema.get_wardrobe(state).get("dress"), "red dress")
+            self.assertEqual(session_schema.get_wardrobe(state).get("footwear"), "white sneakers")
 
         asyncio.run(run())
 
@@ -3333,13 +3504,13 @@ class ServiceTestCase(unittest.TestCase):
             sid = "telegram:1"
             svc._classify_wardrobe_change = AsyncMock(return_value={"dress": "floral dress", "names": {"dress": "碎花连衣裙"}})
             await svc._apply_wardrobe(sid, "换上碎花连衣裙")
-            closet = svc._get_session_state(sid)["wardrobe_closet"]
+            closet = session_schema.get_closet(svc._get_session_state(sid))
             self.assertIn("碎花连衣裙", closet)
             self.assertEqual(closet["碎花连衣裙"]["slot"], "dress")
             # 换上衣 → 衣橱新增上衣，碎花裙仍在收藏
             svc._classify_wardrobe_change = AsyncMock(return_value={"top": "blue blouse", "names": {"top": "蓝衬衫"}})
             await svc._apply_wardrobe(sid, "换蓝衬衫")
-            closet = svc._get_session_state(sid)["wardrobe_closet"]
+            closet = session_schema.get_closet(svc._get_session_state(sid))
             self.assertEqual(set(closet), {"碎花连衣裙", "蓝衬衫"})
 
         asyncio.run(run())
@@ -3352,9 +3523,9 @@ class ServiceTestCase(unittest.TestCase):
             await svc._apply_wardrobe(sid, "穿红裙")
             await svc._apply_wardrobe(sid, "reset")  # 脱掉当前外型
             state = svc._get_session_state(sid)
-            self.assertEqual(state["wardrobe"], {})
-            self.assertEqual(state["dynamic_appearance"], "")
-            self.assertIn("红裙", state["wardrobe_closet"])  # 衣橱收藏保留
+            self.assertEqual(session_schema.get_wardrobe(state), {})
+            self.assertEqual(session_schema.get_outfit(state), "")
+            self.assertIn("红裙", session_schema.get_closet(state))  # 衣橱收藏保留
 
         asyncio.run(run())
 

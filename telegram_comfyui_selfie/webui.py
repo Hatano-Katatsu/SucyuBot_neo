@@ -9,6 +9,7 @@ from typing import Any
 
 from aiohttp import web
 
+from . import session_schema
 from .world_runtime import PLACE_TYPES
 
 
@@ -555,14 +556,14 @@ def serialize_prompt_slots(service, session_id: str, scene: str = "{场景描述
             "custom_default_hair": state.get("custom_default_hair", ""),
             "custom_default_eyes": state.get("custom_default_eyes", ""),
             "custom_current_style": state.get("custom_current_style", ""),
-            "dynamic_appearance": state.get("dynamic_appearance", ""),
+            "dynamic_appearance": session_schema.get_outfit(state),
             "custom_scene_preference": state.get("custom_scene_preference", ""),
             "custom_selfie_preference": state.get("custom_selfie_preference", ""),
         },
         # 只读：当前衣柜按槽位拆分（编辑仍走上面的 dynamic_appearance 扁平框，保存后会自动重新分槽）。
         "wardrobe": service._get_wardrobe(state),
         # 只读：衣橱收藏（角色穿过、可点名复穿的衣服）。
-        "closet": state.get("wardrobe_closet") or {},
+        "closet": session_schema.get_closet(state),
         "effective": {
             "positive_prefix": service._get_session_cfg(session_id, "positive_prefix", ""),
             "default_hair": service._get_session_cfg(session_id, "default_hair", ""),
@@ -665,7 +666,7 @@ async def api_update_session(request: web.Request):
         "custom_scheduled_persona", "custom_role_name", "custom_bot_name", "custom_bot_self_name",
         "custom_spatial_relationship", "custom_location", "custom_timezone_offset",
         "custom_count", "custom_positive_prefix",
-        "custom_default_hair", "custom_default_eyes", "custom_current_style", "dynamic_appearance",
+        "custom_default_hair", "custom_default_eyes", "custom_current_style",
         "custom_scene_preference", "custom_selfie_preference",
         "custom_character", "custom_series", "custom_visual_character", "custom_visual_series", "custom_daily_selfie_limit",
         "custom_character_age_stage", "custom_character_occupation", "custom_character_day_anchor",
@@ -681,6 +682,9 @@ async def api_update_session(request: web.Request):
             state[key] = "" if payload[key] is None else str(payload[key])
             if key in life_profile_keys:
                 profile_touched = True
+    # dynamic_appearance 现走 clothing box（不在 allowed 里直写顶层，避免遗留陈旧顶层键）。
+    if "dynamic_appearance" in payload:
+        session_schema.set_outfit(state, "" if payload["dynamic_appearance"] is None else str(payload["dynamic_appearance"]))
     if profile_touched:
         state.pop("life_profile", None)
     if "purity" in payload:

@@ -6,6 +6,7 @@ import logging
 import re
 from typing import Any
 
+from . import session_schema
 from .memory import format_memory_lines, normalize_kind
 
 logger = logging.getLogger(__name__)
@@ -66,7 +67,7 @@ class MemoryPolicyMixin:
             ("当前作品", state.get("custom_series") or ""),
             ("当前人设", (state.get("custom_scheduled_persona") or "")[:120]),
             ("当前身体特征", (state.get("custom_positive_prefix") or "")[:120]),
-            ("当前临时外型", state.get("dynamic_appearance") or ""),
+            ("当前临时外型", session_schema.get_outfit(state)),
             ("当前地点", self._get_session_cfg(session_id, "location", "")),
             ("当前时区", self._get_session_cfg(session_id, "timezone_offset", "")),
             ("当前画风", self._get_current_style(session_id)),
@@ -101,7 +102,7 @@ class MemoryPolicyMixin:
                 state.get("custom_series", ""),
                 state.get("custom_scheduled_persona", ""),
                 state.get("custom_positive_prefix", ""),
-                state.get("dynamic_appearance", ""),
+                session_schema.get_outfit(state),
                 self._get_session_cfg(session_id, "location", ""),
                 self._get_current_style(session_id),
             ]

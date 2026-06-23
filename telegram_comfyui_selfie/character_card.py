@@ -17,9 +17,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import session_schema
 
-# (可移植卡片键, 会话 state 键)：18 个 1:1 字符串字段，顺序即对外 JSON 字段顺序。
-# 注意 outfit 落在 dynamic_appearance（无 custom_ 前缀），是历史约定，保持不动。
+
+# (可移植卡片键, 会话 state 键)：17 个 1:1 字符串字段，顺序即对外 JSON 字段顺序。
+# outfit 不在此表：它已收进 clothing box（state["clothing"]["dynamic_appearance"]），
+# 在 card_from_state/apply_card_to_state 里经 session_schema 访问器单独处理。
 CARD_STRING_FIELDS: tuple[tuple[str, str], ...] = (
     ("character", "custom_character"),
     ("series", "custom_series"),
@@ -38,15 +41,14 @@ CARD_STRING_FIELDS: tuple[tuple[str, str], ...] = (
     ("scene_preference", "custom_scene_preference"),
     ("selfie_preference", "custom_selfie_preference"),
     ("style", "custom_current_style"),
-    ("outfit", "dynamic_appearance"),
 )
 
 # 自动换装开关的 state 键；三态（None=跟随全局 / True / False），单独处理。
 ALLOW_KEY = "custom_allow_llm_change_appearance"
 
-# 卡片字段全集（含两个特殊字段）：默认角色卡用它做一致性校验。
+# 卡片字段全集（含 outfit 及两个特殊字段）：默认角色卡用它做一致性校验。
 CARD_KEYS: tuple[str, ...] = tuple(
-    [card_key for card_key, _ in CARD_STRING_FIELDS] + ["allow_change_appearance", "purity"]
+    [card_key for card_key, _ in CARD_STRING_FIELDS] + ["outfit", "allow_change_appearance", "purity"]
 )
 
 # 默认角色卡（蕾伊）字段 → 全局 config 键：卡编辑器改默认角色即写回这些 config 键。
@@ -81,6 +83,7 @@ def card_from_state(state: dict[str, Any]) -> dict[str, Any]:
     card: dict[str, Any] = {
         card_key: state.get(state_key, "") for card_key, state_key in CARD_STRING_FIELDS
     }
+    card["outfit"] = session_schema.get_outfit(state)  # 当前穿搭来自 clothing box
     card["allow_change_appearance"] = state.get(ALLOW_KEY)
     card["purity"] = state.get("purity")
     return card
@@ -91,6 +94,8 @@ def apply_card_to_state(state: dict[str, Any], data: dict[str, Any]) -> None:
     for card_key, state_key in CARD_STRING_FIELDS:
         if card_key in data:
             state[state_key] = "" if data[card_key] is None else str(data[card_key])
+    if "outfit" in data:  # 当前穿搭写进 clothing box
+        session_schema.set_outfit(state, "" if data["outfit"] is None else str(data["outfit"]))
     if "allow_change_appearance" in data:
         state[ALLOW_KEY] = parse_allow_change_appearance(data.get("allow_change_appearance"))
     if "purity" in data:
