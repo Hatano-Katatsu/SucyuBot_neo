@@ -683,8 +683,12 @@ class TelegramComfyUIService(
 
     def _get_purity(self, session_id: str) -> int:
         state = self._get_session_state(session_id) if session_id else {}
-        if state.get("purity") is not None:
-            return max(0, min(10, int(state["purity"])))
+        raw = state.get("purity")
+        if raw is not None:
+            try:
+                return max(0, min(10, int(raw)))
+            except (TypeError, ValueError):
+                return 5
         default = self.config.get("default_purity", "")
         if default not in ("", None):
             try:

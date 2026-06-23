@@ -1223,8 +1223,18 @@ class CommandHandlersMixin:
             else:
                 state["custom_allow_llm_change_appearance"] = s in ("true", "1", "yes", "on", "开", "允许", "启用")
         if "purity" in data:
-            state["purity"] = data.get("purity")
-            state["purity_user_set"] = data.get("purity") is not None
+            raw = data.get("purity")
+            s = str(raw).strip() if raw is not None else ""
+            if s:
+                try:
+                    state["purity"] = max(0, min(10, int(s)))
+                    state["purity_user_set"] = True
+                except (TypeError, ValueError):
+                    state["purity"] = None
+                    state["purity_user_set"] = False
+            else:
+                state["purity"] = None
+                state["purity_user_set"] = False
 
     @staticmethod
     def _snapshot_character(state: dict[str, Any]):
