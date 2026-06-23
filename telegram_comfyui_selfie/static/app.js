@@ -80,13 +80,7 @@ const configSections = [
     ["long_memory_enabled", "启用长期记忆注入", "bool"],
     ["long_memory_extract_enabled", "自动提取长期记忆", "bool"],
     ["long_memory_context_limit", "长期记忆注入条数", "number"],
-    ["long_memory_db_path", "长期记忆数据库", "text"],
-    ["user_log_enabled", "分用户活动日志", "bool"],
-    ["user_log_dir", "日志目录（留空=data/logs）", "text"],
     ["short_context_reset_gap_hours", "短期场景超时小时", "text"],
-    ["web_enabled", "启用控制台", "bool"],
-    ["web_host", "控制台 Host", "text"],
-    ["web_port", "控制台 Port", "number"],
   ]],
 ];
 
@@ -317,7 +311,8 @@ function renderSessionSelector() {
   const opts = ['<option value="">选择会话...</option>'];
   state.sessions.forEach(item => {
     const selected = item.session_id === state.selectedSession ? " selected" : "";
-    const label = item.character ? `${item.character} · ${item.chat_id}` : String(item.chat_id || item.session_id);
+    const frozenTag = item.frozen ? " [已冻结]" : "";
+    const label = item.character ? `${item.character}${frozenTag} · ${item.chat_id}` : `${String(item.chat_id || item.session_id)}${frozenTag}`;
     opts.push(`<option value="${escapeHtml(item.session_id)}"${selected}>${escapeHtml(label)}</option>`);
   });
   select.innerHTML = opts.join("");
@@ -633,6 +628,12 @@ async function loadMemories() {
         </div>
         <button class="primary" type="submit">新增记忆</button>
       </form>
+      <div class="memory-toolbar">
+        <button id="memory-organize-btn" type="button">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+          手动整理记忆
+        </button>
+      </div>
       <div class="manager-list">${rows || `<div class="empty-state">暂无记忆。</div>`}</div>
     `;
     bindRangeInputs(box);
@@ -642,6 +643,22 @@ async function loadMemories() {
       await loadMemories();
       toast("记忆已新增");
     };
+    const organizeBtn = $("#memory-organize-btn");
+    if (organizeBtn) {
+      organizeBtn.onclick = async () => {
+        if (!window.confirm("这会让 AI 根据最近日记和对话自动整理非手动记忆（增删改）。手动记忆不会被修改。继续吗？")) return;
+        setBusy(organizeBtn, true);
+        try {
+          const data = await api(`/api/sessions/${sid}/organize-memories?character_key=${charKey}`, { method: "POST" });
+          toast(data.message || "记忆整理完成");
+          await loadMemories();
+        } catch (err) {
+          toast(err.message, "error");
+        } finally {
+          setBusy(organizeBtn, false);
+        }
+      };
+    }
     box.querySelectorAll("[data-memory-save]").forEach(btn => {
       btn.onclick = async () => {
         const id = btn.dataset.memorySave;
@@ -660,6 +677,8 @@ async function loadMemories() {
     box.querySelectorAll("[data-memory-delete]").forEach(btn => {
       btn.onclick = async () => {
         const id = btn.dataset.memoryDelete;
+        const summary = box.querySelector(`[data-memory-summary="${id}"]`).value.trim();
+        if (!window.confirm(`确定删除这条记忆吗？\n\n${summary || "(空)"}`)) return;
         await api(`/api/sessions/${sid}/memories/${id}?character_key=${charKey}`, { method: "DELETE" });
         await loadMemories();
         toast("记忆已删除");
@@ -864,9 +883,10 @@ function renderWorldSessionList() {
   }
   state.sessions.forEach(item => {
     const btn = document.createElement("button");
-    btn.className = "session-item";
+    btn.className = "session-item" + (item.frozen ? " frozen" : "");
     btn.dataset.sid = item.session_id;
-    btn.innerHTML = `<div class="session-title">${escapeHtml(item.character || item.chat_id)}</div><div class="session-meta">${escapeHtml(item.location || "未设置城市")} · UTC${escapeHtml(item.timezone || "-")} · 推送 ${escapeHtml(item.daily_push || "-")}</div>`;
+    const frozenBadge = item.frozen ? ' <span class="frozen-badge">已冻结</span>' : "";
+    btn.innerHTML = `<div class="session-title">${escapeHtml(item.character || item.chat_id)}${frozenBadge}</div><div class="session-meta">${escapeHtml(item.location || "未设置城市")} · UTC${escapeHtml(item.timezone || "-")} · 推送 ${escapeHtml(item.daily_push || "-")}</div>`;
     btn.onclick = () => selectWorldSession(item.session_id);
     list.appendChild(btn);
   });
@@ -1314,6 +1334,7 @@ async function initEvents() {
   });
   $("#log-clear").onclick = async () => {
     if (!state.selectedLog) return;
+    if (!window.confirm(`确定清空 ${state.selectedLog} 的日志吗？`)) return;
     try {
       await api(`/api/logs/${encodeURIComponent(state.selectedLog)}`, { method: "DELETE" });
       $("#log-content").textContent = "（已清空）";
@@ -1453,6 +1474,31 @@ async function initEvents() {
         await waitForServiceRestart(data.restart?.old_pid || state.status?.process_id);
       } else {
         toast("Git 更新完成（无新提交或拉取失败）");
+      }
+    } catch (err) {
+      out.textContent = err.message;
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+    }
+  };
+
+  $("#freeze-inactive-btn").onclick = async (event) => {
+    if (!window.confirm("这会冻结所有 7 天以上未主动发消息的用户。被冻结用户发一条消息即可自动解冻。继续吗？")) return;
+    const btn = event.currentTarget;
+    const out = $("#freeze-output");
+    setBusy(btn, true);
+    out.textContent = "正在扫描并冻结不活跃用户...";
+    try {
+      const data = await api("/api/admin/freeze-inactive", { method: "POST" });
+      if (data.frozen_count === 0) {
+        out.textContent = "没有需要冻结的用户（所有用户均在 7 天内活跃过）。";
+        toast("没有需要冻结的用户");
+      } else {
+        const lines = data.frozen.map(s => `  ${s.character || s.chat_id} (${s.session_id}) — 最后活跃: ${s.last_interaction_ago}`);
+        out.textContent = `已冻结 ${data.frozen_count} 个用户:\n${lines.join("\n")}`;
+        toast(`已冻结 ${data.frozen_count} 个不活跃用户`);
+        await loadAll();
       }
     } catch (err) {
       out.textContent = err.message;

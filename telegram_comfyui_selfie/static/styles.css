@@ -1148,6 +1148,19 @@ select {
   flex: 0 0 auto;
 }
 
+.memory-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 0;
+}
+
+.memory-toolbar button {
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .range-wrap {
   display: flex;
   align-items: center;
@@ -1369,6 +1382,22 @@ button:disabled .spinner {
   color: white;
   font-size: 11px;
   font-weight: 500;
+}
+
+.frozen-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--danger, #ef4444);
+  color: white;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.session-item.frozen {
+  opacity: 0.6;
+  border-style: dashed;
 }
 
 .character-pool-actions {

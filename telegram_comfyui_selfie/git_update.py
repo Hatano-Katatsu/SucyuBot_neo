@@ -76,6 +76,8 @@ class GitUpdateMixin:
             env=env,
             capture_output=capture,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
         )

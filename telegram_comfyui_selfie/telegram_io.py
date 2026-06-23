@@ -130,6 +130,14 @@ class TelegramIOMixin:
             logger.info("ignored chat_id not in allowlist: %s", chat_id)
             return
 
+        state = self._get_session_state(session_id)
+        if state.get("frozen"):
+            state["frozen"] = False
+            state["frozen_at"] = 0
+            self._save_session_state(session_id, state)
+            self._ulog(session_id, "UNFREEZE", "用户发消息，自动解冻")
+            logger.info("session %s auto-unfrozen by user message", session_id)
+
         cmd, arg = self.parse_command(text)
         if cmd is not None:
             self._ulog(session_id, "CMD", f"/{cmd} {arg}".strip())

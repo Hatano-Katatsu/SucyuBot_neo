@@ -372,6 +372,8 @@ class SchedulerRuntimeMixin:
             try:
                 for session_id in list(self.sessions.keys()):
                     state = self._get_session_state(session_id)
+                    if state.get("frozen"):
+                        continue
                     if self._is_recently_active(state):
                         continue
                     now = self._session_now(session_id)

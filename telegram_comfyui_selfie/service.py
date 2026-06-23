@@ -509,6 +509,8 @@ class TelegramComfyUIService(
             "purity_user_set": False,
             "ntr_stage_reached": 0,
             "ntr_reconcile_count": 0,
+            "frozen": False,
+            "frozen_at": 0,
             "rounds_since_image": 0,
             "short_context_start": 0,
             "short_context_reset_time": 0,

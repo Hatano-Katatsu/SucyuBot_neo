@@ -22,6 +22,9 @@ YAML_ONLY_CONFIG_KEYS = {
     "turbo_lora_model", "comfyui_workflow_file", "steps", "cfg",
     # 全局模型 profile 只允许 YAML 配置，不允许 WebUI/命令修改
     "global_model_profiles", "default_chat_model_profile", "default_fast_model_profile",
+    # 基础设施/运维配置，不允许 WebUI 修改
+    "long_memory_db_path", "user_log_enabled", "user_log_dir",
+    "web_enabled", "web_host", "web_port",
 }
 WORLD_TIMELINE_HOURS = (6, 8, 11, 13, 16, 18, 20, 23)
 
@@ -112,6 +115,9 @@ def create_web_app(service) -> web.Application:
     app.router.add_get("/api/sessions/{session_id:.+}/diaries/{diary_date:.+}", api_diary_detail)
     app.router.add_post("/api/sessions/{session_id:.+}/diaries/{diary_date:.+}", api_save_diary)
     app.router.add_delete("/api/sessions/{session_id:.+}/diaries/{diary_date:.+}", api_delete_diary)
+    app.router.add_post("/api/sessions/{session_id:.+}/freeze", api_freeze_session)
+    app.router.add_post("/api/sessions/{session_id:.+}/unfreeze", api_unfreeze_session)
+    app.router.add_post("/api/sessions/{session_id:.+}/organize-memories", api_organize_memories)
     # 通用会话路由放在最后，且只匹配不含 / 的 session_id（session_id 含 : 但不含 /）
     app.router.add_get("/api/sessions/{session_id:[^/]+}", api_session_detail)
     app.router.add_patch("/api/sessions/{session_id:[^/]+}", api_update_session)
@@ -130,6 +136,7 @@ def create_web_app(service) -> web.Application:
     app.router.add_post("/api/admin/migrate-visual-tags", api_migrate_visual_tags)
     app.router.add_post("/api/admin/cleanup-prompt-prefix", api_cleanup_prompt_prefix)
     app.router.add_post("/api/admin/git-update", api_admin_git_update)
+    app.router.add_post("/api/admin/freeze-inactive", api_freeze_inactive)
     app.router.add_get("/api/logs", api_logs)
     app.router.add_get("/api/logs/{chat_id:.+}", api_log_detail)
     app.router.add_delete("/api/logs/{chat_id:.+}", api_log_clear)
@@ -380,6 +387,7 @@ def session_summary(service, session_id: str, state: dict[str, Any]) -> dict[str
         "daily_push": f"{len(state.get('daily_triggered_times', []))}/{len(state.get('daily_trigger_times', []))}",
         "photos": len(state.get("sent_photos_history", [])),
         "saved_characters": len(state.get("saved_characters", {})),
+        "frozen": bool(state.get("frozen")),
     }
 
 
@@ -1157,6 +1165,72 @@ async def api_admin_git_update(request: web.Request):
         except Exception as exc:
             return json_error(f"Git 拉取成功但准备重启失败: {exc}", status=500)
     return json_ok({"result": result, "report": service._format_git_update_report(result), "restart": restart})
+
+
+FREEZE_INACTIVE_DAYS = 7
+
+
+async def api_freeze_inactive(request: web.Request):
+    _require_admin(request)
+    service = service_from(request)
+    threshold = time.time() - FREEZE_INACTIVE_DAYS * 86400
+    frozen_list = []
+    for sid, state in service.sessions.items():
+        if state.get("frozen"):
+            continue
+        last = state.get("last_interaction", 0)
+        if last > 0 and last < threshold:
+            state["frozen"] = True
+            state["frozen_at"] = time.time()
+            service._mark_dirty(sid)
+            frozen_list.append({
+                "session_id": sid,
+                "chat_id": service.chat_id_from_session(sid),
+                "character": state.get("custom_character") or "",
+                "last_interaction_ago": human_ago(time.time() - last),
+            })
+    service._flush_sessions(force=True)
+    return json_ok({"frozen_count": len(frozen_list), "frozen": frozen_list})
+
+
+async def api_freeze_session(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权操作此会话", status=403)
+    state = service._get_session_state(sid)
+    state["frozen"] = True
+    state["frozen_at"] = time.time()
+    service._save_session_state(sid, state)
+    return json_ok({"session": session_summary(service, sid, state)})
+
+
+async def api_unfreeze_session(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权操作此会话", status=403)
+    state = service._get_session_state(sid)
+    state["frozen"] = False
+    state["frozen_at"] = 0
+    service._save_session_state(sid, state)
+    return json_ok({"session": session_summary(service, sid, state)})
+
+
+async def api_organize_memories(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权操作此会话", status=403)
+    char = request.query.get("character_key") or (service._memory_character(sid) if hasattr(service, "_memory_character") else "")
+    if not service.has_llm_config("chat", sid):
+        return json_error("聊天模型未配置，无法整理记忆")
+    try:
+        await service._organize_memories_after_dream(sid, char)
+    except Exception as exc:
+        return json_error(f"整理记忆失败: {exc}", status=500)
+    memories = service.memory.list_memories(sid, character=char, limit=80)
+    return json_ok({"memories": memories, "character": char, "message": "记忆整理完成"})
 
 
 async def api_logs(request: web.Request):
