@@ -717,7 +717,7 @@ class CommandHandlersMixin:
     async def cmd_rollback(self, chat_id, session_id, arg):
         """回退 N 轮对话：从聊天历史尾部删掉最近 N 条角色回复及其对应的用户消息。方便测试时撤回。"""
         state = self._get_session_state(session_id)
-        history = state.get("chat_history", [])
+        history = session_schema.get_chat_history(state)
         if not history:
             await self.send_message(chat_id, "当前没有可回滚的对话。")
             return
@@ -739,10 +739,10 @@ class CommandHandlersMixin:
             if history and history[-1].get("role") == "user":
                 history.pop()
             turns += 1
-        state["chat_history"] = history
-        if int(state.get("short_context_start", 0) or 0) > len(history):
-            state["short_context_start"] = 0
-        state["replying_to_selfie"] = False
+        session_schema.set_chat_history(state, history)
+        if session_schema.get_short_context_start(state) > len(history):
+            session_schema.set_short_context_start(state, 0)
+        session_schema.set_replying_to_selfie(state, False)
         self._save_session_state(session_id, state)
         self._ulog(session_id, "ROLLBACK", f"回退 {turns} 轮，剩余 {len(history)} 条上下文")
         tail = next((m.get("content", "") for m in reversed(history) if m.get("role") == "user"), "")
@@ -754,15 +754,15 @@ class CommandHandlersMixin:
     async def cmd_regenerate(self, chat_id, session_id, arg):
         """重答：删掉上一条角色回复，用同一条用户消息重新生成。方便测试对比。"""
         state = self._get_session_state(session_id)
-        history = state.get("chat_history", [])
+        history = session_schema.get_chat_history(state)
         if history and history[-1].get("role") == "assistant":
             history.pop()
         if not history or history[-1].get("role") != "user":
             await self.send_message(chat_id, "没有可重答的上一条用户消息。")
             return
         last_user = (history.pop().get("content") or "").strip()
-        state["chat_history"] = history
-        state["replying_to_selfie"] = False
+        session_schema.set_chat_history(state, history)
+        session_schema.set_replying_to_selfie(state, False)
         self._save_session_state(session_id, state)
         if not last_user:
             await self.send_message(chat_id, "上一条用户消息为空，无法重答。")
@@ -1153,8 +1153,8 @@ class CommandHandlersMixin:
         try:
             checkpoint = self.app_store.get_checkpoint(session_id, self._context_character_key(session_id))
             if checkpoint.get("summary"):
-                state["checkpoint_summary"] = checkpoint.get("summary") or ""
-                state["checkpoint_message_id"] = int(checkpoint.get("source_until_id") or 0)
+                session_schema.set_checkpoint_summary(state, checkpoint.get("summary") or "")
+                session_schema.set_checkpoint_message_id(state, int(checkpoint.get("source_until_id") or 0))
         except Exception:
             pass
 

@@ -12,6 +12,7 @@ from typing import Any
 
 import aiohttp
 
+from . import session_schema
 from .defaults import DEFAULT_CONFIG, WEEKDAY_NAMES
 from .image_planning import (
     VALID_VIEWS,
@@ -28,7 +29,7 @@ class SchedulerRuntimeMixin:
     def _get_recent_chat_history(self, state: dict[str, Any], session_id: str = "") -> str | None:
         recent = []
         now_ts = time.time()
-        for msg in state.get("recent_message_history", []):
+        for msg in session_schema.get_recent_message_history(state):
             if now_ts - msg.get("time", 0) < 3 * 3600:
                 dt = datetime.fromtimestamp(msg["time"], self._session_tz(session_id))
                 recent.append(f"[{dt.strftime('%H:%M')}] 用户: {msg.get('text', '')}")
@@ -46,10 +47,10 @@ class SchedulerRuntimeMixin:
             ttl = 2 * 3600
         now_ts = now.timestamp() if isinstance(now, datetime) else time.time()
         latest = float(state.get("last_interaction", 0) or 0)
-        latest = max(latest, float(state.get("last_message_time", 0) or 0))
-        for msg in state.get("recent_message_history", []):
+        latest = max(latest, session_schema.get_last_message_time(state))
+        for msg in session_schema.get_recent_message_history(state):
             latest = max(latest, float(msg.get("time", 0) or 0))
-        for photo in state.get("sent_photos_history", []):
+        for photo in session_schema.get_sent_photos_history(state):
             latest = max(latest, float(photo.get("timestamp", 0) or 0))
         if not latest or now_ts - latest > ttl:
             return ""
@@ -371,8 +372,8 @@ class SchedulerRuntimeMixin:
         await self._generate_character_history_summary(session_id, character_key, diaries)
         self.app_store.mark_dream(session_id, character_key, to_id)
         state = self._get_session_state(session_id)
-        state["last_dream_at"] = time.time()
-        state["last_dream_message_id"] = to_id
+        session_schema.set_last_dream_at(state, time.time())
+        session_schema.set_last_dream_message_id(state, to_id)
         self._save_session_state(session_id, state)
         self._ulog(session_id, "DREAM", f"reason={reason} date={diary_date} messages={len(messages)}")
 
@@ -510,7 +511,7 @@ class SchedulerRuntimeMixin:
                 summary = summary[-hard:]
             self.app_store.upsert_character_history_summary(session_id, key, summary)
             state = self._get_session_state(session_id)
-            state["character_history_summary"] = summary
+            session_schema.set_character_history_summary(state, summary)
             self._save_session_state(session_id, state)
             self._ulog(session_id, "HISTORY", f"角色历史提要更新 chars={len(summary)}")
         except Exception:
@@ -676,8 +677,8 @@ class SchedulerRuntimeMixin:
             self._active_pushes.discard(session_id)
 
     def _check_goodnight_inhibition(self, state: dict[str, Any]) -> bool:
-        text = (state.get("last_message_text") or "").lower()
-        ts = state.get("last_message_time", 0)
+        text = (session_schema.get_last_message_text(state) or "").lower()
+        ts = session_schema.get_last_message_time(state)
         return time.time() - ts < 3600 and any(word in text for word in ("晚安", "睡觉", "睡了", "去睡", "good night", "sleep"))
 
     @staticmethod

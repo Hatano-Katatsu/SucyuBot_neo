@@ -461,6 +461,8 @@ class TelegramComfyUIService(
         session_schema.ensure_clothing_box(state)
         # place 字段已收进 state["place"] 盒；迁移旧扁平持久态并补齐子键。
         session_schema.ensure_place_box(state)
+        # context 字段已收进 state["context"] 盒；迁移旧扁平持久态并补齐子键。
+        session_schema.ensure_context_box(state)
         return state
 
     def _default_character_payload(self) -> dict[str, Any]:
@@ -852,7 +854,7 @@ class TelegramComfyUIService(
         source_description: str = "",
     ):
         state = self._get_session_state(session_id)
-        history = state.get("sent_photos_history", [])
+        history = session_schema.get_sent_photos_history(state)
         source_description = (source_description or "").strip()
         appearance_snapshot = (appearance or "").strip()
         if not appearance_snapshot:
@@ -868,12 +870,12 @@ class TelegramComfyUIService(
             "view": (view or "").strip().lower(),
             "source_description": source_description,
         })
-        state["sent_photos_history"] = history[-10:]
-        state["last_sent_selfie_time"] = time.time()
-        state["last_sent_selfie_caption"] = caption
-        state["last_sent_selfie_source_description"] = source_description or scene
-        state["last_sent_selfie_replied"] = False
-        state["rounds_since_image"] = 0
+        session_schema.set_sent_photos_history(state, history[-10:])
+        session_schema.set_last_sent_selfie_time(state, time.time())
+        session_schema.set_last_sent_selfie_caption(state, caption)
+        session_schema.set_last_sent_selfie_source_description(state, source_description or scene)
+        session_schema.set_last_sent_selfie_replied(state, False)
+        session_schema.set_rounds_since_image(state, 0)
         self._save_session_state(session_id, state)
         self._ulog(
             session_id, "IMAGE",

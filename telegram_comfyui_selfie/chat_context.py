@@ -42,16 +42,16 @@ class ChatContextMixin:
         if reset_reason:
             self._reset_short_context(state, reset_reason)
         self._update_user_place_from_text(session_id, text)
-        state["last_message_text"] = text
-        state["last_message_time"] = time.time()
-        state["recent_message_history"] = (state.get("recent_message_history", []) + [{"text": text, "time": time.time()}])[-5:]
+        session_schema.set_last_message_text(state, text)
+        session_schema.set_last_message_time(state, time.time())
+        session_schema.set_recent_message_history(state, (session_schema.get_recent_message_history(state) + [{"text": text, "time": time.time()}])[-5:])
 
-        if state.get("last_sent_selfie_time", 0) and not state.get("last_sent_selfie_replied", False):
-            if self._within(state["last_sent_selfie_time"], 12 * 3600):
-                state["replying_to_selfie"] = True
-            state["last_sent_selfie_replied"] = True
+        if session_schema.get_last_sent_selfie_time(state) and not session_schema.get_last_sent_selfie_replied(state):
+            if self._within(session_schema.get_last_sent_selfie_time(state), 12 * 3600):
+                session_schema.set_replying_to_selfie(state, True)
+            session_schema.set_last_sent_selfie_replied(state, True)
 
-        state["rounds_since_image"] = state.get("rounds_since_image", 0) + 1
+        session_schema.set_rounds_since_image(state, session_schema.get_rounds_since_image(state) + 1)
         # "距上次确认位置的轮数"：每轮 +1，由 _set_character_place（角色再次明确位置时）清零。
         # 用来给陈旧 pin 降权——多轮没再提及地点时，该 pin 不再锁死生图。
         session_schema.increment_rounds_since_location(state)
@@ -173,7 +173,7 @@ class ChatContextMixin:
                     logger.warning("background location extract failed", exc_info=True)
             asyncio.create_task(_bg_extract())
 
-        history = state.get("chat_history", [])
+        history = session_schema.get_chat_history(state)
         new_messages = [{"role": "user", "content": user_text}]
         if content:
             new_messages.append({"role": "assistant", "content": content})
@@ -242,7 +242,7 @@ class ChatContextMixin:
             "偶尔": "每 5 到 8 轮在精彩时刻触发配图。",
             "关闭": "本次对话中请勿触发配图。",
         }.get(freq, "原则上每 2 到 3 轮对话触发一次配图。")
-        if self._image_nudge_due(freq, state.get("rounds_since_image", 0)):
+        if self._image_nudge_due(freq, session_schema.get_rounds_since_image(state)):
             freq_inst += " 已有多轮未配图，本轮请优先调用 generate_roleplay_image。"
 
         system_dynamic = (
@@ -292,8 +292,8 @@ class ChatContextMixin:
                     "聊天时可参考这个世界状态自然提及所在与去向（例如“我现在在公司”、“等会儿要去逛商场”），但不要机械地报地点。"
                     "不要让角色无理由瞬移；如果用户和角色不在同一地点，优先用消息、自拍、电话或约定见面推进。\n"
                 )
-        if state.get("replying_to_selfie"):
-            photos = state.get("sent_photos_history", [])
+        if session_schema.get_replying_to_selfie(state):
+            photos = session_schema.get_sent_photos_history(state)
             last_photo = photos[-1] if photos else {}
             scene = (last_photo.get("scene") or "").strip()
             caption = (last_photo.get("caption") or "").strip()
@@ -305,11 +305,11 @@ class ChatContextMixin:
             if parts:
                 system_dynamic += f"你刚向用户发了一张图。{'；'.join(parts)}。用户现在说:\n"
             else:
-                fallback = state.get("last_sent_selfie_source_description") or ""
+                fallback = session_schema.get_last_sent_selfie_source_description(state) or ""
                 if fallback:
                     system_dynamic += f"你刚向用户发了一张图，描述: {fallback}。用户现在说:\n"
-            state["replying_to_selfie"] = False
-        if state.get("short_context_start", 0):
+            session_schema.set_replying_to_selfie(state, False)
+        if session_schema.get_short_context_start(state):
             system_dynamic += (
                 "短期注意规则: 用户已经切换过话题或场景。切换点之前的聊天、地点、动作、服装、冲突和图片只作历史背景，"
                 "不要主动带入当前场景；只有用户明确说继续刚才、上一张、那个话题时才引用。\n"
@@ -485,7 +485,7 @@ class ChatContextMixin:
             explicit = self._user_requested_image(user_text)
         if explicit:
             return False
-        rounds = self._get_session_state(session_id).get("rounds_since_image", 0)
+        rounds = session_schema.get_rounds_since_image(self._get_session_state(session_id))
         return rounds < self._image_min_gap(freq)
 
     def _recent_dialog_for_judge(self, state: dict[str, Any], limit: int = 6) -> str:
@@ -511,7 +511,7 @@ class ChatContextMixin:
         if freq == "关闭":
             return None
         state = self._get_session_state(session_id)
-        rounds = state.get("rounds_since_image", 0)
+        rounds = session_schema.get_rounds_since_image(state)
         if not explicit and rounds < self._image_min_gap(freq):
             return None  # 刚发过图，留白（用户明确要图时不受冷却约束）
         overdue = self._image_nudge_due(freq, rounds)
@@ -565,7 +565,7 @@ class ChatContextMixin:
         except Exception:
             logger.debug("checkpoint lookup failed", exc_info=True)
         state = self._get_session_state(session_id)
-        return str(state.get("checkpoint_summary") or "").strip()
+        return session_schema.get_checkpoint_summary(state)
 
     def _character_history_summary_context(self, session_id: str) -> str:
         key = self._context_character_key(session_id)
@@ -577,7 +577,7 @@ class ChatContextMixin:
         except Exception:
             logger.debug("character history summary lookup failed", exc_info=True)
         state = self._get_session_state(session_id)
-        return str(state.get("character_history_summary") or "").strip()
+        return session_schema.get_character_history_summary(state)
 
     def _build_scene_system_prompt(self, session_id: str, *, weather: Any = None, mode: str = "image", now: Any = None) -> str:
         """构建场景生成用的完整 system prompt，复用聊天侧的静态 + 稳定 + 动态上下文。
@@ -693,15 +693,15 @@ class ChatContextMixin:
         所有下标左移，必须同量下移这个起点，否则 _chat_prompt_history 的切片会错位
         （丢掉本应保留的当前场景消息，甚至取到空窗口）。
         """
-        history = state.get("chat_history", [])
+        history = session_schema.get_chat_history(state)
         if len(history) <= limit:
             return
         trimmed = self._trim_history_preserve_turns(history, limit)
         removed = len(history) - len(trimmed)
-        state["chat_history"] = trimmed
+        session_schema.set_chat_history(state, trimmed)
         if removed > 0:
-            start = int(state.get("short_context_start", 0) or 0)
-            state["short_context_start"] = max(0, start - removed)
+            start = session_schema.get_short_context_start(state)
+            session_schema.set_short_context_start(state, max(0, start - removed))
 
     def _queue_checkpoint_if_needed(self, session_id: str, history_snapshot: list[dict[str, Any]] | None = None):
         if not session_id:
@@ -751,9 +751,9 @@ class ChatContextMixin:
                 logger.warning("checkpoint memory extraction failed", exc_info=True)
             self.app_store.upsert_checkpoint(session_id, character_key, merged, until_id)
             state = self._get_session_state(session_id)
-            state["checkpoint_summary"] = merged
-            state["checkpoint_message_id"] = until_id
-            state["last_checkpoint_at"] = time.time()
+            session_schema.set_checkpoint_summary(state, merged)
+            session_schema.set_checkpoint_message_id(state, until_id)
+            session_schema.set_last_checkpoint_at(state, time.time())
             # Trim only after the summary has been committed (同步 short_context_start)。
             self._apply_history_trim(state, keep)
             self._save_session_state(session_id, state)
@@ -827,18 +827,18 @@ class ChatContextMixin:
         #   · character_place：降级为 weak（见 _demote_character_place），新场景不钉死生图、仍作背景，
         #     等新场景的位置声明覆盖或 TTL 过期。
         # 两个位置字段在本路径**对称处理**（都不清空），消除原先“SR 清 user 不清 character”的不对称。
-        state["short_context_start"] = len(state.get("chat_history", []))
-        state["short_context_reset_time"] = time.time()
-        state["short_context_reset_reason"] = reason
-        state["recent_message_history"] = []
+        session_schema.set_short_context_start(state, len(session_schema.get_chat_history(state)))
+        session_schema.set_short_context_reset_time(state, time.time())
+        session_schema.set_short_context_reset_reason(state, reason)
+        session_schema.set_recent_message_history(state, [])
         self._demote_character_place(state)
         session_schema.clear_nudity(state)  # 新场景：不再续上上一幕的裸体态
 
     @staticmethod
     def _active_chat_history(state: dict[str, Any], limit: int = 16) -> list[dict[str, Any]]:
-        history = state.get("chat_history", [])
+        history = session_schema.get_chat_history(state)
         try:
-            start = int(state.get("short_context_start", 0) or 0)
+            start = session_schema.get_short_context_start(state)
         except Exception:
             start = 0
         if start < 0 or start > len(history):
@@ -853,9 +853,9 @@ class ChatContextMixin:
         keep）与 _history_storage_cap 兜底共同约束。这样两次 checkpoint 之间历史前缀只增不
         移，最大化服务端 prefix cache 命中；只有 checkpoint 落地那一刻才发生一次前缀归位。
         """
-        history = state.get("chat_history", [])
+        history = session_schema.get_chat_history(state)
         try:
-            start = int(state.get("short_context_start", 0) or 0)
+            start = session_schema.get_short_context_start(state)
         except Exception:
             start = 0
         if start < 0 or start > len(history):
@@ -863,11 +863,11 @@ class ChatContextMixin:
         return history[start:]
 
     def _inject_photo_history_messages(self, messages: list[dict[str, Any]], state: dict[str, Any]):
-        photos = state.get("sent_photos_history", [])
+        photos = session_schema.get_sent_photos_history(state)
         if not photos:
             return
-        existing = "\n".join(m.get("content", "") for m in state.get("chat_history", []) if isinstance(m.get("content"), str))
-        reset_time = float(state.get("short_context_reset_time", 0) or 0)
+        existing = "\n".join(m.get("content", "") for m in session_schema.get_chat_history(state) if isinstance(m.get("content"), str))
+        reset_time = session_schema.get_short_context_reset_time(state)
         for photo in photos[-3:]:
             # 12h 内 且 晚于短期重置边界（视觉时效绑定注意力边界——见 ④，刻意为之）。
             if not self._within(photo.get("timestamp", 0), 12 * 3600, since=reset_time):

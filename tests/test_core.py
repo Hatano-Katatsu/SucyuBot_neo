@@ -2905,6 +2905,90 @@ class ServiceTestCase(unittest.TestCase):
         ss.ensure_place_box(st)
         self.assertEqual(st["place"], before)
 
+    def test_context_box_migration_and_accessors(self):
+        """context box：旧扁平对话/checkpoint/照片字段迁移进盒、访问器读写、双写兼容、幂等。"""
+        from telegram_comfyui_selfie import session_schema as ss
+        # box_for 归位
+        self.assertEqual(ss.box_for("context"), ss.BOX_CONTEXT)
+
+        # 旧扁平持久态：顶层有 chat_history/recent_message_history 等 → 保障盒存在，不删顶层（非破坏）
+        legacy = {
+            "chat_history": [{"role": "user", "content": "你好"}],
+            "sent_photos_history": [{"timestamp": 999.0, "scene": "test"}],
+            "short_context_start": 5,
+            "rounds_since_image": 3,
+            "some_other": "keep",
+        }
+        box = ss.ensure_context_box(legacy)
+        self.assertIn("chat_history", legacy)         # 扁平键保留（非破坏迁移）
+        self.assertIn("short_context_start", legacy)
+        self.assertIn("some_other", legacy)
+        # 盒内值由扁平拷贝
+        self.assertEqual(box["chat_history"], [{"role": "user", "content": "你好"}])
+        self.assertEqual(box["rounds_since_image"], 3)
+        # 访问器读取（扁平优先）
+        self.assertEqual(ss.get_chat_history(legacy), [{"role": "user", "content": "你好"}])
+        self.assertEqual(ss.get_rounds_since_image(legacy), 3)
+
+        # 子键补齐 + 默认值
+        self.assertEqual(ss.get_checkpoint_summary(legacy), "")
+        self.assertFalse(ss.get_replying_to_selfie(legacy))
+        self.assertEqual(ss.get_last_sent_selfie_time(legacy), 0.0)
+
+        # 访问器读写（双写：盒 + 扁平）
+        st = {}
+        ss.set_chat_history(st, [{"role": "assistant", "content": "Hello"}])
+        self.assertEqual(ss.get_chat_history(st), [{"role": "assistant", "content": "Hello"}])
+        self.assertEqual(st["context"]["chat_history"], [{"role": "assistant", "content": "Hello"}])
+        self.assertEqual(st["chat_history"], [{"role": "assistant", "content": "Hello"}])  # 扁平同步
+
+        ss.set_short_context_start(st, 42)
+        self.assertEqual(ss.get_short_context_start(st), 42)
+        self.assertEqual(st["context"]["short_context_start"], 42)
+
+        ss.set_replying_to_selfie(st, True)
+        self.assertTrue(ss.get_replying_to_selfie(st))
+
+        # 拍图记录
+        ss.set_last_sent_selfie_time(st, 99999.0)
+        ss.set_last_sent_selfie_caption(st, "晚上好")
+        ss.set_last_sent_selfie_source_description(st, "玄关灯下")
+        ss.set_last_sent_selfie_replied(st, True)
+        self.assertEqual(ss.get_last_sent_selfie_time(st), 99999.0)
+        self.assertEqual(ss.get_last_sent_selfie_caption(st), "晚上好")
+        self.assertEqual(ss.get_last_sent_selfie_source_description(st), "玄关灯下")
+        self.assertTrue(ss.get_last_sent_selfie_replied(st))
+
+        # increment
+        self.assertEqual(ss.get_rounds_since_image(st), 0)
+        ss.increment_rounds_since_image(st)
+        self.assertEqual(ss.get_rounds_since_image(st), 1)
+        ss.increment_rounds_since_image(st)
+        self.assertEqual(ss.get_rounds_since_image(st), 2)
+
+        # 向后兼容：直写扁平键，访问器立即可读（扁平优先策略）
+        flat_st = {"context": {}}
+        ss.ensure_context_box(flat_st)
+        flat_st["chat_history"] = [{"role": "user", "content": "flat write"}]
+        self.assertEqual(ss.get_chat_history(flat_st), [{"role": "user", "content": "flat write"}])
+        # 清空后空列表也穿透
+        flat_st["chat_history"] = []
+        self.assertEqual(ss.get_chat_history(flat_st), [])
+
+        # 幂等：再 ensure 一次不改变内容
+        before = copy.deepcopy(st["context"])
+        ss.ensure_context_box(st)
+        self.assertEqual(st["context"], before)
+
+        # clear_transient 可正确复位 context box
+        defaults = ss.state_defaults()
+        st2 = {}
+        st2["context"] = copy.deepcopy(defaults.get("context", {}))
+        self.assertEqual(ss.get_chat_history(st2), [])
+        self.assertEqual(ss.get_short_context_start(st2), 0)
+        self.assertEqual(ss.get_rounds_since_image(st2), 0)
+
+
     def test_transient_state_partition_classifier(self):
         """字段单一来源（黑名单反推）：会话全局/角色配置/短期态三类不重叠，关键字段各归其位。
 

@@ -158,11 +158,32 @@ STATE_SCHEMA: dict[str, Field] = {
         "character_place_history": [],
         "rounds_since_location": 0,
     }, reset_preserved=False),
-    # —— 角色短期态：配图节奏 / 短期场景边界 ——
-    "rounds_since_image": Field(T, default=0),
-    "short_context_start": Field(T, default=0),
-    "short_context_reset_time": Field(T, default=0),
-    "short_context_reset_reason": Field(T, default=""),
+    # —— 角色短期态：对话上下文（context box）——
+    # 聊天历史 / checkpoint / dream / 照片 / 短期场景边界 / 配图节奏 全部收进 state["context"] 子字典。
+    # 访问一律走本模块的访问器，不要直接下钻 state["context"][...]。
+    "context": Field(T, default={
+        "recent_message_history": [],
+        "chat_history": [],
+        "checkpoint_summary": "",
+        "checkpoint_message_id": 0,
+        "last_checkpoint_at": 0,
+        "last_dream_at": 0,
+        "last_dream_message_id": 0,
+        "sent_photos_history": [],
+        "replying_to_selfie": False,
+        "last_sent_selfie_time": 0,
+        "last_sent_selfie_caption": "",
+        "last_sent_selfie_source_description": "",
+        "last_sent_selfie_replied": False,
+        "rounds_since_image": 0,
+        "short_context_start": 0,
+        "short_context_reset_time": 0,
+        "short_context_reset_reason": "",
+        # 以下 3 个字段此前未在 STATE_SCHEMA 注册（运行时动态产生），盒化时补入默认值。
+        "last_message_text": "",
+        "last_message_time": 0.0,
+        "character_history_summary": "",
+    }, reset_preserved=False),
 }
 
 
@@ -217,6 +238,7 @@ BOXES: tuple[str, ...] = (BOX_SESSION, BOX_CHARACTER, BOX_CLOTHING, BOX_PLACE, B
 # 短期态里按域细分（其余短期态默认归 context）。
 _CLOTHING_KEYS = frozenset({"clothing"})
 _PLACE_KEYS = frozenset({"place"})
+_CONTEXT_KEYS = frozenset({"context"})
 # 短期态但归属角色域的派生缓存（生活档案：年龄段/职业/白天去向推断）。
 _CHARACTER_DOMAIN_TRANSIENT = frozenset({"life_profile"})
 
@@ -234,6 +256,8 @@ def box_for(key: str) -> str:
         return BOX_CLOTHING
     if key in _PLACE_KEYS:
         return BOX_PLACE
+    if key in _CONTEXT_KEYS:
+        return BOX_CONTEXT
     if key in _CHARACTER_DOMAIN_TRANSIENT:
         return BOX_CHARACTER
     return BOX_CONTEXT
@@ -522,3 +546,284 @@ def set_rounds_since_location(state: dict[str, Any], value: int):
 def increment_rounds_since_location(state: dict[str, Any]):
     box = ensure_place_box(state)
     box["rounds_since_location"] = int(box.get("rounds_since_location", 0) or 0) + 1
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# context box：第三个切换的盒。把对话上下文 / checkpoint / dream / 照片历史 /
+# 短期场景边界 / 配图节奏 从扁平顶层收进 state["context"]。
+# 所有访问走下面的访问器，调用方不直接下钻盒内键名。
+# ──────────────────────────────────────────────────────────────────────────
+
+# 盒内默认值（与 STATE_SCHEMA["context"].default 同源含义）。
+_CONTEXT_DEFAULT: dict[str, Any] = {
+    "recent_message_history": [],
+    "chat_history": [],
+    "checkpoint_summary": "",
+    "checkpoint_message_id": 0,
+    "last_checkpoint_at": 0,
+    "last_dream_at": 0,
+    "last_dream_message_id": 0,
+    "sent_photos_history": [],
+    "replying_to_selfie": False,
+    "last_sent_selfie_time": 0,
+    "last_sent_selfie_caption": "",
+    "last_sent_selfie_source_description": "",
+    "last_sent_selfie_replied": False,
+    "rounds_since_image": 0,
+    "short_context_start": 0,
+    "short_context_reset_time": 0,
+    "short_context_reset_reason": "",
+    "last_message_text": "",
+    "last_message_time": 0.0,
+    "character_history_summary": "",
+}
+_LEGACY_CONTEXT_FLAT_KEYS = (
+    "recent_message_history", "chat_history", "checkpoint_summary",
+    "checkpoint_message_id", "last_checkpoint_at", "last_dream_at",
+    "last_dream_message_id", "sent_photos_history", "replying_to_selfie",
+    "last_sent_selfie_time", "last_sent_selfie_caption",
+    "last_sent_selfie_source_description", "last_sent_selfie_replied",
+    "rounds_since_image", "short_context_start", "short_context_reset_time",
+    "short_context_reset_reason", "last_message_text", "last_message_time",
+    "character_history_summary",
+)
+
+
+def ensure_context_box(state: dict[str, Any]) -> dict[str, Any]:
+    """保证 state["context"] 存在且子键补齐；把旧扁平 context 字段迁移进盒（幂等）。
+
+    与 clothing/place box 不同：context 访问点极多（~97 个），改为**不弹出**扁平旧键——
+    盒与扁平共存。accessors 读取时优先盒（盒由 ensure + set 维护），摊平情况下
+    box 为空或 stale 时回落扁平键值。写入走 accessor，两边同时生效。
+    """
+    box = state.get("context")
+    if not isinstance(box, dict):
+        box = {}
+        state["context"] = box
+    # 懒迁移：扁平值一次性拷贝进盒（不弹出，箱键共存以供回落）
+    for key in _LEGACY_CONTEXT_FLAT_KEYS:
+        if key in state and key not in box:
+            box[key] = state[key]
+    for key, default in _CONTEXT_DEFAULT.items():
+        if key not in box:
+            box[key] = copy.deepcopy(default)
+    return box
+
+
+def _context_get(state: dict[str, Any], key: str, *, is_list: bool = False, coerce=int):
+    """读取 context 字段：**扁平键优先**（盒内值可能陈旧），不存在时回落盒。
+
+    策略：context 盒与扁平键共存。ensure_context_box 不弹出旧键；accessor 写入双写。
+    但测试/旧代码可能直接写扁平键，导致盒内值陈旧。读取时一律扁平优先，
+    这样直写扁平键的调用方（测试、未迁移代码）能立刻被读回。
+    """
+    flat = state.get(key)
+    box = ensure_context_box(state)
+    if is_list:
+        if isinstance(flat, list):
+            # 扁平存在 → 用它（即使为空列表；认为调用方有意清空）
+            if flat != box.get(key):
+                box[key] = flat  # 回写同步
+            return flat
+        val = box.get(key)
+        return val if isinstance(val, list) else []
+    if isinstance(flat, str):
+        if flat != box.get(key, ""):
+            box[key] = flat
+        return flat
+    if isinstance(flat, (int, float)):
+        return coerce(flat)
+    if isinstance(flat, bool):
+        if flat != box.get(key):
+            box[key] = flat
+        return flat
+    if flat is not None:
+        return flat
+    # 扁平不存在 → 回落盒
+    val = box.get(key)
+    if is_list:
+        return val if isinstance(val, list) else []
+    if isinstance(val, (int, float)):
+        return coerce(val)
+    return val
+
+
+def _context_set(state: dict[str, Any], key: str, value: Any):
+    """写入 context 字段：盒 + 扁平键双写（向后兼容）。"""
+    box = ensure_context_box(state)
+    box[key] = value
+    state[key] = value  # 扁平键同步
+
+
+# ── 对话历史 ──
+
+def get_recent_message_history(state):
+    return _context_get(state, "recent_message_history", is_list=True)
+
+def set_recent_message_history(state, value):
+    _context_set(state, "recent_message_history", list(value or []))
+
+def get_chat_history(state):
+    return _context_get(state, "chat_history", is_list=True)
+
+def set_chat_history(state, value):
+    _context_set(state, "chat_history", list(value or []))
+
+
+# ── checkpoint ──
+
+def get_checkpoint_summary(state):
+    return (_context_get(state, "checkpoint_summary") or "").strip()
+
+def set_checkpoint_summary(state, value):
+    _context_set(state, "checkpoint_summary", str(value or ""))
+
+def get_checkpoint_message_id(state):
+    try:
+        return int(_context_get(state, "checkpoint_message_id", coerce=int))
+    except (TypeError, ValueError):
+        return 0
+
+def set_checkpoint_message_id(state, value):
+    _context_set(state, "checkpoint_message_id", int(value or 0))
+
+def get_last_checkpoint_at(state):
+    try:
+        return float(_context_get(state, "last_checkpoint_at", coerce=float))
+    except (TypeError, ValueError):
+        return 0.0
+
+def set_last_checkpoint_at(state, value):
+    _context_set(state, "last_checkpoint_at", float(value or 0))
+
+
+# ── dream ──
+
+def get_last_dream_at(state):
+    try:
+        return float(_context_get(state, "last_dream_at", coerce=float))
+    except (TypeError, ValueError):
+        return 0.0
+
+def set_last_dream_at(state, value):
+    _context_set(state, "last_dream_at", float(value or 0))
+
+def get_last_dream_message_id(state):
+    try:
+        return int(_context_get(state, "last_dream_message_id", coerce=int))
+    except (TypeError, ValueError):
+        return 0
+
+def set_last_dream_message_id(state, value):
+    _context_set(state, "last_dream_message_id", int(value or 0))
+
+
+# ── 照片历史 ──
+
+def get_sent_photos_history(state):
+    return _context_get(state, "sent_photos_history", is_list=True)
+
+def set_sent_photos_history(state, value):
+    _context_set(state, "sent_photos_history", list(value or []))
+
+def get_replying_to_selfie(state):
+    return bool(_context_get(state, "replying_to_selfie"))
+
+def set_replying_to_selfie(state, value):
+    _context_set(state, "replying_to_selfie", bool(value))
+
+def get_last_sent_selfie_time(state):
+    try:
+        return float(_context_get(state, "last_sent_selfie_time", coerce=float))
+    except (TypeError, ValueError):
+        return 0.0
+
+def set_last_sent_selfie_time(state, value):
+    _context_set(state, "last_sent_selfie_time", float(value or 0))
+
+def get_last_sent_selfie_caption(state):
+    return (_context_get(state, "last_sent_selfie_caption") or "").strip()
+
+def set_last_sent_selfie_caption(state, value):
+    _context_set(state, "last_sent_selfie_caption", str(value or ""))
+
+def get_last_sent_selfie_source_description(state):
+    return (_context_get(state, "last_sent_selfie_source_description") or "").strip()
+
+def set_last_sent_selfie_source_description(state, value):
+    _context_set(state, "last_sent_selfie_source_description", str(value or ""))
+
+def get_last_sent_selfie_replied(state):
+    return bool(_context_get(state, "last_sent_selfie_replied"))
+
+def set_last_sent_selfie_replied(state, value):
+    _context_set(state, "last_sent_selfie_replied", bool(value))
+
+
+# ── 配图节奏 ──
+
+def get_rounds_since_image(state):
+    try:
+        return int(_context_get(state, "rounds_since_image", coerce=int))
+    except (TypeError, ValueError):
+        return 0
+
+def set_rounds_since_image(state, value):
+    _context_set(state, "rounds_since_image", int(value or 0))
+
+def increment_rounds_since_image(state):
+    box = ensure_context_box(state)
+    cur = int(box.get("rounds_since_image", 0) or 0) + 1
+    box["rounds_since_image"] = cur
+    state["rounds_since_image"] = cur  # 扁平同步
+
+
+# ── 短期场景边界 ──
+
+def get_short_context_start(state):
+    try:
+        return int(_context_get(state, "short_context_start", coerce=int))
+    except (TypeError, ValueError):
+        return 0
+
+def set_short_context_start(state, value):
+    _context_set(state, "short_context_start", int(value or 0))
+
+def get_short_context_reset_time(state):
+    try:
+        return float(_context_get(state, "short_context_reset_time", coerce=float))
+    except (TypeError, ValueError):
+        return 0.0
+
+def set_short_context_reset_time(state, value):
+    _context_set(state, "short_context_reset_time", float(value or 0))
+
+def get_short_context_reset_reason(state):
+    return (_context_get(state, "short_context_reset_reason") or "").strip()
+
+def set_short_context_reset_reason(state, value):
+    _context_set(state, "short_context_reset_reason", str(value or ""))
+
+
+# ── 对话文本 ──
+
+def get_last_message_text(state):
+    return (_context_get(state, "last_message_text") or "").strip()
+
+def set_last_message_text(state, value):
+    _context_set(state, "last_message_text", str(value or ""))
+
+def get_last_message_time(state):
+    try:
+        return float(_context_get(state, "last_message_time", coerce=float))
+    except (TypeError, ValueError):
+        return 0.0
+
+def set_last_message_time(state, value):
+    _context_set(state, "last_message_time", float(value or 0))
+
+def get_character_history_summary(state):
+    return (_context_get(state, "character_history_summary") or "").strip()
+
+def set_character_history_summary(state, value):
+    _context_set(state, "character_history_summary", str(value or ""))

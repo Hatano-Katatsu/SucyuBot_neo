@@ -388,7 +388,7 @@ def session_summary(service, session_id: str, state: dict[str, Any]) -> dict[str
         "last_interaction": last,
         "last_interaction_ago": human_ago(now - last) if last else "无记录",
         "daily_push": f"{len(state.get('daily_triggered_times', []))}/{len(state.get('daily_trigger_times', []))}",
-        "photos": len(state.get("sent_photos_history", [])),
+        "photos": len(session_schema.get_sent_photos_history(state)),
         "saved_characters": len(state.get("saved_characters", {})),
         "frozen": bool(state.get("frozen")),
     }
@@ -1258,7 +1258,7 @@ async def api_get_history_summary(request: web.Request):
         pass
     if not summary:
         state = service._get_session_state(sid)
-        summary = str(state.get("character_history_summary") or "").strip()
+        summary = session_schema.get_character_history_summary(state)
     return json_ok({"character_key": key, "summary": summary})
 
 
@@ -1277,7 +1277,7 @@ async def api_save_history_summary(request: web.Request):
     except Exception as exc:
         return json_error(f"保存历史提要失败: {exc}", status=500)
     state = service._get_session_state(sid)
-    state["character_history_summary"] = summary
+    session_schema.set_character_history_summary(state, summary)
     service._save_session_state(sid, state)
     return json_ok({"character_key": char, "summary": summary})
 
