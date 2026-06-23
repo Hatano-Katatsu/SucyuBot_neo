@@ -439,11 +439,14 @@ class TelegramComfyUIService(
         except ValueError:
             return raw
 
-    def _get_session_state(self, session_id: str) -> dict[str, Any]:
-        if session_id not in self.sessions:
-            self.sessions[session_id] = {}
-        state = self.sessions[session_id]
-        defaults = {
+    @staticmethod
+    def _session_state_defaults() -> dict[str, Any]:
+        """会话 state 全部字段的默认值（单一来源）。
+
+        既供 `_get_session_state` 做 setdefault，也供通用上下文清空按字段默认值复位
+        （见 commands._clear_conversation_context）。新增字段只在这里加一行即可。
+        """
+        return {
             "last_interaction": time.time(),
             "last_morning_greet_date": "",
             "daily_trigger_times": [],
@@ -477,9 +480,11 @@ class TelegramComfyUIService(
             "user_place_text": "",
             "user_place_updated_at": 0,
             "user_place_confidence": 0,
+            "user_co_located": False,
             "character_place": "",
             "character_place_label": "",
             "character_place_text": "",
+            "character_place_name": "",
             "character_place_updated_at": 0,
             "character_place_confidence": 0,
             "character_place_history": [],
@@ -516,7 +521,12 @@ class TelegramComfyUIService(
             "short_context_reset_time": 0,
             "short_context_reset_reason": "",
         }
-        for key, val in defaults.items():
+
+    def _get_session_state(self, session_id: str) -> dict[str, Any]:
+        if session_id not in self.sessions:
+            self.sessions[session_id] = {}
+        state = self.sessions[session_id]
+        for key, val in self._session_state_defaults().items():
             state.setdefault(key, val)
         return state
 

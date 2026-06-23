@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import random
 import re
@@ -24,6 +25,38 @@ SESSION_CUSTOM_RESET_KEYS = (
     "custom_visual_character", "custom_visual_series",
     "custom_character_age_stage", "custom_character_occupation", "custom_character_day_anchor",
 )
+# ── 会话 state 字段归属分类（单一来源，根治 ③：三份手写名单各漏字段导致的串味/丢档）──
+# state 的键分三类，切角色时各走各的路：
+#   · 会话全局（SESSION_GLOBAL_STATE_KEYS）：属于这场会话/这个人，绝不随角色冻结/清空（计时、调度、
+#     NTR 进度、容器自身）。
+#   · 角色配置（custom_* 前缀 + 少数显式项）：身份/人设/外貌设定，走 saved_characters 卡 schema。
+#   · 角色短期态（其余一切）：对话/位置/照片/穿搭等工作记忆，走 character_contexts 冻结/解冻。
+# 关键：短期态用「黑名单之外即是」反推——新增字段默认跟角色走，漏配的失败方向是“正确隔离”而非串味。
+SESSION_GLOBAL_STATE_KEYS = frozenset({
+    "last_interaction", "last_morning_greet_date",
+    "daily_trigger_times", "daily_trigger_date", "daily_triggered_times",
+    "saved_characters", "character_contexts", "init_flow",
+    "ntr_stage_reached", "ntr_reconcile_count", "ntr_affection_reset",
+    "frozen", "frozen_at",  # 用户/会话级冻结状态，与角色无关，切角色不得清
+})
+# custom_ 前缀之外的角色配置项（标志位/纯良度），同样不进短期态冻结。
+CHARACTER_CONFIG_EXTRA_KEYS = frozenset({"purity", "purity_user_set", "persona_user_set"})
+# 短期态里「/reset（清对话）要保留、只有切角色才清」的子集：当前外型/穿搭属于角色当下状态，
+# 不算“对话上下文”，轻量 reset 应保留它们；切角色才整体冻结/解冻/清空。
+RESET_PRESERVED_TRANSIENT_KEYS = frozenset({
+    "dynamic_appearance", "wardrobe", "wardrobe_closet", "life_profile",
+})
+
+
+def _is_character_config_key(key: str) -> bool:
+    return key.startswith("custom_") or key in CHARACTER_CONFIG_EXTRA_KEYS
+
+
+def _is_transient_state_key(key: str) -> bool:
+    """是否为「角色短期态」字段：既非会话全局、也非角色配置，即随角色冻结/解冻/清空。"""
+    return key not in SESSION_GLOBAL_STATE_KEYS and not _is_character_config_key(key)
+
+
 RESET_DONE_MSG = "对话上下文与照片历史已清空。角色设定与角色池保持不变。"
 
 CLEARUP_DONE_MSG = (
@@ -537,7 +570,6 @@ class CommandHandlersMixin:
         state["custom_bot_name"] = name
         state["custom_scheduled_persona"] = persona_text
         state["custom_positive_prefix"] = appearance_tags
-        state["dynamic_appearance"] = outfit_tags
         state["custom_spatial_relationship"] = relationship
         state["custom_scene_preference"] = intake.get("scene_preference", "")
         state["custom_selfie_preference"] = intake.get("selfie_preference", "")
@@ -551,6 +583,8 @@ class CommandHandlersMixin:
         state.pop("life_profile", None)
         if switching:
             self._restore_character_context(session_id, state)
+        # 新 OC 的初始穿搭在 restore（切角色会整体清空短期态）之后再设，避免被清掉。
+        state["dynamic_appearance"] = outfit_tags
 
         self._snapshot_character(state)
         saved = state.setdefault("saved_characters", {})
@@ -1074,36 +1108,30 @@ class CommandHandlersMixin:
         state.pop("life_profile", None)
         self._clear_conversation_context(state)
 
-    @staticmethod
-    def _clear_conversation_context(state: dict[str, Any]):
-        """清掉会带着旧人设/旧画面回流进提示词的对话上下文。"""
-        state["chat_history"] = []
-        state["recent_message_history"] = []
-        state["checkpoint_summary"] = ""
-        state["checkpoint_message_id"] = 0
-        state["sent_photos_history"] = []
-        state["short_context_start"] = 0
-        state["short_context_reset_time"] = 0
-        state["short_context_reset_reason"] = ""
-        state["replying_to_selfie"] = False
-        state["last_sent_selfie_time"] = 0
-        state["last_sent_selfie_caption"] = ""
-        state["last_sent_selfie_source_description"] = ""
-        state["last_sent_selfie_replied"] = False
-        state["rounds_since_image"] = 0
-        # 角色位置不跨角色继承：换角色后由新角色的对话/动线重新确立。
-        state["character_place"] = ""
-        state["character_place_updated_at"] = 0
-        state["character_place_history"] = []
-        state["rounds_since_location"] = 0
-        # 用户位置也一并清（修复原先 CC 漏清 user_place 的不对称）：换角色/clearup 是硬重置，
-        # 用户上一段对话里声明的所在不应渗进新角色上下文，由新对话重新确立。
-        state["user_place"] = ""
-        state["user_place_label"] = ""
-        state["user_place_text"] = ""
-        state["user_place_updated_at"] = 0
-        state["user_place_confidence"] = 0
-        state["user_co_located"] = False
+    def _clear_transient_state(self, state: dict[str, Any], *, keep_appearance: bool = False):
+        """把「角色短期态」字段复位到默认值——遍历分类器、按 `_session_state_defaults` 逐字段复位，
+        而非手写名单（根治 ③：新增短期字段无需再来这里补一行，漏配也不会串味）。
+
+        keep_appearance=True：保留当前外型/穿搭等（`/reset` 清对话但留外型）；
+        keep_appearance=False：整体清空（切角色 restore 前的全清）。
+        会话全局与角色配置字段始终不动。
+        """
+        defaults = self._session_state_defaults()
+        for key in list(state.keys()):
+            if not _is_transient_state_key(key):
+                continue
+            if keep_appearance and key in RESET_PRESERVED_TRANSIENT_KEYS:
+                continue
+            if key in defaults:
+                state[key] = copy.deepcopy(defaults[key])
+            else:
+                # 默认表里没有的动态短期键（life_profile/user_co_located/character_place_name 等）：
+                # 删除即回到“未设”自然默认。
+                state.pop(key, None)
+
+    def _clear_conversation_context(self, state: dict[str, Any]):
+        """清掉会带着旧话题/旧画面回流进提示词的对话上下文（`/reset`、clearup 用），保留当前外型/穿搭。"""
+        self._clear_transient_state(state, keep_appearance=True)
 
     @staticmethod
     def _character_context_key_from_state(state: dict[str, Any]) -> str:
@@ -1111,16 +1139,8 @@ class CommandHandlersMixin:
 
     @staticmethod
     def _conversation_context_payload(state: dict[str, Any]) -> dict[str, Any]:
-        keys = (
-            "chat_history", "recent_message_history", "checkpoint_summary", "checkpoint_message_id",
-            "last_checkpoint_at", "sent_photos_history", "short_context_start",
-            "short_context_reset_time", "short_context_reset_reason", "replying_to_selfie",
-            "last_sent_selfie_time", "last_sent_selfie_caption", "last_sent_selfie_source_description",
-            "last_sent_selfie_replied", "rounds_since_image", "character_place",
-            "character_place_label", "character_place_text", "character_place_updated_at",
-            "character_place_confidence", "character_place_history", "rounds_since_location",
-        )
-        return {key: state.get(key) for key in keys}
+        """冻结当前角色的全部短期态：黑名单之外即冻，与清空同源，杜绝“冻的和清的不一致”。"""
+        return {key: state.get(key) for key in state.keys() if _is_transient_state_key(key)}
 
     def _save_current_character_context(self, state: dict[str, Any]):
         key = self._character_context_key_from_state(state)
@@ -1129,12 +1149,11 @@ class CommandHandlersMixin:
     def _restore_character_context(self, session_id: str, state: dict[str, Any]):
         key = self._character_context_key_from_state(state)
         payload = (state.get("character_contexts") or {}).get(key)
+        # 切角色：整体清空全部短期态（含外型/穿搭），再用目标角色存档覆盖——保证不串味，且切回拿回自己穿搭。
+        self._clear_transient_state(state, keep_appearance=False)
         if isinstance(payload, dict):
-            self._clear_conversation_context(state)
             for ctx_key, value in payload.items():
                 state[ctx_key] = value
-        else:
-            self._clear_conversation_context(state)
         try:
             checkpoint = self.app_store.get_checkpoint(session_id, self._context_character_key(session_id))
             if checkpoint.get("summary"):
@@ -1393,8 +1412,9 @@ class CommandHandlersMixin:
             if data.get("purity") is not None and not state.get("purity_user_set"):
                 state["purity"] = data.get("purity")
             if switching:
+                # 短期态（含 dynamic_appearance/wardrobe）现已随 character_contexts 冻结/解冻：
+                # 切回的角色拿回自己存档的穿搭，新角色则被清空——不再需要在此硬抹（那会覆盖存档）。
                 self._restore_character_context(session_id, state)
-                state["dynamic_appearance"] = ""  # 不继承上一个角色的临时穿搭
             state.pop("life_profile", None)
             self._save_session_state(session_id, state)
             self._ulog(session_id, "SWITCH", f"载入角色 {sub_arg}" + ("（已清空对话上下文）" if switching else ""))

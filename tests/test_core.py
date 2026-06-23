@@ -11,6 +11,11 @@ from unittest.mock import AsyncMock, patch
 from telegram_comfyui_selfie import TelegramComfyUIService
 from telegram_comfyui_selfie import appearance as appearance_rules
 from telegram_comfyui_selfie.image_planning import _detect_intimate_context, format_dialog_context, format_sent_photo_context, normalize_scene_visual_subject, plan_roleplay_image
+from telegram_comfyui_selfie.commands import (
+    SESSION_GLOBAL_STATE_KEYS,
+    _is_character_config_key,
+    _is_transient_state_key,
+)
 from telegram_comfyui_selfie.prompt_intake import heuristic_intake
 from telegram_comfyui_selfie.webui import build_world_route_preview, cast_config_value, masked_config, serialize_prompt_slots, session_summary
 
@@ -2487,6 +2492,77 @@ class ServiceTestCase(unittest.TestCase):
             # 切换不清空角色池，B/A 都还在。
             self.assertIn("角色A", after["saved_characters"])
             self.assertIn("角色B", after["saved_characters"])
+
+        asyncio.run(run())
+
+    def test_transient_state_partition_classifier(self):
+        """字段单一来源（黑名单反推）：会话全局/角色配置/短期态三类不重叠，关键字段各归其位。
+
+        守住分类器，防未来新增字段误分类。短期态 = 既非会话全局、也非角色配置。
+        """
+        # 会话全局：绝不随角色走
+        for k in ["last_interaction", "daily_trigger_times", "saved_characters",
+                  "character_contexts", "ntr_stage_reached", "init_flow"]:
+            self.assertFalse(_is_transient_state_key(k), f"{k} 应为会话全局")
+        # 角色配置（custom_ 前缀 + 纯良度/标志位）：走 saved_characters 卡
+        for k in ["custom_character", "custom_scheduled_persona", "custom_positive_prefix",
+                  "purity", "purity_user_set", "persona_user_set"]:
+            self.assertTrue(_is_character_config_key(k), f"{k} 应为角色配置")
+            self.assertFalse(_is_transient_state_key(k), f"{k} 配置不应进短期态")
+        # 短期态：随角色冻结/解冻/清空（含原先会串味的 wardrobe，及动态键）
+        for k in ["chat_history", "sent_photos_history", "user_place", "character_place",
+                  "dynamic_appearance", "wardrobe", "wardrobe_closet", "user_co_located",
+                  "character_place_name", "life_profile", "short_context_start"]:
+            self.assertTrue(_is_transient_state_key(k), f"{k} 应为短期态")
+        # 会话全局与角色配置不重叠
+        self.assertFalse(any(_is_character_config_key(k) for k in SESSION_GLOBAL_STATE_KEYS))
+
+    def test_character_switch_roundtrip_restores_full_transient(self):
+        """A→B→A 往返：A 的全部短期态（含 wardrobe/位置/照片/穿搭）原样解冻；B 不继承 A 的任何短期态。
+
+        这是 ③ 的根治守卫——不再逐字段列，凡短期态都随角色冻结/解冻，漏配不再串味。
+        """
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.send_message = AsyncMock()
+            state = svc._get_session_state(sid)
+            state.update({
+                "custom_character": "角色A",
+                "saved_characters": {
+                    "角色A": {"character": "角色A", "persona": "我是A"},
+                    "角色B": {"character": "角色B", "persona": "我是B"},
+                },
+                "chat_history": [{"role": "assistant", "content": "A的台词"}],
+                "sent_photos_history": [{"timestamp": 9999999999, "scene": "A的画面", "view": "selfie"}],
+                "dynamic_appearance": "A的红裙",
+                "wardrobe": {"红裙": ["red dress"]},
+                "user_place": "mall",
+                "user_place_updated_at": time.time(),
+            })
+            svc._save_session_state(sid, state)
+
+            await svc.cmd_character(1, sid, "load 角色B")
+            after_b = svc._get_session_state(sid)
+            # B 不继承 A 的任何短期态（含原先会串味的 wardrobe/dynamic_appearance/user_place）
+            self.assertEqual(after_b["chat_history"], [])
+            self.assertEqual(after_b["sent_photos_history"], [])
+            self.assertEqual(after_b["dynamic_appearance"], "")
+            self.assertEqual(after_b["wardrobe"], {})
+            self.assertEqual(after_b["user_place"], "")
+            # B 期间产生自己的短期态
+            after_b["chat_history"] = [{"role": "assistant", "content": "B的台词"}]
+            after_b["dynamic_appearance"] = "B的西装"
+            svc._save_session_state(sid, after_b)
+
+            await svc.cmd_character(1, sid, "load 角色A")
+            after_a = svc._get_session_state(sid)
+            # 切回 A：A 离开时的全部短期态原样解冻
+            self.assertEqual(after_a["chat_history"], [{"role": "assistant", "content": "A的台词"}])
+            self.assertEqual(after_a["sent_photos_history"][0]["scene"], "A的画面")
+            self.assertEqual(after_a["dynamic_appearance"], "A的红裙")
+            self.assertEqual(after_a["wardrobe"], {"红裙": ["red dress"]})
+            self.assertEqual(after_a["user_place"], "mall")
 
         asyncio.run(run())
 
