@@ -533,6 +533,17 @@ class CommandHandlersMixin:
 
         appearance_tags = await self._oc_translate_tags(appearance)
         outfit_tags = await self._oc_translate_tags(outfit)
+        # 穿搭串归一去重（LLM 可能输出重复标签），避免展示和存储中的脏数据。
+        outfit_tags = session_schema.normalize_outfit_string(outfit_tags)
+        # 穿搭字段只保留服装/配饰/其他标签，剔除发色/瞳色等稳定外观标签；
+        # 防止 LLM 误分类或默认角色外观污染 dynamic_appearance。
+        # dynamic_appearance 只存「衣服/配饰 + 本角色显式的临时发/瞳」，稳定外貌走 custom_positive_prefix。
+        if outfit_tags:
+            parsed = appearance_rules.parse_appearance(outfit_tags, self._outfit_kw, self._accessory_kw)
+            filtered: dict[str, list[str]] = {"hair": [], "eyes": [], "outfit": [], "accessory": [], "other": []}
+            for k in ("outfit", "accessory", "other"):
+                filtered[k] = parsed[k]
+            outfit_tags = appearance_rules.slots_to_string(filtered)
         if not appearance_tags:
             appearance_tags = f"{self.config.get('default_hair', 'black long flowing hair')}, {self.config.get('default_eyes', 'purple eyes')}"
 

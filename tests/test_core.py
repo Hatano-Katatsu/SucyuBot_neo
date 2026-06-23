@@ -296,6 +296,101 @@ class ServiceTestCase(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_create_oc_strips_hair_eyes_and_dedup_from_outfit(self):
+        """OC创建时穿搭字段不含发色/瞳色标签，且去重——防止 LLM 误分类或默认外观污染 dynamic_appearance。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_create_oc(
+                1,
+                sid,
+                "名字: 林翩翩\n身体特征: brown eyes\n初始穿搭: black hair, brown hair, white hanfu, purple eyes, pink vertical pupils, white hanfu",
+            )
+
+            state = svc._get_session_state(sid)
+            outfit = session_schema.get_outfit(state)
+            # 发色/瞳色应从穿搭中剔除
+            self.assertNotIn("black hair", outfit.lower())
+            self.assertNotIn("brown hair", outfit.lower())
+            self.assertNotIn("purple eyes", outfit.lower())
+            self.assertNotIn("pink vertical", outfit.lower())
+            # 只保留服装/配饰
+            self.assertIn("white hanfu", outfit.lower())
+            # 去重（"white hanfu" 只出现一次）
+            self.assertEqual(outfit.lower().count("white hanfu"), 1)
+            # 基础外观保留用户输入
+            self.assertIn("brown eyes", (state.get("custom_positive_prefix") or "").lower())
+            # 最终穿搭不含质量词/发瞳，确认干净
+            self.assertEqual(outfit.lower(), "white hanfu")
+
+        asyncio.run(run())
+
+    def test_create_oc_empty_outfit_unchanged_after_filter(self):
+        """空穿搭不受过滤影响——无输入时不应污染 dynamic_appearance。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.send_message = AsyncMock()
+            # LLM 外观翻译：中文→英文
+            svc._translate_appearance_tags = AsyncMock(side_effect=lambda text: text)
+
+            await svc.cmd_create_oc(
+                1,
+                sid,
+                "名字: 小羽\n身体特征: blue eyes, short blonde hair",
+            )
+
+            state = svc._get_session_state(sid)
+            # 无穿搭输入 → dynamic_appearance 应为空
+            self.assertEqual(session_schema.get_outfit(state), "")
+            # 基础外观保留
+            self.assertIn("blue eyes", state.get("custom_positive_prefix", "").lower())
+            self.assertIn("blonde hair", state.get("custom_positive_prefix", "").lower())
+
+        asyncio.run(run())
+
+    def test_webui_outfit_save_reflected_in_build_prompt(self):
+        """WebUI角色页保存outfit后，build_prompt 应使用新穿搭，不出现默认发瞳污染。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.send_message = AsyncMock()
+            # _oc_translate_tags 直接透传英文标签（无 CJK → 不调 LLM）
+            svc._oc_translate_tags = AsyncMock(side_effect=lambda text: (text or "").strip())
+
+            # 创建含污穿搭的 OC（模拟 LLM 误分类把默认发瞳灌进穿搭）
+            await svc.cmd_create_oc(
+                1, sid,
+                "名字: 林翩翩\n身体特征: brown eyes, black hair\n"
+                "初始穿搭: purple eyes, pink vertical pupils, black hair, white hanfu",
+            )
+            state = svc._get_session_state(sid)
+            # 修复已生效：穿搭不含发瞳
+            outfit = session_schema.get_outfit(state)
+            self.assertNotIn("purple eyes", outfit.lower())
+            self.assertNotIn("pink vertical", outfit.lower())
+            self.assertIn("white hanfu", outfit.lower())
+
+            # 模拟 WebUI 角色页保存：把穿搭清空
+            payload = {"id": "林翩翩", "outfit": "", "appearance": "brown eyes, black hair"}
+            # 复现 api_save_character 的条件逻辑
+            active_id = state.get("custom_character") or state.get("custom_bot_name") or ""
+            key = str(payload.get("id") or payload.get("character") or payload.get("bot_name") or "").strip()
+            self.assertEqual(active_id, key)  # 应该相等，否则 _apply_character_payload 不会调用
+            svc._apply_character_payload(state, payload)
+
+            # 穿搭已清空
+            self.assertEqual(session_schema.get_outfit(state), "")
+
+            # build_prompt 应只用 base appearance（brown eyes），不出默认紫瞳
+            pos, neg = svc._build_prompt("standing in a room", session_id=sid)
+            self.assertIn("brown eyes", pos.lower())
+            self.assertNotIn("purple eyes", pos.lower())
+
+        asyncio.run(run())
+
     def test_appearance_natural_input_splits_stable_and_dynamic_slots(self):
         async def run():
             svc = self.make_service()
