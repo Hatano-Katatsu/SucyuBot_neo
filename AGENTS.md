@@ -264,6 +264,24 @@ custom_allow_llm_change_appearance : true   # 自动换装开着
 
 **相关代码**：换装链路 [`tool_change_appearance`→`_apply_wardrobe`→`_wardrobe_apply_to_state`→`_classify_wardrobe_change`](telegram_comfyui_selfie/service.py:1887)；clothing_off 逐图脱衣在生图侧（`image_planning.py` / `generation.py` 的 `clothing_off` 分支）；外观开关三态见 [`_allow_llm_change_appearance`](telegram_comfyui_selfie/service.py:786)。先加针对性测试（脱光后 `dynamic_appearance`/`closet` 的预期、`positive_prefix` 不被临时项污染）再改实现。
 
+## 交接任务（2026-06-24）：脱衣/外观污染 + 分盒重构进行中
+
+**当前进度（数据结构分盒重构）**：阶段 1（scope 表单一来源）✅、`clothing` 盒切换 ✅、持久裸体态 ✅、穿搭串归一（去重+空格）✅。下一步按「## 数据结构分盒重构·路线图」砌 `place`→`context`→`session`→`character` 四盒。
+
+**⚠️ 先重启线上 bot**：上述修复都在最新 commit 里，但运行进程是旧码。线上日志（`telegram_*.log`）仍出现 `dynamic_appearance` 重复标签 = 旧码在跑。重启后 `ensure_clothing_box` 才会懒清理脏数据、剥衣才确定性。
+
+**线上日志（2026-06-24 00:11–00:14，新角色林翩翩）暴露的待修问题**（重启**也修不掉**，需改代码）：
+
+1. **「衣服脱了」不触发裸体（P1，最严重）**。用户「…衣服脱了」、角色「寝衣滑落」，但自拍仍全套汉服。两因叠加：①`image_planning.NUDITY_CONTEXT_ZH` 缺倒装/含蓄词（有「脱掉衣服/脱下衣服/衣服都脱」，**没有「衣服脱了/脱了衣服/宽衣解带/敞开/滑落/褪下」**）；②规划器只写「半脱」（nightgown slips to elbows）、`clothing_off` 留空。方向：补关键词表 + 让明确「半脱/敞胸」也按程度填 `clothing_off`（topless 等）。
+
+2. **新角色被默认魅魔发/瞳污染（P1，根因）**。林翩翩「身体特征」是 `brown eyes`，但生图 `effective` 出 `purple eyes, pink vertical pupils`（+ `black hair, smooth hair, air bangs`）——默认角色的发/瞳串进了该 OC 的 `dynamic_appearance`。这是 AGENTS.md 旧交接「基础特征串污染」对**新角色**的复现。归一只去重、不剔除外观项，治不了。方向：定位创建/设定角色时把默认发/瞳灌进 `dynamic_appearance` 的写入路径并堵住；`dynamic_appearance` 应只存「衣服/配饰 + 本角色显式的临时发/瞳」，不得回退默认角色外观。**这是好几个问题的共同根（脏穿搭串）——建议优先修。**
+
+3. **scene 英文被换装去冲突逻辑损坏（P2）**。`generation._strip_conflicting_scene_outfit` 把 `moon-white nightgown…` 替换成 `moon-wearing the current outfit`——颜色词正则 `\b(white|…)` 命中 `moon-white` 的 `white`，把 `moon-` 拦腰截断。方向：替换前要求颜色词左边是空白/句首边界，别截断连字符复合词。
+
+4. **outfit 写入时就重复（P2）**。base 干净、`dynamic_appearance` 自身重复两遍 → 创建/设定角色侧把 outfit 灌了两遍（归一重启后会去重，但写入源头也该堵）。
+
+**建议起手**：先修 #2（发/瞳污染的写入路径），它是脏穿搭串的根；连带 #1 关键词补全。改前先复现定位 + 加测试（新 OC 的 `dynamic_appearance` 不得含默认发/瞳；`brown eyes` 角色生图不出 `purple eyes`）。
+
 ## 已知限制（暂不修，等模型能力）
 
 - **时序叙事 / 同一部位多位置导致崩图**：规划器有时会把 scene 写成带时间推进的小叙事（`Suddenly … / still cling / doesn't bother wiping`），并给同一部位分配互斥位置（例：尾巴同时“tracing circles on the armrest”又“taps the back of the hand”）、给脸两个表情态。diffusion 没有时间轴，会把整段当成同一帧的约束全集去满足 → 叠加态（双尾/扭曲尾、糊脸）。本质是画图模型的语义解析能力问题，**当前不在 prompt 端硬堵**（硬堵会把生动场景描述削干，收益有限）。若日后要治本，方向是在 `image_planning.py` 的 “Scene boundary” 指令里加约束：scene 只描述单一冻结瞬间、禁时间推进词、同一身体部位只给一个位置/动作、表情只给终态。`_normalize_*` 那套下游正则只改人称/颜色/光照，碰不到叙事结构，治不了这个。
