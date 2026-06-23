@@ -138,22 +138,26 @@ STATE_SCHEMA: dict[str, Field] = {
         "nudity_at": 0.0,           # 裸体态确立时间，供 TTL 老化
     }, reset_preserved=True),
     "life_profile": Field(T, reset_preserved=True),  # 动态产生，不进默认表
-    # —— 角色短期态：用户位置 ——
-    "user_place": Field(T, default=""),
-    "user_place_label": Field(T, default=""),
-    "user_place_text": Field(T, default=""),
-    "user_place_updated_at": Field(T, default=0),
-    "user_place_confidence": Field(T, default=0),
-    "user_co_located": Field(T, default=False),
-    # —— 角色短期态：角色位置 ——
-    "character_place": Field(T, default=""),
-    "character_place_label": Field(T, default=""),
-    "character_place_text": Field(T, default=""),
-    "character_place_name": Field(T, default=""),
-    "character_place_updated_at": Field(T, default=0),
-    "character_place_confidence": Field(T, default=0),
-    "character_place_history": Field(T, default=[]),
-    "rounds_since_location": Field(T, default=0),
+    # —— 角色短期态：位置（place box）——
+    # 用户位置 / 角色位置 / 同处判定 / 陈旧度全部收进 state["place"] 子字典。
+    # 访问一律走本模块的访问器，不要直接下钻 state["place"][...]。
+    "place": Field(T, default={
+        "user_place": "",
+        "user_place_label": "",
+        "user_place_text": "",
+        "user_place_updated_at": 0,
+        "user_place_confidence": 0,
+        "user_co_located": False,
+        "user_place_source": "",
+        "character_place": "",
+        "character_place_label": "",
+        "character_place_text": "",
+        "character_place_name": "",
+        "character_place_updated_at": 0,
+        "character_place_confidence": 0,
+        "character_place_history": [],
+        "rounds_since_location": 0,
+    }, reset_preserved=False),
     # —— 角色短期态：配图节奏 / 短期场景边界 ——
     "rounds_since_image": Field(T, default=0),
     "short_context_start": Field(T, default=0),
@@ -212,13 +216,7 @@ BOXES: tuple[str, ...] = (BOX_SESSION, BOX_CHARACTER, BOX_CLOTHING, BOX_PLACE, B
 
 # 短期态里按域细分（其余短期态默认归 context）。
 _CLOTHING_KEYS = frozenset({"clothing"})
-_PLACE_KEYS = frozenset({
-    "user_place", "user_place_label", "user_place_text", "user_place_updated_at",
-    "user_place_confidence", "user_co_located",
-    "character_place", "character_place_label", "character_place_text", "character_place_name",
-    "character_place_updated_at", "character_place_confidence", "character_place_history",
-    "rounds_since_location",
-})
+_PLACE_KEYS = frozenset({"place"})
 # 短期态但归属角色域的派生缓存（生活档案：年龄段/职业/白天去向推断）。
 _CHARACTER_DOMAIN_TRANSIENT = frozenset({"life_profile"})
 
@@ -350,3 +348,177 @@ def clear_nudity(state: dict[str, Any]) -> None:
     box = ensure_clothing_box(state)
     box["nudity"] = ""
     box["nudity_at"] = 0.0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# place box：第二个切换的盒。把用户位置 / 角色位置 / 同处判定从扁平顶层收进
+# state["place"]。所有访问走下面的访问器，调用方不直接下钻盒内键名。
+# ──────────────────────────────────────────────────────────────────────────
+
+# 盒内默认值（与 STATE_SCHEMA["place"].default 同源含义）。
+_PLACE_DEFAULT: dict[str, Any] = {
+    "user_place": "",
+    "user_place_label": "",
+    "user_place_text": "",
+    "user_place_updated_at": 0,
+    "user_place_confidence": 0,
+    "user_co_located": False,
+    "user_place_source": "",
+    "character_place": "",
+    "character_place_label": "",
+    "character_place_text": "",
+    "character_place_name": "",
+    "character_place_updated_at": 0,
+    "character_place_confidence": 0,
+    "character_place_history": [],
+    "rounds_since_location": 0,
+}
+_LEGACY_PLACE_FLAT_KEYS = (
+    "user_place", "user_place_label", "user_place_text", "user_place_updated_at",
+    "user_place_confidence", "user_co_located", "user_place_source",
+    "character_place", "character_place_label", "character_place_text", "character_place_name",
+    "character_place_updated_at", "character_place_confidence", "character_place_history",
+    "rounds_since_location",
+)
+
+
+def ensure_place_box(state: dict[str, Any]) -> dict[str, Any]:
+    """保证 state["place"] 存在且子键补齐；把旧扁平 place 字段迁移进盒（幂等）。"""
+    box = state.get("place")
+    if not isinstance(box, dict):
+        box = {}
+        state["place"] = box
+    for key in _LEGACY_PLACE_FLAT_KEYS:
+        if key in state:
+            box[key] = state.pop(key)
+    for key, default in _PLACE_DEFAULT.items():
+        if key not in box:
+            box[key] = copy.deepcopy(default)
+    return box
+
+
+# ── 用户位置访问器 ──
+
+def get_user_place(state: dict[str, Any]) -> str:
+    return (ensure_place_box(state).get("user_place") or "").strip()
+
+def get_user_place_label(state: dict[str, Any]) -> str:
+    return ensure_place_box(state).get("user_place_label") or ""
+
+def get_user_place_text(state: dict[str, Any]) -> str:
+    return ensure_place_box(state).get("user_place_text") or ""
+
+def get_user_place_updated_at(state: dict[str, Any]) -> float:
+    try:
+        return float(ensure_place_box(state).get("user_place_updated_at", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+def get_user_place_confidence(state: dict[str, Any]) -> float:
+    try:
+        return float(ensure_place_box(state).get("user_place_confidence", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+def get_user_co_located(state: dict[str, Any]) -> bool:
+    return bool(ensure_place_box(state).get("user_co_located", False))
+
+def get_user_place_source(state: dict[str, Any]) -> str:
+    return ensure_place_box(state).get("user_place_source") or ""
+
+def set_user_place(state: dict[str, Any], *, key="", label="", text="",
+                   updated_at=None, confidence=None, co_located=None, source=None):
+    box = ensure_place_box(state)
+    if key is not None:
+        box["user_place"] = key or ""
+    if label is not None:
+        box["user_place_label"] = label or ""
+    if text is not None:
+        box["user_place_text"] = text or ""
+    if updated_at is not None:
+        box["user_place_updated_at"] = float(updated_at or 0)
+    if confidence is not None:
+        box["user_place_confidence"] = float(confidence or 0)
+    if co_located is not None:
+        box["user_co_located"] = bool(co_located)
+    if source is not None:
+        box["user_place_source"] = source or ""
+
+def set_user_co_located(state: dict[str, Any], value: bool):
+    ensure_place_box(state)["user_co_located"] = bool(value)
+
+
+# ── 角色位置访问器 ──
+
+def get_character_place(state: dict[str, Any]) -> str:
+    return (ensure_place_box(state).get("character_place") or "").strip()
+
+def get_character_place_label(state: dict[str, Any]) -> str:
+    return ensure_place_box(state).get("character_place_label") or ""
+
+def get_character_place_text(state: dict[str, Any]) -> str:
+    return ensure_place_box(state).get("character_place_text") or ""
+
+def get_character_place_name(state: dict[str, Any]) -> str:
+    return (ensure_place_box(state).get("character_place_name") or "").strip()
+
+def get_character_place_updated_at(state: dict[str, Any]) -> float:
+    try:
+        return float(ensure_place_box(state).get("character_place_updated_at", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+def get_character_place_confidence(state: dict[str, Any]) -> float:
+    try:
+        return float(ensure_place_box(state).get("character_place_confidence", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+def get_character_place_history(state: dict[str, Any]) -> list:
+    val = ensure_place_box(state).get("character_place_history")
+    return val if isinstance(val, list) else []
+
+def get_rounds_since_location(state: dict[str, Any]) -> int:
+    try:
+        return int(ensure_place_box(state).get("rounds_since_location", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+def set_character_place(state: dict[str, Any], *, key="", label="", text="",
+                        name="", updated_at=None, confidence=None, rounds=None):
+    box = ensure_place_box(state)
+    if key is not None:
+        box["character_place"] = key or ""
+    if label is not None:
+        box["character_place_label"] = label or ""
+    if text is not None:
+        box["character_place_text"] = text or ""
+    if name is not None:
+        box["character_place_name"] = name or ""
+    if updated_at is not None:
+        box["character_place_updated_at"] = float(updated_at or 0)
+    if confidence is not None:
+        box["character_place_confidence"] = float(confidence or 0)
+    if rounds is not None:
+        box["rounds_since_location"] = int(rounds or 0)
+
+def set_character_place_updated_at(state: dict[str, Any], value: float):
+    ensure_place_box(state)["character_place_updated_at"] = float(value or 0)
+
+def set_character_place_history(state: dict[str, Any], value: list):
+    ensure_place_box(state)["character_place_history"] = list(value or [])
+
+def append_character_place_history(state: dict[str, Any], entry: dict, *, max_len: int = 20):
+    box = ensure_place_box(state)
+    hist = box.get("character_place_history")
+    if not isinstance(hist, list):
+        hist = []
+    hist.append(entry)
+    box["character_place_history"] = hist[-max_len:]
+
+def set_rounds_since_location(state: dict[str, Any], value: int):
+    ensure_place_box(state)["rounds_since_location"] = int(value or 0)
+
+def increment_rounds_since_location(state: dict[str, Any]):
+    box = ensure_place_box(state)
+    box["rounds_since_location"] = int(box.get("rounds_since_location", 0) or 0) + 1

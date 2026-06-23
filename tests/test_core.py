@@ -849,7 +849,7 @@ class ServiceTestCase(unittest.TestCase):
             # mock LLM 返回 home → 自动抽取并持久化 → 压过时钟
             svc._call_llm = AsyncMock(return_value='{"place":"home"}')
             self.assertTrue(await svc._update_character_place_from_text(sid, "我在家呢，刚到客厅"))
-            self.assertEqual(state["character_place"], "home")
+            self.assertEqual(session_schema.get_character_place(state), "home")
             self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "home")
         asyncio.run(run())
 
@@ -862,8 +862,8 @@ class ServiceTestCase(unittest.TestCase):
             msg = await svc.tool_update_location(sid, "楼下的咖啡店")
             self.assertIn("咖啡", msg)
             state = svc._get_session_state(sid)
-            self.assertEqual(state["character_place"], "cafe")
-            self.assertEqual(state["character_place_confidence"], 0.95)
+            self.assertEqual(session_schema.get_character_place(state), "cafe")
+            self.assertEqual(session_schema.get_character_place_confidence(state), 0.95)
             self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "cafe")
 
         asyncio.run(run())
@@ -877,8 +877,8 @@ class ServiceTestCase(unittest.TestCase):
             svc._session_now = lambda session_id="": fixed_now
             await svc.tool_update_location(sid, "上海海军博物馆")
             state = svc._get_session_state(sid)
-            self.assertEqual(state["character_place"], "museum")
-            self.assertEqual(state["character_place_name"], "上海海军博物馆")
+            self.assertEqual(session_schema.get_character_place(state), "museum")
+            self.assertEqual(session_schema.get_character_place_name(state), "上海海军博物馆")
             cp = svc.build_world_state(sid, weather=None)["character_place"]
             self.assertEqual(cp["key"], "museum")
             self.assertEqual(cp["name"], "上海海军博物馆")  # 显示这一家，而非 PLACE_TYPES 示例
@@ -913,8 +913,8 @@ class ServiceTestCase(unittest.TestCase):
             state["custom_character_day_anchor"] = "company"
             svc._call_llm = AsyncMock(return_value='{"place":"home"}')
             self.assertTrue(await svc._update_character_place_from_text(sid, "我在家"))
-            self.assertEqual(state["character_place"], "home")
-            state["character_place_updated_at"] = 1.0  # 远早于 TTL → 过期
+            self.assertEqual(session_schema.get_character_place(state), "home")
+            session_schema.set_character_place_updated_at(state, 1.0)  # 远早于 TTL → 过期
             self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "company")
         asyncio.run(run())
 
@@ -979,7 +979,7 @@ class ServiceTestCase(unittest.TestCase):
             # LLM 返回 company 但身份不符 → 不钉位
             svc._call_llm = AsyncMock(return_value='{"place":"company"}')
             self.assertFalse(await svc._update_character_place_from_text(sid, "今天上班累死了，刚到公司楼下"))
-            self.assertEqual(state.get("character_place", ""), "")
+            self.assertEqual(session_schema.get_character_place(state), "")
             # 深夜动线仍回落到家，而不是公司（商务中心）
             self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "home")
             # 对照：上班族角色提到公司则可被钉位（办公时段）
@@ -987,7 +987,7 @@ class ServiceTestCase(unittest.TestCase):
             day_now = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)
             svc._session_now = lambda session_id="": day_now
             self.assertTrue(await svc._update_character_place_from_text(sid, "还在公司加班"))
-            self.assertEqual(state["character_place"], "company")
+            self.assertEqual(session_schema.get_character_place(state), "company")
         asyncio.run(run())
 
     def test_autoextract_anchor_pin_does_not_persist_into_night(self):
@@ -1008,7 +1008,7 @@ class ServiceTestCase(unittest.TestCase):
             # 同一条持久位置仍在 TTL 内，但到了深夜（时钟判家），低置信锚定职场不再覆盖时钟
             night = datetime(2026, 6, 18, 23, 30, tzinfo=timezone.utc)
             svc._session_now = lambda session_id="": night
-            self.assertEqual(state["character_place"], "company")  # 持久字段未清，仍新鲜
+            self.assertEqual(session_schema.get_character_place(state), "company")  # 持久字段未清，仍新鲜
             self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "home")
         asyncio.run(run())
 
@@ -1023,7 +1023,7 @@ class ServiceTestCase(unittest.TestCase):
             night = datetime(2026, 6, 18, 23, 30, tzinfo=timezone.utc)
             svc._session_now = lambda session_id="": night
             await svc.tool_update_location(sid, "公司")
-            self.assertEqual(state["character_place_confidence"], 0.95)
+            self.assertEqual(session_schema.get_character_place_confidence(state), 0.95)
             self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "company")
 
         asyncio.run(run())
@@ -1517,10 +1517,7 @@ class ServiceTestCase(unittest.TestCase):
         state = svc._get_session_state(sid)
         # 新鲜的强 pin（对话刚确立）+ 用户自报位置
         svc._set_character_place(sid, "home", "在家", 0.95, source="tool")
-        state["user_place"] = "mall"
-        state["user_place_label"] = "商场"
-        state["user_place_updated_at"] = time.time()
-        state["user_place_confidence"] = 0.85
+        session_schema.set_user_place(state, key="mall", label="商场", updated_at=time.time(), confidence=0.85)
         self.assertEqual(svc._active_character_place(state)["authority"], "strong")
 
         svc._reset_short_context(state, "用户显式切换或结束上一话题/场景")
@@ -1530,8 +1527,8 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(active["key"], "home", "地点保留，仅降级")
         self.assertEqual(active["authority"], "weak", "降级为 weak：生图不再钉死，仅作背景")
         # user_place 原样保留（B 方案：换话题不代表用户物理移动）
-        self.assertEqual(state["user_place"], "mall")
-        self.assertEqual(state["user_place_confidence"], 0.85)
+        self.assertEqual(session_schema.get_user_place(state), "mall")
+        self.assertEqual(session_schema.get_user_place_confidence(state), 0.85)
 
     def test_clear_conversation_context_clears_both_places(self):
         """① 硬重置对称：换角色/clearup 的 _clear_conversation_context 同时清空 character_place 和
@@ -1540,19 +1537,16 @@ class ServiceTestCase(unittest.TestCase):
         sid = "telegram:123"
         state = svc._get_session_state(sid)
         svc._set_character_place(sid, "home", "在家", 0.95, source="tool")
-        state["user_place"] = "mall"
-        state["user_place_label"] = "商场"
-        state["user_place_updated_at"] = time.time()
-        state["user_place_confidence"] = 0.85
-        state["user_co_located"] = True
+        session_schema.set_user_place(state, key="mall", label="商场", updated_at=time.time(), confidence=0.85)
+        session_schema.set_user_co_located(state, True)
 
         svc._clear_conversation_context(state)
 
-        self.assertEqual(state["character_place"], "")
-        self.assertEqual(state["user_place"], "")
-        self.assertEqual(state["user_place_updated_at"], 0)
-        self.assertEqual(state["user_place_confidence"], 0)
-        self.assertFalse(state["user_co_located"])
+        self.assertEqual(session_schema.get_character_place(state), "")
+        self.assertEqual(session_schema.get_user_place(state), "")
+        self.assertEqual(session_schema.get_user_place_updated_at(state), 0)
+        self.assertEqual(session_schema.get_user_place_confidence(state), 0)
+        self.assertFalse(session_schema.get_user_co_located(state))
 
     def test_within_primitive_semantics(self):
         """② 薄时效原语：年龄上限 + 可选 since 切点；ttl=None 表示只按 since 过滤。"""
@@ -2238,7 +2232,7 @@ class ServiceTestCase(unittest.TestCase):
             self.assertIn("地点锁定", system)
             self.assertIn("家", system)
             # 已钉死：规划器乱选的 mall 不回写，仍是 home
-            self.assertEqual(svc._get_session_state(sid)["character_place"], "home")
+            self.assertEqual(session_schema.get_character_place(svc._get_session_state(sid)), "home")
 
         asyncio.run(run())
 
@@ -2258,7 +2252,7 @@ class ServiceTestCase(unittest.TestCase):
             await plan_roleplay_image(svc, sid, intent="看看你在干嘛")
             system = svc._call_llm.await_args.args[0]
             self.assertNotIn("地点锁定", system)  # 无持久位置，不钉
-            self.assertEqual(svc._get_session_state(sid)["character_place"], "cafe")  # 规划器判断回写
+            self.assertEqual(session_schema.get_character_place(svc._get_session_state(sid)), "cafe")  # 规划器判断回写
 
         asyncio.run(run())
 
@@ -2748,8 +2742,8 @@ class ServiceTestCase(unittest.TestCase):
         from telegram_comfyui_selfie import session_schema as ss
         # box_for 归位
         self.assertEqual(ss.box_for("clothing"), ss.BOX_CLOTHING)
+        self.assertEqual(ss.box_for("place"), ss.BOX_PLACE)
         self.assertEqual(ss.box_for("custom_bot_name"), ss.BOX_CHARACTER)
-        self.assertEqual(ss.box_for("user_place"), ss.BOX_PLACE)
         self.assertEqual(ss.box_for("chat_history"), ss.BOX_CONTEXT)
         self.assertEqual(ss.box_for("life_profile"), ss.BOX_CHARACTER)
 
@@ -2791,6 +2785,72 @@ class ServiceTestCase(unittest.TestCase):
         ss.ensure_clothing_box(st)
         self.assertEqual(st["clothing"], before)
 
+    def test_place_box_migration_and_accessors(self):
+        """place box：旧扁平位置字段迁移进盒、访问器读写、子键补齐、幂等。"""
+        from telegram_comfyui_selfie import session_schema as ss
+        # box_for 归位
+        self.assertEqual(ss.box_for("place"), ss.BOX_PLACE)
+
+        # 旧扁平持久态：顶层有 user_place/character_place 等 → 迁移进盒并删顶层
+        legacy = {
+            "user_place": "cafe",
+            "user_place_label": "咖啡店",
+            "user_place_confidence": 0.85,
+            "character_place": "home",
+            "character_place_name": "家",
+            "character_place_history": [{"key": "transit", "label": "通勤"}],
+            "rounds_since_location": 5,
+            "some_other": "keep",
+        }
+        box = ss.ensure_place_box(legacy)
+        self.assertNotIn("user_place", legacy)       # 顶层已删
+        self.assertNotIn("character_place", legacy)
+        self.assertNotIn("character_place_history", legacy)
+        self.assertIn("some_other", legacy)          # 非位置字段保留
+        self.assertEqual(legacy["place"]["user_place"], "cafe")
+        self.assertEqual(ss.get_user_place(legacy), "cafe")
+        self.assertEqual(ss.get_character_place(legacy), "home")
+        self.assertEqual(ss.get_character_place_name(legacy), "家")
+        self.assertEqual(ss.get_rounds_since_location(legacy), 5)
+        # 子键补齐 + 默认值
+        self.assertFalse(ss.get_user_co_located(legacy))
+        self.assertEqual(ss.get_user_place_source(legacy), "")
+        self.assertEqual(box["user_place_updated_at"], 0)
+
+        # 访问器读写
+        st = {}
+        ss.set_user_place(st, key="mall", label="商场", updated_at=1000.0, confidence=0.9, co_located=False)
+        self.assertEqual(ss.get_user_place(st), "mall")
+        self.assertEqual(ss.get_user_place_label(st), "商场")
+        self.assertEqual(ss.get_user_place_confidence(st), 0.9)
+        self.assertFalse(ss.get_user_co_located(st))
+        ss.set_user_co_located(st, True)
+        self.assertTrue(ss.get_user_co_located(st))
+
+        ss.set_character_place(st, key="cafe", label="咖啡店", name="星巴克", updated_at=2000.0, confidence=0.8, rounds=0)
+        self.assertEqual(ss.get_character_place(st), "cafe")
+        self.assertEqual(ss.get_character_place_name(st), "星巴克")
+        self.assertEqual(ss.get_character_place_confidence(st), 0.8)
+
+        # 历史记录 + 轮数递增
+        self.assertEqual(ss.get_character_place_history(st), [])
+        ss.append_character_place_history(st, {"key": "mall", "label": "商场"})
+        self.assertEqual(len(ss.get_character_place_history(st)), 1)
+        ss.increment_rounds_since_location(st)
+        self.assertEqual(ss.get_rounds_since_location(st), 1)
+
+        # clear_transient 可正确复位 place box
+        defaults = ss.state_defaults()
+        st["place"] = defaults.get("place", {})
+        self.assertEqual(ss.get_user_place(st), "")
+        self.assertEqual(ss.get_character_place(st), "")
+        self.assertEqual(ss.get_rounds_since_location(st), 0)
+
+        # 幂等：再 ensure 一次不改变内容
+        before = copy.deepcopy(st["place"])
+        ss.ensure_place_box(st)
+        self.assertEqual(st["place"], before)
+
     def test_transient_state_partition_classifier(self):
         """字段单一来源（黑名单反推）：会话全局/角色配置/短期态三类不重叠，关键字段各归其位。
 
@@ -2806,9 +2866,8 @@ class ServiceTestCase(unittest.TestCase):
             self.assertTrue(_is_character_config_key(k), f"{k} 应为角色配置")
             self.assertFalse(_is_transient_state_key(k), f"{k} 配置不应进短期态")
         # 短期态：随角色冻结/解冻/清空（含原先会串味的 wardrobe，及动态键）
-        for k in ["chat_history", "sent_photos_history", "user_place", "character_place",
-                  "dynamic_appearance", "wardrobe", "wardrobe_closet", "user_co_located",
-                  "character_place_name", "life_profile", "short_context_start"]:
+        for k in ["chat_history", "sent_photos_history", "place", "dynamic_appearance",
+                  "wardrobe", "wardrobe_closet", "life_profile", "short_context_start"]:
             self.assertTrue(_is_transient_state_key(k), f"{k} 应为短期态")
         # 会话全局与角色配置不重叠
         self.assertFalse(any(_is_character_config_key(k) for k in SESSION_GLOBAL_STATE_KEYS))
@@ -2833,9 +2892,8 @@ class ServiceTestCase(unittest.TestCase):
                 "sent_photos_history": [{"timestamp": 9999999999, "scene": "A的画面", "view": "selfie"}],
                 "dynamic_appearance": "A的红裙",
                 "wardrobe": {"红裙": ["red dress"]},
-                "user_place": "mall",
-                "user_place_updated_at": time.time(),
             })
+            session_schema.set_user_place(state, key="mall", updated_at=time.time())
             svc._save_session_state(sid, state)
 
             await svc.cmd_character(1, sid, "load 角色B")
@@ -2845,7 +2903,7 @@ class ServiceTestCase(unittest.TestCase):
             self.assertEqual(after_b["sent_photos_history"], [])
             self.assertEqual(session_schema.get_outfit(after_b), "")
             self.assertEqual(session_schema.get_wardrobe(after_b), {})
-            self.assertEqual(after_b["user_place"], "")
+            self.assertEqual(session_schema.get_user_place(after_b), "")
             # B 期间产生自己的短期态
             after_b["chat_history"] = [{"role": "assistant", "content": "B的台词"}]
             session_schema.set_outfit(after_b, "B的西装")
@@ -2858,7 +2916,7 @@ class ServiceTestCase(unittest.TestCase):
             self.assertEqual(after_a["sent_photos_history"][0]["scene"], "A的画面")
             self.assertEqual(session_schema.get_outfit(after_a), "A的红裙")
             self.assertEqual(session_schema.get_wardrobe(after_a), {"红裙": ["red dress"]})
-            self.assertEqual(after_a["user_place"], "mall")
+            self.assertEqual(session_schema.get_user_place(after_a), "mall")
 
         asyncio.run(run())
 

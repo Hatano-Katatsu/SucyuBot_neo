@@ -320,7 +320,7 @@ async def plan_roleplay_image(
     weak_pin = pinned_place if (pinned_place and pinned_place.get("authority") == "weak") else None
     # 最近位置轨迹（用于 weak / 冷启动时给规划器一条动线连续性线索）。
     location_trail = ""
-    history = state.get("character_place_history", []) if isinstance(state, dict) else []
+    history = session_schema.get_character_place_history(state) if isinstance(state, dict) else []
     if history and not strong_pin:
         recent = history[-3:]
         location_trail = "、".join(item.get("label", item.get("key", "?")) for item in recent if isinstance(item, dict))

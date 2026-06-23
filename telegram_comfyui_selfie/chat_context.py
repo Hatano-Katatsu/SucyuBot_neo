@@ -54,7 +54,7 @@ class ChatContextMixin:
         state["rounds_since_image"] = state.get("rounds_since_image", 0) + 1
         # "距上次确认位置的轮数"：每轮 +1，由 _set_character_place（角色再次明确位置时）清零。
         # 用来给陈旧 pin 降权——多轮没再提及地点时，该 pin 不再锁死生图。
-        state["rounds_since_location"] = state.get("rounds_since_location", 0) + 1
+        session_schema.increment_rounds_since_location(state)
         if state.get("ntr_affection_reset"):
             self._tick_ntr_reconcile(state)
 

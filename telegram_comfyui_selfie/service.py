@@ -459,6 +459,8 @@ class TelegramComfyUIService(
             state.setdefault(key, val)
         # clothing 字段已收进 state["clothing"] 盒；迁移旧扁平持久态并补齐子键。
         session_schema.ensure_clothing_box(state)
+        # place 字段已收进 state["place"] 盒；迁移旧扁平持久态并补齐子键。
+        session_schema.ensure_place_box(state)
         return state
 
     def _default_character_payload(self) -> dict[str, Any]:

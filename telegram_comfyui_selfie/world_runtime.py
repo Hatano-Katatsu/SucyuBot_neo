@@ -9,6 +9,8 @@ import time
 from datetime import datetime, timedelta
 from typing import Any
 
+from . import session_schema
+
 import aiohttp
 
 logger = logging.getLogger(__name__)
@@ -681,24 +683,24 @@ class WorldRuntimeMixin:
             ttl = max(0.25, float(self.config.get("world_user_place_ttl_hours", "4") or "4")) * 3600
         except Exception:
             ttl = 4 * 3600
-        updated = float(state.get("user_place_updated_at", 0) or 0)
+        updated = session_schema.get_user_place_updated_at(state)
         if updated and not self._within(updated, ttl):
             return None
-        if state.get("user_co_located"):
+        if session_schema.get_user_co_located(state):
             return {
                 "key": "__with_character__",
-                "label": state.get("user_place_label") or "与角色同处",
-                "text": state.get("user_place_text") or "",
+                "label": session_schema.get_user_place_label(state) or "与角色同处",
+                "text": session_schema.get_user_place_text(state) or "",
                 "updated_at": updated,
                 "co_located": True,
             }
-        key = (state.get("user_place") or "").strip()
+        key = session_schema.get_user_place(state)
         if key not in PLACE_TYPES:
             return None
         return {
             "key": key,
-            "label": state.get("user_place_label") or PLACE_TYPES[key]["label"],
-            "text": state.get("user_place_text") or "",
+            "label": session_schema.get_user_place_label(state) or PLACE_TYPES[key]["label"],
+            "text": session_schema.get_user_place_text(state) or "",
             "updated_at": updated,
             "co_located": False,
         }
@@ -725,12 +727,12 @@ class WorldRuntimeMixin:
         if not key:
             return False
         state = self._get_session_state(session_id)
-        state["user_place"] = key
-        state["user_place_label"] = PLACE_TYPES[key]["label"]
-        state["user_place_text"] = matched or (text or "")[:40]
-        state["user_place_updated_at"] = time.time()
-        state["user_place_confidence"] = 0.85
-        state["user_co_located"] = False  # 用户报了独立地点，清除同处标记，避免与历史同处状态打架
+        session_schema.set_user_place(
+            state, key=key, label=PLACE_TYPES[key]["label"],
+            text=matched or (text or "")[:40],
+            updated_at=time.time(), confidence=0.85,
+            co_located=False,  # 用户报了独立地点，清除同处标记
+        )
         self._mark_dirty(session_id)
         return True
 
@@ -740,10 +742,10 @@ class WorldRuntimeMixin:
             ttl = max(0.25, float(self.config.get("world_character_place_ttl_hours", "4") or "4")) * 3600
         except Exception:
             ttl = 4 * 3600
-        updated = float(state.get("character_place_updated_at", 0) or 0)
+        updated = session_schema.get_character_place_updated_at(state)
         if not self._within(updated, ttl):
             return None
-        key = (state.get("character_place") or "").strip()
+        key = session_schema.get_character_place(state)
         if key not in PLACE_TYPES:
             return None
         # 权威分档（供生图侧区分"锁死"与"参考"）：
@@ -760,14 +762,14 @@ class WorldRuntimeMixin:
         except Exception:
             stale_rounds = 8
         age = time.time() - updated
-        conf = float(state.get("character_place_confidence", 0) or 0)
-        rounds_since = int(state.get("rounds_since_location", 0) or 0)
+        conf = session_schema.get_character_place_confidence(state)
+        rounds_since = session_schema.get_rounds_since_location(state)
         authority = "strong" if (age <= strong_hours * 3600 and rounds_since < stale_rounds and conf >= 0.8) else "weak"
         return {
             "key": key,
-            "label": state.get("character_place_label") or PLACE_TYPES[key]["label"],
-            "text": state.get("character_place_text") or "",
-            "name": (state.get("character_place_name") or "").strip(),
+            "label": session_schema.get_character_place_label(state) or PLACE_TYPES[key]["label"],
+            "text": session_schema.get_character_place_text(state) or "",
+            "name": session_schema.get_character_place_name(state),
             "updated_at": updated,
             "authority": authority,
             "confidence": conf,
@@ -788,49 +790,48 @@ class WorldRuntimeMixin:
         if key not in PLACE_TYPES:
             return False
         state = self._get_session_state(session_id)
-        state["character_place"] = key
-        state["character_place_label"] = PLACE_TYPES[key]["label"]
-        state["character_place_text"] = (matched or "")[:40]
-        # 用户/模型明确说的具体地名（如"上海海军博物馆"），优先于目录示例名显示；为空则不覆盖。
-        state["character_place_name"] = (name or "").strip()[:40]
-        state["character_place_updated_at"] = time.time()
-        state["character_place_confidence"] = confidence
-        # 新一轮位置确认：把"距上次确认位置的轮数"清零（见 chat_context.handle_chat 的自增）。
-        state["rounds_since_location"] = 0
-        # 位置历史轨迹（ring buffer，cap 20，镜像 recent_message_history/sent_photos_history 模式）。
+        session_schema.set_character_place(
+            state,
+            key=key, label=PLACE_TYPES[key]["label"],
+            text=(matched or "")[:40],
+            name=(name or "").strip()[:40],
+            updated_at=time.time(),
+            confidence=confidence,
+            rounds=0,  # 新一轮位置确认：清零距上次确认的轮数
+        )
+        # 位置历史轨迹（ring buffer，cap 20）。
         # 去重连续相同的地点——同一地点连续确认只记首条，避免一条 pin 把轨迹撑满。
-        history = list(state.get("character_place_history", []))
+        history = session_schema.get_character_place_history(state)
         if not history or history[-1].get("key") != key:
-            history.append({
+            session_schema.append_character_place_history(state, {
                 "key": key,
                 "label": PLACE_TYPES[key]["label"],
                 "source": source,
                 "confidence": confidence,
                 "ts": time.time(),
             })
-            state["character_place_history"] = history[-20:]
         self._mark_dirty(session_id)
         return True
 
     def _demote_character_place(self, state: dict[str, Any]):
         """把角色位置降级为 weak（不清空）：短期重置/新场景时不再钉死生图，但仍作背景，靠 4h TTL 自然老化。
 
-        手段是把 `character_place_updated_at` 往后推到“strong 边界”（now - strong_hours），使
+        手段是把 `character_place_updated_at` 往后推到"strong 边界"（now - strong_hours），使
         `_active_character_place` 立刻判成 weak、但仍在硬 TTL 内。用 min() 保证只后移、绝不前移
         （已经陈旧的 pin 不会被刷新）。这样新场景的第一句位置声明会以高置信覆盖它，在覆盖前旧地点
         作为 weak 背景延续——连续过渡，而非瞬移或失忆。
         """
-        updated = float(state.get("character_place_updated_at", 0) or 0)
+        updated = session_schema.get_character_place_updated_at(state)
         if not updated:
             return
         try:
             strong_hours = max(0.0, float(self.config.get("world_character_place_strong_hours", "1.0") or "1.0"))
         except Exception:
             strong_hours = 1.0
-        # 后移到 strong 边界之外（-1s 余量：strong 判定用 age<=边界，Windows time.time() 分辨率粗，
-        # 不留余量时 demote 后立即判定可能 age 恰等于边界而误判 strong）。confidence/TTL 不动——
-        # 我们仍“确信”角色刚才在哪，只是这地点对新场景不再 fresh、不钉死生图；靠 4h TTL 自然老化。
-        state["character_place_updated_at"] = min(updated, time.time() - strong_hours * 3600 - 1.0)
+        session_schema.set_character_place_updated_at(
+            state,
+            min(updated, time.time() - strong_hours * 3600 - 1.0),
+        )
 
     async def _update_character_place_from_text(self, session_id: str, text: str) -> bool:
         """用 LLM 从角色（助手）回复里判断角色此刻所在的具体地点并持久化。
@@ -904,7 +905,7 @@ class WorldRuntimeMixin:
         """把生图前 LLM 对【用户当前位置 / 是否与角色同处】的判断写入会话状态。
 
         带迟滞：判成 unknown（或非法值）时不清空旧状态，保留到 TTL 自然过期，
-        避免视角在“同处/异地”之间来回抖动。具体地点或同处判断才覆盖。
+        避免视角在"同处/异地"之间来回抖动。具体地点或同处判断才覆盖。
         """
         if not session_id or not self._world_runtime_enabled():
             return False
@@ -912,22 +913,20 @@ class WorldRuntimeMixin:
         state = self._get_session_state(session_id)
         now_ts = now.timestamp() if isinstance(now, datetime) else time.time()
         if co_located or loc in ("with_user", "with_character", "together", "同处", "一起"):
-            state["user_co_located"] = True
-            state["user_place"] = ""  # 同处时不绑定具体场所，跟随角色动线
-            state["user_place_label"] = "与角色同处"
-            state["user_place_text"] = "生图前判断：与角色在同一空间"
-            state["user_place_updated_at"] = now_ts
-            state["user_place_source"] = "llm"
+            session_schema.set_user_place(
+                state,
+                key="", label="与角色同处", text="生图前判断：与角色在同一空间",
+                updated_at=now_ts, confidence=None, co_located=True, source="llm",
+            )
             self._mark_dirty(session_id)
             self._ulog(session_id, "LOC", f"规划器判定 co_located=True user_location={user_location or '-'} → 与角色同处(视角倾向 POV)")
             return True
         if loc in PLACE_TYPES:
-            state["user_co_located"] = False
-            state["user_place"] = loc
-            state["user_place_label"] = PLACE_TYPES[loc]["label"]
-            state["user_place_text"] = "生图前推断"
-            state["user_place_updated_at"] = now_ts
-            state["user_place_source"] = "llm"
+            session_schema.set_user_place(
+                state,
+                key=loc, label=PLACE_TYPES[loc]["label"], text="生图前推断",
+                updated_at=now_ts, confidence=None, co_located=False, source="llm",
+            )
             self._mark_dirty(session_id)
             self._ulog(session_id, "LOC", f"规划器判定 co_located=False user_location={user_location or '-'} → 用户在 {PLACE_TYPES[loc]['label']}(异地，视角倾向 selfie)")
             return True
@@ -1015,7 +1014,7 @@ class WorldRuntimeMixin:
         persisted = self._active_character_place(state) if apply_persisted_place else None
         if persisted:
             pkey = persisted["key"]
-            conf = float(state.get("character_place_confidence", 0) or 0)
+            conf = session_schema.get_character_place_confidence(state)
             # 低置信（自动抽取 0.8）钉到锚定职场时，仅在该场所时段合理（时钟+职业评分>0）才覆盖时钟，
             # 否则傍晚提一句“上班”会让角色深夜仍停在公司/学校。显式工具声明（0.95）尊重剧情、不受此限。
             if pkey in ANCHOR_ONLY_PLACES and conf < 0.9 and scores.get(pkey, 0.0) <= 0:
