@@ -292,14 +292,23 @@ def inject_appearance(service: Any, char: str, session_id: str = "") -> str:
                 slots[s] = fb[s]
 
     def resolve(slot, custom_key, global_key, default):
+        # 1) 临时发/瞳（dynamic_appearance 里本轮显式给的）→ 覆盖角色 base。
         if slots[slot]:
             return ", ".join(slots[slot]), True
         custom = (state.get(custom_key, "") or "").strip()
+        if char_set:
+            # 已设角色：角色 base（custom_positive_prefix）自己的发瞳优先，绝不被默认覆盖。
+            #   根治：custom_default/全局默认发瞳曾以 override 抹掉角色发瞳，导致刻晴紫发被画成黑发、
+            #   且 webui 改身体特征也被覆盖改不掉。custom_default 只在角色没写该槽时兜底。
+            if parse_appearance(char, outfit_kw, accessory_kw)[slot]:
+                return "", False
+            if custom:
+                return custom, True
+            return "", False
+        # 默认角色态：base 是全局 config，custom_default 是该默认角色的覆盖项 → 覆盖；其次回退全局默认。
         if custom:
             return custom, True
-        if not char_set:
-            return (service.config.get(global_key, default) or "").strip(), False
-        return "", False
+        return (service.config.get(global_key, default) or "").strip(), False
 
     for slot, ckey, gkey, default in (
         ("hair", "custom_default_hair", "default_hair", "black long flowing hair"),

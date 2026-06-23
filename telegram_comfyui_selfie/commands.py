@@ -1523,6 +1523,14 @@ class CommandHandlersMixin:
         self._save_session_state(session_id, state)
         await self.send_message(chat_id, f"你和角色的关系已设为: {value[:200]}")
 
+    def _replace_appearance_slot(self, state: dict[str, Any], slot: str, value: str) -> None:
+        """把当前角色 base（custom_positive_prefix）里某个外观槽（hair/eyes）整体替换为 value。
+        发/瞳是角色 base 的一部分、per-character；改完由调用方 _snapshot_character 写回卡。"""
+        base = state.get("custom_positive_prefix", "") or ""
+        slots = self._parse_appearance(base)
+        slots[slot] = [v.strip() for v in str(value or "").split(",") if v.strip()]
+        state["custom_positive_prefix"] = appearance_rules.slots_to_string(slots)
+
     async def cmd_appearance(self, chat_id, session_id, arg):
         tags = arg.strip()
         state = self._get_session_state(session_id)
@@ -1564,23 +1572,45 @@ class CommandHandlersMixin:
             return
         if sub in ("发色", "hair"):
             if not sub_arg:
-                await self.send_message(chat_id, f"当前默认发色: {state.get('custom_default_hair') or self.config.get('default_hair')}")
+                if self._is_character_set(session_id):
+                    cur = ", ".join(self._parse_appearance(state.get("custom_positive_prefix", "")).get("hair", [])) or "（未设定，见身体特征）"
+                    await self.send_message(chat_id, f"当前角色发色: {cur}")
+                else:
+                    await self.send_message(chat_id, f"当前默认发色: {state.get('custom_default_hair') or self.config.get('default_hair')}")
                 return
             if re.search(r"[\u4e00-\u9fff]", sub_arg):
                 sub_arg = await self._translate_appearance_tags(sub_arg)
-            state["custom_default_hair"] = sub_arg
-            self._save_session_state(session_id, state)
-            await self.send_message(chat_id, f"默认发色已更新: {sub_arg}")
+            if self._is_character_set(session_id):
+                # 已设角色：发色是该角色 base 的一部分 → 写进 custom_positive_prefix（per-character，随卡快照），不再写全局默认
+                self._replace_appearance_slot(state, "hair", sub_arg)
+                self._snapshot_character(state)
+                self._save_session_state(session_id, state)
+                await self.send_message(chat_id, f"角色发色已更新: {sub_arg}")
+            else:
+                state["custom_default_hair"] = sub_arg
+                self._save_session_state(session_id, state)
+                await self.send_message(chat_id, f"默认发色已更新: {sub_arg}")
             return
         if sub in ("瞳色", "eyes"):
             if not sub_arg:
-                await self.send_message(chat_id, f"当前默认瞳色: {state.get('custom_default_eyes') or self.config.get('default_eyes')}")
+                if self._is_character_set(session_id):
+                    cur = ", ".join(self._parse_appearance(state.get("custom_positive_prefix", "")).get("eyes", [])) or "（未设定，见身体特征）"
+                    await self.send_message(chat_id, f"当前角色瞳色: {cur}")
+                else:
+                    await self.send_message(chat_id, f"当前默认瞳色: {state.get('custom_default_eyes') or self.config.get('default_eyes')}")
                 return
             if re.search(r"[\u4e00-\u9fff]", sub_arg):
                 sub_arg = await self._translate_appearance_tags(sub_arg)
-            state["custom_default_eyes"] = sub_arg
-            self._save_session_state(session_id, state)
-            await self.send_message(chat_id, f"默认瞳色已更新: {sub_arg}")
+            if self._is_character_set(session_id):
+                # 已设角色：瞳色是该角色 base 的一部分 → 写进 custom_positive_prefix（per-character，随卡快照），不再写全局默认
+                self._replace_appearance_slot(state, "eyes", sub_arg)
+                self._snapshot_character(state)
+                self._save_session_state(session_id, state)
+                await self.send_message(chat_id, f"角色瞳色已更新: {sub_arg}")
+            else:
+                state["custom_default_eyes"] = sub_arg
+                self._save_session_state(session_id, state)
+                await self.send_message(chat_id, f"默认瞳色已更新: {sub_arg}")
             return
         if sub in ("自动", "auto", "自动变装"):
             await self._set_auto_appearance(chat_id, session_id, sub_arg)

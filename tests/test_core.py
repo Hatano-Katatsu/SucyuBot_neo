@@ -602,6 +602,60 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("red dress", all_sys)
         self.assertNotIn("red dress", after_msgs[0]["content"])
 
+    def test_character_own_hair_eyes_win_over_default(self):
+        """角色 base 的发/瞳优先于会话/全局默认——根治"刻晴紫发被画成黑发、webui 改不掉"。"""
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state.update({
+            "custom_character": "keqing",
+            "custom_series": "Genshin Impact",
+            "custom_positive_prefix": "purple hair, long hair, purple eyes, fair skin",
+            # 用户曾在菜单设过的"默认发/瞳"（旧逻辑会覆盖一切角色）
+            "custom_default_hair": "black hair",
+            "custom_default_eyes": "brown eyes",
+        })
+        eff = svc._effective_visual_prompt_tags(sid)
+        self.assertIn("purple hair", eff)
+        self.assertIn("purple eyes", eff)
+        self.assertNotIn("black hair", eff)   # 默认不再覆盖角色自己的发色
+        self.assertNotIn("brown eyes", eff)
+
+    def test_default_hair_eyes_only_fill_when_character_lacks(self):
+        """角色没写发/瞳时，会话默认才兜底补上（是兜底不是覆盖）。"""
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state.update({
+            "custom_character": "someone",
+            "custom_positive_prefix": "fair skin, slim figure",  # 无发/瞳
+            "custom_default_hair": "silver hair",
+            "custom_default_eyes": "red eyes",
+        })
+        eff = svc._effective_visual_prompt_tags(sid)
+        self.assertIn("silver hair", eff)
+        self.assertIn("red eyes", eff)
+
+    def test_appearance_hair_command_edits_character_not_global(self):
+        """/外型 发色 对已设角色写进角色 base(positive_prefix) 并回写卡，不写全局默认。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.send_message = AsyncMock()
+            state = svc._get_session_state(sid)
+            state.update({
+                "custom_character": "keqing",
+                "custom_positive_prefix": "purple hair, purple eyes, fair skin",
+            })
+            svc._save_session_state(sid, state)
+            await svc.cmd_appearance(1, sid, "发色 silver hair")
+            after = svc._get_session_state(sid)
+            self.assertIn("silver hair", after["custom_positive_prefix"])
+            self.assertNotIn("purple hair", after["custom_positive_prefix"])  # 旧发色被替换
+            self.assertEqual(after.get("custom_default_hair", ""), "")        # 没写全局默认
+            self.assertIn("silver hair", after["saved_characters"]["keqing"]["appearance"])  # 已回写卡
+        asyncio.run(run())
+
     def test_webui_masks_secrets(self):
         svc = self.make_service()
         svc.config["telegram_bot_token"] = "secret-token"
