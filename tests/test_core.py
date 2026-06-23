@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 from telegram_comfyui_selfie import TelegramComfyUIService
 from telegram_comfyui_selfie import appearance as appearance_rules
+from telegram_comfyui_selfie import character_card
 from telegram_comfyui_selfie.image_planning import _detect_intimate_context, format_dialog_context, format_sent_photo_context, normalize_scene_visual_subject, plan_roleplay_image
 from telegram_comfyui_selfie.commands import (
     SESSION_GLOBAL_STATE_KEYS,
@@ -2449,6 +2450,34 @@ class ServiceTestCase(unittest.TestCase):
         # 三态空 → 跟随全局(None)
         svc._apply_character_payload(state, {"allow_change_appearance": ""})
         self.assertIsNone(state["custom_allow_llm_change_appearance"])
+
+    def test_character_card_schema_single_source(self):
+        """角色卡字段集单一来源（character_card）：导出/快照/默认卡共用同一字段集，
+        且写回→导出往返值一致。防再次出现多处手写表各漏字段的 drift。
+        """
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["custom_character"] = "小雨"
+        card_keys = set(character_card.CARD_KEYS)
+
+        # 导出 = id + 卡片字段集
+        export = svc._character_export_payload(state)
+        self.assertEqual(set(export) - {"id"}, card_keys)
+        # 快照（saved_characters 条目）字段集 == 卡片字段集
+        svc._snapshot_character(state)
+        self.assertEqual(set(state["saved_characters"]["小雨"]), card_keys)
+        # 默认卡 = id + is_default + 卡片字段集（钉住 config 派生的默认卡不漏字段）
+        default = svc._default_character_payload()
+        self.assertEqual(set(default) - {"id", "is_default"}, card_keys)
+        # 写回→导出往返：值一致
+        payload = {k: v for k, v in export.items() if k != "id"}
+        fresh = svc._get_session_state("telegram:2")
+        svc._apply_character_payload(fresh, payload)
+        self.assertEqual(
+            {k: v for k, v in svc._character_export_payload(fresh).items() if k != "id"},
+            payload,
+        )
 
     def test_default_character_card_roundtrips_outfit_and_auto_change(self):
         """默认角色卡的服装标签/自动换装写回全局 config；空(跟随全局)不改写开关。"""

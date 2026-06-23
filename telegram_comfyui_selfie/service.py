@@ -13,6 +13,7 @@ from typing import Any
 import aiohttp
 
 from . import appearance as appearance_rules
+from . import character_card
 from . import generation as image_generation
 from . import prompt_intake
 from .app_store import AppStateStore
@@ -565,19 +566,8 @@ class TelegramComfyUIService(
         }
 
     # 卡片字段 → config 键的映射：默认角色以 config 为存储，编辑卡片即写回 config。
-    # appearance↔positive_prefix 是 1:1（发/瞳已折进 positive_prefix，与非默认角色同构，无需拆分）。
-    _DEFAULT_CARD_TO_CONFIG = {
-        "role_name": "role_name",
-        "bot_name": "bot_name",
-        "bot_self_name": "bot_self_name",
-        "persona": "scheduled_persona",
-        "appearance": "positive_prefix",
-        "style": "current_style",
-        "relationship": "spatial_relationship",
-        "age_stage": "character_age_stage",
-        "day_anchor": "character_day_anchor",
-        "outfit": "dynamic_appearance",
-    }
+    # 单一来源见 character_card.DEFAULT_CARD_TO_CONFIG（与默认卡读取共用同一字段集）。
+    _DEFAULT_CARD_TO_CONFIG = character_card.DEFAULT_CARD_TO_CONFIG
 
     def _apply_default_character_payload(self, payload: dict[str, Any]) -> None:
         """把卡编辑器对默认角色的修改写回 config（不进 saved_characters，不动 custom_*）。"""

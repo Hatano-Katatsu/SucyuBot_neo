@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from . import appearance as appearance_rules
+from . import character_card
 from . import prompt_intake
 from .defaults import INIT_GUIDE, MENU_BODY, MENU_TOPICS, MENU_TOPIC_ALIASES, OC_CREATE_HELP, SCENES, WEEKDAY_NAMES
 from .memory import format_memory_lines
@@ -1165,106 +1166,22 @@ class CommandHandlersMixin:
     @staticmethod
     def _character_export_payload(state: dict[str, Any]) -> dict[str, Any]:
         key = (state.get("custom_character") or state.get("custom_bot_name") or "default").strip() or "default"
-        return {
-            "id": key,
-            "character": state.get("custom_character", ""),
-            "series": state.get("custom_series", ""),
-            "role_name": state.get("custom_role_name", ""),
-            "bot_name": state.get("custom_bot_name", ""),
-            "bot_self_name": state.get("custom_bot_self_name", ""),
-            "visual_character": state.get("custom_visual_character", ""),
-            "visual_series": state.get("custom_visual_series", ""),
-            "persona": state.get("custom_scheduled_persona", ""),
-            "appearance": state.get("custom_positive_prefix", ""),
-            "count": state.get("custom_count", ""),
-            "age_stage": state.get("custom_character_age_stage", ""),
-            "occupation": state.get("custom_character_occupation", ""),
-            "day_anchor": state.get("custom_character_day_anchor", ""),
-            "relationship": state.get("custom_spatial_relationship", ""),
-            "scene_preference": state.get("custom_scene_preference", ""),
-            "selfie_preference": state.get("custom_selfie_preference", ""),
-            "style": state.get("custom_current_style", ""),
-            "outfit": state.get("dynamic_appearance", ""),
-            "allow_change_appearance": state.get("custom_allow_llm_change_appearance"),
-            "purity": state.get("purity"),
-        }
+        # 字段表由 character_card 单一来源派生（见模块说明）。
+        return {"id": key, **character_card.card_from_state(state)}
 
     @staticmethod
     def _apply_character_payload(state: dict[str, Any], data: dict[str, Any]):
-        mapping = {
-            "character": "custom_character",
-            "series": "custom_series",
-            "role_name": "custom_role_name",
-            "bot_name": "custom_bot_name",
-            "bot_self_name": "custom_bot_self_name",
-            "visual_character": "custom_visual_character",
-            "visual_series": "custom_visual_series",
-            "persona": "custom_scheduled_persona",
-            "appearance": "custom_positive_prefix",
-            "count": "custom_count",
-            "age_stage": "custom_character_age_stage",
-            "occupation": "custom_character_occupation",
-            "day_anchor": "custom_character_day_anchor",
-            "relationship": "custom_spatial_relationship",
-            "scene_preference": "custom_scene_preference",
-            "selfie_preference": "custom_selfie_preference",
-            "style": "custom_current_style",
-            "outfit": "dynamic_appearance",
-        }
-        for src, dst in mapping.items():
-            if src in data:
-                state[dst] = "" if data[src] is None else str(data[src])
-        if "allow_change_appearance" in data:
-            # 三态：空/None=跟随全局，其余按真假解析
-            raw = data.get("allow_change_appearance")
-            s = "" if raw is None else str(raw).strip().lower()
-            if not s:
-                state["custom_allow_llm_change_appearance"] = None
-            else:
-                state["custom_allow_llm_change_appearance"] = s in ("true", "1", "yes", "on", "开", "允许", "启用")
-        if "purity" in data:
-            raw = data.get("purity")
-            s = str(raw).strip() if raw is not None else ""
-            if s:
-                try:
-                    state["purity"] = max(0, min(10, int(s)))
-                    state["purity_user_set"] = True
-                except (TypeError, ValueError):
-                    state["purity"] = None
-                    state["purity_user_set"] = False
-            else:
-                state["purity"] = None
-                state["purity_user_set"] = False
+        character_card.apply_card_to_state(state, data)
 
     @staticmethod
     def _snapshot_character(state: dict[str, Any]):
-        """保存当前角色最新状态到 saved_characters 快照。"""
+        """保存当前角色最新状态到 saved_characters 快照。字段表由 character_card 单一来源派生。"""
         name = (state.get("custom_character") or "").strip()
         if not name:
             return
-        saved = state.setdefault("saved_characters", {})
-        saved[name] = {
-            "character": name,
-            "series": state.get("custom_series", ""),
-            "role_name": state.get("custom_role_name", ""),
-            "bot_name": state.get("custom_bot_name", ""),
-            "bot_self_name": state.get("custom_bot_self_name", ""),
-            "visual_character": state.get("custom_visual_character", ""),
-            "visual_series": state.get("custom_visual_series", ""),
-            "persona": state.get("custom_scheduled_persona", ""),
-            "appearance": state.get("custom_positive_prefix", ""),
-            "count": state.get("custom_count", ""),
-            "age_stage": state.get("custom_character_age_stage", ""),
-            "occupation": state.get("custom_character_occupation", ""),
-            "day_anchor": state.get("custom_character_day_anchor", ""),
-            "relationship": state.get("custom_spatial_relationship", ""),
-            "scene_preference": state.get("custom_scene_preference", ""),
-            "selfie_preference": state.get("custom_selfie_preference", ""),
-            "style": state.get("custom_current_style", ""),
-            "outfit": state.get("dynamic_appearance", ""),
-            "allow_change_appearance": state.get("custom_allow_llm_change_appearance"),
-            "purity": state.get("purity"),
-        }
+        card = character_card.card_from_state(state)
+        card["character"] = name  # 存档键用 stripped 名，character 字段与键对齐
+        state.setdefault("saved_characters", {})[name] = card
 
     async def cmd_purity(self, chat_id, session_id, arg):
         text = arg.strip().lower()
