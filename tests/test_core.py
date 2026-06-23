@@ -479,6 +479,32 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("silver-rimmed glasses", all_sys)
         self.assertIn("dual swords", all_sys)
 
+    def test_static_prefix_stable_across_outfit_change(self):
+        """前缀缓存不变量：只换穿搭时 messages[0]（静态前缀）必须不变。
+
+        穿搭是中频变化字段，若焊进静态前缀，每次换装都会作废整条历史的服务端 prefix cache
+        （命中率暴跌的根因）。穿搭只应出现在动态层。
+        """
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state.update({
+            "custom_character": "小雨",
+            "custom_scheduled_persona": "温柔体贴",
+            "custom_positive_prefix": "black hair, blue eyes",
+            "dynamic_appearance": "white shirt",
+        })
+        before = svc._build_chat_messages(sid, "你好")[0]["content"]
+        # 换一套穿搭
+        state["dynamic_appearance"] = "red dress, black coat"
+        after_msgs = svc._build_chat_messages(sid, "你好")
+        # 静态前缀不随穿搭变化（缓存可命中）
+        self.assertEqual(before, after_msgs[0]["content"])
+        # 但新穿搭仍出现在动态层 system，信息没丢
+        all_sys = "\n".join(m["content"] for m in after_msgs if m.get("role") == "system")
+        self.assertIn("red dress", all_sys)
+        self.assertNotIn("red dress", after_msgs[0]["content"])
+
     def test_webui_masks_secrets(self):
         svc = self.make_service()
         svc.config["telegram_bot_token"] = "secret-token"

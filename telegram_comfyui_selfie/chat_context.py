@@ -206,7 +206,8 @@ class ChatContextMixin:
         time_period = time_ctx.get("period") or self._get_time_period(now.hour)
         time_light = self._format_time_context(session_id, now=now)
         light_guard = self._format_light_guard(session_id, now=now)
-        persona = self._get_effective_persona(session_id)
+        # 静态前缀不含穿搭（中频变化），避免换装作废整条历史前缀缓存；穿搭见下方动态层 visual_context。
+        persona = self._get_effective_persona(session_id, include_appearance=False)
         role_name, bot_name, bot_self_name = self._session_role_identity(session_id)
         relationship = self._get_session_cfg(session_id, "spatial_relationship", "")
         rel_line = f"你和用户的关系: {str(relationship).strip()}。\n" if str(relationship).strip() else ""
@@ -590,8 +591,8 @@ class ChatContextMixin:
         time_ctx = self._get_time_context(session_id, now=now, weather=weather)
         time_period = time_ctx.get("period") or self._get_time_period(now.hour)
 
-        # ── 静态前缀 ──
-        persona = self._get_effective_persona(session_id)
+        # ── 静态前缀 ──（不含穿搭：见下方动态层「当前附加外貌」，避免双注入+毒化前缀缓存）
+        persona = self._get_effective_persona(session_id, include_appearance=False)
         role_name, bot_name, bot_self_name = self._session_role_identity(session_id)
         relationship = self._get_session_cfg(session_id, "spatial_relationship", "")
         rel_line = f"你和用户的关系: {str(relationship).strip()}。\n" if str(relationship).strip() else ""

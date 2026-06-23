@@ -734,11 +734,15 @@ class TelegramComfyUIService(
         tag = "nsfw" if effective <= 2 else "safe" if effective >= 8 else None
         return {"level": effective, "tag": tag, "context": context}
 
-    def _get_effective_persona(self, session_id: str) -> str:
+    def _get_effective_persona(self, session_id: str, include_appearance: bool = True) -> str:
         """读时组装聊天人格：纯人格描述串 + 身份安全前缀 + 短期附加外型。
 
         custom_scheduled_persona 只存纯人格描述（性格/语气/习惯），不含身份、角色类型、
         关系、职业——这些是字段单源，由本函数（身份）和各 prompt 的身份行/关系行实时拼。
+
+        include_appearance=False：不追加短期穿搭。供放进【静态前缀（messages[0]）】的调用方
+        使用——穿搭是中频变化字段，焊进静态前缀会让每次换装作废整条历史的服务端 prefix cache；
+        聊天/场景 builder 已在【动态层】单独注入当前外型，故静态前缀这里去掉，避免双注入+毒化缓存。
         """
         state = self._get_session_state(session_id)
         char_set = self._is_character_set(session_id)
@@ -762,6 +766,8 @@ class TelegramComfyUIService(
                 base = f"你是{bot}。"
             else:
                 base = self.config.get("scheduled_persona") or DEFAULT_CONFIG["scheduled_persona"]
+        if not include_appearance:
+            return base
         additional = self._effective_dynamic_appearance(session_id)
         return f"{base}\n\n[当前附加人设/短期穿搭与配饰: {additional}]" if additional else base
 
