@@ -478,12 +478,10 @@ def _infer_prompt_view(scene_desc: str) -> str:
     text = scene_desc.strip().lower()
     if "mirror reflection" in text or "mirror selfie" in text:
         return "mirror"
-    if (
-        text.startswith("a candid photo")
-        or text.startswith("a front-camera selfie")  # 旧措辞：历史场景/库存兼容
-        or text.startswith("a selfie of")
-    ):
+    if text.startswith("a front-camera selfie") or text.startswith("a selfie of"):
         return "selfie"
+    if text.startswith("a photo of"):
+        return "portrait"
     if text.startswith("first-person pov"):
         return "pov"
     return ""
@@ -587,10 +585,12 @@ DEVICE_SCENE_RE = re.compile(
 )
 # 自拍/对镜取景措辞：伴侣同框时必须清掉，避免“自拍框 + 画面里有第二人”自相矛盾。
 SELF_CAMERA_FRAMING_RE = re.compile(
-    r"\bA candid photo of a (?:woman|man|girl|boy)\b|"
-    r"\btaken by someone else just out of frame\b|"
     r"\bA front-camera selfie of a (?:woman|man|girl|boy)\b|"  # 旧措辞兼容
     r"\bA selfie of a (?:woman|man|girl|boy)\b|"
+    r"\bone arm extended toward the viewer\b|"
+    r"\bA photo of a (?:woman|man|girl|boy)\b|"  # portrait 取景：别人帮拍
+    r"\bposing for the camera\b|"
+    r"\btaken by someone else just out of frame\b|"
     r"\bA mirror reflection of a (?:woman|man|girl|boy)\b|"
     r"\bshot by an off-frame front-facing phone camera\b|"
     r"\bno visible phone\b|"
@@ -750,10 +750,12 @@ def view_opener(view: str, gender: str = "girl") -> str:
     subj = "man" if gender == "boy" else "woman"
     count = "1boy" if gender == "boy" else "1girl"
     return {
-        "selfie": f"A candid photo of a {subj}, solo, upper body framing, looking at viewer, taken by someone else just out of frame",
+        "selfie": f"A selfie of a {subj}, solo, upper body framing, looking at viewer, one arm extended toward the viewer",
         "mirror": f"A mirror reflection of a {subj}, solo, single reflected body, only mirror reflection is visible, no foreground person, holding one smartphone with one hand, looking at viewer through the mirror",
         "pov": f"First-person POV, looking at a {subj}, solo, eye contact with the viewer",
         "third": f"{count}, solo",
+        # 别人（用户/他人）帮角色拍的照片：角色看向镜头为镜头摆姿势，拍摄者在画面外，画面里只有角色，不出现手机/相机。
+        "portrait": f"A photo of a {subj}, solo, upper body framing, looking at viewer, posing for the camera, taken by someone else just out of frame",
     }.get(view, "")
 
 
@@ -899,11 +901,12 @@ def build_prompt(
             neg = _remove_negatives(neg, "holding phone", "phone", "cellphone", "mobile phone", "smartphone", "visible phone", "phone in hand")
             scene_desc += ", mirror reflection, single reflected body, only mirror reflection is visible, no foreground person"
             neg = _append_negatives(neg, "foreground person", "person outside mirror", "second body", "duplicate body", "multiple reflections", "two phones", "multiple phones")
-        elif prompt_view in {"selfie", "pov"}:
+        elif prompt_view in {"selfie", "pov", "portrait"}:
             scene_desc = _strip_non_mirror_camera_artifacts(scene_desc)
-            # selfie = 别人帮角色拍的照片（第三者在画面外），不是前摄自拍：只补“看向镜头”的取景线索，
-            # 绝不再写手机/相机/自拍取景词（那正是手机 UI 框的来源），手机/UI 抑制交给下面的负向。
-            if prompt_view == "selfie" and "looking at viewer" not in scene_desc.lower():
+            # selfie 是真·前摄自拍、portrait 是别人帮角色拍的照片：两者画面里都不该出现手机本体或手机 UI。
+            # 关键：不再往正向里写 “front-facing phone camera” 之类诱导词（那正是手机 UI 框的来源），
+            # 只补“看向镜头”的取景线索，手机/UI 的抑制全部交给下面的负向。
+            if prompt_view in {"selfie", "portrait"} and "looking at viewer" not in scene_desc.lower():
                 scene_desc += ", looking at viewer"
             neg = _append_negatives(
                 neg,

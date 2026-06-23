@@ -102,12 +102,13 @@ class SchedulerRuntimeMixin:
             "\n模式要求:\n"
             "morning: 必须使用 pov，刚睡醒、厨房或卧室早安场景。\n"
             f"normal: 根据{spatial_hint}和近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror。\n"
-            f"ntr: 用户超过 {self._compute_ntr_threshold(purity)} 天没有互动时的冷落惩罚推送，强烈 NTR 危机感，通常 selfie 或分屏。\n"
-            "取景物理规则: view=selfie 是别人帮角色拍的照片（第三者在画面外拍摄，角色看向镜头），不是前摄自拍，画面中不得出现手机、相机、镜子或拿手机的手，也不要写成自拍；"
+            f"ntr: 用户超过 {self._compute_ntr_threshold(purity)} 天没有互动时的冷落惩罚推送，强烈 NTR 危机感，通常 portrait（他人帮角色拍）、selfie 或分屏。\n"
+            "取景物理规则: view=selfie 是前摄自拍（伸手举手机），画面中不得出现手机本体、手机 UI、相机、镜子或拿手机的手；"
+            "view=portrait 是他人帮角色拍的照片（拍摄者在画面外、角色看向镜头，画面里只有角色），NTR 冷落场景适合用，同样不出现手机/相机/镜子；"
             "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。\n"
             "selfie/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。\n"
             "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。\n"
-            "必须输出严格 JSON: {\"scene\":\"...\",\"caption\":\"...\",\"view\":\"selfie|mirror|pov|third\"}。"
+            "必须输出严格 JSON: {\"scene\":\"...\",\"caption\":\"...\",\"view\":\"selfie|mirror|pov|third|portrait\"}。"
         )
         prompt = f"当前时段: {time_period}，星期: {weekday}，天气: {weather}，推送模式: {mode}。"
         if recent_chat:
@@ -189,12 +190,13 @@ class SchedulerRuntimeMixin:
             "\n模式要求:\n"
             "morning: 必须使用 pov，刚睡醒、厨房或卧室早安场景。\n"
             f"normal: 根据{spatial_hint}和近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror。\n"
-            f"ntr: 用户超过 {self._compute_ntr_threshold(purity)} 天没有互动时的冷落惩罚推送，强烈 NTR 危机感，通常 selfie 或分屏。\n"
-            "取景物理规则: view=selfie 是别人帮角色拍的照片（第三者在画面外拍摄，角色看向镜头），不是前摄自拍，画面中不得出现手机、相机、镜子或拿手机的手，也不要写成自拍；"
+            f"ntr: 用户超过 {self._compute_ntr_threshold(purity)} 天没有互动时的冷落惩罚推送，强烈 NTR 危机感，通常 portrait（他人帮角色拍）、selfie 或分屏。\n"
+            "取景物理规则: view=selfie 是前摄自拍（伸手举手机），画面中不得出现手机本体、手机 UI、相机、镜子或拿手机的手；"
+            "view=portrait 是他人帮角色拍的照片（拍摄者在画面外、角色看向镜头，画面里只有角色），NTR 冷落场景适合用，同样不出现手机/相机/镜子；"
             "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。\n"
             "selfie/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。\n"
             "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。\n"
-            "必须输出严格 JSON: {\"scene\":\"...\",\"caption\":\"...\",\"view\":\"selfie|mirror|pov|third\"}。"
+            "必须输出严格 JSON: {\"scene\":\"...\",\"caption\":\"...\",\"view\":\"selfie|mirror|pov|third|portrait\"}。"
         )
         prompt = f"当前时段: {time_period}，星期: {weekday}，天气: {weather}，推送模式: {mode}。"
         if recent_chat:

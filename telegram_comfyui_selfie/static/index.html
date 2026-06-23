@@ -293,7 +293,8 @@
               <p class="muted">按模型 profile 和任务维度统计 token 消耗与缓存命中率</p>
             </div>
             <div class="button-row">
-              <select id="usage-range">
+              <label for="usage-range" class="sr-only">时间范围</label>
+              <select id="usage-range" title="时间范围">
                 <option value="86400">最近 24 小时</option>
                 <option value="604800">最近 7 天</option>
                 <option value="2592000">最近 30 天</option>
@@ -314,11 +315,15 @@
             <div class="metric"><span>Total Tokens</span><strong>-</strong></div>
           </div>
           <div class="usage-filter-bar">
-            <input id="usage-filter-text" type="text" placeholder="搜索 Profile / Model / Purpose / Tag">
-            <select id="usage-filter-profile"><option value="">全部 Profile</option></select>
-            <select id="usage-filter-model"><option value="">全部 Model</option></select>
-            <select id="usage-filter-purpose"><option value="">全部 Purpose</option></select>
-            <select id="usage-filter-tag"><option value="">全部 Tag</option></select>
+            <input id="usage-filter-text" type="text" placeholder="搜索 Profile / Model / Purpose / Tag" title="搜索过滤">
+            <label for="usage-filter-profile" class="sr-only">Profile 过滤</label>
+            <select id="usage-filter-profile" title="Profile 过滤"><option value="">全部 Profile</option></select>
+            <label for="usage-filter-model" class="sr-only">Model 过滤</label>
+            <select id="usage-filter-model" title="Model 过滤"><option value="">全部 Model</option></select>
+            <label for="usage-filter-purpose" class="sr-only">Purpose 过滤</label>
+            <select id="usage-filter-purpose" title="Purpose 过滤"><option value="">全部 Purpose</option></select>
+            <label for="usage-filter-tag" class="sr-only">Tag 过滤</label>
+            <select id="usage-filter-tag" title="Tag 过滤"><option value="">全部 Tag</option></select>
             <select id="usage-sort">
               <option value="last_used-desc" selected>按最新时间降序</option>
               <option value="last_used-asc">按最新时间升序</option>

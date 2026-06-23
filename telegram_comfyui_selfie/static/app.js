@@ -100,7 +100,9 @@ const characterFieldSections = [
   ["外貌", [
     ["count", "人数标签", "text"],
     ["appearance", "身体特征", "textarea"],
+    ["outfit", "服装标签", "textarea"],
     ["style", "画风", "text"],
+    ["allow_change_appearance", "自动换装", "tristate"],
   ]],
   ["关系与背景", [
     ["relationship", "空间关系", "textarea"],
@@ -360,8 +362,13 @@ function renderStatus() {
 }
 
 function inputFor([key, label, type], values) {
-  const wrap = document.createElement("label");
-  wrap.textContent = label;
+  const fieldId = "field-" + key;
+  const wrap = document.createElement("div");
+  wrap.className = "field-wrap";
+  const labelEl = document.createElement("label");
+  labelEl.htmlFor = fieldId;
+  labelEl.textContent = label;
+  wrap.appendChild(labelEl);
   let input;
   const value = values[key];
   if (type === "textarea" || type === "list") {
@@ -372,6 +379,10 @@ function inputFor([key, label, type], values) {
     input = document.createElement("select");
     input.innerHTML = `<option value="true">开启</option><option value="false">关闭</option>`;
     input.value = value ? "true" : "false";
+  } else if (type === "tristate") {
+    input = document.createElement("select");
+    input.innerHTML = `<option value="">跟随全局</option><option value="true">开启</option><option value="false">关闭</option>`;
+    input.value = value === true || value === "true" ? "true" : (value === false || value === "false" ? "false" : "");
   } else if (type.startsWith("select:")) {
     input = document.createElement("select");
     const options = type.slice(7).split(",");
@@ -383,8 +394,8 @@ function inputFor([key, label, type], values) {
     const opts = ['<option value="">默认</option>'];
     profileIds.forEach(id => {
       const p = state.profiles[id];
-      const label = `${escapeHtml(id)} · ${escapeHtml(p?.name || p?.model || "")}`;
-      opts.push(`<option value="${escapeHtml(id)}">${label}</option>`);
+      const lbl = `${escapeHtml(id)} · ${escapeHtml(p?.name || p?.model || "")}`;
+      opts.push(`<option value="${escapeHtml(id)}">${lbl}</option>`);
     });
     input.innerHTML = opts.join("");
     input.value = value ?? "";
@@ -394,6 +405,7 @@ function inputFor([key, label, type], values) {
     input.value = type === "secret" ? "" : (value ?? "");
     if (type === "secret" && state.secretPresent[key]) input.placeholder = "已保存；留空不修改";
   }
+  input.id = fieldId;
   input.name = key;
   wrap.appendChild(input);
   return wrap;
@@ -403,14 +415,14 @@ function renderConfig() {
   const form = $("#config-form");
   form.innerHTML = "";
   for (const [title, fields] of configSections) {
-    const section = document.createElement("section");
-    section.className = "form-section";
-    section.innerHTML = `<h3>${title}</h3>`;
+    const fs = document.createElement("fieldset");
+    fs.className = "form-section";
+    fs.innerHTML = `<legend>${title}</legend>`;
     const grid = document.createElement("div");
     grid.className = "field-grid";
     fields.forEach(field => grid.appendChild(inputFor(field, state.config || {})));
-    section.appendChild(grid);
-    form.appendChild(section);
+    fs.appendChild(grid);
+    form.appendChild(fs);
   }
   const actions = document.createElement("div");
   actions.className = "form-actions";
@@ -523,8 +535,8 @@ function renderCharacterForm() {
     <h3 class="section-toggle" type="button">角色历史提要</h3>
     <div class="field-grid">
       <div class="field-wrap full-width">
-        <label>历史提要 <span class="muted">（dream 自动生成，可手动编辑）</span></label>
-        <textarea id="history-summary-editor" rows="6" placeholder="暂无历史提要，等待 dream 生成或手动输入。"></textarea>
+        <label for="history-summary-editor">历史提要 <span class="muted">（dream 自动生成，可手动编辑）</span></label>
+        <textarea id="history-summary-editor" name="history_summary" rows="6" placeholder="暂无历史提要，等待 dream 生成或手动输入。"></textarea>
         <div class="field-actions">
           <button type="button" id="history-summary-save" class="primary">保存提要</button>
         </div>

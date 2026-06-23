@@ -1470,14 +1470,15 @@ class ServiceTestCase(unittest.TestCase):
     def test_selfie_prompt_strips_phone_instead_of_forcing_mirror(self):
         svc = self.make_service()
         pos, neg = svc._build_prompt(
-            "A candid photo of a woman, solo, holding a smartphone in the bedroom, warm bedside lighting",
+            "A selfie of a woman, solo, holding a smartphone in the bedroom, warm bedside lighting",
             session_id="telegram:123",
         )
 
-        self.assertIn("candid photo", pos.lower())
+        self.assertIn("selfie", pos.lower())
         self.assertIn("looking at viewer", pos.lower())
-        self.assertNotIn("front-camera selfie", pos.lower())
+        # 真·自拍保留 selfie 取景，但绝不写 front-facing phone camera（手机 UI 框的来源）
         self.assertNotIn("phone camera", pos.lower())
+        self.assertNotIn("front-facing", pos.lower())
         self.assertNotIn("smartphone", pos.lower())
         self.assertNotIn("mirror reflection", pos.lower())
         neg_tokens = {item.strip().lower() for item in neg.split(",")}
@@ -1490,14 +1491,14 @@ class ServiceTestCase(unittest.TestCase):
     def test_selfie_prompt_removes_phone_screen_ui_without_breaking_sentence(self):
         svc = self.make_service()
         pos, _ = svc._build_prompt(
-            "A candid photo of a woman, solo, upper body framing, looking at viewer, "
+            "A selfie of a woman, solo, upper body framing, looking at viewer, "
             "a woman sits by the window, gazing at a phone screen with purple eyes gleaming, "
             "the phone screen lit showing a message interface countdown prompt, black dress, phone screen, countdown",
             session_id="telegram:123",
         )
 
         lower = pos.lower()
-        self.assertIn("candid photo", lower)
+        self.assertIn("selfie", lower)
         self.assertIn("looking at viewer", lower)
         self.assertEqual(lower.count("looking at viewer"), 1)
         self.assertNotIn("phone camera", lower)
@@ -1506,6 +1507,26 @@ class ServiceTestCase(unittest.TestCase):
         self.assertNotIn("countdown", lower)
         self.assertNotIn("gazing at a with", lower)
         self.assertNotIn("the lit", lower)
+
+    def test_portrait_view_is_third_person_photo_without_phone(self):
+        # portrait = 别人帮角色拍的照片：看向镜头、画面里只有角色、不出现手机本体或手机 UI；
+        # 负向仍压制 camera frame / phone interface / selfie frame 等手机 UI 框元素。
+        svc = self.make_service()
+        pos, neg = svc._build_prompt(
+            "A photo of a woman, solo, upper body framing, looking at viewer, "
+            "posing for the camera, taken by someone else just out of frame, "
+            "standing in the kitchen, holding a smartphone, warm daylight",
+            session_id="telegram:123",
+        )
+        pos_lower = pos.lower()
+        self.assertIn("looking at viewer", pos_lower)
+        self.assertIn("taken by someone else just out of frame", pos_lower)
+        self.assertNotIn("smartphone", pos_lower)
+        self.assertNotIn("front-facing phone camera", pos_lower)
+        neg_lower = neg.lower()
+        self.assertIn("camera frame", neg_lower)
+        self.assertIn("phone interface", neg_lower)
+        self.assertIn("selfie frame", neg_lower)
 
     def test_prompt_rewrites_user_subject_and_removes_phone_clause(self):
         svc = self.make_service()
@@ -2409,6 +2430,43 @@ class ServiceTestCase(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_character_card_roundtrips_outfit_and_auto_change(self):
+        """角色卡新增的服装标签(outfit↔dynamic_appearance)与自动换装(三态)能存取并回读。"""
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        # 服装标签 + 自动换装关闭
+        svc._apply_character_payload(state, {
+            "character": "小雨",
+            "outfit": "white shirt, dark pleated skirt",
+            "allow_change_appearance": "false",
+        })
+        self.assertEqual(state["dynamic_appearance"], "white shirt, dark pleated skirt")
+        self.assertIs(state["custom_allow_llm_change_appearance"], False)
+        card = svc._character_export_payload(state)
+        self.assertEqual(card["outfit"], "white shirt, dark pleated skirt")
+        self.assertIs(card["allow_change_appearance"], False)
+        # 三态空 → 跟随全局(None)
+        svc._apply_character_payload(state, {"allow_change_appearance": ""})
+        self.assertIsNone(state["custom_allow_llm_change_appearance"])
+
+    def test_default_character_card_roundtrips_outfit_and_auto_change(self):
+        """默认角色卡的服装标签/自动换装写回全局 config；空(跟随全局)不改写开关。"""
+        svc = self.make_service()
+        svc._apply_default_character_payload({
+            "id": svc._default_character_payload()["id"],
+            "outfit": "black silk slip dress",
+            "allow_change_appearance": "false",
+        })
+        self.assertEqual(svc.config["dynamic_appearance"], "black silk slip dress")
+        self.assertIs(svc.config["allow_llm_change_appearance"], False)
+        card = svc._default_character_payload()
+        self.assertEqual(card["outfit"], "black silk slip dress")
+        self.assertIs(card["allow_change_appearance"], False)
+        # 空(跟随全局)不改写全局开关
+        svc._apply_default_character_payload({"id": card["id"], "allow_change_appearance": ""})
+        self.assertIs(svc.config["allow_llm_change_appearance"], False)
+
     def test_default_character_edit_writes_back_to_config(self):
         """卡编辑器改默认角色 → 写回 config（不进 saved_characters），且默认卡读取反映新值。"""
         svc = self.make_service()
@@ -2840,7 +2898,7 @@ class ServiceTestCase(unittest.TestCase):
         state = svc._get_session_state(sid)
         state["custom_default_hair"] = "silver_hair,bun"
         pos, neg = svc._build_prompt(
-            "A candid photo of a woman, Dark brown hair spills loosely over her shoulders, demon horns peeking through",
+            "A selfie of a woman, Dark brown hair spills loosely over her shoulders, demon horns peeking through",
             session_id=sid,
         )
         low_pos = pos.lower()
@@ -3265,13 +3323,12 @@ class ServiceTestCase(unittest.TestCase):
         state["custom_positive_prefix"] = "1girl, black long hair, purple eyes"
         state["custom_count"] = "1girl"
         pos, neg = svc._build_prompt(
-            "A candid photo of a woman, solo, lying beside him after sex",
+            "A selfie of a woman, solo, lying beside him after sex",
             session_id=sid,
             is_intimate=True,
         )
         pos_lower = pos.lower()
-        self.assertNotIn("candid photo", pos_lower)
-        self.assertNotIn("front-camera selfie", pos_lower)
+        self.assertNotIn("selfie", pos_lower)
         self.assertNotIn("solo", pos_lower)
         self.assertIn("first-person pov", pos_lower)
         self.assertIn("partial male body visible", pos_lower)

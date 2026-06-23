@@ -559,6 +559,8 @@ class TelegramComfyUIService(
             "scene_preference": "",
             "selfie_preference": "",
             "style": str(cfg.get("current_style", "") or "").strip(),
+            "outfit": str(cfg.get("dynamic_appearance", "") or "").strip(),
+            "allow_change_appearance": bool(cfg.get("allow_llm_change_appearance", True)),
             "purity": None,
         }
 
@@ -574,6 +576,7 @@ class TelegramComfyUIService(
         "relationship": "spatial_relationship",
         "age_stage": "character_age_stage",
         "day_anchor": "character_day_anchor",
+        "outfit": "dynamic_appearance",
     }
 
     def _apply_default_character_payload(self, payload: dict[str, Any]) -> None:
@@ -583,6 +586,12 @@ class TelegramComfyUIService(
         for src, dst in self._DEFAULT_CARD_TO_CONFIG.items():
             if src in payload:
                 self.config[dst] = "" if payload[src] is None else str(payload[src]).strip()
+        if "allow_change_appearance" in payload:
+            # 默认角色以全局配置为存储：非空才写回全局开关，空（跟随全局）对默认角色即不改。
+            raw = payload.get("allow_change_appearance")
+            s = "" if raw is None else str(raw).strip().lower()
+            if s:
+                self.config["allow_llm_change_appearance"] = s in ("true", "1", "yes", "on", "开", "允许", "启用")
         if "purity" in payload:
             p = payload.get("purity")
             self.config["default_purity"] = "" if p in (None, "") else str(p)
@@ -1625,7 +1634,9 @@ class TelegramComfyUIService(
             if view == "mirror":
                 view_rule = "固定视角是 mirror 对镜自拍；系统会添加镜子和一部手机，你不要重复输出 mirror/phone/smartphone。"
             elif view == "selfie":
-                view_rule = "固定视角是 selfie：这是别人帮角色拍的照片（第三者在画面外举机拍摄），角色正对镜头、看向观众，不是前摄自拍；画面中不得出现手机、相机、镜子、拿手机的手、手机屏幕、消息界面、倒计时界面，也不要写自拍取景。"
+                view_rule = "固定视角是 selfie 前摄自拍：角色伸手举着手机自拍、看向镜头；但画面中不得出现手机本体、手机屏幕、手机 UI、相机、镜子、拿手机的手、消息界面、倒计时界面。"
+            elif view == "portrait":
+                view_rule = "固定视角是 portrait：别人（用户或他人）帮角色拍的照片，角色看向镜头、为镜头摆姿势，拍摄者在画面外，画面里只有角色一个人；画面中不得出现手机、相机、镜子、拿手机的手、手机屏幕、UI、消息界面。"
             elif view == "pov":
                 view_rule = "固定视角是 POV；画面中不得出现自拍手机、镜子、拿手机的手、手机屏幕、消息界面、倒计时界面。"
             else:
@@ -1655,8 +1666,8 @@ class TelegramComfyUIService(
                 "你是专业的 Anima3 提示词工程师。Anima3 支持英文自然语言与 danbooru 标签混编。"
                 "将中文场景描述重构为一句英文自然语言画面描述，后接少量 danbooru 补强标签。"
                 "直接输出英文提示词，不要 JSON、不要解释，不要压缩成纯标签列表。"
-                "根据物理距离判断别人帮角色拍的照片(selfie)、对镜自拍、POV 或第三人称视角。"
-                "别人帮角色拍的照片(selfie)不出现手机和镜子，角色看向镜头；只有对镜自拍才允许镜子和手机同时出现。"
+                "根据物理距离判断自拍、对镜、POV 或第三人称视角。"
+                "前摄自拍不出现手机和镜子；只有对镜自拍才允许镜子和手机同时出现。"
                 "避免复杂手势和多手互动；除非原文强制要求，尽量不强调手部。"
                 "自然语言句子尽量不要使用逗号。输出格式: English visual sentence. key tag, key tag, key tag"
             )
@@ -1900,12 +1911,14 @@ class TelegramComfyUIService(
             raise ValueError("wardrobe classify did not return an object")
         return parsed
 
-    async def _wardrobe_apply_to_state(self, state: dict, description: str, *, replace: bool = False) -> str:
+    async def _wardrobe_apply_to_state(self, state: dict, description: str, *, replace: bool = False, session_id: str = "") -> str:
         """把一次换装应用到 state（改 wardrobe + dynamic_appearance），不落盘——由调用方保存。"""
         desc = (description or "").strip()
         if desc.lower() in ("reset", "none", "clear", "无", "", "重置", "恢复", "默认"):
             state["wardrobe"] = {}
             state["dynamic_appearance"] = ""
+            if session_id:
+                self._ulog(session_id, "WARDROBE", f'desc="{desc[:80]}" → reset 清空全部穿搭')
             return ""
         wardrobe = {} if replace else self._get_wardrobe(state)
         closet = state.get("wardrobe_closet") if isinstance(state.get("wardrobe_closet"), dict) else {}
@@ -1915,6 +1928,14 @@ class TelegramComfyUIService(
                 desc, appearance_rules.wardrobe_summary(wardrobe), appearance_rules.closet_brief_for_llm(closet)
             )
             wardrobe = appearance_rules.apply_wardrobe_change(wardrobe, change)
+            # 守卫：reset_all 但没穿任何新衣服 → 这是"脱光"，不应清空衣柜
+            if change.get("reset_all") and not any(
+                str(change.get(s) or "").strip()
+                for s in appearance_rules.WARDROBE_CLOTHING_SLOTS
+            ):
+                if session_id:
+                    self._ulog(session_id, "WARDROBE", f"拦截 reset_all 无新衣: desc=\"{desc[:120]}\"")
+                return ""
         except Exception as exc:
             logger.warning("wardrobe classify failed, fallback to keyword slotting: %s", exc)
             if re.search(r"[a-zA-Z]{3,}", desc) and not _HAS_CJK(desc):
@@ -1936,18 +1957,37 @@ class TelegramComfyUIService(
         state["wardrobe_closet"] = closet
         state["wardrobe"] = wardrobe
         state["dynamic_appearance"] = appearance_rules.render_wardrobe(wardrobe)
+        if session_id:
+            slots = {k: v for k, v in change.items() if k != "names" and v not in ("", [], False, None)}
+            self._ulog(session_id, "WARDROBE", f'desc="{desc[:80]}" replace={replace} → 分槽={slots} | 结果="{(state["dynamic_appearance"] or "")[:140]}"')
         return state["dynamic_appearance"]
 
     async def _apply_wardrobe(self, session_id: str, description: str, *, replace: bool = False) -> str:
         """换装统一入口：分槽（LLM 主判，关键词兜底）→ 应用规则 → 渲染回 dynamic_appearance 并持久化。"""
         state = self._get_session_state(session_id)
-        rendered = await self._wardrobe_apply_to_state(state, description, replace=replace)
+        rendered = await self._wardrobe_apply_to_state(state, description, replace=replace, session_id=session_id)
         self._save_session_state(session_id, state)
         return rendered or "（已清空）"
 
+    _TEMPORARY_NUDITY_RE = re.compile(
+        r"\b(?:脱[光精]|全裸|裸体|一[丝条]不[挂卦]|脱[得掉][精光一].*|"
+        r"nude|naked|strip(?:\s+naked)?|get\s+naked|take\s+off\s+(?:everything|all|clothes)|"
+        r"completely\s+(?:nude|naked|undressed)|stark\s+naked|nothing\s+on|no\s+clothes)\b",
+        re.IGNORECASE,
+    )
+    _PUT_ON_RE = re.compile(
+        r"\b(?:换[上穿]|穿[上回]|put\s+on|wear|change\s+(?:into|to)|换上)", re.IGNORECASE
+    )
+
     async def tool_change_appearance(self, session_id: str, description: str = "", mode: str = "merge") -> str:
-        if not self._allow_llm_change_appearance(session_id):
+        allow = self._allow_llm_change_appearance(session_id)
+        desc = (description or "").strip()
+        self._ulog(session_id, "WARDROBE", f'模型调用 change_appearance allow={"on" if allow else "off"} mode={mode} desc="{desc[:100]}"')
+        if not allow:
             return "当前会话已关闭模型自主修改外型，dynamic_appearance 未改变。"
+        if self._TEMPORARY_NUDITY_RE.search(desc) and not self._PUT_ON_RE.search(desc):
+            self._ulog(session_id, "WARDROBE", f'拦截临时裸体 change_appearance: "{desc[:120]}"')
+            return "临时脱衣/裸体不需要调用 change_appearance——配图系统会自动处理，场景结束后角色会自动恢复原着装。只有换上不同衣服时才调用。"
         result = await self._apply_wardrobe(session_id, description, replace=(mode == "replace"))
         return f"外貌已改变: {result}"
 

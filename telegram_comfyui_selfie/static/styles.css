@@ -1,3 +1,16 @@
+/* Screen-reader only utility */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* Design tokens */
 :root {
   color-scheme: light;
@@ -502,7 +515,8 @@ select {
   padding: 16px;
 }
 
-.form-section h3 {
+.form-section h3,
+.form-section legend {
   margin: 0 0 12px;
   font-size: 15px;
   font-weight: 600;
@@ -510,6 +524,10 @@ select {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 0;
+  border: none;
+  float: none;
+  width: auto;
 }
 
 .field-grid, .slot-edit-grid {

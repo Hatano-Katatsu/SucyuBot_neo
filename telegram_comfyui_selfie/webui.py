@@ -829,13 +829,17 @@ async def api_save_character(request: web.Request):
     key = str(payload.get("id") or payload.get("character") or payload.get("bot_name") or "").strip()
     if not key:
         return json_error("角色 JSON 必须包含 id 或 character")
-    # 默认角色以 config 为存储：编辑它就写回 config，不建 saved_characters 条目、不动当前会话角色态。
-    if key == (service._default_character_payload().get("id") or ""):
+    # 默认角色以 config 为存储：仅当该角色不在 saved_characters（用户没创建过同名自定义角色）、
+    # 且其 is_default 标记为真时，才走默认路径写回 config。否则走常规 saved_characters 路径。
+    default_id = service._default_character_payload().get("id") or ""
+    saved = state.get("saved_characters") or {}
+    is_default_card = key == default_id and saved.get(key, {}).get("is_default") is True
+    if is_default_card:
         service._apply_default_character_payload(payload)
         return json_ok({
             "active_id": state.get("custom_character") or "",
             "current": service._character_export_payload(state),
-            "characters": state.get("saved_characters") or {},
+            "characters": saved,
             "default": service._default_character_payload(),
         })
     active_id = state.get("custom_character") or state.get("custom_bot_name") or ""
@@ -857,10 +861,11 @@ async def api_delete_character(request: web.Request):
         return json_error("无权访问此会话", status=403)
     character_id = request.match_info["character_id"]
     default_id = service._default_character_payload().get("id") or ""
-    if character_id == default_id:
-        return json_error("系统默认角色不能删除", status=403)
     state = service._get_session_state(sid)
     saved = state.setdefault("saved_characters", {})
+    is_default_card = character_id == default_id and saved.get(character_id, {}).get("is_default") is True
+    if is_default_card:
+        return json_error("系统默认角色不能删除", status=403)
     saved.pop(character_id, None)
     if state.get("custom_character") == character_id and hasattr(service, "_clear_conversation_context"):
         service._clear_conversation_context(state)
@@ -906,7 +911,6 @@ async def api_activate_character(request: web.Request):
         state["purity"] = data.get("purity")
     if switching and hasattr(service, "_restore_character_context"):
         service._restore_character_context(sid, state)
-        state["dynamic_appearance"] = ""
     state.pop("life_profile", None)
     service._save_session_state(sid, state)
     return json_ok({"active_id": state.get("custom_character") or "", "current": service._character_export_payload(state), "characters": state.get("saved_characters") or {}})

@@ -1184,6 +1184,8 @@ class CommandHandlersMixin:
             "scene_preference": state.get("custom_scene_preference", ""),
             "selfie_preference": state.get("custom_selfie_preference", ""),
             "style": state.get("custom_current_style", ""),
+            "outfit": state.get("dynamic_appearance", ""),
+            "allow_change_appearance": state.get("custom_allow_llm_change_appearance"),
             "purity": state.get("purity"),
         }
 
@@ -1207,10 +1209,19 @@ class CommandHandlersMixin:
             "scene_preference": "custom_scene_preference",
             "selfie_preference": "custom_selfie_preference",
             "style": "custom_current_style",
+            "outfit": "dynamic_appearance",
         }
         for src, dst in mapping.items():
             if src in data:
                 state[dst] = "" if data[src] is None else str(data[src])
+        if "allow_change_appearance" in data:
+            # 三态：空/None=跟随全局，其余按真假解析
+            raw = data.get("allow_change_appearance")
+            s = "" if raw is None else str(raw).strip().lower()
+            if not s:
+                state["custom_allow_llm_change_appearance"] = None
+            else:
+                state["custom_allow_llm_change_appearance"] = s in ("true", "1", "yes", "on", "开", "允许", "启用")
         if "purity" in data:
             state["purity"] = data.get("purity")
             state["purity_user_set"] = data.get("purity") is not None
@@ -1240,6 +1251,8 @@ class CommandHandlersMixin:
             "scene_preference": state.get("custom_scene_preference", ""),
             "selfie_preference": state.get("custom_selfie_preference", ""),
             "style": state.get("custom_current_style", ""),
+            "outfit": state.get("dynamic_appearance", ""),
+            "allow_change_appearance": state.get("custom_allow_llm_change_appearance"),
             "purity": state.get("purity"),
         }
 
@@ -1673,7 +1686,7 @@ class CommandHandlersMixin:
                 applied.append(f"基础外观: {base_tags[:180]}")
             if dynamic_src:
                 # 服装/配饰走衣柜分槽（同槽替换、连衣裙互斥），不再扁平合并。
-                await self._wardrobe_apply_to_state(state, dynamic_src)
+                await self._wardrobe_apply_to_state(state, dynamic_src, session_id=session_id)
                 applied.append(f"穿搭/配饰: {(state.get('dynamic_appearance') or '')[:180]}")
             style = self._apply_intake_style(state, intake)
             if style:
