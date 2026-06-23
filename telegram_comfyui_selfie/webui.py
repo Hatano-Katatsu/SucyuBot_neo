@@ -118,6 +118,8 @@ def create_web_app(service) -> web.Application:
     app.router.add_post("/api/sessions/{session_id:.+}/freeze", api_freeze_session)
     app.router.add_post("/api/sessions/{session_id:.+}/unfreeze", api_unfreeze_session)
     app.router.add_post("/api/sessions/{session_id:.+}/organize-memories", api_organize_memories)
+    app.router.add_get("/api/sessions/{session_id:.+}/history-summary", api_get_history_summary)
+    app.router.add_put("/api/sessions/{session_id:.+}/history-summary", api_save_history_summary)
     # 通用会话路由放在最后，且只匹配不含 / 的 session_id（session_id 含 : 但不含 /）
     app.router.add_get("/api/sessions/{session_id:[^/]+}", api_session_detail)
     app.router.add_patch("/api/sessions/{session_id:[^/]+}", api_update_session)
@@ -1231,6 +1233,45 @@ async def api_organize_memories(request: web.Request):
         return json_error(f"整理记忆失败: {exc}", status=500)
     memories = service.memory.list_memories(sid, character=char, limit=80)
     return json_ok({"memories": memories, "character": char, "message": "记忆整理完成"})
+
+
+async def api_get_history_summary(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    char = request.query.get("character_key") or (service._memory_character(sid) if hasattr(service, "_memory_character") else "")
+    key = char
+    summary = ""
+    try:
+        meta = service.app_store.get_context_meta(sid, key)
+        summary = (meta.get("character_history_summary") or "").strip()
+    except Exception:
+        pass
+    if not summary:
+        state = service._get_session_state(sid)
+        summary = str(state.get("character_history_summary") or "").strip()
+    return json_ok({"character_key": key, "summary": summary})
+
+
+async def api_save_history_summary(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权操作此会话", status=403)
+    payload = await request.json()
+    summary = str(payload.get("summary") or "").strip()
+    char = str(payload.get("character_key") or "").strip()
+    if not char:
+        char = service._memory_character(sid) if hasattr(service, "_memory_character") else ""
+    try:
+        service.app_store.upsert_character_history_summary(sid, char, summary)
+    except Exception as exc:
+        return json_error(f"保存历史提要失败: {exc}", status=500)
+    state = service._get_session_state(sid)
+    state["character_history_summary"] = summary
+    service._save_session_state(sid, state)
+    return json_ok({"character_key": char, "summary": summary})
 
 
 async def api_logs(request: web.Request):

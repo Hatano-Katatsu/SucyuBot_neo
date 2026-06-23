@@ -517,6 +517,31 @@ function renderCharacterForm() {
     form.appendChild(section);
   });
 
+  const histSection = document.createElement("section");
+  histSection.className = "form-section character-section";
+  histSection.innerHTML = `
+    <h3 class="section-toggle" type="button">角色历史提要</h3>
+    <div class="field-grid">
+      <div class="field-wrap full-width">
+        <label>历史提要 <span class="muted">（dream 自动生成，可手动编辑）</span></label>
+        <textarea id="history-summary-editor" rows="6" placeholder="暂无历史提要，等待 dream 生成或手动输入。"></textarea>
+        <div class="field-actions">
+          <button type="button" id="history-summary-save" class="primary">保存提要</button>
+        </div>
+      </div>
+    </div>
+  `;
+  form.appendChild(histSection);
+
+  const histToggle = histSection.querySelector(".section-toggle");
+  const histGrid = histSection.querySelector(".field-grid");
+  histToggle.onclick = () => {
+    histGrid.classList.toggle("collapsed");
+    histToggle.classList.toggle("collapsed");
+  };
+
+  loadHistorySummary();
+
   const actions = document.createElement("div");
   actions.className = "form-actions";
   actions.innerHTML = `<button type="button" class="danger" id="delete-character" ${isDefault ? "disabled" : ""}>删除角色</button><button class="primary" type="submit">保存角色</button>`;
@@ -560,6 +585,36 @@ function renderCharacterForm() {
       setBusy(btn, false);
     }
   };
+}
+
+async function loadHistorySummary() {
+  const editor = $("#history-summary-editor");
+  const saveBtn = $("#history-summary-save");
+  if (!editor || !state.selectedSession) return;
+  const sid = encodeURIComponent(state.selectedSession);
+  const charKey = state.selectedCharacter || "";
+  try {
+    const data = await api(`/api/sessions/${sid}/history-summary?character_key=${encodeURIComponent(charKey)}`);
+    editor.value = data.summary || "";
+  } catch (_) {
+    editor.value = "";
+  }
+  if (saveBtn) {
+    saveBtn.onclick = async () => {
+      setBusy(saveBtn, true);
+      try {
+        await api(`/api/sessions/${sid}/history-summary`, {
+          method: "PUT",
+          body: { character_key: charKey, summary: editor.value },
+        });
+        toast("历史提要已保存");
+      } catch (err) {
+        toast(err.message, "error");
+      } finally {
+        setBusy(saveBtn, false);
+      }
+    };
+  }
 }
 
 async function loadCharacters() {

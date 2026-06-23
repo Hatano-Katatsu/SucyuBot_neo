@@ -1164,22 +1164,25 @@ select {
 .panel-head-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   flex-shrink: 0;
 }
 
 .panel-head-actions .icon-btn {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  padding: 4px 8px;
+  gap: 5px;
+  font-size: 13px;
+  padding: 6px 12px;
   border-radius: 6px;
   border: 1px solid var(--line);
   background: var(--surface);
   color: var(--text-secondary);
   cursor: pointer;
   white-space: nowrap;
+  line-height: 1;
+  height: 32px;
+  box-sizing: border-box;
 }
 .panel-head-actions .icon-btn:hover {
   background: var(--accent-ghost);
@@ -1230,6 +1233,28 @@ select {
 }
 .dropdown-menu button:hover {
   background: var(--accent-ghost);
+}
+
+.field-wrap.full-width {
+  grid-column: 1 / -1;
+}
+.field-wrap.full-width label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+.field-wrap.full-width textarea {
+  width: 100%;
+  min-height: 80px;
+  resize: vertical;
+}
+.field-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  justify-content: flex-end;
 }
 
 .range-wrap {
