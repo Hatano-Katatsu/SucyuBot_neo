@@ -1470,12 +1470,14 @@ class ServiceTestCase(unittest.TestCase):
     def test_selfie_prompt_strips_phone_instead_of_forcing_mirror(self):
         svc = self.make_service()
         pos, neg = svc._build_prompt(
-            "A front-camera selfie of a woman, solo, holding a smartphone in the bedroom, warm bedside lighting",
+            "A candid photo of a woman, solo, holding a smartphone in the bedroom, warm bedside lighting",
             session_id="telegram:123",
         )
 
-        self.assertIn("front-camera selfie", pos)
-        self.assertIn("off-frame front-facing phone camera", pos)
+        self.assertIn("candid photo", pos.lower())
+        self.assertIn("looking at viewer", pos.lower())
+        self.assertNotIn("front-camera selfie", pos.lower())
+        self.assertNotIn("phone camera", pos.lower())
         self.assertNotIn("smartphone", pos.lower())
         self.assertNotIn("mirror reflection", pos.lower())
         neg_tokens = {item.strip().lower() for item in neg.split(",")}
@@ -1488,17 +1490,17 @@ class ServiceTestCase(unittest.TestCase):
     def test_selfie_prompt_removes_phone_screen_ui_without_breaking_sentence(self):
         svc = self.make_service()
         pos, _ = svc._build_prompt(
-            "A front-camera selfie of a woman, solo, upper body framing, looking at viewer, "
-            "shot by an off-frame front-facing phone camera, no visible phone, "
+            "A candid photo of a woman, solo, upper body framing, looking at viewer, "
             "a woman sits by the window, gazing at a phone screen with purple eyes gleaming, "
             "the phone screen lit showing a message interface countdown prompt, black dress, phone screen, countdown",
             session_id="telegram:123",
         )
 
         lower = pos.lower()
-        self.assertIn("off-frame front-facing phone camera", lower)
-        self.assertIn("no visible phone", lower)
-        self.assertEqual(lower.count("off-frame front-facing phone camera"), 1)
+        self.assertIn("candid photo", lower)
+        self.assertIn("looking at viewer", lower)
+        self.assertEqual(lower.count("looking at viewer"), 1)
+        self.assertNotIn("phone camera", lower)
         self.assertNotIn("phone screen", lower)
         self.assertNotIn("message interface", lower)
         self.assertNotIn("countdown", lower)
@@ -2838,7 +2840,7 @@ class ServiceTestCase(unittest.TestCase):
         state = svc._get_session_state(sid)
         state["custom_default_hair"] = "silver_hair,bun"
         pos, neg = svc._build_prompt(
-            "A front-camera selfie of a woman, Dark brown hair spills loosely over her shoulders, demon horns peeking through",
+            "A candid photo of a woman, Dark brown hair spills loosely over her shoulders, demon horns peeking through",
             session_id=sid,
         )
         low_pos = pos.lower()
@@ -3263,11 +3265,12 @@ class ServiceTestCase(unittest.TestCase):
         state["custom_positive_prefix"] = "1girl, black long hair, purple eyes"
         state["custom_count"] = "1girl"
         pos, neg = svc._build_prompt(
-            "A front-camera selfie of a woman, solo, lying beside him after sex",
+            "A candid photo of a woman, solo, lying beside him after sex",
             session_id=sid,
             is_intimate=True,
         )
         pos_lower = pos.lower()
+        self.assertNotIn("candid photo", pos_lower)
         self.assertNotIn("front-camera selfie", pos_lower)
         self.assertNotIn("solo", pos_lower)
         self.assertIn("first-person pov", pos_lower)

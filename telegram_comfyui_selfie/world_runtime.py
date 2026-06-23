@@ -935,7 +935,7 @@ class WorldRuntimeMixin:
         if not user_place:
             return "用户当前位置未知；角色按日常动线行动。"
         if user_place.get("co_located"):
-            return "用户和角色此刻在同一空间，适合写成 POV 或近距离第三人称的同框互动；不要写成角色独自一人的前摄自拍。"
+            return "用户和角色此刻在同一空间，适合写成 POV 或近距离第三人称的同框互动；不要写成角色独自一人对着镜头的单人照。"
         if user_place["key"] == character_place["key"]:
             return "用户和角色处于同类场所，可自然写成同地点互动；适合 POV 或第三人称近距离场景。"
         return "用户和角色不在同一地点；优先写成消息、自拍、通勤或约定见面的场景，不要强行瞬移到用户身边。"

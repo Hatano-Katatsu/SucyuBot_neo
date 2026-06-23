@@ -363,7 +363,7 @@ class ChatContextMixin:
                             "mood": {"type": "string", "description": "图片应承载的情绪或关系推进，例如安抚、调情、撒娇、展示、挑逗。"},
                             "must_include": {"type": "string", "description": "用户明确要求必须出现的服装、动作、地点或物件；没有则留空。"},
                             "prompt": {"type": "string", "description": "可选的简短画面草案。不要写英文标签，生图辅助模型会重写。"},
-                            "view": {"type": "string", "enum": ["selfie", "mirror", "pov", "third"], "description": "用户明确要求视角时填写；否则留空交给生图辅助模型判断。selfie 是前摄自拍，画面不出现手机；只有 mirror 对镜自拍才允许镜子和手机同时出现。"},
+                            "view": {"type": "string", "enum": ["selfie", "mirror", "pov", "third"], "description": "用户明确要求视角时填写；否则留空交给生图辅助模型判断。selfie 是别人帮角色拍的照片（第三者在画面外拍摄，角色看向镜头），画面不出现手机；只有 mirror 对镜自拍才允许镜子和手机同时出现。"},
                         },
                         "required": ["intent"],
                     },

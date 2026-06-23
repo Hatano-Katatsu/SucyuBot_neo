@@ -1625,7 +1625,7 @@ class TelegramComfyUIService(
             if view == "mirror":
                 view_rule = "固定视角是 mirror 对镜自拍；系统会添加镜子和一部手机，你不要重复输出 mirror/phone/smartphone。"
             elif view == "selfie":
-                view_rule = "固定视角是 selfie 前摄自拍；画面中不得出现手机、相机、镜子、拿手机的手、手机屏幕、消息界面、倒计时界面。"
+                view_rule = "固定视角是 selfie：这是别人帮角色拍的照片（第三者在画面外举机拍摄），角色正对镜头、看向观众，不是前摄自拍；画面中不得出现手机、相机、镜子、拿手机的手、手机屏幕、消息界面、倒计时界面，也不要写自拍取景。"
             elif view == "pov":
                 view_rule = "固定视角是 POV；画面中不得出现自拍手机、镜子、拿手机的手、手机屏幕、消息界面、倒计时界面。"
             else:
@@ -1655,8 +1655,8 @@ class TelegramComfyUIService(
                 "你是专业的 Anima3 提示词工程师。Anima3 支持英文自然语言与 danbooru 标签混编。"
                 "将中文场景描述重构为一句英文自然语言画面描述，后接少量 danbooru 补强标签。"
                 "直接输出英文提示词，不要 JSON、不要解释，不要压缩成纯标签列表。"
-                "根据物理距离判断自拍、对镜、POV 或第三人称视角。"
-                "前摄自拍不出现手机和镜子；只有对镜自拍才允许镜子和手机同时出现。"
+                "根据物理距离判断别人帮角色拍的照片(selfie)、对镜自拍、POV 或第三人称视角。"
+                "别人帮角色拍的照片(selfie)不出现手机和镜子，角色看向镜头；只有对镜自拍才允许镜子和手机同时出现。"
                 "避免复杂手势和多手互动；除非原文强制要求，尽量不强调手部。"
                 "自然语言句子尽量不要使用逗号。输出格式: English visual sentence. key tag, key tag, key tag"
             )
