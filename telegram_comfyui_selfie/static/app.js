@@ -628,12 +628,6 @@ async function loadMemories() {
         </div>
         <button class="primary" type="submit">新增记忆</button>
       </form>
-      <div class="memory-toolbar">
-        <button id="memory-organize-btn" type="button">
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
-          手动整理记忆
-        </button>
-      </div>
       <div class="manager-list">${rows || `<div class="empty-state">暂无记忆。</div>`}</div>
     `;
     bindRangeInputs(box);
@@ -643,22 +637,6 @@ async function loadMemories() {
       await loadMemories();
       toast("记忆已新增");
     };
-    const organizeBtn = $("#memory-organize-btn");
-    if (organizeBtn) {
-      organizeBtn.onclick = async () => {
-        if (!window.confirm("这会让 AI 根据最近日记和对话自动整理非手动记忆（增删改）。手动记忆不会被修改。继续吗？")) return;
-        setBusy(organizeBtn, true);
-        try {
-          const data = await api(`/api/sessions/${sid}/organize-memories?character_key=${charKey}`, { method: "POST" });
-          toast(data.message || "记忆整理完成");
-          await loadMemories();
-        } catch (err) {
-          toast(err.message, "error");
-        } finally {
-          setBusy(organizeBtn, false);
-        }
-      };
-    }
     box.querySelectorAll("[data-memory-save]").forEach(btn => {
       btn.onclick = async () => {
         const id = btn.dataset.memorySave;
@@ -1437,6 +1415,49 @@ async function initEvents() {
       setBusy(btn, false);
     }
   };
+  $("#memory-organize-btn").onclick = async (event) => {
+    if (!state.selectedSession || !state.selectedCharacter) return;
+    const btn = event.currentTarget;
+    if (!window.confirm("这会让 AI 根据最近日记和对话自动整理非手动记忆（增删改）。手动记忆不会被修改。继续吗？")) return;
+    setBusy(btn, true);
+    try {
+      const charKey = state.selectedCharacter || "";
+      const data = await api(`/api/sessions/${state.selectedSession}/organize-memories?character_key=${encodeURIComponent(charKey)}`, { method: "POST" });
+      toast(data.message || "记忆整理完成");
+      await loadMemories();
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+    }
+  };
+  const pushMenu = $("#test-push-menu");
+  $("#test-push-btn").onclick = (event) => {
+    event.stopPropagation();
+    pushMenu.classList.toggle("open");
+  };
+  pushMenu.querySelectorAll("[data-mode]").forEach(btn => {
+    btn.onclick = async () => {
+      pushMenu.classList.remove("open");
+      if (!state.selectedSession) { toast("请先选择会话", "error"); return; }
+      const mode = btn.dataset.mode;
+      const chatId = state.selectedSession.replace("telegram:", "");
+      if (!window.confirm(`确定触发 ${mode} 模式测试推送吗？`)) return;
+      setBusy(btn, true);
+      try {
+        await api("/api/actions/run-command", {
+          method: "POST",
+          body: { chat_id: chatId, command: "测试推送", arg: mode },
+        });
+        toast(`${mode} 推送已触发`);
+      } catch (err) {
+        toast(err.message, "error");
+      } finally {
+        setBusy(btn, false);
+      }
+    };
+  });
+  document.addEventListener("click", () => pushMenu.classList.remove("open"));
   $("#model-refresh").onclick = async (event) => {
     const btn = event.currentTarget;
     setBusy(btn, true);

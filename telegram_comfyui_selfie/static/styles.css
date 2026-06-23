@@ -1161,6 +1161,77 @@ select {
   gap: 4px;
 }
 
+.panel-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.panel-head-actions .icon-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.panel-head-actions .icon-btn:hover {
+  background: var(--accent-ghost);
+  color: var(--text);
+}
+.panel-head-actions .icon-btn .icon {
+  width: 14px;
+  height: 14px;
+}
+.panel-head-actions .icon-btn .caret {
+  width: 12px;
+  height: 12px;
+  margin-left: -2px;
+}
+
+.dropdown-wrap {
+  position: relative;
+}
+
+.dropdown-menu {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow-md);
+  z-index: 100;
+  min-width: 100px;
+  overflow: hidden;
+}
+.dropdown-menu.open {
+  display: block;
+}
+.dropdown-menu button {
+  display: block;
+  width: 100%;
+  padding: 8px 14px;
+  font-size: 13px;
+  text-align: left;
+  border: none;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.dropdown-menu button:hover {
+  background: var(--accent-ghost);
+}
+
 .range-wrap {
   display: flex;
   align-items: center;
