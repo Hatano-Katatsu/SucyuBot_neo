@@ -74,6 +74,64 @@ class SchedulerRuntimeMixin:
     async def _llm_write_scene(self, mode, weather, weekday, time_period, recent_chat=None, session_id="", now=None, weather_data=None):
         if not self.has_llm_config("image"):
             return None, None, None, None
+        state = self._get_session_state(session_id)
+        spatial = self._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])
+        spatial_hint = f"默认物理空间设定（{spatial}）" if str(spatial).strip() else "默认无固定空间设定"
+        purity = self._get_purity(session_id)
+        if hasattr(self, "_ensure_life_profile"):
+            try:
+                await self._ensure_life_profile(session_id)
+            except Exception:
+                logger.debug("life profile ensure failed for scheduler scene", exc_info=True)
+
+        # 复用完整的聊天上下文（静态 + 稳定 + 动态），只追加场景生成的特定指令。
+        system_base = self._build_scene_system_prompt(session_id, weather=weather_data or weather, mode=mode, now=now)
+        system = (
+            f"{system_base}\n\n"
+            "主动推送时优先遵守当前世界状态：把画面写成角色日常动线里的一个自然片段，不要无理由瞬移到用户身边。"
+            "但如果后面存在短期连续性上下文，短期连续性优先于自动动线。\n"
+            "Scene boundary: write scene as environment, camera framing, action, lighting, mood, and spatial context. "
+            "Do not restate stable character appearance that is already in persona/current appearance/photo memory, such as hair color, eye color, body traits, species traits, or permanent accessories. "
+            "Scheduled pushes should not invent persistent outfit or appearance changes unless the user has explicitly asked for them.\n"
+            "你只需要构思发送给用户的画面，输出简短中文画面描述 scene 和一句中文台词 caption，不要输出英文画图标签。\n"
+            "户外、办公室等公开场景必须穿着得体；深夜和私密场合可更放松。"
+            "\n画面主体规则: 图片主体默认必须是角色，不要把'你/用户'写成画面中被观看的主角。"
+            "用户只能作为视角来源、互动对象或少量局部元素出现；只有用户明确要求双人同框时，才允许用户作为第二主体。"
+            "如果草案写成'你坐着/你躺着/你穿着'，必须改写为'角色坐着/她躺着/角色穿着'。"
+            "角色名只用于台词称呼；默认或原创角色不要把名字当作画面标签，画面描述应依靠角色类型和外貌特征。既有作品角色可以保留角色名和作品名。"
+            "\n模式要求:\n"
+            "morning: 必须使用 pov，刚睡醒、厨房或卧室早安场景。\n"
+            f"normal: 根据{spatial_hint}和近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror。\n"
+            f"ntr: 用户超过 {self._compute_ntr_threshold(purity)} 天没有互动时的冷落惩罚推送，强烈 NTR 危机感，通常 selfie 或分屏。\n"
+            "自拍物理规则: view=selfie 是前摄自拍，画面中不得出现手机、相机、镜子或拿手机的手；"
+            "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。\n"
+            "selfie/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。\n"
+            "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。\n"
+            "必须输出严格 JSON: {\"scene\":\"...\",\"caption\":\"...\",\"view\":\"selfie|mirror|pov|third\"}。"
+        )
+        prompt = f"当前时段: {time_period}，星期: {weekday}，天气: {weather}，推送模式: {mode}。"
+        if recent_chat:
+            prompt += f"\n近期对话:\n{recent_chat}\n请呼应这些上下文。"
+        try:
+            text = await self._call_llm(system, prompt, temp=float(self._get_llm_value("image", "temperature_scene", "0.95")), tag="scene", purpose="image")
+            parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
+            view = (parsed.get("view") or "").strip().lower()
+            if view not in VALID_VIEWS:
+                view = "pov" if mode == "morning" else "selfie"
+            # normal 模式定时推送是角色主动发给用户的消息，应避免使用 third 第三人称
+            # （那样会失去"角色主动分享自己视角"的推送感），统一回退到 selfie。
+            if mode == "normal" and view == "third":
+                view = "selfie"
+            scene = normalize_scene_visual_subject(parsed.get("scene") or "")
+            if scene_implies_mirror_selfie(scene):
+                view = "mirror"
+            # 主动推送/自拍不再让场景生成器自主换装：旧的"随机惊喜换装"已移除，且本条管道的
+            # system prompt 输出的是中文，若读取 new_appearance_tags 会把未翻译的中文塞进 one_shot_appearance。
+            # 一次性换装仍由聊天配图的 image_planning（英文 new_appearance_tags）负责。
+            return scene, parsed.get("caption") or "", None, view
+        except Exception as exc:
+            logger.error("LLM scene generation failed: %s", exc)
+            return None, None, None, None
         persona = self._get_effective_persona(session_id)
         spatial = self._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])
         spatial_hint = f"默认物理空间设定（{spatial}）" if str(spatial).strip() else "默认无固定空间设定"
@@ -307,6 +365,8 @@ class SchedulerRuntimeMixin:
         diary = await self._write_dream_diary(session_id, diary_date, source_text, existing.get("content", ""), reason=reason)
         self.app_store.upsert_diary(session_id, character_key, diary_date, diary, from_message_id=from_id + 1, to_message_id=to_id)
         await self._organize_memories_after_dream(session_id, character_key)
+        diaries = self.app_store.recent_diaries(session_id, character_key, limit=2)
+        await self._generate_character_history_summary(session_id, character_key, diaries)
         self.app_store.mark_dream(session_id, character_key, to_id)
         state = self._get_session_state(session_id)
         state["last_dream_at"] = time.time()
@@ -332,18 +392,32 @@ class SchedulerRuntimeMixin:
         diaries = self.app_store.recent_diaries(session_id, character_key, limit=2)
         if not diaries or not self.has_llm_config("chat", session_id):
             return
-        checkpoint = self.app_store.get_checkpoint(session_id, character_key).get("summary", "")
-        current = self._format_store_messages(self._active_chat_history(self._get_session_state(session_id), self._checkpoint_keep_message_limit()), limit_chars=12000)
         memories = self.memory.list_memories(session_id, character=character_key, limit=120)
         editable = [m for m in memories if m.get("kind") != "manual"]
         if not editable:
             return
+        limit = self._long_memory_limit()
+        threshold = max(1, limit // 2)
+        if len(editable) > limit:
+            await self._summarize_all_memories(session_id, character_key, editable, target_n=threshold, diaries=diaries)
+        else:
+            await self._incremental_organize_memories(session_id, character_key, editable, diaries=diaries)
+
+    async def _incremental_organize_memories(
+        self, session_id: str, character_key: str,
+        editable: list[dict[str, Any]], *, diaries: list[dict[str, Any]] | None = None,
+    ):
+        checkpoint = self.app_store.get_checkpoint(session_id, character_key).get("summary", "")
+        current = self._format_store_messages(self._active_chat_history(self._get_session_state(session_id), self._checkpoint_keep_message_limit()), limit_chars=12000)
+        limit = self._long_memory_limit()
+        threshold = max(1, limit // 2)
         system = (
             "You maintain long-term memories for a roleplay bot. Based on recent diaries, current context, "
             "and checkpoint, decide how to update non-manual memories. Never modify manual memories. "
+            f"Keep total non-manual memories under {threshold} items. Merge similar memories, remove outdated ones. "
             "Return strict JSON: {\"ops\":[{\"op\":\"add|update|delete\",\"id\":123,\"kind\":\"profile|preference|relationship|setting|boundary|visual|event|correction\",\"summary\":\"...\",\"importance\":1-5,\"tags\":[\"...\"]}]}"
         )
-        diary_text = "\n\n".join(f"[{d.get('diary_date')}]\n{d.get('content','')}" for d in diaries)
+        diary_text = "\n\n".join(f"[{d.get('diary_date')}]\n{d.get('content','')}" for d in (diaries or []))
         mem_text = "\n".join(f"{m['id']}. [{m.get('kind')}] {m.get('summary')}" for m in editable)
         user = f"Recent diaries:\n{diary_text}\n\nCheckpoint:\n{checkpoint or 'none'}\n\nCurrent window:\n{current or 'none'}\n\nEditable memories:\n{mem_text or 'none'}"
         try:
@@ -365,6 +439,80 @@ class SchedulerRuntimeMixin:
                 self.memory.update_memory(session_id, int(op.get("id")), character=character_key, summary=op.get("summary"), kind=op.get("kind"), importance=op.get("importance"), tags=op.get("tags") or [], source="dream")
             elif action == "delete" and op.get("id"):
                 self.memory.deactivate_non_manual_memory(session_id, int(op.get("id")), character=character_key)
+
+    async def _summarize_all_memories(
+        self, session_id: str, character_key: str,
+        editable: list[dict[str, Any]], *, target_n: int = 4,
+        diaries: list[dict[str, Any]] | None = None,
+    ):
+        checkpoint = self.app_store.get_checkpoint(session_id, character_key).get("summary", "")
+        system = (
+            f"You are a memory consolidator for a roleplay bot. The character has {len(editable)} non-manual memories, "
+            f"which exceeds the limit. Consolidate ALL of them into at most {target_n} compact, non-redundant memories. "
+            "Merge similar items, drop outdated or trivial ones, keep the most important and durable information. "
+            "Each memory should be self-contained and cover a broader theme rather than a single fact. "
+            "Never include manual memories. "
+            f"Return strict JSON: {{\"memories\":[{{\"kind\":\"profile|preference|relationship|setting|boundary|visual|event|correction\","
+            "\"summary\":\"一句中文记忆摘要\",\"importance\":1-5,\"tags\":[\"标签\"]}]}} "
+            f"memories 数组长度不超过 {target_n}。"
+        )
+        diary_text = "\n\n".join(f"[{d.get('diary_date')}]\n{d.get('content','')}" for d in (diaries or []))
+        mem_text = "\n".join(f"{m['id']}. [{m.get('kind')}] {m.get('summary')}" for m in editable)
+        user = f"Recent diaries:\n{diary_text or 'none'}\n\nCheckpoint:\n{checkpoint or 'none'}\n\nAll editable memories:\n{mem_text}"
+        try:
+            raw = await self._call_llm(system, user, temp=0.1, tag="dream-memory-summarize", purpose="chat", disable_thinking=True, session_id=session_id)
+            parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", raw).strip())
+        except Exception:
+            logger.warning("dream memory summarize failed", exc_info=True)
+            return
+        new_memories = parsed.get("memories") if isinstance(parsed, dict) else None
+        if not isinstance(new_memories, list) or not new_memories:
+            return
+        for m in editable:
+            self.memory.deactivate_non_manual_memory(session_id, int(m["id"]), character=character_key)
+        for item in new_memories[:target_n]:
+            if not isinstance(item, dict) or not item.get("summary"):
+                continue
+            self.memory.add_memory(
+                session_id, item.get("kind", "event"), item["summary"],
+                character=character_key, importance=item.get("importance", 3),
+                tags=item.get("tags") or [], source="dream-summarize",
+            )
+        self._ulog(session_id, "MEMORY", f"全量重写 {len(editable)}→{min(len(new_memories), target_n)} 条（上限{target_n}）")
+
+    async def _generate_character_history_summary(self, session_id: str, character_key: str, diaries: list[dict[str, Any]]):
+        if not diaries or not self.has_llm_config("chat", session_id):
+            return
+        limit = self._checkpoint_hard_limit_chars()
+        key = self._context_character_key(session_id) if hasattr(self, "_context_character_key") else character_key
+        meta = self.app_store.get_context_meta(session_id, key)
+        previous = (meta.get("character_history_summary") or "").strip()
+        diary_text = "\n\n".join(f"[{d.get('diary_date')}]\n{d.get('content','')}" for d in diaries)
+        system = (
+            "你是角色历史提要生成器。根据上一次的历史提要和最近两天的日记，"
+            "生成一份简洁的角色发展脉络摘要。涵盖关系进展、情感变化、重要承诺、未解事件和角色成长。"
+            "这是给聊天模型的长期背景参考，不是日记复述。"
+            f"字数控制在 {limit} 字以内。只输出中文摘要文本。"
+        )
+        user = f"上次历史提要:\n{previous or '无'}\n\n最近日记:\n{diary_text}"
+        try:
+            summary = await self._call_llm(
+                system, user, temp=0.2, tag="history-summary",
+                purpose="chat", disable_thinking=True, session_id=session_id,
+            )
+            summary = (summary or "").strip()
+            if not summary:
+                return
+            hard = self._checkpoint_hard_limit_chars()
+            if len(summary) > hard:
+                summary = summary[-hard:]
+            self.app_store.upsert_character_history_summary(session_id, key, summary)
+            state = self._get_session_state(session_id)
+            state["character_history_summary"] = summary
+            self._save_session_state(session_id, state)
+            self._ulog(session_id, "HISTORY", f"角色历史提要更新 chars={len(summary)}")
+        except Exception:
+            logger.warning("character history summary generation failed", exc_info=True)
 
     async def scheduler_loop(self):
         await asyncio.sleep(10)

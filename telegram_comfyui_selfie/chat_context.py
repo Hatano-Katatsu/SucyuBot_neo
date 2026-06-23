@@ -196,7 +196,6 @@ class ChatContextMixin:
                 prompt=content,
                 view=judge_decision.get("view", ""),
             ))
-        self._queue_long_memory_extraction(session_id, user_text, content)
         return content
 
     def _build_chat_messages(self, session_id: str, user_text: str) -> list[dict[str, Any]]:
@@ -310,27 +309,42 @@ class ChatContextMixin:
                 "短期注意规则: 用户已经切换过话题或场景。切换点之前的聊天、地点、动作、服装、冲突和图片只作历史背景，"
                 "不要主动带入当前场景；只有用户明确说继续刚才、上一张、那个话题时才引用。\n"
             )
+
+        # ── 稳定上下文（仅在 checkpoint / dream 时更新，变化低频，适合作前缀缓存）──
+        # 包含：checkpoint 摘要、角色历史提要、长期记忆。放在历史之后、动态 system 之前，
+        # 使 [静态 system] + [历史] + [稳定上下文] 构成可缓存前缀；仅动态部分（时间/光线/世界状态）逐轮冲刷。
+        stable_parts: list[str] = []
         checkpoint_context = self._checkpoint_context(session_id)
         if checkpoint_context:
-            system_dynamic += (
+            stable_parts.append(
                 "Checkpoint summary of earlier dialogue "
                 "(use this as continuity background; do not reveal it):\n"
-                f"{checkpoint_context}\n"
+                f"{checkpoint_context}"
+            )
+        history_summary = self._character_history_summary_context(session_id)
+        if history_summary:
+            stable_parts.append(
+                "角色历史提要（长期发展脉络，仅在相关时自然引用）:\n"
+                f"{history_summary}"
             )
         memory_context = self._long_term_memory_context(session_id, user_text)
         if memory_context:
-            system_dynamic += (
-                "长期记忆（仅在相关时自然使用，不要逐条复述，不要暴露记忆系统）：\n"
-                f"{memory_context}\n"
+            stable_parts.append(
+                "长期记忆（仅在相关时自然使用，不要逐条复述，不要暴露记忆系统）:\n"
+                f"{memory_context}"
             )
 
         # 拼接顺序刻意为前缀缓存优化：
-        #   [静态 system] + [聊天历史] + [照片注入] + [动态 system] + [本轮 user]
+        #   [静态 system] + [聊天历史] + [照片注入] + [稳定上下文] + [动态 system] + [本轮 user]
         # 静态前缀与逐轮追加的历史构成稳定前缀；照片注入每隔几轮就变，必须放在历史之后，
         # 否则它一变就会作废后面整段历史的前缀缓存（checkpoint 攒下的命中红利会被清零）。
+        # 稳定上下文（checkpoint/历史提要/记忆）变化低频，放在照片之后、动态之前，
+        # 使 [静态+历史+照片+稳定] 在两次 checkpoint/dream 之间几乎不动，最大化前缀缓存命中。
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_static}]
         messages.extend(self._chat_prompt_history(state))
         self._inject_photo_history_messages(messages, state)
+        if stable_parts:
+            messages.append({"role": "system", "content": "\n\n".join(stable_parts)})
         messages.append({"role": "system", "content": system_dynamic})
         messages.append({"role": "user", "content": user_text})
         return messages
@@ -545,6 +559,93 @@ class ChatContextMixin:
             logger.debug("checkpoint lookup failed", exc_info=True)
         state = self._get_session_state(session_id)
         return str(state.get("checkpoint_summary") or "").strip()
+
+    def _character_history_summary_context(self, session_id: str) -> str:
+        key = self._context_character_key(session_id)
+        try:
+            meta = self.app_store.get_context_meta(session_id, key)
+            summary = (meta.get("character_history_summary") or "").strip()
+            if summary:
+                return summary
+        except Exception:
+            logger.debug("character history summary lookup failed", exc_info=True)
+        state = self._get_session_state(session_id)
+        return str(state.get("character_history_summary") or "").strip()
+
+    def _build_scene_system_prompt(self, session_id: str, *, weather: Any = None, mode: str = "image", now: Any = None) -> str:
+        """构建场景生成用的完整 system prompt，复用聊天侧的静态 + 稳定 + 动态上下文。
+
+        返回拼好的单个 system 字符串，供 _llm_write_scene / plan_roleplay_image 使用。
+        调用方只需追加场景特定的模式指令和 JSON 输出要求。
+        """
+        state = self._get_session_state(session_id)
+        if now is None:
+            now = self._session_now(session_id)
+        weekday = WEEKDAY_NAMES[now.weekday()]
+        time_ctx = self._get_time_context(session_id, now=now, weather=weather)
+        time_period = time_ctx.get("period") or self._get_time_period(now.hour)
+
+        # ── 静态前缀 ──
+        persona = self._get_effective_persona(session_id)
+        role_name, bot_name, bot_self_name = self._session_role_identity(session_id)
+        relationship = self._get_session_cfg(session_id, "spatial_relationship", "")
+        rel_line = f"你和用户的关系: {str(relationship).strip()}。\n" if str(relationship).strip() else ""
+        system_static = (
+            f"{persona}\n\n"
+            f"你当前扮演的角色是「{bot_name}」（{role_name}）。对话中按角色习惯使用「{bot_self_name}」或自然第一人称作为自称。\n"
+            f"{rel_line}"
+        )
+
+        # ── 稳定上下文 ──
+        stable_parts: list[str] = []
+        checkpoint_context = self._checkpoint_context(session_id)
+        if checkpoint_context:
+            stable_parts.append(f"Checkpoint summary of earlier dialogue:\n{checkpoint_context}")
+        history_summary = self._character_history_summary_context(session_id)
+        if history_summary:
+            stable_parts.append(f"角色历史提要:\n{history_summary}")
+        memory_context = self._long_term_memory_context(session_id)
+        if memory_context:
+            stable_parts.append(f"长期记忆:\n{memory_context}")
+
+        # ── 动态上下文 ──
+        time_light = self._format_time_context(session_id, now=now, weather=weather)
+        light_guard = self._format_light_guard(session_id, now=now, weather=weather)
+        dynamic = self._effective_dynamic_appearance(session_id)
+        prompt_prefs = self._prompt_scene_preferences(session_id) if hasattr(self, "_prompt_scene_preferences") else {}
+        purity = self._get_purity(session_id)
+        safety = self._get_effective_safety(session_id)
+        system_dynamic = (
+            f"当前时间: {now.strftime('%H:%M')} ({weekday}) {time_period}。\n"
+            f"季节与自然光: {time_light}。\n"
+            f"{light_guard}\n"
+            f"当前附加外貌: {dynamic or '无'}\n"
+            f"用户画面偏好: 场景偏好={prompt_prefs.get('scene_preference') or '无'}；自拍偏好={prompt_prefs.get('selfie_preference') or '无'}。\n"
+            f"角色性观念: {self._purity_directive(purity)}\n"
+            f"当前场合: {time_period}, {weekday}, {safety.get('context', '')}。\n"
+        )
+
+        # 对话场景连续性（近 3h 内的对话 + 照片）
+        continuity = self._format_scene_continuity_context(state, session_id, now=now) if hasattr(self, "_format_scene_continuity_context") else ""
+
+        # 世界状态
+        world_context = ""
+        if hasattr(self, "_format_world_context"):
+            try:
+                world_context = self._format_world_context(session_id, "", weather=weather, mode=mode, now=now)
+            except Exception:
+                logger.debug("world context build failed for scene prompt", exc_info=True)
+
+        # ── 拼接 ──
+        parts = [system_static]
+        if stable_parts:
+            parts.append("\n\n".join(stable_parts))
+        parts.append(system_dynamic)
+        if world_context:
+            parts.append(world_context)
+        if continuity:
+            parts.append(continuity)
+        return "\n\n".join(parts)
 
     def _context_character_key(self, session_id: str) -> str:
         return self._memory_character(session_id) if hasattr(self, "_memory_character") else ""

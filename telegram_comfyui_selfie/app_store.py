@@ -114,10 +114,15 @@ class AppStateStore:
                     last_dream_message_id INTEGER NOT NULL DEFAULT 0,
                     last_checkpoint_at REAL NOT NULL DEFAULT 0,
                     last_checkpoint_message_id INTEGER NOT NULL DEFAULT 0,
+                    character_history_summary TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY(session_id, character_key)
                 )
                 """
             )
+            # 迁移：旧库没有 character_history_summary 列时补上。
+            meta_cols = {row["name"] for row in conn.execute("PRAGMA table_info(context_meta)")}
+            if "character_history_summary" not in meta_cols:
+                conn.execute("ALTER TABLE context_meta ADD COLUMN character_history_summary TEXT NOT NULL DEFAULT ''")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS web_credentials (
@@ -302,6 +307,7 @@ class AppStateStore:
                 "last_dream_message_id": 0,
                 "last_checkpoint_at": 0,
                 "last_checkpoint_message_id": 0,
+                "character_history_summary": "",
             }
         return dict(row)
 
@@ -316,6 +322,19 @@ class AppStateStore:
                     last_dream_message_id = excluded.last_dream_message_id
                 """,
                 (session_id, character_key or "", _now(), int(to_message_id or 0)),
+            )
+            conn.commit()
+
+    def upsert_character_history_summary(self, session_id: str, character_key: str, summary: str):
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO context_meta(session_id, character_key, character_history_summary)
+                VALUES (?, ?, ?)
+                ON CONFLICT(session_id, character_key) DO UPDATE SET
+                    character_history_summary = excluded.character_history_summary
+                """,
+                (session_id, character_key or "", summary or ""),
             )
             conn.commit()
 
