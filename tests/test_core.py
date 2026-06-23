@@ -2964,6 +2964,35 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("slip dress", neg.lower())
         self.assertEqual(session_schema.get_outfit(state), "cotton knit cardigan, black silk slip dress")
 
+    def test_outfit_normalized_so_nude_strips_deterministically(self):
+        """脏穿搭(双空格/重复标签)经归一后，全裸能确定性剥掉——回归"脱不掉衣服"。
+
+        根因：remove_tag 是裸字符串 replace，worn 标签带双空格/重复时与渲染串对不上而删不掉。
+        """
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        # 历史脏数据：双空格 + 重复同一条裙子
+        session_schema.set_outfit(
+            state,
+            "black silk slip dress with thin spaghetti straps bias cut  liquid-like drape, "
+            "black silk slip dress with thin spaghetti straps bias cut liquid-like drape",
+        )
+        # set_outfit 已归一：去重 + 单空格
+        self.assertEqual(
+            session_schema.get_outfit(state),
+            "black silk slip dress with thin spaghetti straps bias cut liquid-like drape",
+        )
+        # 全裸 → 裙子被确定性剥掉
+        pos, _ = svc._build_prompt("on the bed", session_id=sid, clothing_off="nude")
+        self.assertNotIn("slip dress", pos.lower())
+        self.assertIn("nude", pos.lower())
+
+        # ensure 懒清理：直接塞进双空格脏值，下次取 state 自动归一
+        state["clothing"]["dynamic_appearance"] = "red  dress, red dress, white  hat"
+        svc._get_session_state(sid)
+        self.assertEqual(session_schema.get_outfit(state), "red dress, white hat")
+
     def test_nudity_context_detector(self):
         """裸体检测器只对强信号(性行为/明确脱光)命中，对暧昧词/日常不误触发。"""
         self.assertTrue(_detect_nudity_context("两人做爱中"))

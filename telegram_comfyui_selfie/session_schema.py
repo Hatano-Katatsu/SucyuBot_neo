@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import copy
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -261,8 +262,32 @@ _CLOTHING_DEFAULT: dict[str, Any] = {
 _LEGACY_CLOTHING_FLAT_KEYS = ("dynamic_appearance", "wardrobe", "wardrobe_closet")
 
 
+def normalize_outfit_string(text: str) -> str:
+    """穿搭串归一：折叠内部空格 + 去重（大小写不敏感），保持顺序。
+
+    剥衣 `remove_tag` 是裸 `text.replace(tag, "")`：worn 标签若带双空格/重复，会与渲染串
+    对不上而删不掉（"脱不掉衣服"的直接原因）。写入时归一，使 worn 与渲染串一致、replace 必中。
+    刻意只动空格/去重，不剔除发色/瞳色（那与临时换发功能绑定，全裸时由 base 兜底）。
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in str(text or "").split(","):
+        tag = re.sub(r"\s+", " ", raw.strip()).strip()
+        if not tag:
+            continue
+        key = tag.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(tag)
+    return ", ".join(out)
+
+
 def ensure_clothing_box(state: dict[str, Any]) -> dict[str, Any]:
-    """保证 state["clothing"] 存在且子键补齐；把旧扁平 clothing 字段迁移进盒（幂等）。"""
+    """保证 state["clothing"] 存在且子键补齐；把旧扁平 clothing 字段迁移进盒（幂等）。
+
+    顺带对 dynamic_appearance 做归一（空格+去重），懒清理历史脏数据（双空格/重复标签）。
+    """
     box = state.get("clothing")
     if not isinstance(box, dict):
         box = {}
@@ -273,6 +298,9 @@ def ensure_clothing_box(state: dict[str, Any]) -> dict[str, Any]:
     for key, default in _CLOTHING_DEFAULT.items():
         if key not in box:
             box[key] = copy.deepcopy(default)
+    normalized = normalize_outfit_string(box.get("dynamic_appearance", ""))
+    if normalized != box.get("dynamic_appearance", ""):
+        box["dynamic_appearance"] = normalized
     return box
 
 
@@ -281,7 +309,7 @@ def get_outfit(state: dict[str, Any]) -> str:
 
 
 def set_outfit(state: dict[str, Any], value: str) -> None:
-    ensure_clothing_box(state)["dynamic_appearance"] = value or ""
+    ensure_clothing_box(state)["dynamic_appearance"] = normalize_outfit_string(value)
 
 
 def get_wardrobe(state: dict[str, Any]) -> dict[str, Any]:
