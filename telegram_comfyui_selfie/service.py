@@ -1751,31 +1751,41 @@ class TelegramComfyUIService(
         elif control == "enable_thinking" and not thinking:
             body["enable_thinking"] = False
         request_url = f"{api_base}/chat/completions"
-        async with aiohttp.ClientSession(
-            trust_env=True,
-            timeout=aiohttp.ClientTimeout(total=float(resolved.get("timeout") or 120)),
-            headers={"Accept-Encoding": "gzip, deflate"},
-        ) as s:
-            async with s.post(
-                request_url,
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept-Encoding": "gzip, deflate"},
-                json=body,
-            ) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    self._record_llm_debug(
-                        purpose=purpose,
-                        tag=tag,
-                        session_id=session_id,
-                        resolved=resolved,
-                        request_url=request_url,
-                        request_body=body,
-                        response={"status": resp.status, "text": text},
-                        status=resp.status,
-                        error=f"LLM request failed: {resp.status}",
-                    )
-                    raise RuntimeError(f"LLM request failed: {resp.status} {text}")
-                data = await resp.json()
+        last_error = None
+        for attempt in range(2):
+            async with aiohttp.ClientSession(
+                trust_env=True,
+                timeout=aiohttp.ClientTimeout(total=float(resolved.get("timeout") or 120)),
+                headers={"Accept-Encoding": "gzip, deflate"},
+            ) as s:
+                async with s.post(
+                    request_url,
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept-Encoding": "gzip, deflate"},
+                    json=body,
+                ) as resp:
+                    if resp.status != 200:
+                        text = await resp.text()
+                        self._record_llm_debug(
+                            purpose=purpose,
+                            tag=tag,
+                            session_id=session_id,
+                            resolved=resolved,
+                            request_url=request_url,
+                            request_body=body,
+                            response={"status": resp.status, "text": text},
+                            status=resp.status,
+                            error=f"LLM request failed: {resp.status}",
+                        )
+                        last_error = RuntimeError(f"LLM request failed: {resp.status} {text}")
+                        if resp.status == 500 and attempt == 0:
+                            logger.warning("LLM request failed with 500, retrying in 1 second...")
+                            await asyncio.sleep(1)
+                            continue
+                        raise last_error
+                    data = await resp.json()
+                    break
+        else:
+            raise last_error
         # 记录 token 消耗（不阻塞主链路，解析失败仅记录日志）。
         try:
             self._record_llm_usage_from_response(data, resolved, tag=tag, purpose=purpose, session_id=session_id)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import secrets
 import os
 import time
@@ -159,6 +160,8 @@ def create_web_app(service) -> web.Application:
     app.router.add_get("/api/logs", api_logs)
     app.router.add_get("/api/logs/{chat_id:.+}", api_log_detail)
     app.router.add_delete("/api/logs/{chat_id:.+}", api_log_clear)
+    app.router.add_get("/api/logs/llm-debug", api_llm_debug_log)
+    app.router.add_get("/api/logs/system-errors", api_system_error_log)
     app.router.add_post("/api/actions/test-comfyui", api_test_comfyui)
     app.router.add_post("/api/actions/test-llm", api_test_llm)
     app.router.add_post("/api/actions/send-message", api_send_message)
@@ -1432,6 +1435,37 @@ async def api_log_clear(request: web.Request):
     except OSError as exc:
         return json_error(str(exc), status=500)
     return json_ok()
+
+
+async def api_llm_debug_log(request: web.Request):
+    _require_admin(request)
+    service = service_from(request)
+    path = service._llm_debug_log_path()
+    if not path.exists():
+        return json_ok({"content": {}, "updated_at": None})
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return json_ok({"content": data.get("entries_by_type", {}), "updated_at": data.get("updated_at")})
+    except Exception as exc:
+        return json_error(str(exc), status=500)
+
+
+async def api_system_error_log(request: web.Request):
+    _require_admin(request)
+    service = service_from(request)
+    log_dir = service._user_log_dir()
+    error_lines = []
+    if log_dir.exists():
+        for path in log_dir.glob("*.log"):
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                for line in lines:
+                    if "ERROR" in line or "error" in line.lower():
+                        error_lines.append({"file": path.name, "line": line})
+            except Exception:
+                continue
+    error_lines.sort(key=lambda x: x["line"], reverse=True)
+    return json_ok({"errors": error_lines[:100]})
 
 
 async def api_test_comfyui(request: web.Request):

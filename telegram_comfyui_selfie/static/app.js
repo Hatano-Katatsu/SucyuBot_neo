@@ -1290,8 +1290,21 @@ function renderLogList(meta) {
     list.innerHTML = `<div class="empty-state">分用户日志已关闭，可在「设置 → 推送与本地控制台」开启。</div>`;
     return;
   }
+  // 添加系统日志分类
+  const systemLogs = [
+    { id: "llm-debug", name: "LLM 调试日志", desc: "查看 LLM 请求/响应详情" },
+    { id: "system-errors", name: "错误日志", desc: "查看系统错误信息" },
+  ];
+  systemLogs.forEach(item => {
+    const btn = document.createElement("button");
+    btn.className = "session-item";
+    btn.dataset.logType = item.id;
+    btn.innerHTML = `<div class="session-title">${item.name}</div><div class="session-meta">${item.desc}</div>`;
+    btn.onclick = () => selectSystemLog(item.id);
+    list.appendChild(btn);
+  });
   if (!state.logs.length) {
-    list.innerHTML = `<div class="empty-state">暂无日志。用户与机器人交互后会自动生成。</div>`;
+    list.innerHTML += `<div class="empty-state">暂无用户日志。用户与机器人交互后会自动生成。</div>`;
     return;
   }
   state.logs.forEach(item => {
@@ -1309,6 +1322,7 @@ function renderLogList(meta) {
 
 async function selectLog(chatId) {
   state.selectedLog = chatId;
+  state.selectedLogType = null;
   $("#log-title").textContent = `日志 · ${chatId}`;
   $all("#log-list .session-item").forEach(btn => btn.classList.toggle("active", btn.dataset.chat === chatId));
   try {
@@ -1318,6 +1332,60 @@ async function selectLog(chatId) {
     box.scrollTop = box.scrollHeight;
   } catch (err) {
     $("#log-content").textContent = err.message;
+  }
+}
+
+async function selectSystemLog(logType) {
+  state.selectedLog = null;
+  state.selectedLogType = logType;
+  $("#log-title").textContent = logType === "llm-debug" ? "LLM 调试日志" : "错误日志";
+  $all("#log-list .session-item").forEach(btn => btn.classList.toggle("active", btn.dataset.logType === logType));
+  const box = $("#log-content");
+  box.textContent = "加载中...";
+  try {
+    if (logType === "llm-debug") {
+      const data = await api("/api/logs/llm-debug");
+      const content = data.content || {};
+      let text = "";
+      Object.keys(content).forEach(key => {
+        text += `=== ${key} ===\n`;
+        (content[key] || []).forEach(entry => {
+          text += `[${entry.time}] ${entry.model} (status: ${entry.status})\n`;
+          if (entry.error) text += `  错误: ${entry.error}\n`;
+          text += `  会话: ${entry.session_id || "-"}\n`;
+          text += `  Profile: ${entry.profile_id || "-"}\n`;
+          text += `  思考模式: ${entry.thinking ? "开" : "关"}\n`;
+          text += `  请求: ${entry.request?.url}\n`;
+          if (entry.request?.body?.messages) {
+            const messages = entry.request.body.messages;
+            text += `  消息数: ${messages.length}\n`;
+          }
+          if (entry.usage) {
+            const u = entry.usage;
+            text += `  --- Token 用量 ---\n`;
+            text += `  Prompt Tokens: ${u.prompt_tokens || 0}\n`;
+            text += `  Completion Tokens: ${u.completion_tokens || 0}\n`;
+            text += `  Total Tokens: ${u.total_tokens || 0}\n`;
+            text += `  缓存命中: ${u.cached_tokens || 0}\n`;
+            text += `  缓存未命中: ${u.cache_miss_tokens || 0}\n`;
+            text += `  缓存命中率: ${((u.cache_hit_rate || 0) * 100).toFixed(1)}%\n`;
+          }
+          text += "\n";
+        });
+      });
+      box.textContent = text || "暂无 LLM 调试日志";
+    } else if (logType === "system-errors") {
+      const data = await api("/api/logs/system-errors");
+      const errors = data.errors || [];
+      if (errors.length === 0) {
+        box.textContent = "暂无错误日志";
+      } else {
+        box.textContent = errors.map(e => `[${e.file}] ${e.line}`).join("\n");
+      }
+    }
+    box.scrollTop = box.scrollHeight;
+  } catch (err) {
+    box.textContent = `加载失败: ${err.message}`;
   }
 }
 
