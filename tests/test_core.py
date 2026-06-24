@@ -661,7 +661,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("red eyes", eff)
 
     def test_appearance_hair_command_edits_character_not_global(self):
-        """/外型 发色 对已设角色写进角色 base(positive_prefix) 并回写卡，不写全局默认。"""
+        """/外型 发色 对已设角色写进衣柜 wardrobe hair 槽，不写 base 也不写全局默认。"""
         async def run():
             svc = self.make_service()
             sid = "telegram:1"
@@ -674,10 +674,15 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._save_session_state(sid, state)
             await svc.cmd_appearance(1, sid, "发色 silver hair")
             after = svc._get_session_state(sid)
-            self.assertIn("silver hair", after["custom_positive_prefix"])
-            self.assertNotIn("purple hair", after["custom_positive_prefix"])  # 旧发色被替换
-            self.assertEqual(after.get("custom_default_hair", ""), "")        # 没写全局默认
-            self.assertIn("silver hair", after["saved_characters"]["keqing"]["appearance"])  # 已回写卡
+            # base 不受影响——发色是可变特征，走衣柜
+            self.assertIn("purple hair", after["custom_positive_prefix"])
+            # silver hair 进衣柜 hair 槽 + 角色卡 outfit 字段
+            w = svc._get_wardrobe(after)
+            self.assertEqual(w.get("hair", "").strip(), "silver hair")
+            self.assertEqual(after.get("custom_default_hair", ""), "")
+            card = after["saved_characters"]["keqing"]
+            self.assertIn("silver hair", card.get("outfit", ""))
+            self.assertIn("purple hair", card["appearance"])  # base 不动
         asyncio.run(run())
 
     def test_webui_masks_secrets(self):

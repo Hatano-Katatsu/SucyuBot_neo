@@ -1597,7 +1597,8 @@ class CommandHandlersMixin:
         if sub in ("发色", "hair"):
             if not sub_arg:
                 if self._is_character_set(session_id):
-                    cur = ", ".join(self._parse_appearance(session_schema.get_character_value(state, "custom_positive_prefix", "")).get("hair", [])) or "（未设定，见身体特征）"
+                    w = self._get_wardrobe(state)
+                    cur = (w.get("hair") or "").strip() or "（未设定，见身体特征）"
                     await self.send_message(chat_id, f"当前角色发色: {cur}")
                 else:
                     await self.send_message(chat_id, f"当前默认发色: {session_schema.get_character_value(state, 'custom_default_hair', '') or self.config.get('default_hair')}")
@@ -1605,8 +1606,10 @@ class CommandHandlersMixin:
             if re.search(r"[\u4e00-\u9fff]", sub_arg):
                 sub_arg = await self._translate_appearance_tags(sub_arg)
             if self._is_character_set(session_id):
-                # 已设角色：发色是该角色 base 的一部分 → 写进 custom_positive_prefix（per-character，随卡快照），不再写全局默认
-                self._replace_appearance_slot(state, "hair", sub_arg)
+                wardrobe = self._get_wardrobe(state)
+                wardrobe["hair"] = sub_arg
+                session_schema.set_wardrobe(state, wardrobe)
+                session_schema.set_outfit(state, appearance_rules.render_wardrobe(wardrobe))
                 self._snapshot_character(state)
                 self._save_session_state(session_id, state)
                 await self.send_message(chat_id, f"角色发色已更新: {sub_arg}")
@@ -1618,7 +1621,8 @@ class CommandHandlersMixin:
         if sub in ("瞳色", "eyes"):
             if not sub_arg:
                 if self._is_character_set(session_id):
-                    cur = ", ".join(self._parse_appearance(session_schema.get_character_value(state, "custom_positive_prefix", "")).get("eyes", [])) or "（未设定，见身体特征）"
+                    w = self._get_wardrobe(state)
+                    cur = (w.get("eyes") or "").strip() or "（未设定，见身体特征）"
                     await self.send_message(chat_id, f"当前角色瞳色: {cur}")
                 else:
                     await self.send_message(chat_id, f"当前默认瞳色: {session_schema.get_character_value(state, 'custom_default_eyes', '') or self.config.get('default_eyes')}")
@@ -1626,8 +1630,10 @@ class CommandHandlersMixin:
             if re.search(r"[\u4e00-\u9fff]", sub_arg):
                 sub_arg = await self._translate_appearance_tags(sub_arg)
             if self._is_character_set(session_id):
-                # 已设角色：瞳色是该角色 base 的一部分 → 写进 custom_positive_prefix（per-character，随卡快照），不再写全局默认
-                self._replace_appearance_slot(state, "eyes", sub_arg)
+                wardrobe = self._get_wardrobe(state)
+                wardrobe["eyes"] = sub_arg
+                session_schema.set_wardrobe(state, wardrobe)
+                session_schema.set_outfit(state, appearance_rules.render_wardrobe(wardrobe))
                 self._snapshot_character(state)
                 self._save_session_state(session_id, state)
                 await self.send_message(chat_id, f"角色瞳色已更新: {sub_arg}")
