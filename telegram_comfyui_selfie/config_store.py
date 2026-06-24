@@ -23,7 +23,7 @@ CONFIG_GROUPS: dict[str, list[str]] = {
         "comfyui_local_socket_port",
     ],
     "models": [
-        "default_chat_model_profile", "default_fast_model_profile", "global_model_profiles",
+        "default_chat_model_profile", "default_fast_model_profile", "default_vision_model_profile", "global_model_profiles",
         "llm_temperature_scene", "llm_temperature_translate", "llm_temperature_classify",
         "chat_llm_temperature",
         "image_llm_temperature_scene", "image_llm_temperature_translate", "image_llm_temperature_classify",

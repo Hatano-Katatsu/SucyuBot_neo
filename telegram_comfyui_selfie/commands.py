@@ -19,7 +19,7 @@ from .memory import format_memory_lines
 # /角色 reset uses this full cleanup path. Keep one public hard-reset entry.
 SESSION_CUSTOM_RESET_KEYS = (
     "custom_scheduled_persona", "custom_role_name", "custom_bot_name", "custom_bot_self_name",
-    "custom_spatial_relationship", "custom_location", "custom_timezone_offset",
+    "custom_user_address", "custom_spatial_relationship", "custom_location", "custom_timezone_offset",
     "custom_count", "custom_positive_prefix", "custom_default_hair", "custom_default_eyes",
     "custom_current_style", "custom_scene_preference", "custom_selfie_preference",
     "custom_raw_profile_text", "custom_prompt_intake",
@@ -58,6 +58,12 @@ OC_FIELD_ALIASES = {
     "类型": "role",
     "身份": "role",
     "role": "role",
+    "对话称呼": "user_address",
+    "对用户称呼": "user_address",
+    "称呼用户": "user_address",
+    "叫我": "user_address",
+    "称呼我": "user_address",
+    "user_address": "user_address",
     "年龄段": "age",
     "年龄": "age",
     "age": "age",
@@ -93,9 +99,10 @@ OC_FIELD_ALIASES = {
 # 展示列表与别名映射都由这里派生，避免两份清单手动对齐时漂移。
 # 人格走专用命令 /人格；关系走专用命令 /关系，均不在此处重复。
 PERSONALIZE_FIELDS = [
-    ("角色类型", "custom_role_name", ("称呼", "角色类型")),
+    ("角色类型", "custom_role_name", ("角色类型",)),
     ("角色名", "custom_bot_name", ("角色名", "名字")),
     ("自称", "custom_bot_self_name", ("自称",)),
+    ("对用户称呼", "custom_user_address", ("称呼", "对话称呼", "对用户称呼", "称呼用户", "叫我", "称呼我")),
     ("生图角色Tag", "custom_visual_character", ("生图角色", "生图角色tag")),
     ("生图作品Tag", "custom_visual_series", ("生图作品", "生图作品tag")),
     ("年龄段", "custom_character_age_stage", ("年龄段", "年龄")),
@@ -110,6 +117,61 @@ PERSONALIZE_LIFE_PROFILE_KEYS = {
 
 
 class CommandHandlersMixin:
+    INIT_FLOW_STEPS = (
+        (
+            "name",
+            "第 1/10 步：新角色叫什么名字？\n"
+            "这是创建角色卡的必填项，例如：小雨。",
+        ),
+        (
+            "role",
+            "第 2/10 步：她/他的角色类型或职业身份是什么？\n"
+            "例如：大学生、上班族、护士、自由画师。回复“跳过”可留空。",
+        ),
+        (
+            "user_address",
+            "第 3/10 步：角色平时怎么称呼你？\n"
+            "例如：主人、前辈、哥哥、姐姐、老师。回复“跳过”可留空。",
+        ),
+        (
+            "persona",
+            "第 4/10 步：角色的性格、语气和习惯是什么？\n"
+            "例如：温柔慢热、说话简短、会认真回应你的情绪。回复“跳过”可留空。",
+        ),
+        (
+            "appearance",
+            "第 5/10 步：角色稳定外貌是什么？\n"
+            "例如：黑色短发、蓝眼睛、身材纤细、浅色皮肤。回复“跳过”可使用默认外貌。",
+        ),
+        (
+            "outfit",
+            "第 6/10 步：角色初始穿搭是什么？\n"
+            "例如：白衬衫、深色百褶裙。回复“跳过”可留空。",
+        ),
+        (
+            "relationship",
+            "第 7/10 步：你和角色是什么关系？\n"
+            "例如：同城恋人、室友、青梅竹马、刚认识。回复“跳过”可留空。",
+        ),
+        (
+            "city",
+            "第 8/10 步：你所在或故事发生的城市是哪里？\n"
+            "例如：上海、东京、纽约。回复“跳过”可之后再用 /天气设置 设置。",
+        ),
+        (
+            "purity",
+            "第 9/10 步：纯良度设置为多少？\n"
+            "输入 0-10 的整数，数字越高越保守；也可以回复 auto。",
+        ),
+        (
+            "push_frequency",
+            "第 10/10 步：每天主动推送几次？\n"
+            "输入 0-20 的整数，0 表示关闭；也可以回复“默认”。",
+        ),
+    )
+    INIT_FLOW_SKIP_WORDS = {"跳过", "skip", "略过", "暂不", "不用", "不要", "无", "空"}
+    INIT_FLOW_CANCEL_WORDS = {"取消", "取消初始化", "退出", "退出初始化", "cancel", "stop", "结束"}
+
     async def dispatch_command(self, chat_id: int | str, session_id: str, command: str, arg: str):
         aliases = {
             "start": "初始化",
@@ -214,7 +276,153 @@ class CommandHandlersMixin:
     # Commands
     # ---------------------------------------------------------------------
     async def cmd_init_guide(self, chat_id, session_id, arg):
-        await self.send_message(chat_id, INIT_GUIDE)
+        text = (arg or "").strip().lower()
+        state = self._get_session_state(session_id)
+        flow = session_schema.get_init_flow(state)
+        if text in self.INIT_FLOW_CANCEL_WORDS:
+            flow.clear()
+            self._save_session_state(session_id, state)
+            await self.send_message(chat_id, "初始化向导已取消。")
+            return
+        flow.clear()
+        flow.update({"active": True, "step": 0, "answers": {}, "started_at": time.time(), "mode": "create_character"})
+        self._save_session_state(session_id, state)
+        await self.send_message(chat_id, INIT_GUIDE + "\n\n" + self._init_flow_question(0))
+
+    def _init_flow_question(self, step: int) -> str:
+        if step < 0 or step >= len(self.INIT_FLOW_STEPS):
+            return ""
+        return self.INIT_FLOW_STEPS[step][1]
+
+    def _init_flow_is_skip(self, text: str) -> bool:
+        return (text or "").strip().lower() in self.INIT_FLOW_SKIP_WORDS
+
+    async def handle_init_flow_message(self, chat_id: int | str, session_id: str, text: str) -> bool:
+        state = self._get_session_state(session_id)
+        flow = session_schema.get_init_flow(state)
+        if not (isinstance(flow, dict) and flow.get("active")):
+            return False
+        answer = (text or "").strip()
+        if not answer:
+            await self.send_message(chat_id, self._init_flow_question(int(flow.get("step") or 0)))
+            return True
+        if answer.lower() in self.INIT_FLOW_CANCEL_WORDS:
+            flow.clear()
+            self._save_session_state(session_id, state)
+            await self.send_message(chat_id, "初始化向导已取消。")
+            return True
+
+        step = int(flow.get("step") or 0)
+        if step < 0 or step >= len(self.INIT_FLOW_STEPS):
+            flow.clear()
+            self._save_session_state(session_id, state)
+            await self.send_message(chat_id, "初始化向导状态已重置。发送 /初始化 可重新开始。")
+            return True
+
+        key, _question = self.INIT_FLOW_STEPS[step]
+        if self._init_flow_is_skip(answer):
+            if key == "name":
+                await self.send_message(chat_id, "角色名是必填项。请发一个角色名，或回复“取消初始化”。")
+                return True
+        else:
+            ok = await self._store_init_flow_answer(chat_id, flow, key, answer)
+            if not ok:
+                return True
+
+        step += 1
+        flow["step"] = step
+        if step >= len(self.INIT_FLOW_STEPS):
+            self._save_session_state(session_id, state)
+            await self._finish_init_flow(chat_id, session_id)
+            return True
+        self._save_session_state(session_id, state)
+        await self.send_message(chat_id, self._init_flow_question(step))
+        return True
+
+    async def _store_init_flow_answer(self, chat_id: int | str, flow: dict[str, Any], key: str, answer: str) -> bool:
+        if key == "name":
+            parsed = self._parse_oc_fields(answer)
+            answer = (parsed.get("name") or answer).strip()
+            if not answer:
+                await self.send_message(chat_id, "角色名不能为空。请发一个角色名，或回复“取消初始化”。")
+                return False
+        if key == "purity":
+            val = answer.strip().lower()
+            if val not in ("auto", "默认", "自动", "reset"):
+                try:
+                    num = int(val)
+                    if num < 0 or num > 10:
+                        raise ValueError
+                except ValueError:
+                    await self.send_message(chat_id, "纯良度请输入 0-10 的整数，或 auto。")
+                    return False
+        if key == "push_frequency":
+            val = answer.strip().lower()
+            if val not in ("默认", "全局", "reset", "auto"):
+                try:
+                    num = int(val)
+                    if num < 0 or num > 20:
+                        raise ValueError
+                except ValueError:
+                    await self.send_message(chat_id, "推送次数请输入 0-20 的整数，或“默认”。")
+                    return False
+        answers = flow.setdefault("answers", {})
+        if isinstance(answers, dict):
+            answers[key] = answer
+        return True
+
+    def _init_flow_create_oc_text(self, answers: dict[str, Any]) -> str:
+        role = str(answers.get("role") or "").strip()
+        lines = [f"名字：{str(answers.get('name') or '').strip()}"]
+        if role:
+            lines.append(f"角色类型：{role}")
+            lines.append(f"职业：{role}")
+        mapping = (
+            ("user_address", "对话称呼"),
+            ("persona", "性格"),
+            ("appearance", "外貌"),
+            ("outfit", "初始穿搭"),
+            ("relationship", "与你的关系"),
+            ("city", "所在城市"),
+        )
+        for key, label in mapping:
+            value = str(answers.get(key) or "").strip()
+            if value:
+                lines.append(f"{label}：{value}")
+        return "\n".join(lines)
+
+    async def _finish_init_flow(self, chat_id: int | str, session_id: str):
+        state = self._get_session_state(session_id)
+        flow = session_schema.get_init_flow(state)
+        answers = dict(flow.get("answers") or {}) if isinstance(flow, dict) else {}
+        name = str(answers.get("name") or "").strip()
+        if not name:
+            flow.clear()
+            flow.update({"active": True, "step": 0, "answers": {}, "started_at": time.time(), "mode": "create_character"})
+            self._save_session_state(session_id, state)
+            await self.send_message(chat_id, "初始化需要先创建角色卡。请告诉我角色名。")
+            return
+        await self.cmd_create_oc(chat_id, session_id, self._init_flow_create_oc_text(answers))
+        state = self._get_session_state(session_id)
+        session_schema.get_init_flow(state).clear()
+        purity = str(answers.get("purity") or "").strip().lower()
+        if purity:
+            if purity in ("auto", "默认", "自动", "reset"):
+                session_schema.set_character_value(state, "purity", None)
+                session_schema.set_character_value(state, "purity_user_set", False)
+            else:
+                session_schema.set_character_value(state, "purity", max(0, min(10, int(purity))))
+                session_schema.set_character_value(state, "purity_user_set", True)
+                self._snapshot_character(state)
+        push_frequency = str(answers.get("push_frequency") or "").strip().lower()
+        if push_frequency:
+            if push_frequency in ("默认", "全局", "reset", "auto"):
+                state.pop("custom_daily_selfie_limit", None)
+            else:
+                state["custom_daily_selfie_limit"] = str(max(0, min(20, int(push_frequency))))
+            session_schema.set_daily_trigger_date(state, "")
+        self._save_session_state(session_id, state)
+        await self.send_message(chat_id, "初始化向导已完成，新的角色卡已经创建。之后可以直接聊天，或发送 /完整菜单 查看全部命令。")
 
     async def cmd_menu(self, chat_id, session_id, arg):
         topic = (arg or "").strip()
@@ -387,40 +595,35 @@ class CommandHandlersMixin:
             names = ", ".join(profiles.keys()) or "none"
             chat_profile = settings.get("chat_profile_id") or self.config.get("default_chat_model_profile")
             fast_profile = settings.get("fast_profile_id") or self.config.get("default_fast_model_profile")
+            vision_profile = settings.get("vision_profile_id") or self.config.get("default_vision_model_profile") or "关闭"
             await self.send_message(
                 chat_id,
                 "可用模型：" + names +
-                f"\nchat={chat_profile} fast={fast_profile}" +
-                "\n用法：/模型 chat <id> | /模型 fast <id> | /模型 think on/off | "
-                "/model fastthink on/off | /model add <id> <json>",
+                f"\nchat={chat_profile} fast={fast_profile} vision={vision_profile}" +
+                "\n用法：/模型 chat <id> | /模型 fast <id> | /模型 vision <id|off> | /模型 add <id> <json>",
             )
             return
         parts = text.split(None, 2)
         action = parts[0].lower()
-        if action in ("chat", "fast") and len(parts) >= 2:
+        if action in ("chat", "fast", "vision") and len(parts) >= 2:
             profile_id = parts[1]
+            if action == "vision" and profile_id.lower() in {"off", "none", "关闭", "空"}:
+                self.app_store.update_user_model_settings(user_id, vision_profile_id="")
+                await self.send_message(chat_id, "vision model disabled")
+                return
             if profile_id not in profiles:
                 await self.send_message(chat_id, f"Unknown profile: {profile_id}")
                 return
             if action == "chat":
                 self.app_store.update_user_model_settings(user_id, chat_profile_id=profile_id)
-            else:
+            elif action == "fast":
                 self.app_store.update_user_model_settings(user_id, fast_profile_id=profile_id)
+            else:
+                self.app_store.update_user_model_settings(user_id, vision_profile_id=profile_id)
             await self.send_message(chat_id, f"{action} model switched to {profile_id}")
             return
         if action in ("think", "thinking", "fastthink") and len(parts) >= 2:
-            purpose = "fast" if action == "fastthink" else "chat"
-            profile_id, profile, _ = self._resolve_llm_profile(purpose, session_id)
-            if profile.get("thinking_fixed"):
-                fixed_state = "关闭" if profile.get("disable_thinking") else "开启"
-                await self.send_message(chat_id, f"当前 {purpose} 模型 {profile_id} 的思考已固定为{fixed_state}，无法手动切换")
-                return
-            value = parts[1].lower() in ("on", "true", "1", "yes")
-            if action == "fastthink":
-                self.app_store.update_user_model_settings(user_id, fast_thinking=value)
-            else:
-                self.app_store.update_user_model_settings(user_id, chat_thinking=value)
-            await self.send_message(chat_id, f"{action} set to {value}")
+            await self.send_message(chat_id, "思考开关现在绑定在模型 profile 的 disable_thinking 配置里，不能按任务或用户单独切换。")
             return
         if action == "add" and len(parts) >= 3:
             profile_id = parts[1]
@@ -435,7 +638,7 @@ class CommandHandlersMixin:
             self.app_store.upsert_model_profile(user_id, profile_id, data)
             await self.send_message(chat_id, f"Profile saved: {profile_id}")
             return
-        await self.send_message(chat_id, "Usage: /model chat <id> | fast <id> | think on/off | fastthink on/off | add <id> <json>")
+        await self.send_message(chat_id, "Usage: /model chat <id> | fast <id> | vision <id|off> | add <id> <json>")
 
     async def cmd_modify_character(self, chat_id, session_id, arg):
         text = (arg or "").strip()
@@ -515,6 +718,7 @@ class CommandHandlersMixin:
         appearance = (fields.get("appearance") or "").strip()
         outfit = (fields.get("outfit") or "").strip()
         relationship = (fields.get("relationship") or "").strip()
+        user_address = (fields.get("user_address") or "").strip()
         occupation = (fields.get("occupation") or "").strip()
         city = (fields.get("city") or "").strip()
         gender = self._oc_gender_tag(name, role, persona, appearance)
@@ -564,6 +768,7 @@ class CommandHandlersMixin:
             "visual_series": "",
             "role_name": role,
             "bot_name": name,
+            "user_address": user_address,
             "persona": persona_text,
             "appearance": appearance_tags,
             "relationship": relationship,
@@ -601,6 +806,8 @@ class CommandHandlersMixin:
             lines.append(f"初始穿搭: {outfit_tags[:200]}")
         if relationship:
             lines.append(f"关系: {relationship[:200]}")
+        if user_address:
+            lines.append(f"对用户称呼: {user_address[:80]}")
         if applied_style:
             lines.append(f"画风: {applied_style[:200]}")
         summary = prompt_intake.useful_summary(intake)

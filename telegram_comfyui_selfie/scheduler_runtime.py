@@ -216,7 +216,7 @@ class SchedulerRuntimeMixin:
         to_id = self.app_store.latest_message_id(session_id, character_key)
         messages = self.app_store.list_messages(session_id, character_key, after_id=from_id, before_or_equal_id=to_id)
         source_limit = max(1000, int(self.config.get("dream_source_hard_limit_chars", "50000") or 50000))
-        source_text = self._format_store_messages(messages, limit_chars=source_limit) if hasattr(self, "_format_store_messages") else ""
+        source_text = self._format_store_messages(messages, limit_chars=source_limit, roles={"user", "assistant"}) if hasattr(self, "_format_store_messages") else ""
         diary_date = self._dream_diary_date(local_dt, force_previous_day=(reason == "morning"))
         existing = self.app_store.get_diary(session_id, character_key, diary_date) or {}
         diary = await self._write_dream_diary(session_id, diary_date, source_text, existing.get("content", ""), reason=reason)
@@ -265,7 +265,11 @@ class SchedulerRuntimeMixin:
         editable: list[dict[str, Any]], *, diaries: list[dict[str, Any]] | None = None,
     ):
         checkpoint = self.app_store.get_checkpoint(session_id, character_key).get("summary", "")
-        current = self._format_store_messages(self._active_chat_history(self._get_session_state(session_id), self._checkpoint_keep_message_limit()), limit_chars=12000)
+        current = self._format_store_messages(
+            self._active_chat_history(self._get_session_state(session_id), self._checkpoint_keep_message_limit()),
+            limit_chars=12000,
+            roles={"user", "assistant"},
+        )
         limit = self._long_memory_limit()
         threshold = max(1, limit // 2)
         system = (

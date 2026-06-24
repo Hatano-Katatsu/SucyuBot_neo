@@ -155,12 +155,16 @@ class AppStateStore:
                     user_id TEXT PRIMARY KEY,
                     chat_profile_id TEXT NOT NULL DEFAULT '',
                     fast_profile_id TEXT NOT NULL DEFAULT '',
+                    vision_profile_id TEXT NOT NULL DEFAULT '',
                     chat_thinking INTEGER,
                     fast_thinking INTEGER,
                     updated_at REAL NOT NULL
                 )
                 """
             )
+            settings_cols = {row["name"] for row in conn.execute("PRAGMA table_info(user_model_settings)")}
+            if "vision_profile_id" not in settings_cols:
+                conn.execute("ALTER TABLE user_model_settings ADD COLUMN vision_profile_id TEXT NOT NULL DEFAULT ''")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS llm_usage (
@@ -491,24 +495,32 @@ class AppStateStore:
                 (str(user_id),),
             ).fetchone()
         if not row:
-            return {"chat_profile_id": "", "fast_profile_id": "", "chat_thinking": None, "fast_thinking": None}
+            return {"chat_profile_id": "", "fast_profile_id": "", "vision_profile_id": ""}
         data = dict(row)
-        for key in ("chat_thinking", "fast_thinking"):
-            if data.get(key) is not None:
-                data[key] = bool(data[key])
-        return data
+        return {
+            "chat_profile_id": data.get("chat_profile_id") or "",
+            "fast_profile_id": data.get("fast_profile_id") or "",
+            "vision_profile_id": data.get("vision_profile_id") or "",
+            "updated_at": data.get("updated_at") or 0,
+        }
 
     def update_user_model_settings(self, user_id: str, **values: Any):
         current = self.get_user_model_settings(user_id)
-        current.update(values)
+        for key in ("chat_profile_id", "fast_profile_id", "vision_profile_id"):
+            if key in values:
+                current[key] = values.get(key) or ""
         with closing(self._connect()) as conn:
             conn.execute(
                 """
-                INSERT INTO user_model_settings(user_id, chat_profile_id, fast_profile_id, chat_thinking, fast_thinking, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO user_model_settings(
+                    user_id, chat_profile_id, fast_profile_id, vision_profile_id,
+                    chat_thinking, fast_thinking, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     chat_profile_id = excluded.chat_profile_id,
                     fast_profile_id = excluded.fast_profile_id,
+                    vision_profile_id = excluded.vision_profile_id,
                     chat_thinking = excluded.chat_thinking,
                     fast_thinking = excluded.fast_thinking,
                     updated_at = excluded.updated_at
@@ -517,8 +529,9 @@ class AppStateStore:
                     str(user_id),
                     current.get("chat_profile_id") or "",
                     current.get("fast_profile_id") or "",
-                    None if current.get("chat_thinking") is None else int(bool(current.get("chat_thinking"))),
-                    None if current.get("fast_thinking") is None else int(bool(current.get("fast_thinking"))),
+                    current.get("vision_profile_id") or "",
+                    None,
+                    None,
                     _now(),
                 ),
             )

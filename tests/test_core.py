@@ -111,7 +111,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             # 初始化引导走 /初始化 命令，完整命令走 /完整菜单。
             self.assertIn("快速菜单", text)
             self.assertIn("/自拍", text)
-            self.assertIn("/角色", text)
+            self.assertIn("/角色 list", text)
+            self.assertIn("/角色 load <名称>", text)
             self.assertIn("/修改角色", text)
             self.assertIn("/记忆", text)
             self.assertIn("/webui", text)
@@ -128,9 +129,158 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             text = svc.send_message.await_args.args[1]
             self.assertIn("初始化向导", text)
-            self.assertIn("/创建OC", text)
+            self.assertIn("第 1/10 步", text)
 
         asyncio.run(run())
+
+    def test_init_flow_consumes_plain_replies_before_chat(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.send_message = AsyncMock()
+            svc.handle_chat = AsyncMock()
+
+            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "初始化"}})
+            self.assertTrue(session_schema.get_init_flow(svc._get_session_state(sid)).get("active"))
+            self.assertIn("第 1/10 步", svc.send_message.await_args.args[1])
+
+            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "小雨"}})
+            self.assertEqual(session_schema.get_init_flow(svc._get_session_state(sid)).get("step"), 1)
+            self.assertIn("第 2/10 步", svc.send_message.await_args.args[1])
+
+            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "大学生"}})
+            state = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_init_flow(state).get("step"), 2)
+            self.assertEqual(state["custom_character"], "")
+            svc.handle_chat.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_photo_message_is_converted_to_text_before_chat(self):
+        async def run():
+            svc = self.make_service()
+            svc.handle_chat = AsyncMock()
+
+            async def fake_describe(session_id, photo_sizes, **kwargs):
+                return "图片里是一杯放在木桌上的咖啡。" if photo_sizes else ""
+
+            svc._describe_telegram_photo_sizes_for_chat = fake_describe
+            await svc.handle_update({
+                "message": {
+                    "chat": {"id": 123},
+                    "caption": "看这个",
+                    "photo": [{"file_id": "p1", "width": 100, "height": 100}],
+                }
+            })
+
+            svc.handle_chat.assert_awaited_once()
+            text = svc.handle_chat.await_args.args[2]
+            self.assertIsInstance(text, str)
+            self.assertIn("【图片描述】", text)
+            self.assertIn("图片里是一杯放在木桌上的咖啡。", text)
+            self.assertIn("【用户当前输入】\n看这个", text)
+
+        asyncio.run(run())
+
+    def test_photo_only_message_is_ignored_when_vision_model_is_empty(self):
+        async def run():
+            svc = self.make_service()
+            svc.handle_chat = AsyncMock()
+            svc._describe_telegram_photo_sizes_for_chat = AsyncMock(return_value="")
+
+            await svc.handle_update({
+                "message": {
+                    "chat": {"id": 123},
+                    "photo": [{"file_id": "p1", "width": 100, "height": 100}],
+                }
+            })
+
+            svc.handle_chat.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_reply_quote_text_is_injected_before_chat(self):
+        async def run():
+            svc = self.make_service()
+            svc.handle_chat = AsyncMock()
+
+            await svc.handle_update({
+                "message": {
+                    "chat": {"id": 123},
+                    "text": "这句是什么意思？",
+                    "quote": {"text": "手动选中的片段"},
+                    "reply_to_message": {
+                        "from": {"is_bot": True},
+                        "text": "上一条机器人回复",
+                    },
+                }
+            })
+
+            text = svc.handle_chat.await_args.args[2]
+            self.assertIn("【引用内容】", text)
+            self.assertIn("手动引用片段: 手动选中的片段", text)
+            self.assertIn("回复的机器人消息: 上一条机器人回复", text)
+            self.assertIn("【用户当前输入】\n这句是什么意思？", text)
+
+        asyncio.run(run())
+
+    def test_init_flow_creates_character_card_at_the_end(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            translations = {
+                "黑色短发，蓝眼睛": "short black hair, blue eyes",
+                "白衬衫，深色百褶裙": "white shirt, dark pleated skirt",
+            }
+            svc._translate_appearance_tags = AsyncMock(side_effect=lambda text: translations[text])
+            svc.send_message = AsyncMock()
+            svc.handle_chat = AsyncMock()
+
+            for text in (
+                "初始化",
+                "小雨",
+                "大学生",
+                "主人",
+                "温柔、慢热",
+                "黑色短发，蓝眼睛",
+                "白衬衫，深色百褶裙",
+                "同城恋人",
+                "跳过",
+                "3",
+                "0",
+            ):
+                await svc.handle_update({"message": {"chat": {"id": 123}, "text": text}})
+
+            state = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_init_flow(state), {})
+            self.assertEqual(state["custom_character"], "小雨")
+            self.assertEqual(state["custom_role_name"], "大学生")
+            self.assertEqual(state["custom_character_occupation"], "大学生")
+            self.assertEqual(state["custom_user_address"], "主人")
+            self.assertEqual(state["custom_spatial_relationship"], "同城恋人")
+            self.assertEqual(state["custom_positive_prefix"], "short black hair, blue eyes")
+            self.assertEqual(session_schema.get_outfit(state), "white shirt, dark pleated skirt")
+            self.assertEqual(state["purity"], 3)
+            self.assertTrue(state["purity_user_set"])
+            self.assertEqual(state["custom_daily_selfie_limit"], "0")
+            self.assertEqual(state["saved_characters"]["小雨"]["user_address"], "主人")
+            svc.handle_chat.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_character_panel_hides_preference_fields(self):
+        app_js = (Path(__file__).resolve().parents[1] / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
+        character_fields = app_js.split("const characterFieldSections = [", 1)[1].split("const commands =", 1)[0]
+        self.assertIn('["user_address", "对用户称呼", "text"]', character_fields)
+        self.assertNotIn('["scene_preference"', character_fields)
+        self.assertNotIn('["selfie_preference"', character_fields)
+
+    def test_model_panel_has_no_thinking_controls(self):
+        app_js = (Path(__file__).resolve().parents[1] / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
+        model_section = app_js.split("async function loadModels()", 1)[1].split("function worldSessionTitle", 1)[0]
+        self.assertIn('name="vision_profile_id"', model_section)
+        self.assertNotIn("chat_thinking", model_section)
+        self.assertNotIn("fast_thinking", model_section)
 
     def test_create_oc_help_includes_template(self):
         async def run():
@@ -193,6 +343,33 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(state["saved_characters"]["小雨"]["series"], "")
             text = svc.send_message.await_args.args[1]
             self.assertIn("OC 已创建: 小雨", text)
+
+        asyncio.run(run())
+
+    def test_create_oc_dialog_address_is_user_address_not_self_name(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc._translate_appearance_tags = AsyncMock(return_value="short black hair, blue eyes")
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_create_oc(
+                1,
+                sid,
+                "名字：小雨\n"
+                "角色类型：大学生\n"
+                "对话称呼：主人\n"
+                "性格：温柔\n"
+                "外貌：黑色短发，蓝眼睛",
+            )
+
+            state = svc._get_session_state(sid)
+            self.assertEqual(state["custom_bot_name"], "小雨")
+            self.assertEqual(state["custom_user_address"], "主人")
+            self.assertEqual(state["custom_bot_self_name"], "")
+            self.assertEqual(state["saved_characters"]["小雨"]["user_address"], "主人")
+            system = svc._build_chat_messages(sid, "你好")[0]["content"]
+            self.assertIn("你通常称呼用户为「主人」", system)
 
         asyncio.run(run())
 
@@ -569,6 +746,10 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("silver hair", appearance)
         self.assertIn("hair bun", appearance)
         self.assertNotIn("silver_hair", appearance)
+        photo_history = session_schema.get_chat_history(svc._get_session_state(sid))[-1]
+        self.assertEqual(photo_history["role"], "system")
+        self.assertIn("照片历史", photo_history["content"])
+        self.assertIn("standing by a window", photo_history["content"])
 
     def test_chat_prompt_injects_visible_appearance_and_accessories(self):
         svc = self.make_service()
@@ -621,10 +802,126 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         after_msgs = svc._build_chat_messages(sid, "你好")
         # 静态前缀不随穿搭变化（缓存可命中）
         self.assertEqual(before, after_msgs[0]["content"])
-        # 但新穿搭仍出现在动态层 system，信息没丢
+        # 但新穿搭仍出现在历史前半稳定状态层，信息没丢
         all_sys = "\n".join(m["content"] for m in after_msgs if m.get("role") == "system")
         self.assertIn("red dress", all_sys)
+        visual = next(m["content"] for m in after_msgs if "当前可见外型与配饰" in m.get("content", ""))
+        self.assertIn("red dress", visual)
         self.assertNotIn("red dress", after_msgs[0]["content"])
+
+    def test_chat_prompt_history_is_checkpoint_anchored_not_sliding(self):
+        """前缀缓存不变量：checkpoint 之间的 prompt 历史只追加，不按 keep 滑动。"""
+        svc = self.make_service()
+        svc.config["checkpoint_keep_message_limit"] = "2"
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        history = [
+            {"role": "user", "content": "用户消息 0"},
+            {"role": "assistant", "content": "角色回复 0"},
+            {"role": "user", "content": "用户消息 1"},
+            {"role": "assistant", "content": "角色回复 1"},
+            {"role": "user", "content": "用户消息 2"},
+            {"role": "assistant", "content": "角色回复 2"},
+        ]
+        session_schema.set_chat_history(state, history)
+
+        messages = svc._build_chat_messages(sid, "继续")
+        contents = [m.get("content") for m in messages]
+
+        for item in history:
+            self.assertIn(item["content"], contents)
+        history_start = next(i for i, msg in enumerate(messages) if msg.get("content") == history[0]["content"])
+        for offset, item in enumerate(history):
+            self.assertEqual(messages[history_start + offset]["role"], item["role"])
+            self.assertEqual(messages[history_start + offset]["content"], item["content"])
+
+    def test_low_frequency_chat_controls_stay_before_history_not_dynamic(self):
+        """前缀缓存不变量：配置型控制放稳定层；发图/照片策略写进 static。"""
+        svc = self.make_service()
+        svc.config["chat_reply_length"] = "简短"
+        svc.config["selfie_frequency"] = "偶尔"
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["purity"] = 8
+        session_schema.set_replying_to_selfie(state, True)
+        session_schema.set_chat_history(state, [
+            {"role": "user", "content": "用户消息 0"},
+            {"role": "assistant", "content": "角色回复 0"},
+        ])
+
+        messages = svc._build_chat_messages(sid, "继续")
+        history_start = next(i for i, msg in enumerate(messages) if msg.get("content") == "用户消息 0")
+        stable = "\n".join(m["content"] for m in messages[1:history_start] if m.get("role") == "system")
+        dynamic = messages[-2]["content"]
+
+        self.assertIn("照片历史规则", messages[0]["content"])
+        self.assertIn("发图节奏规则", messages[0]["content"])
+        self.assertIn("对话控制", stable)
+        self.assertIn("纯度指令", stable)
+        self.assertIn("发图频率", stable)
+        self.assertIn("回复长度", stable)
+        self.assertNotIn("纯度指令", dynamic)
+        self.assertNotIn("回复长度", dynamic)
+        self.assertNotIn("发图频率", dynamic)
+        self.assertNotIn("你刚向用户发了一张图", dynamic)
+        self.assertFalse(session_schema.get_replying_to_selfie(state))
+
+        session_schema.set_rounds_since_image(state, 99)
+        nudged = svc._build_chat_messages(sid, "继续")
+        self.assertIn("发图节奏规则", nudged[0]["content"])
+        self.assertIn("发图提醒", nudged[-2]["content"])
+        self.assertNotIn("发图提醒", "\n".join(m.get("content", "") for m in nudged[:-2]))
+
+    def test_semistable_visual_state_is_between_durable_context_and_checkpoint(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state.update({
+            "custom_character": "小雨",
+            "custom_positive_prefix": "black hair, blue eyes",
+            "dynamic_appearance": "red dress",
+            "checkpoint_summary": "旧场景摘要",
+        })
+        session_schema.set_character_history_summary(state, "长期关系阶段")
+        svc._long_term_memory_context = lambda session_id, query="": "重要记忆"
+        session_schema.set_chat_history(state, [
+            {"role": "user", "content": "用户消息 0"},
+            {"role": "assistant", "content": "角色回复 0"},
+        ])
+
+        messages = svc._build_chat_messages(sid, "继续")
+        history_summary_i = next(i for i, msg in enumerate(messages) if "长期关系阶段" in msg.get("content", ""))
+        memory_i = next(i for i, msg in enumerate(messages) if "重要记忆" in msg.get("content", ""))
+        visual_i = next(i for i, msg in enumerate(messages) if "当前可见外型与配饰" in msg.get("content", ""))
+        checkpoint_i = next(i for i, msg in enumerate(messages) if "旧场景摘要" in msg.get("content", ""))
+        history_i = next(i for i, msg in enumerate(messages) if msg.get("content") == "用户消息 0")
+
+        self.assertLess(history_summary_i, visual_i)
+        self.assertLess(memory_i, visual_i)
+        self.assertLess(visual_i, checkpoint_i)
+        self.assertLess(checkpoint_i, history_i)
+        self.assertIn("red dress", messages[visual_i]["content"])
+
+    def test_importance_memory_context_stays_in_stable_prefix(self):
+        """前缀缓存不变量：按重要性选取的长期记忆属于历史前稳定上下文。"""
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        session_schema.set_chat_history(state, [
+            {"role": "user", "content": "用户消息 0"},
+            {"role": "assistant", "content": "角色回复 0"},
+        ])
+        svc._long_term_memory_context = lambda session_id, query="": "重要记忆"
+
+        messages = svc._build_chat_messages(sid, "继续")
+
+        memory_i = next(i for i, msg in enumerate(messages) if "重要记忆" in msg.get("content", ""))
+        history_i = next(i for i, msg in enumerate(messages) if msg.get("content") == "用户消息 0")
+        self.assertEqual(messages[memory_i]["role"], "system")
+        self.assertLess(memory_i, history_i)
+        self.assertEqual(messages[history_i]["role"], "user")
+        self.assertEqual(messages[history_i + 1]["role"], "assistant")
+        self.assertEqual(messages[history_i + 1]["content"], "角色回复 0")
 
     def test_character_own_hair_eyes_win_over_default(self):
         """角色 base 的发/瞳优先于会话/全局默认——根治"刻晴紫发被画成黑发、webui 改不掉"。"""
@@ -688,9 +985,21 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
     def test_webui_masks_secrets(self):
         svc = self.make_service()
         svc.config["telegram_bot_token"] = "secret-token"
+        svc.config["global_model_profiles"] = {
+            "secret-profile": {
+                "name": "Secret",
+                "base_url": "https://example.com/v1",
+                "api_key": "profile-secret",
+                "api_key_no_think": "profile-secret-2",
+                "model": "m",
+            }
+        }
         cfg = masked_config(svc)
         self.assertEqual(cfg["values"]["telegram_bot_token"], "")
         self.assertTrue(cfg["secret_present"]["telegram_bot_token"])
+        profile = cfg["values"]["global_model_profiles"]["secret-profile"]
+        self.assertEqual(profile["api_key"], "********")
+        self.assertEqual(profile["api_key_no_think"], "********")
 
     def test_webui_casts_lists_and_booleans(self):
         self.assertEqual(cast_config_value("allowed_chat_ids", "1, 2\n3", []), ["1", "2", "3"])
@@ -805,6 +1114,43 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         all_sys = "\n".join(m["content"] for m in messages if m.get("role") == "system")
         self.assertIn("长期记忆", all_sys)
         self.assertIn("温柔安抚式回复", all_sys)
+
+    def test_long_memory_hit_count_does_not_change_retrieval_order(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        old_id = svc.memory.add_memory(sid, "event", "共同关键词 旧记忆", importance=3)
+        time.sleep(0.01)
+        new_id = svc.memory.add_memory(sid, "event", "共同关键词 新记忆", importance=3)
+
+        before = svc.memory.context_memories(sid, "共同关键词", limit=2, stable_limit=0)
+        self.assertEqual(int(before[0]["id"]), int(new_id))
+
+        for _ in range(10):
+            svc.memory.mark_used([int(old_id)])
+
+        after = svc.memory.context_memories(sid, "共同关键词", limit=2, stable_limit=0)
+        self.assertEqual(int(after[0]["id"]), int(new_id))
+
+    def test_long_memory_context_uses_importance_not_query_match(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        svc.memory.add_memory(sid, "event", "普通但重要的关系事实", importance=5)
+        svc.memory.add_memory(sid, "event", "共同关键词 低重要事件", importance=1)
+
+        context = svc._long_term_memory_context(sid, "共同关键词", limit=1)
+
+        self.assertIn("普通但重要的关系事实", context)
+        self.assertNotIn("低重要事件", context)
+
+    def test_long_memory_context_does_not_maintain_hit_count(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        memory_id = svc.memory.add_memory(sid, "event", "稳定记忆", importance=5)
+
+        svc._long_term_memory_context(sid, "稳定记忆", limit=1)
+
+        memory = next(m for m in svc.memory.list_memories(sid, limit=10) if int(m["id"]) == int(memory_id))
+        self.assertEqual(memory.get("hit_count"), 0)
 
     def test_long_memory_extraction_writes_structured_memory(self):
         async def run():
@@ -2325,25 +2671,58 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_photo_memory_injects_source_description_instead_of_caption(self):
+    def test_photo_history_is_recorded_as_stable_system_history(self):
         svc = self.make_service()
-        state = svc._get_session_state("telegram:123")
-        state["sent_photos_history"] = [{
-            "timestamp": 9999999999,
-            "scene": "站在玄关等用户回家",
-            "caption": "快回来，我给你留了灯。",
-            "appearance": "black dress",
-            "view": "selfie",
-            "source_description": "意图: 用户想看角色下班后在家等自己的样子；必须包含: 玄关灯",
-        }]
-        messages = [{"role": "system", "content": "persona"}]
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        session_schema.set_chat_history(state, [
+            {"role": "user", "content": "下班到家了吗"},
+            {"role": "assistant", "content": "到了，在玄关。"},
+        ])
 
-        svc._inject_photo_history_messages(messages, state)
+        svc._record_sent_photo(
+            sid,
+            "站在玄关等用户回家",
+            "快回来，我给你留了灯。",
+            appearance="black dress",
+            view="selfie",
+            source_description="意图: 用户想看角色下班后在家等自己的样子；必须包含: 玄关灯",
+        )
 
-        injected = messages[-1]["content"]
+        history = session_schema.get_chat_history(svc._get_session_state(sid))
+        self.assertEqual([m["role"] for m in history], ["user", "assistant", "system"])
+        injected = history[-1]["content"]
+        self.assertIn("照片历史", injected)
         self.assertIn("站在玄关等用户回家", injected)
         self.assertIn("快回来，我给你留了灯。", injected)
         self.assertIn("用户想看角色下班后在家等自己的样子", injected)
+
+        messages = svc._build_chat_messages(sid, "刚才那张照片很好看")
+        contents = [m.get("content", "") for m in messages]
+        self.assertIn(injected, contents)
+
+    def test_photo_history_can_be_deferred_for_chat_tool_turn(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+
+        svc._record_sent_photo(
+            sid,
+            "坐在窗边向用户挥手",
+            "我在这里等你。",
+            appearance="black dress",
+            view="selfie",
+            source_description="用户想看当前场景",
+            defer_history_message=True,
+        )
+
+        state = svc._get_session_state(sid)
+        self.assertEqual(session_schema.get_chat_history(state), [])
+        pending = svc._take_pending_photo_history_messages(sid)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["role"], "system")
+        self.assertIn("照片历史", pending[0]["content"])
+        self.assertIn("坐在窗边向用户挥手", pending[0]["content"])
+        self.assertEqual(svc._take_pending_photo_history_messages(sid), [])
 
 
     def test_user_log_writes_per_chat_file(self):
@@ -4154,6 +4533,48 @@ class CheckpointTrimTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_checkpoint_overflow_includes_orphan_system_trimmed_from_kept_window(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["context_window_message_limit"] = "10"
+            svc.config["checkpoint_keep_message_limit"] = "4"
+            sid = "telegram:1"
+            key = svc._context_character_key(sid)
+            messages = []
+            for i in range(5):
+                messages.append({"role": "user", "content": f"用户消息 {i}"})
+                messages.append({"role": "assistant", "content": f"角色回复 {i}"})
+            messages.extend([
+                {"role": "assistant", "content": "孤立角色回复，应进入 checkpoint"},
+                {"role": "system", "content": "照片历史 system，应进入 checkpoint"},
+                {"role": "user", "content": "最后用户消息，应保留"},
+                {"role": "assistant", "content": "最后角色回复，应保留"},
+            ])
+            svc.app_store.append_messages(sid, key, messages)
+            state = svc._get_session_state(sid)
+            session_schema.set_chat_history(state, messages)
+
+            captured = []
+
+            async def fake_summarize(session_id, previous, msgs):
+                captured.extend(msgs)
+                return "CHECKPOINT SUMMARY"
+
+            svc._summarize_checkpoint = fake_summarize
+            svc._extract_long_term_memories_from_messages = AsyncMock()
+
+            await svc._run_context_checkpoint(sid, key, keep=4)
+
+            captured_text = "\n".join(str(m.get("content") or "") for m in captured)
+            self.assertIn("孤立角色回复，应进入 checkpoint", captured_text)
+            self.assertIn("照片历史 system，应进入 checkpoint", captured_text)
+
+            kept = session_schema.get_chat_history(state)
+            self.assertEqual([m.get("content") for m in kept], ["最后用户消息，应保留", "最后角色回复，应保留"])
+            self.assertEqual(kept[0].get("role"), "user")
+
+        asyncio.run(run())
+
 
 class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
     """TODO #9.5: dream 记忆整理测试 — manual 记忆不被 update/delete。"""
@@ -4189,6 +4610,36 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(manual_after.get("summary"), "手动记忆-不应被改",
                              "manual 记忆不应被 update")
             self.assertEqual(manual_after.get("kind"), "manual")
+
+        asyncio.run(run())
+
+    def test_dream_source_ignores_system_history_messages(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = svc._context_character_key(sid)
+            messages = [
+                {"role": "user", "content": "用户真实对话"},
+                {"role": "system", "content": "照片历史 system 不应进入 dream"},
+                {"role": "assistant", "content": "角色真实回复"},
+            ]
+            svc.app_store.append_messages(sid, key, messages)
+            captured = {}
+
+            async def fake_write_dream_diary(session_id, diary_date, source_text, existing_diary="", *, reason=""):
+                captured["source_text"] = source_text
+                return "梦境日记"
+
+            svc._write_dream_diary = fake_write_dream_diary
+            svc._organize_memories_after_dream = AsyncMock()
+            svc._generate_character_history_summary = AsyncMock()
+
+            await svc._dream_once(sid, key, datetime(2026, 6, 24, tzinfo=timezone.utc), reason="manual")
+
+            source_text = captured.get("source_text", "")
+            self.assertIn("User: 用户真实对话", source_text)
+            self.assertIn("Assistant: 角色真实回复", source_text)
+            self.assertNotIn("照片历史 system 不应进入 dream", source_text)
 
         asyncio.run(run())
 
@@ -4492,16 +4943,34 @@ class ModelProfileTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_non_fixed_profile_allows_user_thinking_override(self):
+    def test_custom_profile_uses_model_bound_thinking(self):
         async def run():
             svc = self.make_service()
             svc.app_store.upsert_model_profile("1", "custom", {
                 "name": "Custom", "base_url": "http://localhost/v1", "api_key": "k",
-                "model": "custom-model", "timeout": 120,
+                "model": "custom-model", "timeout": 120, "disable_thinking": True,
             })
             svc.app_store.update_user_model_settings("1", chat_profile_id="custom", chat_thinking=True)
             _, _, thinking = svc._resolve_llm_profile("chat", "telegram:1")
-            self.assertTrue(thinking, "未声明 thinking_fixed 的自定义模型应允许用户覆盖思考开关")
+            self.assertFalse(thinking, "用户级 thinking 覆盖已移除，应完全跟随模型 profile")
+
+        asyncio.run(run())
+
+    def test_vision_profile_is_optional_and_user_scoped(self):
+        async def run():
+            svc = self.make_service()
+            self.assertFalse(svc.has_llm_config("vision", "telegram:1"))
+            svc.app_store.upsert_model_profile("1", "vision", {
+                "name": "Vision", "base_url": "http://localhost/v1", "api_key": "vk",
+                "model": "vision-model", "disable_thinking": True,
+            })
+            svc.app_store.update_user_model_settings("1", vision_profile_id="vision")
+
+            self.assertTrue(svc.has_llm_config("vision", "telegram:1"))
+            self.assertFalse(svc.has_llm_config("vision", "telegram:2"))
+            profile_id, _, thinking = svc._resolve_llm_profile("vision", "telegram:1")
+            self.assertEqual(profile_id, "vision")
+            self.assertFalse(thinking)
 
         asyncio.run(run())
 

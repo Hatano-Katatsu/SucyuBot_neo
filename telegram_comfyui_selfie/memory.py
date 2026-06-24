@@ -243,29 +243,10 @@ class LongTermMemoryStore:
         return [memory for _, memory in scored[:limit]]
 
     def context_memories(self, session_id: str, query: str, *, character: str | None = None, limit: int = 8, stable_limit: int = 4) -> list[dict[str, Any]]:
-        stable = [
-            memory for memory in self.list_memories(session_id, character=character, limit=80)
-            if memory["kind"] in STABLE_KINDS
-        ][:stable_limit]
-        chosen: dict[int, dict[str, Any]] = {int(memory["id"]): memory for memory in stable}
-        for memory in self.search_memories(session_id, query, character=character, limit=limit * 2):
-            chosen.setdefault(int(memory["id"]), memory)
-            if len(chosen) >= limit:
-                break
-        return list(chosen.values())[:limit]
+        return self.list_memories(session_id, character=character, limit=limit)
 
     def mark_used(self, ids: list[int]):
-        ids = [int(item) for item in ids if item]
-        if not ids:
-            return
-        now = time.time()
-        placeholders = ",".join("?" for _ in ids)
-        with closing(self._connect()) as conn:
-            conn.execute(
-                f"UPDATE memories SET last_used_at = ?, hit_count = hit_count + 1 WHERE id IN ({placeholders})",
-                (now, *ids),
-            )
-            conn.commit()
+        return
 
 
     def update_memory(self, session_id: str, memory_id: int, *, character: str | None = None, summary: str | None = None, kind: str | None = None, importance: Any = None, tags: Any = None, source: str | None = None) -> bool:
@@ -390,7 +371,9 @@ class LongTermMemoryStore:
         score = float(memory.get("importance") or 3) * 2
         if memory.get("kind") in STABLE_KINDS:
             score += 2
-        return score + min(float(memory.get("hit_count") or 0), 8) * 0.1
+        # hit_count 是观测指标，不参与检索排序；否则每次注入记忆都会改变下次排序，
+        # 造成相同数据下的上下文漂移，并削弱前缀缓存可复现性。
+        return score
 
     def _score_memory(self, memory: dict[str, Any], terms: list[str]) -> float:
         hay_summary = str(memory.get("summary") or "").lower()

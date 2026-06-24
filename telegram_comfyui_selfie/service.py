@@ -537,6 +537,7 @@ class TelegramComfyUIService(
             "role_name": str(cfg.get("role_name", "魅魔") or "").strip(),
             "bot_name": bot_name,
             "bot_self_name": str(cfg.get("bot_self_name", "我") or "").strip(),
+            "user_address": "",
             "visual_character": "",
             "visual_series": "",
             "persona": str(cfg.get("scheduled_persona", "") or "").strip(),
@@ -917,6 +918,7 @@ class TelegramComfyUIService(
         appearance: str | None = None,
         view: str = "",
         source_description: str = "",
+        defer_history_message: bool = False,
     ):
         state = self._get_session_state(session_id)
         history = session_schema.get_sent_photos_history(state)
@@ -927,15 +929,21 @@ class TelegramComfyUIService(
                 appearance_snapshot = self._effective_visual_prompt_tags(session_id)
             except Exception:
                 appearance_snapshot = session_schema.get_outfit(state)
-        history.append({
+        photo = {
             "timestamp": time.time(),
             "scene": scene,
             "caption": caption,
             "appearance": appearance_snapshot,
             "view": (view or "").strip().lower(),
             "source_description": source_description,
-        })
+        }
+        history.append(photo)
         session_schema.set_sent_photos_history(state, history[-10:])
+        photo_message = self._format_photo_history_system_message(photo)
+        if defer_history_message:
+            self._queue_pending_photo_history_message(session_id, photo_message)
+        else:
+            self._append_photo_history_message(session_id, photo_message, state=state)
         session_schema.set_last_sent_selfie_time(state, time.time())
         session_schema.set_last_sent_selfie_caption(state, caption)
         session_schema.set_last_sent_selfie_source_description(state, source_description or scene)
@@ -946,6 +954,51 @@ class TelegramComfyUIService(
             session_id, "IMAGE",
             f"view={(view or '').strip().lower() or '?'} caption={caption or '-'} scene={scene}",
         )
+
+    @staticmethod
+    def _format_photo_history_system_message(photo: dict[str, Any]) -> dict[str, str]:
+        scene = str(photo.get("scene") or "").strip()
+        caption = str(photo.get("caption") or "").strip()
+        source = str(photo.get("source_description") or "").strip()
+        view = str(photo.get("view") or "").strip()
+        lines = [
+            "照片历史（系统记录，保留到对话历史裁剪；用户明确提到照片/刚才画面时再引用，不要主动复述）：",
+            f"画面: {scene or '未记录'}",
+        ]
+        if caption and caption != scene:
+            lines.append(f"配文: {caption}")
+        if source and source != scene:
+            lines.append(f"当时要回应的原始描写: {source}")
+        if view:
+            lines.append(f"视角: {view}")
+        return {"role": "system", "content": "\n".join(lines)}
+
+    def _pending_photo_history_bucket(self) -> dict[str, list[dict[str, str]]]:
+        bucket = getattr(self, "_pending_photo_history_messages", None)
+        if not isinstance(bucket, dict):
+            bucket = {}
+            self._pending_photo_history_messages = bucket
+        return bucket
+
+    def _queue_pending_photo_history_message(self, session_id: str, message: dict[str, str]):
+        self._pending_photo_history_bucket().setdefault(session_id, []).append(message)
+
+    def _take_pending_photo_history_messages(self, session_id: str) -> list[dict[str, str]]:
+        return self._pending_photo_history_bucket().pop(session_id, [])
+
+    def _append_photo_history_message(self, session_id: str, message: dict[str, str], *, state: dict[str, Any] | None = None):
+        if not session_id or not message:
+            return
+        state = state if state is not None else self._get_session_state(session_id)
+        history = session_schema.get_chat_history(state)
+        history.append(dict(message))
+        session_schema.set_chat_history(state, history)
+        try:
+            self.app_store.append_messages(session_id, self._context_character_key(session_id), [dict(message)])
+        except Exception:
+            logger.warning("photo history sqlite append failed", exc_info=True)
+        if hasattr(self, "_apply_history_trim"):
+            self._apply_history_trim(state, self._history_storage_cap())
 
     @staticmethod
     def _identity_key(value: Any) -> str:
@@ -1432,7 +1485,8 @@ class TelegramComfyUIService(
     def _resolve_llm_profile(self, purpose: str, session_id: str = "") -> tuple[str, dict[str, Any], bool]:
         """解析当前会话实际使用的 LLM profile。
 
-        chat 使用 chat_profile_id，image/fast 使用 fast_profile_id；缺省回退到 YAML 全局配置。
+        chat 使用 chat_profile_id，image/fast 使用 fast_profile_id，vision 使用 vision_profile_id。
+        vision 没有显式配置时保持为空，用于关闭图片理解链路。
         """
         user_id = self._user_id_for_session(session_id)
         settings = self.app_store.get_user_model_settings(user_id) if user_id else {}
@@ -1440,38 +1494,29 @@ class TelegramComfyUIService(
         global_profiles = self._global_model_profiles()
         if purpose == "chat":
             profile_id = settings.get("chat_profile_id") or self.config.get("default_chat_model_profile") or ""
-            thinking_value = settings.get("chat_thinking")
+        elif purpose == "vision":
+            profile_id = settings.get("vision_profile_id") or self.config.get("default_vision_model_profile") or ""
         else:
             profile_id = settings.get("fast_profile_id") or self.config.get("default_fast_model_profile") or ""
-            thinking_value = settings.get("fast_thinking")
         profile = user_profiles.get(profile_id) or global_profiles.get(profile_id) or {}
+        if purpose == "vision" and not profile:
+            return str(profile_id or ""), {}, False
         if not profile and global_profiles:
             profile_id, profile = next(iter(global_profiles.items()))
-        # 如果模型 profile 声明了 thinking_fixed，则强制使用 profile 中的思考开关，忽略用户 settings 覆盖。
-        if profile.get("thinking_fixed"):
-            disable = profile.get("disable_thinking", False)
-            if isinstance(disable, str):
-                disable = disable.lower() in ("true", "1", "yes", "on")
-            thinking = not bool(disable)
-        elif thinking_value is None:
-            disable = profile.get("disable_thinking", self._get_llm_value(purpose, "disable_thinking", False))
-            if isinstance(disable, str):
-                disable = disable.lower() in ("true", "1", "yes", "on")
-            thinking = not bool(disable)
-        else:
-            thinking = bool(thinking_value)
+        disable = profile.get("disable_thinking", self._get_llm_value(purpose, "disable_thinking", False))
+        if isinstance(disable, str):
+            disable = disable.lower() in ("true", "1", "yes", "on")
+        thinking = not bool(disable)
         return str(profile_id or ""), dict(profile or {}), thinking
 
     def _resolved_llm_config(self, purpose: str, session_id: str = "", disable_thinking: bool | None = None) -> dict[str, Any]:
         profile_id, profile, thinking = self._resolve_llm_profile(purpose, session_id)
-        if disable_thinking is not None:
-            thinking = not bool(disable_thinking)
         model, api_base, api_key = self._llm_profile_model_name(profile, thinking)
-        if not api_base:
+        if purpose != "vision" and not api_base:
             api_base = self._get_llm_value(purpose, "api_base", "https://api.deepseek.com/v1") or "https://api.deepseek.com/v1"
-        if not api_key:
+        if purpose != "vision" and not api_key:
             api_key = self._get_llm_value(purpose, "api_key", "") or ""
-        if not model:
+        if purpose != "vision" and not model:
             model = self._get_llm_value(purpose, "model", "deepseek-chat") or "deepseek-chat"
         return {
             "profile_id": profile_id,
@@ -1665,7 +1710,10 @@ class TelegramComfyUIService(
         return default
 
     def has_llm_config(self, purpose: str, session_id: str = "") -> bool:
-        return bool(self._resolved_llm_config(purpose, session_id).get("api_key"))
+        resolved = self._resolved_llm_config(purpose, session_id)
+        if purpose == "vision":
+            return bool(resolved.get("api_key") and resolved.get("api_base") and resolved.get("model"))
+        return bool(resolved.get("api_key"))
 
     async def _call_llm_messages(
         self,
@@ -1682,7 +1730,7 @@ class TelegramComfyUIService(
         api_base = resolved["api_base"]
         api_key = resolved["api_key"]
         if not api_key:
-            label = "chat model" if purpose == "chat" else "fast model"
+            label = "chat model" if purpose == "chat" else ("vision model" if purpose == "vision" else "fast model")
             raise RuntimeError(f"{label} API Key is not configured")
         body = {
             "model": resolved["model"],
@@ -1702,8 +1750,6 @@ class TelegramComfyUIService(
             body["thinking"] = {"type": "disabled"}
         elif control == "enable_thinking" and not thinking:
             body["enable_thinking"] = False
-        elif disable_thinking:
-            body["thinking"] = {"type": "disabled"}
         request_url = f"{api_base}/chat/completions"
         async with aiohttp.ClientSession(
             trust_env=True,
@@ -1761,6 +1807,74 @@ class TelegramComfyUIService(
         text = re.sub(r"\n```$", "", text).strip()
         if not text:
             raise RuntimeError("LLM 返回空内容")
+        return text
+
+    def _recent_dialogue_text_for_vision(self, session_id: str, limit: int = 4) -> str:
+        """给图片理解模型的短上下文，只取最近两轮实际 user/assistant 对话。"""
+        if not session_id:
+            return ""
+        try:
+            state = self._get_session_state(session_id)
+            history = session_schema.get_chat_history(state)
+        except Exception:
+            return ""
+        lines: list[str] = []
+        for msg in reversed(history):
+            role = msg.get("role")
+            if role not in {"user", "assistant"}:
+                continue
+            content = str(msg.get("content") or "").strip()
+            if not content:
+                continue
+            label = "用户" if role == "user" else "角色"
+            lines.append(f"{label}: {content[:500]}")
+            if len(lines) >= limit:
+                break
+        return "\n".join(reversed(lines))
+
+    async def _describe_image_for_chat(
+        self,
+        session_id: str,
+        image_bytes: bytes,
+        mime_type: str = "image/jpeg",
+        *,
+        source_label: str = "图片",
+        nearby_text: str = "",
+    ) -> str:
+        """把 Telegram 图片转成纯文本描述，供 chat 输入注入；chat 模型不接收多模态内容。"""
+        if not image_bytes or not self.has_llm_config("vision", session_id):
+            return ""
+        mime_type = (mime_type or "image/jpeg").strip() or "image/jpeg"
+        data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+        recent = self._recent_dialogue_text_for_vision(session_id)
+        context_parts = []
+        if recent:
+            context_parts.append("最近两轮对话:\n" + recent)
+        if nearby_text:
+            context_parts.append("用户当前文字/引用线索:\n" + nearby_text.strip()[:1200])
+        context = "\n\n".join(context_parts) or "无额外上下文。"
+        system = (
+            "你是聊天输入的图片理解器。只负责把图片内容描述成中文纯文本，供后续角色聊天模型阅读。"
+            "可以参考最近两轮对话理解代词、场景和用户意图，但不要编造图片里没有的内容。"
+            "输出应客观、紧凑，优先描述主体、动作、表情、文字信息、环境和与对话相关的细节。"
+            "不要输出 JSON、Markdown 标题或解释。"
+        )
+        prompt = f"{context}\n\n请描述这张{source_label}，120 字以内。"
+        messages = [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            },
+        ]
+        data = await self._call_llm_messages(messages, tag="describe-image", temp=0.2, purpose="vision", session_id=session_id)
+        msg = data.get("choices", [{}])[0].get("message", {})
+        text = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+        text = re.sub(r"^```[a-zA-Z]*\n", "", text)
+        text = re.sub(r"\n```$", "", text).strip()
         return text
 
     async def _translate_to_tags(self, natural: str, session_id: str = "", view: str = "", is_intimate: bool = False) -> str:
@@ -1869,8 +1983,9 @@ class TelegramComfyUIService(
         system = (
             "你是提示词槽位归档器，只输出 JSON。用户会自然描述角色、外观、穿搭、画风、场景偏好或关系。"
             "不要扩写，不要润色，不要替用户新增设定，只把原文按用途归档。"
-            "字段固定为: name, role, age, occupation, anchor, persona, base_appearance, dynamic_appearance, relationship, city, style, scene_preference, selfie_preference, unclassified。"
+            "字段固定为: name, role, age, occupation, anchor, persona, user_address, base_appearance, dynamic_appearance, relationship, city, style, scene_preference, selfie_preference, unclassified。"
             "occupation 放角色的中文职业/身份原文（如 高中生/上班族/护士）；anchor 从职业推断白天去向枚举。"
+            "user_address 放角色对用户的称呼（如 主人/前辈/哥哥/姐姐），不是角色自称，也不是角色名。"
             "base_appearance 只放稳定身体身份特征：性别、发色、发型、瞳色、肤色、体型、物种特征、伤疤、纹身等永久标志。"
             "dynamic_appearance 只放当前/默认穿搭、配饰、临时发型瞳色、持有物；不要放场景、姿势、灯光。"
             "style 只放画风、artist tag、渲染风格；不要放质量词。"
@@ -1960,6 +2075,7 @@ class TelegramComfyUIService(
         intent: str = "",
         mood: str = "",
         must_include: str = "",
+        defer_photo_history: bool = False,
     ) -> str:
         if not any((prompt, intent, must_include)):
             return "缺少图片意图"
@@ -2008,6 +2124,7 @@ class TelegramComfyUIService(
             appearance=new_app or session_schema.get_outfit(state),
             view=final_view,
             source_description=source_description,
+            defer_history_message=defer_photo_history,
         )
         return f"图片已生成并发送。画面: {scene}"
 

@@ -23,6 +23,7 @@
   "turbo_lora_model": "anima-turbo-lora-v0.2.safetensors",
   "default_chat_model_profile": "deepseek-pro",
   "default_fast_model_profile": "deepseek-flash",
+  "default_vision_model_profile": "",
   "global_model_profiles": {
     "deepseek-pro": {
       "name": "DeepSeek V4 Pro",

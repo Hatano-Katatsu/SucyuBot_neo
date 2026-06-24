@@ -177,6 +177,8 @@ class ChatContextMixin:
         new_messages = [{"role": "user", "content": user_text}]
         if content:
             new_messages.append({"role": "assistant", "content": content})
+        if hasattr(self, "_take_pending_photo_history_messages"):
+            new_messages.extend(self._take_pending_photo_history_messages(session_id))
         history.extend(new_messages)
         try:
             self.app_store.append_messages(session_id, self._context_character_key(session_id), new_messages)
@@ -212,6 +214,8 @@ class ChatContextMixin:
         role_name, bot_name, bot_self_name = self._session_role_identity(session_id)
         relationship = self._get_session_cfg(session_id, "spatial_relationship", "")
         rel_line = f"你和用户的关系: {str(relationship).strip()}。\n" if str(relationship).strip() else ""
+        user_address = self._get_session_cfg(session_id, "user_address", "")
+        address_line = f"你通常称呼用户为「{str(user_address).strip()}」。\n" if str(user_address).strip() else ""
 
         # ── 静态前缀（变化极低频：角色切换/配置变更才动）──
         # 放在 messages[0]，最大化 DeepSeek 服务端 prefix cache 命中率。
@@ -221,6 +225,7 @@ class ChatContextMixin:
             f"不要声称自己是其他角色或默认角色。对话中按角色习惯使用「{bot_self_name}」或自然第一人称作为自称，"
             "不要不自然地反复报全名。\n"
             f"{rel_line}"
+            f"{address_line}"
             "当用户明示或暗示想看你的样子、照片、穿着或当前场景时，应调用 generate_roleplay_image。"
             "工具调用只需要描述这张图要回应的对话意图、情绪和必要元素；"
             "最终画面会由生图辅助模型结合完整上下文整合。不要把工具名、函数调用或内部指令写进聊天文字。"
@@ -231,45 +236,41 @@ class ChatContextMixin:
             "不要只在文字里描述换装却不调用工具。"
             "\n位置持久化：当剧情里角色移动到新地点、或你明确交代了此刻在哪（出门、到公司、回家、到了某店等）时，调用 update_location 工具记录，"
             "这样之后的配图和推送会和你说的位置保持一致，不会无理由瞬移。位置没变就不用调。"
+            "\n照片历史规则：历史中 role=system 且以「照片历史」开头的内容，是你之前发给用户的照片记录。"
+            "当用户紧接照片历史回复，或提到“刚才那张/照片/图/自拍/画面/出来看看”等内容时，优先理解为用户在回应最近一张照片；"
+            "依据照片历史自然承接，但不要主动复述系统记录。"
+            "\n发图节奏规则：根据下方发图频率和可见历史里的「照片历史」记录自行判断是否该补图；"
+            "如果可见历史中已经连续多轮没有照片，且当前对话有明确画面感、穿搭/外貌/地点展示或关系推进，优先调用 generate_roleplay_image。"
         )
 
-        # ── 动态后缀（每请求变化：时间/光线/频率/世界状态/记忆）──
-        freq = self.config.get("selfie_frequency", "频繁")
-        freq_inst = {
-            "极频繁": "原则上每 1 到 2 轮对话至少触发一次配图。",
-            "频繁": "原则上每 2 到 3 轮对话触发一次配图。",
-            "适度": "每 3 到 5 轮可触发一次配图。",
-            "偶尔": "每 5 到 8 轮在精彩时刻触发配图。",
-            "关闭": "本次对话中请勿触发配图。",
-        }.get(freq, "原则上每 2 到 3 轮对话触发一次配图。")
-        if self._image_nudge_due(freq, session_schema.get_rounds_since_image(state)):
-            freq_inst += " 已有多轮未配图，本轮请优先调用 generate_roleplay_image。"
+        # ── 半稳定状态快照（外型/衣橱：中低频变化，独立放在 checkpoint 前）──
+        semistable_parts: list[str] = []
+        visual_context = self._chat_visible_appearance_context(session_id)
+        if visual_context:
+            semistable_parts.append(
+                "当前可见外型与配饰（这是你此刻身上真实可见的状态；用户问到外貌、穿搭、配饰或随身物时优先依据这里，"
+                "不要编造不存在的配饰）：\n"
+                f"{visual_context}"
+            )
+        closet_context = self._wardrobe_closet_context(session_id) if hasattr(self, "_wardrobe_closet_context") else ""
+        if closet_context:
+            semistable_parts.append(
+                "你的衣橱里收藏着这些穿过的衣服（你清楚自己有哪些）：\n"
+                f"{closet_context}\n"
+                "用户点名某件、或剧情/场合自然需要时（出门、睡前、洗澡后、约会等），可以让角色换上其中一件；不要无缘无故频繁换装。"
+            )
+        semistable_context = "\n\n".join(semistable_parts)
+        self._track_semistable_context_change(session_id, semistable_context)
 
+        # ── 动态后缀（每请求变化：时间/光线/世界状态/本轮位置判断/发图 overdue）──
+        freq = self.config.get("selfie_frequency", "频繁")
         system_dynamic = (
             f"当前时间: {now.strftime('%H:%M')} ({weekday}) {time_period}。\n"
             f"季节与自然光: {time_light}。\n"
             f"{light_guard}\n"
-            f"纯度指令: {self._purity_directive(self._get_purity(session_id))}\n"
-            f"外貌修改权限: {'允许' if self._allow_llm_change_appearance(session_id) else '禁止'}。\n"
-            f"发图频率: {freq_inst}\n"
         )
-        length_directive = self._reply_length_directive()
-        if length_directive:
-            system_dynamic += f"{length_directive}\n"
-        visual_context = self._chat_visible_appearance_context(session_id)
-        if visual_context:
-            system_dynamic += (
-                "当前可见外型与配饰（这是你此刻身上真实可见的状态；用户问到外貌、穿搭、配饰或随身物时优先依据这里，"
-                "不要编造不存在的配饰）：\n"
-                f"{visual_context}\n"
-            )
-        closet_context = self._wardrobe_closet_context(session_id) if hasattr(self, "_wardrobe_closet_context") else ""
-        if closet_context:
-            system_dynamic += (
-                "你的衣橱里收藏着这些穿过的衣服（你清楚自己有哪些）：\n"
-                f"{closet_context}\n"
-                "用户点名某件、或剧情/场合自然需要时（出门、睡前、洗澡后、约会等），可以让角色换上其中一件；不要无缘无故频繁换装。\n"
-            )
+        if self._image_nudge_due(freq, session_schema.get_rounds_since_image(state)):
+            system_dynamic += "发图提醒: 已有多轮未配图，本轮请优先调用 generate_roleplay_image。\n"
         # 对话进行中：对话已建立的场景优先，动线只作背景；只有冷启动/刚换场景才以动线引导，
         # 避免角色随现实时间被算法"传送"（家→公园这类飘移）。对话态不钉死时钟地点（pin_location=False）。
         active_dialog = bool(self._active_chat_history(state))
@@ -293,60 +294,42 @@ class ChatContextMixin:
                     "不要让角色无理由瞬移；如果用户和角色不在同一地点，优先用消息、自拍、电话或约定见面推进。\n"
                 )
         if session_schema.get_replying_to_selfie(state):
-            photos = session_schema.get_sent_photos_history(state)
-            last_photo = photos[-1] if photos else {}
-            scene = (last_photo.get("scene") or "").strip()
-            caption = (last_photo.get("caption") or "").strip()
-            parts = []
-            if scene:
-                parts.append(f"画面: {scene}")
-            if caption:
-                parts.append(f"你给这张图配的台词: {caption}")
-            if parts:
-                system_dynamic += f"你刚向用户发了一张图。{'；'.join(parts)}。用户现在说:\n"
-            else:
-                fallback = session_schema.get_last_sent_selfie_source_description(state) or ""
-                if fallback:
-                    system_dynamic += f"你刚向用户发了一张图，描述: {fallback}。用户现在说:\n"
             session_schema.set_replying_to_selfie(state, False)
-        if session_schema.get_short_context_start(state):
-            system_dynamic += (
-                "短期注意规则: 用户已经切换过话题或场景。切换点之前的聊天、地点、动作、服装、冲突和图片只作历史背景，"
-                "不要主动带入当前场景；只有用户明确说继续刚才、上一张、那个话题时才引用。\n"
-            )
-
-        # ── 稳定上下文（仅在 checkpoint / dream 时更新，变化低频）──
-        # 包含：checkpoint 摘要、角色历史提要、长期记忆。放在历史之前，与静态 system
-        # 共同构成缓存前缀；历史用固定长度滑动窗口，前缀结构每轮一致。
-        stable_parts: list[str] = []
-        checkpoint_context = self._checkpoint_context(session_id)
-        if checkpoint_context:
-            stable_parts.append(
-                "Checkpoint summary of earlier dialogue "
-                "(use this as continuity background; do not reveal it):\n"
-                f"{checkpoint_context}"
-            )
+        # ── 天级/低频稳定上下文（角色历史、长期记忆、配置控制）──
+        # 这些比半稳定外型更低频，放在半稳定状态快照之前。
+        durable_parts: list[str] = []
+        control_context = self._chat_low_frequency_context(session_id, state=state)
+        if control_context:
+            durable_parts.append(control_context)
         history_summary = self._character_history_summary_context(session_id)
         if history_summary:
-            stable_parts.append(
-                "角色历史提要（长期发展脉络，仅在相关时自然引用）:\n"
+            durable_parts.append(
+                "角色历史提要（宏观关系与剧情发展脉络；用于理解长期阶段变化，不复述近期细节，不替代长期记忆）:\n"
                 f"{history_summary}"
             )
-        memory_context = self._long_term_memory_context(session_id, user_text)
+        memory_context = self._long_term_memory_context(session_id)
         if memory_context:
-            stable_parts.append(
-                "长期记忆（仅在相关时自然使用，不要逐条复述，不要暴露记忆系统）:\n"
+            durable_parts.append(
+                "长期记忆（高重要度稳定事实/偏好/边界/纠正；比 checkpoint 更像硬约束，仅在相关时自然使用，不要逐条复述）:\n"
                 f"{memory_context}"
             )
+        checkpoint_context = self._checkpoint_context(session_id)
+        checkpoint_part = (
+            "Checkpoint（近期已折叠对话连续性；只用于承接当前/最近场景、未完成动作、承诺、情绪和地点，不是长期设定；不要主动暴露）:\n"
+            f"{checkpoint_context}"
+        ) if checkpoint_context else ""
 
         # 拼接顺序：
-        #   [静态 system] + [稳定上下文: checkpoint/历史提要/记忆] + [历史(固定窗口)] + [照片注入] + [动态 system] + [本轮 user]
-        # 静态 + 稳定 + 历史（固定长度）构成稳定前缀，最大化 DeepSeek 前缀缓存命中。
+        #   [静态 system] + [天级/低频稳定层] + [半稳定状态快照] + [checkpoint 会话连续性] + [历史(checkpoint 锚定，含照片 system 记录)] + [动态 system] + [本轮 user]
+        # 静态 + 低频稳定 + 半稳定 + checkpoint + 未折叠历史构成只追加不左移的前缀；checkpoint 落地时才整体归位。
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_static}]
-        if stable_parts:
-            messages.append({"role": "system", "content": "\n\n".join(stable_parts)})
-        messages.extend(self._active_chat_history(state, self._checkpoint_keep_message_limit()))
-        self._inject_photo_history_messages(messages, state)
+        if durable_parts:
+            messages.append({"role": "system", "content": "\n\n".join(durable_parts)})
+        if semistable_context:
+            messages.append({"role": "system", "content": semistable_context})
+        if checkpoint_part:
+            messages.append({"role": "system", "content": checkpoint_part})
+        messages.extend(self._chat_prompt_history(state))
         messages.append({"role": "system", "content": system_dynamic})
         messages.append({"role": "user", "content": user_text})
         return messages
@@ -428,6 +411,7 @@ class ChatContextMixin:
                 intent=args.get("intent", ""),
                 mood=args.get("mood", ""),
                 must_include=args.get("must_include", ""),
+                defer_photo_history=True,
             )
         if fn == "change_appearance":
             return await self.tool_change_appearance(session_id, args.get("description", ""), args.get("mode", "merge"))
@@ -449,6 +433,78 @@ class ChatContextMixin:
             "适中": "回复长度：控制在 2 到 4 句、约 120 字以内，避免大段独白和过度铺陈。",
             "详细": "回复长度：可以适当展开，但单次不要超过约 300 字。",
         }.get(preset, "")
+
+    @staticmethod
+    def _image_frequency_instruction(freq: str) -> str:
+        return {
+            "极频繁": "原则上每 1 到 2 轮对话至少触发一次配图。",
+            "频繁": "原则上每 2 到 3 轮对话触发一次配图。",
+            "适度": "每 3 到 5 轮可触发一次配图。",
+            "偶尔": "每 5 到 8 轮在精彩时刻触发配图。",
+            "关闭": "本次对话中请勿触发配图。",
+        }.get(freq, "原则上每 2 到 3 轮对话触发一次配图。")
+
+    def _chat_low_frequency_context(self, session_id: str, *, state: dict[str, Any] | None = None) -> str:
+        """低频对话控制：配置/角色设置变化时才动，放在历史前稳定层。"""
+        if state is None:
+            state = self._get_session_state(session_id)
+        freq = self.config.get("selfie_frequency", "频繁")
+        lines = [
+            f"纯度指令: {self._purity_directive(self._get_purity(session_id))}",
+            f"外貌修改权限: {'允许' if self._allow_llm_change_appearance(session_id) else '禁止'}。",
+            f"发图频率: {self._image_frequency_instruction(freq)}",
+        ]
+        length_directive = self._reply_length_directive()
+        if length_directive:
+            lines.append(length_directive)
+        if session_schema.get_short_context_start(state):
+            lines.append(
+                "短期注意规则: 用户已经切换过话题或场景。切换点之前的聊天、地点、动作、服装、冲突和图片只作历史背景，"
+                "不要主动带入当前场景；只有用户明确说继续刚才、上一张、那个话题时才引用。"
+            )
+        return "对话控制（低频配置；变化时才会影响历史前缀）:\n" + "\n".join(lines)
+
+    def _scene_low_frequency_context(self, session_id: str) -> str:
+        """低频场景控制：角色偏好/纯度类设置，放在场景 prompt 的时间动态信息之前。"""
+        prompt_prefs = self._prompt_scene_preferences(session_id) if hasattr(self, "_prompt_scene_preferences") else {}
+        return (
+            "场景控制（低频配置；变化时才会影响场景前缀）:\n"
+            f"角色性观念: {self._purity_directive(self._get_purity(session_id))}\n"
+            f"用户画面偏好: 场景偏好={prompt_prefs.get('scene_preference') or '无'}；自拍偏好={prompt_prefs.get('selfie_preference') or '无'}。"
+        )
+
+    def _track_semistable_context_change(self, session_id: str, context: str):
+        """半稳定状态变化后，如果历史已经足够长，异步 checkpoint 一次来收敛缓存前缀。"""
+        if not session_id:
+            return
+        bucket = getattr(self, "_semistable_context_signatures", None)
+        if not isinstance(bucket, dict):
+            bucket = {}
+            self._semistable_context_signatures = bucket
+        previous = bucket.get(session_id)
+        bucket[session_id] = context
+        if previous is None or previous == context:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        key = self._context_character_key(session_id)
+        try:
+            checkpoint = self.app_store.get_checkpoint(session_id, key)
+            pending = self.app_store.list_messages(session_id, key, after_id=int(checkpoint.get("source_until_id") or 0))
+        except Exception:
+            return
+        threshold = max(2, self._context_window_message_limit() // 2)
+        if len(pending) < threshold:
+            return
+        scope = f"{session_id}\n{key}"
+        task = getattr(self, "_checkpoint_tasks", {}).get(scope)
+        if task and not task.done():
+            return
+        self._checkpoint_tasks[scope] = loop.create_task(
+            self._run_context_checkpoint(session_id, key, self._checkpoint_keep_message_limit(), force=True)
+        )
 
     def _image_min_gap(self, freq: str | None = None) -> int:
         """最小配图间隔（轮）：刚发过图后留白几轮再考虑，避免连刷。随频率档位变化。
@@ -600,32 +656,34 @@ class ChatContextMixin:
             f"{rel_line}"
         )
 
-        # ── 稳定上下文 ──
-        stable_parts: list[str] = []
-        checkpoint_context = self._checkpoint_context(session_id)
-        if checkpoint_context:
-            stable_parts.append(f"Checkpoint summary of earlier dialogue:\n{checkpoint_context}")
+        # ── 天级/低频稳定上下文 + 半稳定快照 + checkpoint ──
+        durable_parts: list[str] = []
+        scene_control = self._scene_low_frequency_context(session_id)
+        if scene_control:
+            durable_parts.append(scene_control)
         history_summary = self._character_history_summary_context(session_id)
         if history_summary:
-            stable_parts.append(f"角色历史提要:\n{history_summary}")
+            durable_parts.append(f"角色历史提要（宏观关系与剧情发展脉络）:\n{history_summary}")
         memory_context = self._long_term_memory_context(session_id)
         if memory_context:
-            stable_parts.append(f"长期记忆:\n{memory_context}")
+            durable_parts.append(f"长期记忆（高重要度稳定事实/偏好/边界）:\n{memory_context}")
+
+        semistable_parts: list[str] = []
+        dynamic = self._effective_dynamic_appearance(session_id)
+        if dynamic:
+            semistable_parts.append(f"当前附加外貌: {dynamic}")
+
+        checkpoint_context = self._checkpoint_context(session_id)
+        checkpoint_part = f"Checkpoint（近期已折叠对话连续性，仅承接当前/最近场景）:\n{checkpoint_context}" if checkpoint_context else ""
 
         # ── 动态上下文 ──
         time_light = self._format_time_context(session_id, now=now, weather=weather)
         light_guard = self._format_light_guard(session_id, now=now, weather=weather)
-        dynamic = self._effective_dynamic_appearance(session_id)
-        prompt_prefs = self._prompt_scene_preferences(session_id) if hasattr(self, "_prompt_scene_preferences") else {}
-        purity = self._get_purity(session_id)
         safety = self._get_effective_safety(session_id)
         system_dynamic = (
             f"当前时间: {now.strftime('%H:%M')} ({weekday}) {time_period}。\n"
             f"季节与自然光: {time_light}。\n"
             f"{light_guard}\n"
-            f"当前附加外貌: {dynamic or '无'}\n"
-            f"用户画面偏好: 场景偏好={prompt_prefs.get('scene_preference') or '无'}；自拍偏好={prompt_prefs.get('selfie_preference') or '无'}。\n"
-            f"角色性观念: {self._purity_directive(purity)}\n"
             f"当前场合: {time_period}, {weekday}, {safety.get('context', '')}。\n"
         )
 
@@ -642,8 +700,12 @@ class ChatContextMixin:
 
         # ── 拼接 ──
         parts = [system_static]
-        if stable_parts:
-            parts.append("\n\n".join(stable_parts))
+        if durable_parts:
+            parts.append("\n\n".join(durable_parts))
+        if semistable_parts:
+            parts.append("\n\n".join(semistable_parts))
+        if checkpoint_part:
+            parts.append(checkpoint_part)
         parts.append(system_dynamic)
         if world_context:
             parts.append(world_context)
@@ -682,6 +744,12 @@ class ChatContextMixin:
         while trimmed and trimmed[0].get("role") != "user":
             trimmed.pop(0)
         return trimmed or list(history[-limit:])
+
+    @classmethod
+    def _split_checkpoint_overflow(cls, history: list[dict[str, Any]], keep: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        kept = cls._trim_history_preserve_turns(history, keep)
+        overflow_count = max(0, len(history) - len(kept))
+        return list(history[:overflow_count]), kept
 
     def _apply_history_trim(self, state: dict[str, Any], limit: int):
         """把 chat_history 从头部裁到 limit 条，并同步下移 short_context_start。
@@ -726,13 +794,17 @@ class ChatContextMixin:
                 return
         self._checkpoint_tasks[scope] = asyncio.create_task(self._run_context_checkpoint(session_id, key, keep))
 
-    async def _run_context_checkpoint(self, session_id: str, character_key: str, keep: int):
+    async def _run_context_checkpoint(self, session_id: str, character_key: str, keep: int, *, force: bool = False):
         try:
             checkpoint = self.app_store.get_checkpoint(session_id, character_key)
             pending = self.app_store.list_messages(session_id, character_key, after_id=int(checkpoint.get("source_until_id") or 0))
-            if len(pending) <= self._context_window_message_limit() and sum(len(str(m.get("content") or "")) for m in pending) <= 30000:
+            if (
+                not force
+                and len(pending) <= self._context_window_message_limit()
+                and sum(len(str(m.get("content") or "")) for m in pending) <= 30000
+            ):
                 return
-            overflow = pending[:-keep]
+            overflow, _kept = self._split_checkpoint_overflow(pending, keep)
             if not overflow:
                 return
             previous = checkpoint.get("summary") or ""
@@ -774,26 +846,32 @@ class ChatContextMixin:
             # 回退到 chat 模型
             system = (
                 "You are a checkpoint summarizer for a long roleplay chat. Merge the existing checkpoint "
-                "and the overflowed dialogue into one continuous background summary. Keep relationships, "
-                "promises, unresolved events, important emotions, places, and confirmed facts. "
+                "and the overflowed dialogue into one recent-continuity summary. Focus on the current or recent "
+                "scene, unresolved actions, promises, immediate emotions, places, and photo/system records that "
+                "the next few turns may need. Do not duplicate broad character-history arcs, permanent profile facts, "
+                "stable preferences, boundaries, or corrections that belong in long-term memory. "
                 f"Soft limit: {soft} Chinese characters. Output only the summary text."
             )
             user = f"Existing checkpoint:\n{previous or 'none'}\n\nOverflow dialogue:\n{dialog}"
             return await self._call_llm(system, user, temp=0.1, tag="checkpoint", purpose="chat", disable_thinking=True, session_id=session_id)
         system = (
             "You are a checkpoint summarizer for a long roleplay chat. Merge the existing checkpoint "
-            "and the overflowed dialogue into one continuous background summary. Keep relationships, "
-            "promises, unresolved events, important emotions, places, and confirmed facts. "
+            "and the overflowed dialogue into one recent-continuity summary. Focus on the current or recent "
+            "scene, unresolved actions, promises, immediate emotions, places, and photo/system records that "
+            "the next few turns may need. Do not duplicate broad character-history arcs, permanent profile facts, "
+            "stable preferences, boundaries, or corrections that belong in long-term memory. "
             f"Soft limit: {soft} Chinese characters. Output only the summary text."
         )
         user = f"Existing checkpoint:\n{previous or 'none'}\n\nOverflow dialogue:\n{dialog}"
         return await self._call_llm(system, user, temp=0.1, tag="checkpoint", purpose="image", disable_thinking=True, session_id=session_id)
 
     @staticmethod
-    def _format_store_messages(messages: list[dict[str, Any]], limit_chars: int = 50000) -> str:
+    def _format_store_messages(messages: list[dict[str, Any]], limit_chars: int = 50000, roles: set[str] | None = None) -> str:
         lines = []
         for msg in messages:
             role = msg.get("role") or ""
+            if roles is not None and role not in roles:
+                continue
             name = "User" if role == "user" else "Assistant" if role == "assistant" else role
             content = str(msg.get("content") or "").strip()
             if content:
@@ -860,24 +938,7 @@ class ChatContextMixin:
         return history[start:]
 
     def _inject_photo_history_messages(self, messages: list[dict[str, Any]], state: dict[str, Any]):
-        photos = session_schema.get_sent_photos_history(state)
-        if not photos:
-            return
-        existing = "\n".join(m.get("content", "") for m in session_schema.get_chat_history(state) if isinstance(m.get("content"), str))
-        reset_time = session_schema.get_short_context_reset_time(state)
-        for photo in photos[-3:]:
-            # 12h 内 且 晚于短期重置边界（视觉时效绑定注意力边界——见 ④，刻意为之）。
-            if not self._within(photo.get("timestamp", 0), 12 * 3600, since=reset_time):
-                continue
-            scene = photo.get("scene", "")
-            if scene and scene in existing:
-                continue
-            content = f"*（你最近一次出现在用户眼前的样子：{scene}）*"
-            caption = (photo.get("caption") or "").strip()
-            if caption and caption != scene:
-                content += f"\n你给这张图配的文字：{caption}"
-            source = (photo.get("source_description") or "").strip()
-            if source and source != scene:
-                content += f"\n这张图当时要回应的原始描写：{source}"
-            messages.append({"role": "assistant", "content": content})
+        # 兼容旧调用点：照片视觉记录现在在 _record_sent_photo 时写入 chat_history
+        # 的 system 消息，并随普通历史一起保留/裁剪；这里不再做每轮动态注入。
+        return
 

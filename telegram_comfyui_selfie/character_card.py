@@ -29,6 +29,7 @@ CARD_STRING_FIELDS: tuple[tuple[str, str], ...] = (
     ("role_name", "custom_role_name"),
     ("bot_name", "custom_bot_name"),
     ("bot_self_name", "custom_bot_self_name"),
+    ("user_address", "custom_user_address"),
     ("visual_character", "custom_visual_character"),
     ("visual_series", "custom_visual_series"),
     ("persona", "custom_scheduled_persona"),

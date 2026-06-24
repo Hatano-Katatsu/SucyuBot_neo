@@ -32,9 +32,10 @@ const configSections = [
     ["telegram_proxy_enabled", "启用 Telegram 代理", "bool"],
     ["telegram_proxy_url", "Telegram 代理地址", "text"],
   ]],
-  ["模型运行参数（模型 profile 在角色页按用户配置；生图后端/模型只读 YAML）", [
+  ["模型运行参数（模型 profile 在角色页按用户配置；生图后端只读 YAML）", [
     ["default_chat_model_profile", "默认对话模型 profile", "model_select"],
     ["default_fast_model_profile", "默认快速模型 profile", "model_select"],
+    ["default_vision_model_profile", "默认视觉模型 profile", "model_select"],
     ["chat_reply_length", "回复长度", "select:,简短,适中,详细"],
     ["chat_llm_temperature", "回复温度", "text"],
     ["image_llm_temperature_scene", "推送场景温度", "text"],
@@ -89,8 +90,9 @@ const characterFieldSections = [
     ["character", "角色名", "text"],
     ["series", "作品/系列", "text"],
     ["role_name", "角色类型", "text"],
-    ["bot_name", "对话称呼", "text"],
+    ["bot_name", "角色对话名", "text"],
     ["bot_self_name", "自称", "text"],
+    ["user_address", "对用户称呼", "text"],
     ["visual_character", "生图角色 Tag", "text"],
     ["visual_series", "生图作品 Tag", "text"],
   ]],
@@ -109,10 +111,6 @@ const characterFieldSections = [
     ["age_stage", "年龄段", "select:,minor,adult"],
     ["occupation", "职业", "text"],
     ["day_anchor", "白天去向", "select:,company,school,factory,farm,construction,medical,retail,delivery,driver,home,flexible"],
-  ]],
-  ["偏好", [
-    ["scene_preference", "场景偏好", "textarea"],
-    ["selfie_preference", "自拍偏好", "textarea"],
   ]],
   ["边界", [
     ["purity", "纯良度", "number"],
@@ -276,7 +274,7 @@ async function loadAll() {
   renderSessionSelector();
   // 获取模型 profile 列表供配置页下拉框使用
   try {
-    const modelData = await api("/api/models");
+    const modelData = await api(modelApiUrl());
     state.profiles = { ...(modelData.global_profiles || {}), ...(modelData.user_profiles || {}) };
   } catch (err) {
     state.profiles = state.profiles || {};
@@ -359,6 +357,7 @@ function renderStatus() {
   $("#status-comfyui").textContent = s.comfyui_url || "-";
   $("#status-chat-llm-model").textContent = s.chat_llm_model ? `${s.chat_llm_model} @ ${s.chat_llm_api_base}` : "-";
   $("#status-image-llm-model").textContent = s.image_llm_model ? `${s.image_llm_model} @ ${s.image_llm_api_base}` : "-";
+  $("#status-vision-llm-model").textContent = s.vision_llm_model ? `${s.vision_llm_model} @ ${s.vision_llm_api_base}` : "未配置";
 }
 
 function inputFor([key, label, type], values) {
@@ -435,6 +434,22 @@ function formValues(form) {
   const values = {};
   new FormData(form).forEach((value, key) => { values[key] = value; });
   return values;
+}
+
+function selectedModelUserId() {
+  if (state.auth?.role === "admin") {
+    return (state.selectedSession || "").startsWith("telegram:") ? state.selectedSession.replace("telegram:", "") : "";
+  }
+  return state.auth?.user_id || "";
+}
+
+function modelApiUrl(path = "/api/models") {
+  const userId = selectedModelUserId();
+  if (state.auth?.role === "admin" && userId) {
+    const sep = path.includes("?") ? "&" : "?";
+    return `${path}${sep}user_id=${encodeURIComponent(userId)}`;
+  }
+  return path;
 }
 
 async function loadCharacterPage() {
@@ -863,54 +878,69 @@ function importCharacter() {
 async function loadModels() {
   const box = $("#model-manager");
   if (!box) return;
-  const data = await api("/api/models");
-  const allProfiles = { ...(data.global_profiles || {}), ...(data.user_profiles || {}) };
+  const data = await api(modelApiUrl());
+  const globalProfiles = data.global_profiles || {};
+  const userProfiles = data.user_profiles || {};
+  const allProfiles = { ...globalProfiles, ...userProfiles };
   const ids = Object.keys(allProfiles);
   const settings = data.settings || {};
   const chatProfileId = settings.chat_profile_id || data.default_chat_model_profile || "";
   const fastProfileId = settings.fast_profile_id || data.default_fast_model_profile || "";
-  const chatProfile = allProfiles[chatProfileId] || {};
-  const fastProfile = allProfiles[fastProfileId] || {};
-  const options = ids.map(id => `<option value="${escapeHtml(id)}">${escapeHtml(id)} · ${escapeHtml(allProfiles[id]?.name || allProfiles[id]?.model || "")}</option>`).join("");
-  const thinkingLabel = profile => {
-    if (!profile || !profile.thinking_fixed) return "";
-    const disabled = profile.disable_thinking === true || profile.disable_thinking === "true" || profile.disable_thinking === 1;
-    return `（固定${disabled ? "关闭" : "开启"}）`;
+  const visionProfileId = settings.vision_profile_id || data.default_vision_model_profile || "";
+  const options = ids.map(id => {
+    const p = allProfiles[id] || {};
+    const scope = userProfiles[id] ? "私有" : "全局";
+    return `<option value="${escapeHtml(id)}">${escapeHtml(id)} · ${escapeHtml(p.name || p.model || "")} · ${scope}</option>`;
+  }).join("");
+  const resolved = data.resolved || {};
+  const resolvedText = key => {
+    const item = resolved[key] || {};
+    const configured = item.configured ? "已配置" : "未配置";
+    const profile = item.profile_id || "默认";
+    const model = item.model || "-";
+    return `${profile} / ${model} / ${configured}`;
   };
-  const chatNote = thinkingLabel(chatProfile);
-  const fastNote = thinkingLabel(fastProfile);
-  const chatDisabled = chatNote ? "disabled" : "";
-  const fastDisabled = fastNote ? "disabled" : "";
+  const adminScopeControl = state.auth?.role === "admin"
+    ? `<label>保存范围<select name="_scope"><option value="user">当前用户私有</option><option value="global">全局 profile</option></select></label>`
+    : "";
   box.innerHTML = `
     <form id="model-settings-form" class="model-settings-form">
       <label>对话模型<select name="chat_profile_id"><option value="">默认</option>${options}</select></label>
       <label>快速模型<select name="fast_profile_id"><option value="">默认</option>${options}</select></label>
-      <label>对话思考<select name="chat_thinking" ${chatDisabled}><option value="">默认</option><option value="true">开启</option><option value="false">关闭</option></select> <span class="fixed-note">${chatNote}</span></label>
-      <label>快速思考<select name="fast_thinking" ${fastDisabled}><option value="">默认</option><option value="true">开启</option><option value="false">关闭</option></select> <span class="fixed-note">${fastNote}</span></label>
+      <label>视觉模型<select name="vision_profile_id"><option value="">关闭</option>${options}</select></label>
       <button class="primary" type="submit">保存模型选择</button>
     </form>
+    <div class="model-current">
+      <div>当前用户: ${escapeHtml(data.user_id || selectedModelUserId() || "-")}</div>
+      <div>对话: ${escapeHtml(resolvedText("chat"))}</div>
+      <div>快速: ${escapeHtml(resolvedText("image"))}</div>
+      <div>视觉: ${escapeHtml(resolvedText("vision"))}</div>
+    </div>
     <form id="model-profile-form" class="inline-manager-form">
+      ${adminScopeControl}
       <input name="profile_id" placeholder="自定义 profile id">
-      <textarea name="json" placeholder='{"name":"DeepSeek","base_url":"...","api_key":"...","model_no_think":"deepseek-chat"}'></textarea>
-      <button type="submit">保存自定义模型</button>
+      <textarea name="json" placeholder='{"name":"Vision","base_url":"https://.../v1","api_key":"...","model":"gpt-4o-mini","disable_thinking":true}'></textarea>
+      <button type="submit">保存模型 profile</button>
+      <p class="muted">api_key/api_key_no_think 返回时会显示为 ********；保存空值或 ******** 会保留原密钥。</p>
     </form>
   `;
   box.querySelector("[name=chat_profile_id]").value = settings.chat_profile_id || "";
   box.querySelector("[name=fast_profile_id]").value = settings.fast_profile_id || "";
-  box.querySelector("[name=chat_thinking]").value = settings.chat_thinking === true ? "true" : settings.chat_thinking === false ? "false" : "";
-  box.querySelector("[name=fast_thinking]").value = settings.fast_thinking === true ? "true" : settings.fast_thinking === false ? "false" : "";
+  box.querySelector("[name=vision_profile_id]").value = settings.vision_profile_id || "";
   $("#model-settings-form").onsubmit = async event => {
     event.preventDefault();
-    await api("/api/models/settings", { method: "PATCH", body: formValues(event.currentTarget) });
+    await api(modelApiUrl("/api/models/settings"), { method: "PATCH", body: formValues(event.currentTarget) });
     await loadModels();
     toast("模型设置已保存");
   };
   $("#model-profile-form").onsubmit = async event => {
     event.preventDefault();
     const values = formValues(event.currentTarget);
-    await api(`/api/models/${encodeURIComponent(values.profile_id)}`, { method: "POST", body: JSON.parse(values.json) });
+    const body = JSON.parse(values.json || "{}");
+    if (values._scope) body._scope = values._scope;
+    await api(modelApiUrl(`/api/models/${encodeURIComponent(values.profile_id)}`), { method: "POST", body });
     await loadModels();
-    toast("自定义模型已保存");
+    toast("模型 profile 已保存");
   };
 }
 

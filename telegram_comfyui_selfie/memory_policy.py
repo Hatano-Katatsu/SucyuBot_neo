@@ -57,7 +57,6 @@ class MemoryPolicyMixin:
         )
         if not memories:
             return ""
-        self.memory.mark_used([int(memory["id"]) for memory in memories])
         return format_memory_lines(memories, with_ids=False)
 
     def _long_memory_structured_boundary_text(self, session_id: str) -> str:
@@ -129,6 +128,7 @@ class MemoryPolicyMixin:
         system = (
             "你是长期记忆提取器。请从一轮用户与角色的对话中提取值得长期保存的信息。\n"
             "只保存稳定偏好、明确设定、关系状态变化、重要事件、视觉/穿搭偏好、边界或禁忌。\n"
+            "长期记忆负责可跨场景复用的高重要度事实/偏好/边界/纠正，不负责承接刚才发生到哪一步；近期连续性交给 checkpoint，宏观关系阶段交给角色历史提要。\n"
             "长期记忆不是第二套人设系统，不要保存已有结构化状态负责的内容。\n"
             "不要保存当前角色、当前人设、当前身体特征、当前地点/时区、当前纯良度、当前画风、当前临时穿搭或最近图片内容；"
             "除非用户明确表达了长期偏好、边界、约定、纠正或重要关系变化。\n"
@@ -139,7 +139,7 @@ class MemoryPolicyMixin:
         )
         user = (
             f"当前结构化状态（不要作为长期记忆重复保存）:\n{structured or '无'}\n\n"
-            f"已有相关记忆:\n{existing or '无'}\n\n"
+            f"已有高重要度记忆（避免重复，必要时只输出真正新增/修正的信息）:\n{existing or '无'}\n\n"
             f"本轮对话:\n用户: {user_text}\n角色: {assistant_text or '（无文字回复）'}"
         )
         try:

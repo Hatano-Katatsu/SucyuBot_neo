@@ -103,6 +103,7 @@ STATE_SCHEMA: dict[str, Field] = {
     "custom_role_name": Field(C, default=""),
     "custom_bot_name": Field(C, default=""),
     "custom_bot_self_name": Field(C, default=""),
+    "custom_user_address": Field(C, default=""),
     "custom_spatial_relationship": Field(C, default=""),
     "custom_location": Field(C, default=""),
     "custom_timezone_offset": Field(C, default=""),

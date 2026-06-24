@@ -12,6 +12,7 @@ INTAKE_FIELDS = (
     "occupation",
     "anchor",
     "persona",
+    "user_address",
     "base_appearance",
     "dynamic_appearance",
     "relationship",
@@ -59,6 +60,9 @@ ROLE_MAP = (
 )
 RELATION_RE = re.compile(r"(关系|暧昧|同居|异地|朋友|恋人|情侣|同事|同学|邻居|青梅竹马)")
 CITY_RE = re.compile(r"(?:所在城市|城市|住在|生活在)[:：\s]*([\u4e00-\u9fffA-Za-z .·-]{2,24})")
+USER_ADDRESS_RE = re.compile(
+    r"(?:对话称呼|对用户称呼|称呼用户|称呼我|叫我|叫用户|称用户为)[是叫为:：\s]*([\w\u4e00-\u9fffぁ-んァ-ヶー·・]{1,16})"
+)
 STYLE_RE = re.compile(r"(画风|风格|artist|style|@)")
 SCENE_RE = re.compile(r"(公园|家里|家中|房间|公司|学校|商场|大街|街头|咖啡|餐厅|车站|海边|自拍|对镜)")
 PERSONA_RE = re.compile(r"(性格|人格|温柔|冷淡|强势|慢热|活泼|开朗|傲娇|病娇|认真|喜欢|习惯|说话|语气)")
@@ -185,6 +189,10 @@ def classify_phrase(phrase: str, out: dict[str, str]):
     if city:
         out["city"] = clean_text(city.group(1))
         return
+    user_address = USER_ADDRESS_RE.search(phrase)
+    if user_address:
+        out["user_address"] = clean_text(user_address.group(1))
+        return
     if STYLE_RE.search(phrase):
         append_field(out, "style", phrase)
         return
@@ -236,6 +244,7 @@ def merge_oc_fields(fields: dict[str, str], intake: dict[str, Any]) -> dict[str,
         "occupation": "occupation",
         "anchor": "anchor",
         "persona": "persona",
+        "user_address": "user_address",
         "base_appearance": "appearance",
         "dynamic_appearance": "outfit",
         "relationship": "relationship",
