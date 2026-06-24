@@ -81,6 +81,22 @@ STATE_SCHEMA: dict[str, Field] = {
     "ntr_affection_reset": Field(G),  # 动态写入，不进默认表
     "frozen": Field(G, default=False),
     "frozen_at": Field(G, default=0),
+    # —— session box：会话全局字段的嵌套容器（非破坏共存，保留上方 13 个 G 注册）——
+    "session": Field(G, default={
+        "last_interaction": 0,
+        "last_morning_greet_date": "",
+        "daily_trigger_times": [],
+        "daily_trigger_date": "",
+        "daily_triggered_times": [],
+        "saved_characters": {},
+        "character_contexts": {},
+        "init_flow": {},
+        "ntr_stage_reached": 0,
+        "ntr_reconcile_count": 0,
+        "ntr_affection_reset": False,
+        "frozen": False,
+        "frozen_at": 0,
+    }),
 
     # —— 角色配置：custom_* 身份/人设/外貌设定 ——
     "custom_scheduled_persona": Field(C, default=""),
@@ -827,3 +843,238 @@ def get_character_history_summary(state):
 
 def set_character_history_summary(state, value):
     _context_set(state, "character_history_summary", str(value or ""))
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# session box：第四个切换的盒。把会话全局字段（计时/调度/NTR/frozen/角色池容器）
+# 从扁平顶层收进 state["session"]。
+# 与 context 盒同构：非破坏共存（扁平键保留不弹出）+ 双写。
+# 但保留 13 个 Field(G) 注册——扁平键继续被分类器归为全局，永不随角色冻结。
+# ──────────────────────────────────────────────────────────────────────────
+
+_SESSION_DEFAULT: dict[str, Any] = {
+    "last_interaction": 0,          # 实际值由 factory=time.time 产生，ensure 中特殊处理
+    "last_morning_greet_date": "",
+    "daily_trigger_times": [],
+    "daily_trigger_date": "",
+    "daily_triggered_times": [],
+    "saved_characters": {},
+    "character_contexts": {},
+    "init_flow": {},
+    "ntr_stage_reached": 0,
+    "ntr_reconcile_count": 0,
+    "ntr_affection_reset": False,
+    "frozen": False,
+    "frozen_at": 0,
+}
+_LEGACY_SESSION_FLAT_KEYS = (
+    "last_interaction", "last_morning_greet_date",
+    "daily_trigger_times", "daily_trigger_date", "daily_triggered_times",
+    "saved_characters", "character_contexts", "init_flow",
+    "ntr_stage_reached", "ntr_reconcile_count", "ntr_affection_reset",
+    "frozen", "frozen_at",
+)
+
+
+def ensure_session_box(state: dict[str, Any]) -> dict[str, Any]:
+    """保证 state["session"] 存在且子键补齐；把旧扁平 session 字段迁移进盒（幂等）。
+
+    与 context 盒同构：非破坏（不弹出扁平键，盒与扁平共存）。
+    特例：last_interaction 缺失时种 time.time()（保留 factory 语义）。
+    """
+    box = state.get("session")
+    if not isinstance(box, dict):
+        box = {}
+        state["session"] = box
+    # 懒迁移：扁平值一次性拷贝进盒（不弹出）
+    for key in _LEGACY_SESSION_FLAT_KEYS:
+        if key in state and key not in box:
+            box[key] = state[key]
+    for key, default in _SESSION_DEFAULT.items():
+        if key not in box:
+            if key == "last_interaction":
+                # factory=time.time：缺失时种当前时间
+                import time as _time
+                box[key] = float(state.get(key, 0) or 0) or _time.time()
+            else:
+                box[key] = copy.deepcopy(default)
+    return box
+
+
+def _session_get(state: dict[str, Any], key: str, *, is_list: bool = False, coerce=int, is_dict: bool = False):
+    """读取 session 字段：**扁平键优先**（盒内值可能陈旧），不存在时回落盒。"""
+    flat = state.get(key)
+    box = ensure_session_box(state)
+    if is_list:
+        if isinstance(flat, list):
+            if flat != box.get(key):
+                box[key] = flat
+            return flat
+        val = box.get(key)
+        return val if isinstance(val, list) else []
+    if is_dict:
+        if isinstance(flat, dict):
+            if flat != box.get(key):
+                box[key] = flat
+            return flat
+        val = box.get(key)
+        return val if isinstance(val, dict) else {}
+    if isinstance(flat, str):
+        if flat != box.get(key, ""):
+            box[key] = flat
+        return flat
+    if isinstance(flat, (int, float)):
+        return coerce(flat)
+    if isinstance(flat, bool):
+        if flat != box.get(key):
+            box[key] = flat
+        return flat
+    if flat is not None:
+        return flat
+    val = box.get(key)
+    if isinstance(val, (int, float)):
+        return coerce(val)
+    return val
+
+
+def _session_set(state: dict[str, Any], key: str, value: Any):
+    """写入 session 字段：盒 + 扁平键双写（向后兼容）。"""
+    box = ensure_session_box(state)
+    box[key] = value
+    state[key] = value
+
+
+# ── 计时/调度 ──
+
+def get_last_interaction(state):
+    try:
+        return float(_session_get(state, "last_interaction", coerce=float))
+    except (TypeError, ValueError):
+        return 0.0
+
+def set_last_interaction(state, value):
+    _session_set(state, "last_interaction", float(value or 0))
+
+def get_last_morning_greet_date(state):
+    return (_session_get(state, "last_morning_greet_date") or "").strip()
+
+def set_last_morning_greet_date(state, value):
+    _session_set(state, "last_morning_greet_date", str(value or ""))
+
+def get_daily_trigger_times(state):
+    return _session_get(state, "daily_trigger_times", is_list=True)
+
+def set_daily_trigger_times(state, value):
+    _session_set(state, "daily_trigger_times", list(value or []))
+
+def get_daily_trigger_date(state):
+    return (_session_get(state, "daily_trigger_date") or "").strip()
+
+def set_daily_trigger_date(state, value):
+    _session_set(state, "daily_trigger_date", str(value or ""))
+
+def get_daily_triggered_times(state):
+    return _session_get(state, "daily_triggered_times", is_list=True)
+
+def set_daily_triggered_times(state, value):
+    _session_set(state, "daily_triggered_times", list(value or []))
+
+
+# ── NTR ──
+
+def get_ntr_stage_reached(state):
+    try:
+        return int(_session_get(state, "ntr_stage_reached", coerce=int))
+    except (TypeError, ValueError):
+        return 0
+
+def set_ntr_stage_reached(state, value):
+    _session_set(state, "ntr_stage_reached", int(value or 0))
+
+def get_ntr_reconcile_count(state):
+    try:
+        return int(_session_get(state, "ntr_reconcile_count", coerce=int))
+    except (TypeError, ValueError):
+        return 0
+
+def set_ntr_reconcile_count(state, value):
+    _session_set(state, "ntr_reconcile_count", int(value or 0))
+
+def get_ntr_affection_reset(state):
+    return bool(_session_get(state, "ntr_affection_reset"))
+
+def set_ntr_affection_reset(state, value):
+    _session_set(state, "ntr_affection_reset", bool(value))
+
+
+# ── 冻结 ──
+
+def get_frozen(state):
+    return bool(_session_get(state, "frozen"))
+
+def set_frozen(state, value):
+    _session_set(state, "frozen", bool(value))
+
+def get_frozen_at(state):
+    try:
+        return float(_session_get(state, "frozen_at", coerce=float))
+    except (TypeError, ValueError):
+        return 0.0
+
+def set_frozen_at(state, value):
+    _session_set(state, "frozen_at", float(value or 0))
+
+
+# ── 容器（返回 live 对象，扁平与盒绑同一引用）──
+
+def get_saved_characters(state) -> dict[str, Any]:
+    """返回 saved_characters 容器（live dict）。保证 key 在扁平和盒中都存在。"""
+    box = ensure_session_box(state)
+    flat = state.get("saved_characters")
+    if isinstance(flat, dict):
+        if flat is not box.get("saved_characters"):
+            box["saved_characters"] = flat
+        return flat
+    val = box.get("saved_characters")
+    if isinstance(val, dict):
+        state["saved_characters"] = val  # 同引用
+        return val
+    # 都不存在 → 创建并双写
+    new: dict[str, Any] = {}
+    box["saved_characters"] = new
+    state["saved_characters"] = new
+    return new
+
+def get_character_contexts(state) -> dict[str, Any]:
+    """返回 character_contexts 容器（live dict）。"""
+    box = ensure_session_box(state)
+    flat = state.get("character_contexts")
+    if isinstance(flat, dict):
+        if flat is not box.get("character_contexts"):
+            box["character_contexts"] = flat
+        return flat
+    val = box.get("character_contexts")
+    if isinstance(val, dict):
+        state["character_contexts"] = val
+        return val
+    new: dict[str, Any] = {}
+    box["character_contexts"] = new
+    state["character_contexts"] = new
+    return new
+
+def get_init_flow(state) -> dict[str, Any]:
+    """返回 init_flow 容器（live dict）。"""
+    box = ensure_session_box(state)
+    flat = state.get("init_flow")
+    if isinstance(flat, dict):
+        if flat is not box.get("init_flow"):
+            box["init_flow"] = flat
+        return flat
+    val = box.get("init_flow")
+    if isinstance(val, dict):
+        state["init_flow"] = val
+        return val
+    new: dict[str, Any] = {}
+    box["init_flow"] = new
+    state["init_flow"] = new
+    return new

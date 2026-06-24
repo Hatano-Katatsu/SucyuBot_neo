@@ -345,7 +345,7 @@ class TelegramComfyUIService(
             if ch:
                 state["custom_scheduled_persona"] = new
                 changed = True
-            saved = state.get("saved_characters")
+            saved = session_schema.get_saved_characters(state)
             if isinstance(saved, dict):
                 for entry in saved.values():
                     if not isinstance(entry, dict):
@@ -463,6 +463,8 @@ class TelegramComfyUIService(
         session_schema.ensure_place_box(state)
         # context 字段已收进 state["context"] 盒；迁移旧扁平持久态并补齐子键。
         session_schema.ensure_context_box(state)
+        # session 字段已收进 state["session"] 盒；迁移旧扁平持久态并补齐子键。
+        session_schema.ensure_session_box(state)
         return state
 
     def _default_character_payload(self) -> dict[str, Any]:
@@ -813,21 +815,21 @@ class TelegramComfyUIService(
         return format_light_guard(self._get_time_context(session_id, now=now, weather=weather))
 
     def _tick_ntr_reconcile(self, state: dict[str, Any]) -> bool:
-        if not state.get("ntr_affection_reset"):
+        if not session_schema.get_ntr_affection_reset(state):
             return False
-        cnt = state.get("ntr_reconcile_count", 0) + 1
+        cnt = session_schema.get_ntr_reconcile_count(state) + 1
         if cnt >= 5:
-            state["ntr_affection_reset"] = False
-            state["ntr_reconcile_count"] = 0
+            session_schema.set_ntr_affection_reset(state, False)
+            session_schema.set_ntr_reconcile_count(state, 0)
             return True
-        state["ntr_reconcile_count"] = cnt
+        session_schema.set_ntr_reconcile_count(state, cnt)
         return False
 
     def _touch(self, session_id: str):
         if session_id:
             state = self._get_session_state(session_id)
-            state["last_interaction"] = time.time()
-            state["ntr_stage_reached"] = 0
+            session_schema.set_last_interaction(state, time.time())
+            session_schema.set_ntr_stage_reached(state, 0)
             self._save_session_state(session_id, state)
 
     @staticmethod
@@ -950,7 +952,7 @@ class TelegramComfyUIService(
             ):
                 sessions_updated += 1
                 updates.append(f"{sid}: {state.get('custom_character') or '-'} -> {state.get('custom_visual_character') or '(blank)'} / {state.get('custom_visual_series') or '(blank)'}")
-            saved = state.get("saved_characters") or {}
+            saved = session_schema.get_saved_characters(state)
             for key, data in saved.items():
                 if not isinstance(data, dict):
                     continue
@@ -1087,7 +1089,7 @@ class TelegramComfyUIService(
                     **state_clean,
                 })
 
-            saved = state.get("saved_characters") or {}
+            saved = session_schema.get_saved_characters(state)
             if not isinstance(saved, dict):
                 continue
             for key, data in saved.items():
@@ -1158,7 +1160,7 @@ class TelegramComfyUIService(
                     count_migrated += 1
                 touched_sessions.add(sid)
             elif scope == "saved_character":
-                saved = state.get("saved_characters") or {}
+                saved = session_schema.get_saved_characters(state)
                 data = saved.get(change.get("saved_key", ""))
                 if not isinstance(data, dict):
                     for item in saved.values():
@@ -1969,7 +1971,7 @@ class TelegramComfyUIService(
     def _mgmt_characters(self) -> str:
         lines, total = ["角色档案池", ""], 0
         for sid, state in self.sessions.items():
-            saved = state.get("saved_characters", {})
+            saved = session_schema.get_saved_characters(state)
             if not saved:
                 continue
             lines.append(f"会话: {sid}")
@@ -1997,11 +1999,11 @@ class TelegramComfyUIService(
         if not self.sessions:
             return "会话概况\n\n暂无会话记录。"
         for sid, state in self.sessions.items():
-            last = state.get("last_interaction", 0)
+            last = session_schema.get_last_interaction(state)
             ago = "无记录"
             if last:
                 sec = time.time() - last
                 ago = f"{int(sec // 60)}分钟前" if sec < 3600 else f"{int(sec // 3600)}小时前" if sec < 86400 else f"{int(sec // 86400)}天前"
-            push = f"{len(state.get('daily_triggered_times', []))}/{len(state.get('daily_trigger_times', []))}" if state.get("daily_trigger_times") else "关闭"
+            push = f"{len(session_schema.get_daily_triggered_times(state))}/{len(session_schema.get_daily_trigger_times(state))}" if session_schema.get_daily_trigger_times(state) else "关闭"
             lines.append(f"{sid}\n  角色: {state.get('custom_character') or '(未设定)'} | 纯良度: {self._get_purity(sid)}/10\n  上次互动: {ago} | 今日推送: {push}")
         return "\n".join(lines)

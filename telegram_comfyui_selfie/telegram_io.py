@@ -7,6 +7,8 @@ from typing import Any
 
 import aiohttp
 
+from . import session_schema
+
 logger = logging.getLogger(__name__)
 
 
@@ -131,9 +133,9 @@ class TelegramIOMixin:
             return
 
         state = self._get_session_state(session_id)
-        if state.get("frozen"):
-            state["frozen"] = False
-            state["frozen_at"] = 0
+        if session_schema.get_frozen(state):
+            session_schema.set_frozen(state, False)
+            session_schema.set_frozen_at(state, 0)
             self._save_session_state(session_id, state)
             self._ulog(session_id, "UNFREEZE", "用户发消息，自动解冻")
             logger.info("session %s auto-unfrozen by user message", session_id)

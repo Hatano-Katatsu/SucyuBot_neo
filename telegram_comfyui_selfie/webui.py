@@ -374,7 +374,7 @@ def cast_config_value(key: str, value, old_value):
 
 
 def session_summary(service, session_id: str, state: dict[str, Any]) -> dict[str, Any]:
-    last = state.get("last_interaction", 0)
+    last = session_schema.get_last_interaction(state)
     now = time.time()
     return {
         "session_id": session_id,
@@ -387,10 +387,10 @@ def session_summary(service, session_id: str, state: dict[str, Any]) -> dict[str
         "timezone": service._get_session_cfg(session_id, "timezone_offset", ""),
         "last_interaction": last,
         "last_interaction_ago": human_ago(now - last) if last else "无记录",
-        "daily_push": f"{len(state.get('daily_triggered_times', []))}/{len(state.get('daily_trigger_times', []))}",
+        "daily_push": f"{len(session_schema.get_daily_triggered_times(state))}/{len(session_schema.get_daily_trigger_times(state))}",
         "photos": len(session_schema.get_sent_photos_history(state)),
-        "saved_characters": len(state.get("saved_characters", {})),
-        "frozen": bool(state.get("frozen")),
+        "saved_characters": len(session_schema.get_saved_characters(state)),
+        "frozen": session_schema.get_frozen(state),
     }
 
 
@@ -801,7 +801,7 @@ async def api_characters(request: web.Request):
     state = service._get_session_state(sid)
     if hasattr(service, "_snapshot_character"):
         service._snapshot_character(state)
-    characters = dict(state.get("saved_characters") or {})
+    characters = dict(session_schema.get_saved_characters(state))
     active_id = (state.get("custom_character") or state.get("custom_bot_name") or state.get("custom_role_name") or "").strip()
     # 如果当前会话已有角色身份但尚未保存进角色池，自动把当前态注入为可编辑条目
     if active_id and active_id not in characters:
@@ -836,7 +836,7 @@ async def api_save_character(request: web.Request):
     # 默认角色以 config 为存储：仅当该角色不在 saved_characters（用户没创建过同名自定义角色）、
     # 且其 is_default 标记为真时，才走默认路径写回 config。否则走常规 saved_characters 路径。
     default_id = service._default_character_payload().get("id") or ""
-    saved = state.get("saved_characters") or {}
+    saved = session_schema.get_saved_characters(state)
     is_default_card = key == default_id and saved.get(key, {}).get("is_default") is True
     if is_default_card:
         service._apply_default_character_payload(payload)
@@ -853,9 +853,9 @@ async def api_save_character(request: web.Request):
             service._apply_character_payload(state, payload)
             if not state.get("custom_character"):
                 state["custom_character"] = key
-    state.setdefault("saved_characters", {})[key] = {k: v for k, v in payload.items() if k != "id"}
+    session_schema.get_saved_characters(state)[key] = {k: v for k, v in payload.items() if k != "id"}
     service._save_session_state(sid, state)
-    return json_ok({"active_id": state.get("custom_character") or "", "current": service._character_export_payload(state), "characters": state.get("saved_characters") or {}})
+    return json_ok({"active_id": state.get("custom_character") or "", "current": service._character_export_payload(state), "characters": session_schema.get_saved_characters(state)})
 
 
 async def api_delete_character(request: web.Request):
@@ -866,7 +866,7 @@ async def api_delete_character(request: web.Request):
     character_id = request.match_info["character_id"]
     default_id = service._default_character_payload().get("id") or ""
     state = service._get_session_state(sid)
-    saved = state.setdefault("saved_characters", {})
+    saved = session_schema.get_saved_characters(state)
     is_default_card = character_id == default_id and saved.get(character_id, {}).get("is_default") is True
     if is_default_card:
         return json_error("系统默认角色不能删除", status=403)
@@ -884,7 +884,7 @@ async def api_activate_character(request: web.Request):
         return json_error("无权访问此会话", status=403)
     character_id = request.match_info["character_id"]
     state = service._get_session_state(sid)
-    saved = state.get("saved_characters") or {}
+    saved = session_schema.get_saved_characters(state)
     data = saved.get(character_id)
     if not data:
         return json_error("角色不存在", status=404)
@@ -917,7 +917,7 @@ async def api_activate_character(request: web.Request):
         service._restore_character_context(sid, state)
     state.pop("life_profile", None)
     service._save_session_state(sid, state)
-    return json_ok({"active_id": state.get("custom_character") or "", "current": service._character_export_payload(state), "characters": state.get("saved_characters") or {}})
+    return json_ok({"active_id": state.get("custom_character") or "", "current": service._character_export_payload(state), "characters": session_schema.get_saved_characters(state)})
 
 
 async def api_diaries(request: web.Request):
@@ -1186,12 +1186,12 @@ async def api_freeze_inactive(request: web.Request):
     threshold = time.time() - FREEZE_INACTIVE_DAYS * 86400
     frozen_list = []
     for sid, state in service.sessions.items():
-        if state.get("frozen"):
+        if session_schema.get_frozen(state):
             continue
-        last = state.get("last_interaction", 0)
+        last = session_schema.get_last_interaction(state)
         if last > 0 and last < threshold:
-            state["frozen"] = True
-            state["frozen_at"] = time.time()
+            session_schema.set_frozen(state, True)
+            session_schema.set_frozen_at(state, time.time())
             service._mark_dirty(sid)
             frozen_list.append({
                 "session_id": sid,
@@ -1209,8 +1209,8 @@ async def api_freeze_session(request: web.Request):
     if not _session_allowed(request, sid):
         return json_error("无权操作此会话", status=403)
     state = service._get_session_state(sid)
-    state["frozen"] = True
-    state["frozen_at"] = time.time()
+    session_schema.set_frozen(state, True)
+    session_schema.set_frozen_at(state, time.time())
     service._save_session_state(sid, state)
     return json_ok({"session": session_summary(service, sid, state)})
 
@@ -1221,8 +1221,8 @@ async def api_unfreeze_session(request: web.Request):
     if not _session_allowed(request, sid):
         return json_error("无权操作此会话", status=403)
     state = service._get_session_state(sid)
-    state["frozen"] = False
-    state["frozen_at"] = 0
+    session_schema.set_frozen(state, False)
+    session_schema.set_frozen_at(state, 0)
     service._save_session_state(sid, state)
     return json_ok({"session": session_summary(service, sid, state)})
 

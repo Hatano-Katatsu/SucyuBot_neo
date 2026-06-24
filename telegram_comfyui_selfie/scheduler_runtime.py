@@ -46,7 +46,7 @@ class SchedulerRuntimeMixin:
         except Exception:
             ttl = 2 * 3600
         now_ts = now.timestamp() if isinstance(now, datetime) else time.time()
-        latest = float(state.get("last_interaction", 0) or 0)
+        latest = float(session_schema.get_last_interaction(state) or 0)
         latest = max(latest, session_schema.get_last_message_time(state))
         for msg in session_schema.get_recent_message_history(state):
             latest = max(latest, float(msg.get("time", 0) or 0))
@@ -324,7 +324,7 @@ class SchedulerRuntimeMixin:
         return local_dt.strftime("%Y-%m-%d")
 
     def _should_run_dream_before_push(self, session_id: str, state: dict[str, Any]) -> bool:
-        last = float(state.get("last_interaction", 0) or 0)
+        last = float(session_schema.get_last_interaction(state) or 0)
         if not last or time.time() - last < self._dream_idle_seconds():
             return False
         key = self._context_character_key(session_id) if hasattr(self, "_context_character_key") else self._memory_character(session_id)
@@ -523,7 +523,7 @@ class SchedulerRuntimeMixin:
             try:
                 for session_id in list(self.sessions.keys()):
                     state = self._get_session_state(session_id)
-                    if state.get("frozen"):
+                    if session_schema.get_frozen(state):
                         continue
                     if self._is_recently_active(state):
                         continue
@@ -534,7 +534,7 @@ class SchedulerRuntimeMixin:
                         daily_limit = int(str(self._get_session_cfg(session_id, "daily_selfie_limit", "3")).strip())
                     except ValueError:
                         daily_limit = 3
-                    if state.get("daily_trigger_date") != today:
+                    if session_schema.get_daily_trigger_date(state) != today:
                         times = []
                         if daily_limit > 0:
                             start, end = 8 * 60 + 30, 23 * 60 + 50
@@ -542,23 +542,23 @@ class SchedulerRuntimeMixin:
                             for i in range(daily_limit):
                                 minute = random.randint(int(start + i * slot), int(start + (i + 1) * slot))
                                 times.append(f"{minute // 60:02d}:{minute % 60:02d}")
-                        state["daily_trigger_times"] = sorted(times)
-                        state["daily_trigger_date"] = today
-                        state["daily_triggered_times"] = []
+                        session_schema.set_daily_trigger_times(state, sorted(times))
+                        session_schema.set_daily_trigger_date(state, today)
+                        session_schema.set_daily_triggered_times(state, [])
                         self._mark_dirty(session_id)
 
                     # 推送关闭(每日次数=0)时，早安推送也不发——否则“关闭推送”每天早上又冒出来（用户报的“只持续一天”）。
-                    if daily_limit > 0 and now.hour == 8 and now.minute < 5 and state.get("last_morning_greet_date") != today:
-                        state["last_morning_greet_date"] = today
+                    if daily_limit > 0 and now.hour == 8 and now.minute < 5 and session_schema.get_last_morning_greet_date(state) != today:
+                        session_schema.set_last_morning_greet_date(state, today)
                         self._mark_dirty(session_id)
                         if not self._check_goodnight_inhibition(state) and session_id not in self._active_pushes:
                             asyncio.create_task(self._sched_fire(session_id, now, mode_override="morning"))
 
-                    triggered = state.get("daily_triggered_times", [])
-                    for t in state.get("daily_trigger_times", []):
+                    triggered = session_schema.get_daily_triggered_times(state)
+                    for t in session_schema.get_daily_trigger_times(state):
                         if t <= time_str and t not in triggered:
                             triggered.append(t)
-                            state["daily_triggered_times"] = triggered
+                            session_schema.set_daily_triggered_times(state, triggered)
                             self._mark_dirty(session_id)
                             t_min = int(t.split(":")[0]) * 60 + int(t.split(":")[1])
                             now_min = now.hour * 60 + now.minute
@@ -574,24 +574,24 @@ class SchedulerRuntimeMixin:
             await asyncio.sleep(60)
 
     async def _check_ntr_stage(self, session_id: str, state: dict[str, Any]):
-        last = state.get("last_interaction", 0)
+        last = session_schema.get_last_interaction(state)
         if not last:
             return
         days = (time.time() - last) / 86400
         threshold = self._compute_ntr_threshold(self._get_purity(session_id))
         current = self._compute_ntr_stage(days, threshold)
-        reached = state.get("ntr_stage_reached", 0)
+        reached = session_schema.get_ntr_stage_reached(state)
         if current <= reached:
             return
         for stage in range(reached + 1, current + 1):
             if stage <= 3:
                 asyncio.create_task(self._fire_ntr_stage_message(session_id, stage, int(days)))
             elif stage == 4:
-                state["ntr_affection_reset"] = True
-                state["ntr_reconcile_count"] = 0
+                session_schema.set_ntr_affection_reset(state, True)
+                session_schema.set_ntr_reconcile_count(state, 0)
             elif stage == 5:
                 logger.info("session %s reached NTR stage 5", session_id)
-        state["ntr_stage_reached"] = current
+        session_schema.set_ntr_stage_reached(state, current)
         self._mark_dirty(session_id)
 
     async def _sched_fire(self, session_id: str, local_dt: datetime, mode_override=None, skip_active_check=False):
@@ -605,7 +605,7 @@ class SchedulerRuntimeMixin:
                 return
             if not skip_active_check and self._is_recently_active(state):
                 return
-            last = state.get("last_interaction", 0)
+            last = session_schema.get_last_interaction(state)
             purity = self._get_purity(session_id)
             mode = mode_override or "normal"
             if last and time.time() - last > self._compute_ntr_threshold(purity) * 86400:
@@ -683,7 +683,7 @@ class SchedulerRuntimeMixin:
 
     @staticmethod
     def _is_recently_active(state: dict[str, Any]) -> bool:
-        last = state.get("last_interaction", 0)
+        last = session_schema.get_last_interaction(state)
         return last > 0 and time.time() - last < 30 * 60
 
     async def _fire_ntr_stage_message(self, session_id: str, stage: int, days: int):

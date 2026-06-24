@@ -2766,6 +2766,7 @@ class ServiceTestCase(unittest.TestCase):
             "saved_characters", "character_contexts", "init_flow",
             "ntr_stage_reached", "ntr_reconcile_count", "ntr_affection_reset",
             "frozen", "frozen_at",
+            "session",
         })
         self.assertEqual(set(ss.CHARACTER_CONFIG_EXTRA_KEYS),
                          {"purity", "purity_user_set", "persona_user_set"})
@@ -2987,6 +2988,142 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(ss.get_chat_history(st2), [])
         self.assertEqual(ss.get_short_context_start(st2), 0)
         self.assertEqual(ss.get_rounds_since_image(st2), 0)
+
+    def test_session_box_migration_and_accessors(self):
+        """session box：旧扁平会话全局字段迁移进盒、访问器读写、双写兼容、幂等、容器原地变更一致性。"""
+        from telegram_comfyui_selfie import session_schema as ss
+        # box_for 归位
+        self.assertEqual(ss.box_for("session"), ss.BOX_SESSION)
+        self.assertEqual(ss.box_for("frozen"), ss.BOX_SESSION)
+        self.assertEqual(ss.box_for("saved_characters"), ss.BOX_SESSION)
+
+        # 旧扁平持久态：顶层有 frozen/saved_characters 等 → 保障盒存在，不删顶层（非破坏）
+        legacy = {
+            "frozen": True,
+            "frozen_at": 999.0,
+            "last_interaction": 12345.0,
+            "saved_characters": {"小雨": {"character": "小雨"}},
+            "daily_trigger_times": ["08:30", "12:00"],
+            "ntr_stage_reached": 2,
+            "some_other": "keep",
+        }
+        box = ss.ensure_session_box(legacy)
+        self.assertIn("frozen", legacy)           # 扁平键保留（非破坏迁移）
+        self.assertIn("saved_characters", legacy)
+        self.assertIn("some_other", legacy)
+        # 盒内值由扁平拷贝
+        self.assertEqual(box["frozen"], True)
+        self.assertEqual(box["last_interaction"], 12345.0)
+        self.assertEqual(box["saved_characters"]["小雨"]["character"], "小雨")
+        self.assertEqual(box["daily_trigger_times"], ["08:30", "12:00"])
+        # 访问器读取（扁平优先）
+        self.assertTrue(ss.get_frozen(legacy))
+        self.assertEqual(ss.get_last_interaction(legacy), 12345.0)
+        self.assertEqual(ss.get_daily_trigger_times(legacy), ["08:30", "12:00"])
+        self.assertEqual(ss.get_ntr_stage_reached(legacy), 2)
+
+        # 子键补齐 + 默认值
+        self.assertFalse(ss.get_ntr_affection_reset(legacy))
+        self.assertEqual(ss.get_ntr_reconcile_count(legacy), 0)
+        self.assertEqual(ss.get_last_morning_greet_date(legacy), "")
+        self.assertEqual(ss.get_character_contexts(legacy), {})
+        self.assertEqual(ss.get_init_flow(legacy), {})
+
+        # 访问器读写（双写：盒 + 扁平）
+        st = {}
+        ss.set_frozen(st, True)
+        ss.set_frozen_at(st, 1000.0)
+        self.assertTrue(ss.get_frozen(st))
+        self.assertEqual(ss.get_frozen_at(st), 1000.0)
+        self.assertEqual(st["session"]["frozen"], True)
+        self.assertEqual(st["frozen"], True)  # 扁平同步
+
+        ss.set_last_interaction(st, 50000.0)
+        self.assertEqual(ss.get_last_interaction(st), 50000.0)
+        self.assertEqual(st["session"]["last_interaction"], 50000.0)
+
+        ss.set_ntr_stage_reached(st, 3)
+        self.assertEqual(ss.get_ntr_stage_reached(st), 3)
+
+        ss.set_ntr_affection_reset(st, True)
+        self.assertTrue(ss.get_ntr_affection_reset(st))
+        ss.set_ntr_reconcile_count(st, 5)
+        self.assertEqual(ss.get_ntr_reconcile_count(st), 5)
+
+        ss.set_last_morning_greet_date(st, "2026-06-24")
+        self.assertEqual(ss.get_last_morning_greet_date(st), "2026-06-24")
+
+        ss.set_daily_trigger_times(st, ["09:00", "14:00"])
+        self.assertEqual(ss.get_daily_trigger_times(st), ["09:00", "14:00"])
+
+        ss.set_daily_trigger_date(st, "2026-06-24")
+        self.assertEqual(ss.get_daily_trigger_date(st), "2026-06-24")
+
+        ss.set_daily_triggered_times(st, ["09:00"])
+        self.assertEqual(ss.get_daily_triggered_times(st), ["09:00"])
+
+        # 容器返回 live 对象：原地变更持久
+        saved = ss.get_saved_characters(st)
+        saved["新角色"] = {"character": "新角色"}
+        self.assertEqual(st["session"]["saved_characters"]["新角色"]["character"], "新角色")
+        self.assertEqual(st["saved_characters"]["新角色"]["character"], "新角色")
+
+        contexts = ss.get_character_contexts(st)
+        contexts["角色A"] = {"chat_history": []}
+        self.assertEqual(st["session"]["character_contexts"]["角色A"]["chat_history"], [])
+        self.assertEqual(st["character_contexts"]["角色A"]["chat_history"], [])
+
+        init = ss.get_init_flow(st)
+        init["step"] = 1
+        self.assertEqual(st["session"]["init_flow"]["step"], 1)
+        self.assertEqual(st["init_flow"]["step"], 1)
+
+        # 向后兼容：直写扁平键，访问器立即可读（扁平优先策略）
+        flat_st = {"session": {}}
+        ss.ensure_session_box(flat_st)
+        flat_st["frozen"] = True
+        self.assertTrue(ss.get_frozen(flat_st))
+        flat_st["saved_characters"] = {"A": {"character": "A"}}
+        self.assertEqual(ss.get_saved_characters(flat_st)["A"]["character"], "A")
+        # 清空后也能穿透
+        flat_st["frozen"] = False
+        self.assertFalse(ss.get_frozen(flat_st))
+
+        # 幂等：再 ensure 一次不改变内容
+        before = copy.deepcopy(st["session"])
+        ss.ensure_session_box(st)
+        self.assertEqual(st["session"], before)
+
+        # clear_transient 可正确复位 session box（session 是 G scope，不会被清）
+        defaults = ss.state_defaults()
+        st2 = {}
+        st2["session"] = copy.deepcopy(defaults.get("session", {}))
+        self.assertFalse(ss.get_frozen(st2))
+        self.assertEqual(ss.get_last_interaction(st2), 0)
+        self.assertEqual(ss.get_saved_characters(st2), {})
+
+        # last_interaction 缺失时种 time.time()（factory 语义）
+        import time as _time
+        empty = {}
+        before_ts = _time.time()
+        ss.ensure_session_box(empty)
+        after_ts = _time.time()
+        self.assertGreaterEqual(empty["session"]["last_interaction"], before_ts)
+        self.assertLessEqual(empty["session"]["last_interaction"], after_ts)
+
+        # session 盒（G scope）在 clear_transient 中不被清——saved_characters/frozen 保留
+        full = {"custom_character": "角色A"}
+        saved_box = ss.ensure_session_box(full)
+        saved_box["saved_characters"] = {"角色A": {"character": "角色A"}}
+        full["saved_characters"] = {"角色A": {"character": "角色A"}}
+        ss.set_frozen(full, True)
+        # 模拟 _clear_transient_state 行为（只清 transient，不动 G）
+        for key in list(full.keys()):
+            if ss.is_transient_state_key(key):
+                del full[key]
+        # session 盒和扁平键都保留
+        self.assertTrue(ss.get_frozen(full))
+        self.assertEqual(ss.get_saved_characters(full)["角色A"]["character"], "角色A")
 
 
     def test_transient_state_partition_classifier(self):

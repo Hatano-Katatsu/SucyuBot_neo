@@ -582,7 +582,7 @@ class CommandHandlersMixin:
         session_schema.set_outfit(state, outfit_tags)
 
         self._snapshot_character(state)
-        saved = state.setdefault("saved_characters", {})
+        saved = session_schema.get_saved_characters(state)
         saved[name]["raw_profile"] = text
         self._save_session_state(session_id, state)
         city_note = await self._apply_oc_city(session_id, city) if city else ""
@@ -1099,8 +1099,8 @@ class CommandHandlersMixin:
         state["persona_user_set"] = False
         state["purity"] = None
         state["purity_user_set"] = False
-        state["daily_trigger_date"] = ""  # 让随机推送计划按全局默认重新生成
-        state["saved_characters"] = {}  # 清空本会话角色池
+        session_schema.set_daily_trigger_date(state, "")  # 让随机推送计划按全局默认重新生成
+        session_schema.get_saved_characters(state).clear()  # 清空本会话角色池
         state.pop("life_profile", None)
         self._clear_conversation_context(state)
 
@@ -1140,11 +1140,11 @@ class CommandHandlersMixin:
 
     def _save_current_character_context(self, state: dict[str, Any]):
         key = self._character_context_key_from_state(state)
-        state.setdefault("character_contexts", {})[key] = self._conversation_context_payload(state)
+        session_schema.get_character_contexts(state)[key] = self._conversation_context_payload(state)
 
     def _restore_character_context(self, session_id: str, state: dict[str, Any]):
         key = self._character_context_key_from_state(state)
-        payload = (state.get("character_contexts") or {}).get(key)
+        payload = session_schema.get_character_contexts(state).get(key)
         # 切角色：整体清空全部短期态（含外型/穿搭），再用目标角色存档覆盖——保证不串味，且切回拿回自己穿搭。
         self._clear_transient_state(state, keep_appearance=False)
         if isinstance(payload, dict):
@@ -1176,7 +1176,7 @@ class CommandHandlersMixin:
             return
         card = character_card.card_from_state(state)
         card["character"] = name  # 存档键用 stripped 名，character 字段与键对齐
-        state.setdefault("saved_characters", {})[name] = card
+        session_schema.get_saved_characters(state)[name] = card
 
     async def cmd_purity(self, chat_id, session_id, arg):
         text = arg.strip().lower()
@@ -1213,13 +1213,13 @@ class CommandHandlersMixin:
                 return 3
 
         if not text:
-            times = state.get("daily_trigger_times", [])
+            times = session_schema.get_daily_trigger_times(state)
             plan = "已关闭随机推送" if cur_limit() == 0 else ("今日推送点: " + "、".join(times) if times else "今日推送点将在下一轮调度生成")
             await self.send_message(chat_id, f"每日主动推送次数: {cur_limit()} 次/天\n{plan}\n用法: /推送频率 <0~20> 或 /推送频率 默认")
             return
         if text in ("默认", "全局", "reset", "auto"):
             state.pop("custom_daily_selfie_limit", None)
-            state["daily_trigger_date"] = ""
+            session_schema.set_daily_trigger_date(state, "")
             self._save_session_state(session_id, state)
             await self.send_message(chat_id, f"已恢复全局默认: {cur_limit()} 次/天")
             return
@@ -1231,14 +1231,14 @@ class CommandHandlersMixin:
             await self.send_message(chat_id, "请输入 0~20 的整数。")
             return
         state["custom_daily_selfie_limit"] = str(val)
-        state["daily_trigger_date"] = ""
+        session_schema.set_daily_trigger_date(state, "")
         self._save_session_state(session_id, state)
         await self.send_message(chat_id, "已关闭本会话随机推送。" if val == 0 else f"每日主动推送次数已设为 {val} 次/天。")
 
     async def cmd_character(self, chat_id, session_id, arg):
         text = arg.strip()
         state = self._get_session_state(session_id)
-        saved = state.setdefault("saved_characters", {})
+        saved = session_schema.get_saved_characters(state)
         lower = text.lower()
         if not text or lower in ("查看", "show"):
             lines = ["当前角色设定"]
@@ -1368,7 +1368,7 @@ class CommandHandlersMixin:
             # 写回 saved_characters，表现为"删了又出现"。这里只复用字段清理原语，不动其它角色。
             is_current = (state.get("custom_character") or "") == sub_arg
             note = ""
-            contexts = state.get("character_contexts")
+            contexts = session_schema.get_character_contexts(state)
             if isinstance(contexts, dict):
                 contexts.pop(sub_arg, None)
             if is_current:
@@ -1714,7 +1714,7 @@ class CommandHandlersMixin:
     async def cmd_sched(self, chat_id, session_id, arg):
         now = self._session_now(session_id)
         state = self._get_session_state(session_id)
-        last = state.get("last_interaction", 0)
+        last = session_schema.get_last_interaction(state)
         days = (time.time() - last) / 86400 if last else 0
         purity = self._get_purity(session_id)
         threshold = self._compute_ntr_threshold(purity)
@@ -1723,10 +1723,10 @@ class CommandHandlersMixin:
         await self.send_message(
             chat_id,
             f"当前本地时间: {now.strftime('%H:%M')} (UTC{now.strftime('%z')})\n"
-            f"今日触发日期: {state.get('daily_trigger_date') or '无'}\n"
-            f"今日随机推送点: {', '.join(state.get('daily_trigger_times', [])) or '未生成'}\n"
-            f"已完成随机推送点: {', '.join(state.get('daily_triggered_times', [])) or '无'}\n"
-            f"今日早安推送: {'已发送' if state.get('last_morning_greet_date') == now.strftime('%Y-%m-%d') else '待发送'}\n"
+            f"今日触发日期: {session_schema.get_daily_trigger_date(state) or '无'}\n"
+            f"今日随机推送点: {', '.join(session_schema.get_daily_trigger_times(state)) or '未生成'}\n"
+            f"已完成随机推送点: {', '.join(session_schema.get_daily_triggered_times(state)) or '无'}\n"
+            f"今日早安推送: {'已发送' if session_schema.get_last_morning_greet_date(state) == now.strftime('%Y-%m-%d') else '待发送'}\n"
             f"纯良度: {purity}/10 | NTR 触发周期: {threshold}天\n"
             f"NTR 阶段: {names.get(stage, '?')} | 已冷落: {days:.1f}天",
         )
@@ -1742,8 +1742,8 @@ class CommandHandlersMixin:
         elif sub:
             await self.send_message(chat_id, "未知管理面板，可用: 角色池、位置、会话")
         else:
-            total_chars = sum(len(s.get("saved_characters", {})) for s in self.sessions.values())
-            active = sum(1 for s in self.sessions.values() if s.get("last_interaction", 0) > time.time() - 86400)
+            total_chars = sum(len(session_schema.get_saved_characters(s)) for s in self.sessions.values())
+            active = sum(1 for s in self.sessions.values() if session_schema.get_last_interaction(s) > time.time() - 86400)
             await self.send_message(
                 chat_id,
                 "管理仪表盘\n\n"

@@ -35,7 +35,7 @@ SHORT_CONTEXT_RESET_RE = re.compile(
 class ChatContextMixin:
     async def handle_chat(self, chat_id: int | str, session_id: str, text: str):
         state = self._get_session_state(session_id)
-        previous_interaction = state.get("last_interaction", 0)
+        previous_interaction = session_schema.get_last_interaction(state)
         reset_reason = self._short_context_reset_reason(text, previous_interaction)
         self._touch(session_id)
         self._schedule_weather_refresh(session_id)  # 天气缓存过期则后台刷新，避免聊天天气停在早安推送那次
@@ -55,7 +55,7 @@ class ChatContextMixin:
         # "距上次确认位置的轮数"：每轮 +1，由 _set_character_place（角色再次明确位置时）清零。
         # 用来给陈旧 pin 降权——多轮没再提及地点时，该 pin 不再锁死生图。
         session_schema.increment_rounds_since_location(state)
-        if state.get("ntr_affection_reset"):
+        if session_schema.get_ntr_affection_reset(state):
             self._tick_ntr_reconcile(state)
 
         self._save_session_state(session_id, state)
