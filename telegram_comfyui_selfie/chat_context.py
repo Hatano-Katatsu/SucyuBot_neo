@@ -97,6 +97,18 @@ class ChatContextMixin:
             logger.warning("LLM request failed: %s", exc)
             return ""
 
+        # 记录 chat 请求的 usage 到会话日志
+        usage = result.get("usage") or {}
+        if usage:
+            prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            completion_tokens = int(usage.get("completion_tokens") or 0)
+            cached_tokens = int(
+                usage.get("prompt_cache_hit_tokens")
+                or usage.get("prompt_cached_tokens")
+                or 0
+            )
+            self._ulog(session_id, "USAGE", f"prompt={prompt_tokens} completion={completion_tokens} cached={cached_tokens}")
+
         assistant = result.get("choices", [{}])[0].get("message", {})
         content = (assistant.get("content") or "").strip()
         tool_calls = assistant.get("tool_calls") or []
@@ -241,6 +253,11 @@ class ChatContextMixin:
             "依据照片历史自然承接，但不要主动复述系统记录。"
             "\n发图节奏规则：根据下方发图频率和可见历史里的「照片历史」记录自行判断是否该补图；"
             "如果可见历史中已经连续多轮没有照片，且当前对话有明确画面感、穿搭/外貌/地点展示或关系推进，优先调用 generate_roleplay_image。"
+            "\n语言理解规则：用户的日常表述（如自夸、调侃、闲聊、陈述事实）默认是普通对话，不是表白或调情。"
+            "只有当用户明确使用恋爱/亲密相关词汇（喜欢你、想你、爱你、亲一下、抱抱等）时才理解为亲密信号。"
+            "不要把「我是好人」「今天天气不错」「我吃饭了」等日常表述曲解为暗示或直球表白。"
+            "\n对话自然度规则：不要反复提及同一个具体物件、食物或配饰（如芝士蛋糕、发卡、某个礼物），除非用户本轮主动提起或上下文自然需要。"
+            "已经提过一次的细节，后续对话中不必每轮都念叨；保持话题新鲜感，避免车轱辘话。"
         )
 
         # ── 半稳定状态快照（外型/衣橱：中低频变化，独立放在 checkpoint 前）──
@@ -850,7 +867,10 @@ class ChatContextMixin:
                 "scene, unresolved actions, promises, immediate emotions, places, and photo/system records that "
                 "the next few turns may need. Do not duplicate broad character-history arcs, permanent profile facts, "
                 "stable preferences, boundaries, or corrections that belong in long-term memory. "
-                f"Soft limit: {soft} Chinese characters. Output only the summary text."
+                f"Soft limit: {soft} Chinese characters. Output only the summary text. "
+                "Do not invent, infer, or add details not explicitly present in the source dialogue. "
+                "Only include rules, promises, constraints, or events that were literally stated by the user or character. "
+                "If uncertain, omit rather than fabricate."
             )
             user = f"Existing checkpoint:\n{previous or 'none'}\n\nOverflow dialogue:\n{dialog}"
             return await self._call_llm(system, user, temp=0.1, tag="checkpoint", purpose="chat", disable_thinking=True, session_id=session_id)
@@ -860,7 +880,10 @@ class ChatContextMixin:
             "scene, unresolved actions, promises, immediate emotions, places, and photo/system records that "
             "the next few turns may need. Do not duplicate broad character-history arcs, permanent profile facts, "
             "stable preferences, boundaries, or corrections that belong in long-term memory. "
-            f"Soft limit: {soft} Chinese characters. Output only the summary text."
+            f"Soft limit: {soft} Chinese characters. Output only the summary text. "
+            "Do not invent, infer, or add details not explicitly present in the source dialogue. "
+            "Only include rules, promises, constraints, or events that were literally stated by the user or character. "
+            "If uncertain, omit rather than fabricate."
         )
         user = f"Existing checkpoint:\n{previous or 'none'}\n\nOverflow dialogue:\n{dialog}"
         return await self._call_llm(system, user, temp=0.1, tag="checkpoint", purpose="image", disable_thinking=True, session_id=session_id)

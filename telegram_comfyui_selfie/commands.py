@@ -1644,6 +1644,42 @@ class CommandHandlersMixin:
             await self.send_message(chat_id, f"用法: /角色 {sub} <名称>")
             return
 
+        # /角色 <名称> 或 /切换角色 <名称>：如果名称匹配已保存角色卡，直接加载（不走 LLM 分类）
+        match_key = text
+        if match_key in saved:
+            data = saved[match_key]
+            current_character = session_schema.get_character_value(state, "custom_character", "")
+            switching = (data.get("character", "") or "") != (current_character or "")
+            if switching:
+                self._save_current_character_context(state)
+                self._snapshot_character(state)
+            payload = dict(data)
+            if not switching:
+                payload["role_name"] = (
+                    session_schema.get_character_value(state, "custom_role_name", "")
+                    or data.get("role_name", "")
+                )
+                payload["bot_self_name"] = (
+                    session_schema.get_character_value(state, "custom_bot_self_name", "")
+                    or data.get("bot_self_name", "")
+                )
+                payload["relationship"] = (
+                    session_schema.get_character_value(state, "custom_spatial_relationship", "")
+                    or data.get("relationship", "")
+                )
+            if not data.get("style"):
+                payload.pop("style", None)
+            if data.get("purity") is None or session_schema.get_character_value(state, "purity_user_set", False):
+                payload.pop("purity", None)
+            self._apply_character_payload(state, payload)
+            if switching:
+                self._restore_character_context(session_id, state)
+            state.pop("life_profile", None)
+            self._save_session_state(session_id, state)
+            self._ulog(session_id, "SWITCH", f"载入角色 {match_key}" + ("（已清空对话上下文）" if switching else ""))
+            await self.send_message(chat_id, f"已载入角色 {match_key}。")
+            return
+
         if not self.has_llm_config("image"):
             if "," in text or re.search(r"[a-zA-Z]{3,}", text):
                 session_schema.set_character_value(state, "custom_positive_prefix", text)

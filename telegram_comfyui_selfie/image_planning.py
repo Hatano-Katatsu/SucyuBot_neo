@@ -471,6 +471,12 @@ async def plan_roleplay_image(
         "device_in_frame: 仅当用户明确要求把手机/相机/镜子作为拍照、录像、对镜的道具拍进画面时置 true；否则 false。"
     )
     system += (
+        "\n单帧构图硬规则: scene 必须是【单一冻结瞬间】——只描写一个时间点的一个场景动作，"
+        "严禁分格、分镜、四宫格、漫画分格、拼贴画、多面板。"
+        "如果角色有连续动作（如转身→走开→回头），只选取其中最具表现力的一帧，不要把多帧塞进同一张图。"
+        "不要在 scene 里写叙事推进或时间线（先…然后…最后…），只写此刻定格的画面。"
+    )
+    system += (
         "\n视角规则: 身处同一空间或用户明确要靠近互动时优先 pov；"
         "异地、展示穿搭或回复照片请求时优先 selfie/mirror；需要叙事全景时用 third。"
         "取景物理规则: view=selfie 是前摄自拍（角色伸手举着手机自拍），但画面中【不得出现手机本体、手机屏幕 UI、相机、镜子或拿手机的手】，只靠伸手取景和看向镜头表现自拍；"
@@ -749,6 +755,10 @@ async def plan_animatool_slots(
         "tags 必须自然体现当前时段与光线（如黄昏金色斜光、夜晚人工灯光、正午自然光）；"
         "室内场景也要让窗外天光/室内灯光与当前时段一致。"
         "绝不要画出与当前时段矛盾的光线（如深夜出现正午阳光、白天出现夕阳）。\n\n"
+        "## 单帧构图（重要，必须遵守）\n"
+        "画面必须是【单一冻结瞬间】的单帧构图，严禁分格、分镜、四宫格、漫画分格、拼贴画、多面板。\n"
+        "scene / tags 只描写一个时间点的一个场景，不要包含多个时间线、多个动作阶段或叙事推进。\n"
+        "如果角色有连续动作（如转身→走开），只选取其中一帧，不要把多帧塞进同一张图。\n\n"
         "只输出 JSON，不要 ```json``` 包装。\n"
     )
 
@@ -798,6 +808,7 @@ async def plan_animatool_slots(
                 neg_low = neg.lower()
 
     _add_neg("worst quality", "low quality", "score_1", "score_2", "score_3")
+    _add_neg("split screen", "grid", "multiple panels", "collage")
     if safety_tag in ("safe", "sensitive"):
         _add_neg("nsfw", "explicit")
     else:

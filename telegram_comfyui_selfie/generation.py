@@ -833,7 +833,8 @@ def build_prompt(
     style_general = current_style if current_style and not current_style.startswith("@") else ""
 
     neg = service.config.get("negative_prompt", DEFAULT_CONFIG["negative_prompt"])
-    neg = _append_negatives(neg, "extra hands", "poorly drawn hands", "extra digits")
+    neg = _append_negatives(neg, "extra hands", "poorly drawn hands", "extra digits",
+                            "split screen", "grid", "multiple panels", "collage")
     if state.get("custom_positive_prefix"):
         strip = {"clothes", "clothing"}
         if male:
@@ -1370,26 +1371,16 @@ async def submit_animatool_turbo(service: Any, positive: str, negative: str, see
 
 
 def _aspect_ratio_from_dimensions(service: Any) -> str:
-    """从全局 width/height 推算最接近的 AnimaTool aspect_ratio。
+    """从全局 width/height 推算画幅比例。
 
-    AnimaTool turbo 模式按 aspect_ratio 自动推算宽高（约 1MP），不接受 width/height。
-    这里把项目的 width/height 映射到 schema 支持的比例字符串。
+    只允许 2:3（竖版）和 3:2（横版），模拟真实相机画幅。
     """
     try:
-        w = int(service.config.get("width", "1024") or 1024)
-        h = int(service.config.get("height", "1024") or 1024)
+        w = int(service.config.get("width", "832") or 832)
+        h = int(service.config.get("height", "1216") or 1216)
     except Exception:
-        return "1:1"
-    ratio = w / h if h else 1.0
-    # ref/app.py 支持的比例及其数值
-    candidates = [
-        ("21:9", 21 / 9), ("2:1", 2.0), ("16:9", 16 / 9), ("16:10", 16 / 10),
-        ("5:3", 5 / 3), ("3:2", 3 / 2), ("4:3", 4 / 3), ("1:1", 1.0),
-        ("3:4", 3 / 4), ("2:3", 2 / 3), ("3:5", 3 / 5), ("10:16", 10 / 16),
-        ("9:16", 9 / 16), ("1:2", 1 / 2), ("9:21", 9 / 21),
-    ]
-    best = min(candidates, key=lambda item: abs(item[1] - ratio))
-    return best[0]
+        return "2:3"
+    return "3:2" if w > h else "2:3"
 
 def ensure_comfy_session(service: Any):
     if service.comfy_session is None or service.comfy_session.closed:

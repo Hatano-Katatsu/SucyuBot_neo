@@ -4608,6 +4608,39 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("first-person pov", pos_lower)
         self.assertIn("partial male body visible", pos_lower)
 
+    def test_chat_system_static_has_interpretation_rules(self):
+        """system_static 应包含语言理解和反重复规则。"""
+        svc = self.make_service()
+        sid = "telegram:1"
+        messages = svc._build_chat_messages(sid, "测试")
+        static = messages[0]["content"]
+        self.assertIn("不是表白或调情", static)
+        self.assertIn("不要反复提及", static)
+
+    def test_checkpoint_summarizer_prompt_has_grounding_rule(self):
+        """checkpoint 摘要 prompt 应包含反幻觉约束。"""
+        svc = self.make_service()
+        import inspect
+        src = inspect.getsource(svc._summarize_checkpoint)
+        self.assertIn("Do not invent", src)
+        self.assertIn("literally stated", src)
+
+    def test_memory_extractor_prompt_has_strong_grounding(self):
+        """记忆提取 prompt 应包含明确的反编造规则约束。"""
+        svc = self.make_service()
+        import inspect
+        src = inspect.getsource(svc._extract_long_term_memories)
+        self.assertIn("只从对话原文提取", src)
+        self.assertIn("不要推断", src)
+
+    def test_history_summary_prompt_has_grounding(self):
+        """角色历史提要 prompt 应包含反幻觉约束。"""
+        svc = self.make_service()
+        import inspect
+        src = inspect.getsource(svc._generate_character_history_summary)
+        self.assertIn("不要编造", src)
+        self.assertIn("只基于日记原文", src)
+
 
 class CheckpointTrimTestCase(ServiceFixtureMixin, unittest.TestCase):
     """TODO #9.4: checkpoint 裁剪测试 — 51+ messages 后 checkpoint，窗口 10 messages，不能 assistant 开头。"""

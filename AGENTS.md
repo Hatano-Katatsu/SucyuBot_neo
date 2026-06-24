@@ -149,7 +149,7 @@ telegram_comfyui_selfie/
 - 对话进行中不钉死时钟地点；只给背景倾向，当前位置以对话为准。
 - 推送/生图仍会使用持久位置和结构化地点约束，避免场景瞬移。
 - 城市地点目录优先真实 POI：中国用高德，海外用 Google Places；失败时回落到 LLM 生成和内置示例。
-- WebUI 动线按钟点预测整天时不会把“此刻持久 pin”套到每个时间段。
+- WebUI 动线按钟点预测整天时不会把"此刻持久 pin"套到每个时间段。
 
 ### 生图与 PromptSlots
 
@@ -159,6 +159,7 @@ telegram_comfyui_selfie/
 - `one_shot_appearance` 是本轮临时补充，不持久化。
 - OC 不把中文名、昵称或作品名塞进视觉 identity；只有已知公开角色才注入角色/作品 tag。
 - 亲密场景默认走 POV，只允许用户/伴侣身体局部入画；除非用户明确要求拍照、录像或对镜，才允许设备入画。
+- 画幅只允许 2:3（竖版）和 3:2（横版），模拟真实相机画幅；负向提示词包含 `split screen, grid, multiple panels, collage` 防止四宫格/分格出图。
 
 ### Telegram 输入增强
 
@@ -191,7 +192,7 @@ telegram_comfyui_selfie/
 
 1. **初始化向导改为角色卡创建入口**：`/创建角色`、`/初始化`、无参数 `/创建OC` 都进入逐题状态机，普通文本回复优先被向导消费；流程压缩为 8 步：角色卡主键、出处/原名、外貌和穿搭、角色设定、关系和称呼、城市、纯良度、推送频率。
 2. **初始化字段综合归档**：初始化收尾不再只依赖结构化行解析，会强制走一次 prompt intake，把外貌/穿搭、人格/类型、关系/称呼等非数值/固定格式字段交给 LLM 综合判断后合并。现有作品角色的 `original_name` 要求英文或姓氏在前罗马音，`series` 要求英文作品名，`visual_character` / `visual_series` 要求 Danbooru 风格标签；原创角色默认不写作品和视觉 tag。
-3. **角色称呼字段修正**：新增 `custom_user_address` / `user_address`，表示“角色对用户的称呼”，与角色名和角色自称分离，并注入聊天静态前缀。
+3. **角色称呼字段修正**：新增 `custom_user_address` / `user_address`，表示"角色对用户的称呼"，与角色名和角色自称分离，并注入聊天静态前缀。
 4. **WebUI 角色面板精简**：隐藏场景偏好/自拍偏好栏，保留内部兼容字段；快捷菜单包含 `/角色 list` 与 `/角色 load <名称>`。
 5. **缓存命中与上下文分层修复**：聊天历史窗口改为 checkpoint 锚定，不再逐轮滑动；照片历史改为真实历史 `system`；checkpoint 裁剪保证第一条为 `user`；dream 只读 `user/assistant`；动态 system 拆出天级稳定层和半稳定状态快照层。
 6. **长期记忆注入策略调整**：长期记忆直接按重要性取前 N 条注入，不维护 `hit_count`；checkpoint、角色历史、长期记忆三者职责重新分工。
@@ -199,21 +200,23 @@ telegram_comfyui_selfie/
 8. **模型管理重构**：WebUI 去掉 chat/fast 思考开关，思考状态完全绑定模型 profile；管理员可维护全局 profile，用户可维护私有 profile；模型 API key 返回掩码并支持保留旧密钥。
 9. **Telegram 引用增强**：支持 `quote.text`、`reply_to_message`、`external_reply` 的文本注入；引用中包含图片时交给视觉模型描述。
 10. **命令别名集中维护**：新增 `command_aliases.py`，命令别名按规范命令分组列表维护，并自动派生完整别名表与裸词快捷别名表；别名覆盖 `/创建角色`、`/新建角色`、`/角色创建`、`/menu`、`/拍照`、`/推送测试` 等正序/倒装写法。
-11. **文档整理**：压缩旧时间线，把本次会话前的历史变更合并进当前架构状态；“今日变更”只保留 2026-06-24 新内容。
+11. **文档整理**：压缩旧时间线，把本次会话前的历史变更合并进当前架构状态；"今日变更"只保留 2026-06-24 新内容。
+12. **画幅限制与反四宫格**：默认 width/height 从 1024x1024 改为 832x1216（2:3 竖版）；`_aspect_ratio_from_dimensions` 只返回 `2:3` 或 `3:2`，模拟真实相机画幅。负向提示词追加 `split screen, grid, multiple panels, collage`；画面规划器和 AnimaTool turbo slots 规划器都加入单帧构图硬规则（scene 只描写单一冻结瞬间，严禁分格/分镜/拼贴/多面板）。
+13. **聊天 prompt 质量**：system_static 追加语言理解规则（日常表述默认不是表白或调情，只有明确使用恋爱/亲密词汇时才理解为亲密信号）+ 对话自然度规则（不要反复提及同一个具体物件/食物/配饰，保持话题新鲜感）。
+14. **多层反幻觉约束**：checkpoint 摘要 prompt 追加 grounding 约束（只保留对话中明确出现的规则/承诺/事件，不确定时省略而非编造）；记忆提取 prompt 强化来源约束（只从对话原文提取，不推断/联想/编造，附反例）；角色历史提要 prompt 追加反编造约束（只基于日记原文）。
+15. **角色切换修复**：`/角色 <名称>` 或 `/切换角色 <名称>` 匹配已保存角色卡时直接加载该角色，不再经过 LLM 分类创建新角色。
 
 ## 最新验证
 
 - `python -m compileall -q telegram_comfyui_selfie`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; python -m unittest discover -s tests -p test_core.py -v`
-- 最新结果：`Ran 225 tests in 5.390s`，`OK (skipped=1)`
-- 跳过项：未安装 `aiohttp_socks` 的 SOCKS 代理集成测试
+- 最新结果：`Ran 229 tests in 3.570s`，`OK`
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示
 
 ## 已知限制
 
-- 画面规划器有时仍会输出带时间推进的小叙事，或给同一身体部位分配多个互斥位置。Diffusion 会把它们当成同一帧约束，可能导致画面叠加。后续可在 `image_planning.py` 强化“单一冻结瞬间”约束。
 - `selfie` 取景与互动动作有时存在轻度矛盾；当前依靠视角和负面提示词约束，尚未拆出完整 `pose/action/forbidden` 结构化字段。
-- 会话状态处于“盒子 + 部分旧扁平键双写”的兼容期；后续彻底删除扁平键前必须先清点所有访问点和迁移测试。
+- 会话状态处于"盒子 + 部分旧扁平键双写"的兼容期；后续彻底删除扁平键前必须先清点所有访问点和迁移测试。
 
 ## 下一阶段目标
 
