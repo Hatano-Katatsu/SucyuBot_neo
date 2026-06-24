@@ -2054,11 +2054,12 @@ class TelegramComfyUIService(
         partner_in_frame: bool = False,
         device_in_frame: bool = False,
         clothing_off: str = "",
+        orientation: str = "",
     ) -> tuple[bool, list[bytes], str]:
         return await image_generation.do_generate(
             self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
             is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
-            clothing_off=clothing_off,
+            clothing_off=clothing_off, orientation=orientation,
         )
 
     async def _do_generate_locked(
@@ -2071,11 +2072,12 @@ class TelegramComfyUIService(
         partner_in_frame: bool = False,
         device_in_frame: bool = False,
         clothing_off: str = "",
+        orientation: str = "",
     ) -> tuple[bool, list[bytes], str]:
         return await image_generation.do_generate_locked(
             self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
             is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
-            clothing_off=clothing_off,
+            clothing_off=clothing_off, orientation=orientation,
         )
 
     # ---------------------------------------------------------------------
@@ -2119,13 +2121,14 @@ class TelegramComfyUIService(
         is_intimate = bool(plan.get("is_intimate"))
         partner_in_frame = bool(plan.get("partner_in_frame"))
         device_in_frame = bool(plan.get("device_in_frame"))
+        orientation = (plan.get("aspect_ratio") or "").strip()
         state = self._get_session_state(session_id)
         # 伴侣同框时也套用翻译护栏（对方只画局部、不画成完整第二人）。
         english = await self._translate_to_tags(scene, session_id=session_id, view=final_view, is_intimate=is_intimate or partner_in_frame)
         ok, imgs, err = await self._do_generate(
             english, session_id=session_id, one_shot_appearance=new_app or "",
             is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
-            clothing_off=clothing_off,
+            clothing_off=clothing_off, orientation=orientation,
         )
         if not ok or not imgs:
             self._ulog(session_id, "ERROR", f"工具生图失败: {err}")

@@ -1823,7 +1823,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "view": "selfie",
             }, ensure_ascii=False))
 
-            scene, caption, _, view = await svc._llm_write_scene(
+            scene, caption, _, view, _ = await svc._llm_write_scene(
                 "normal",
                 "晴 22 C",
                 "星期四",
@@ -1930,6 +1930,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 is_ntr=False,
                 session_id=sid,
                 one_shot_appearance="white dress",
+                orientation="2:3",
             )
             self.assertEqual(session_schema.get_outfit(state), "black hoodie")
             svc.send_photo.assert_awaited_once()
@@ -2513,7 +2514,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc = self.make_service()
             sid = "telegram:123"
             svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
-            svc._llm_write_scene = AsyncMock(return_value=("坐在窗边看向镜头", "给你看一眼。", "", "selfie"))
+            svc._llm_write_scene = AsyncMock(return_value=("坐在窗边看向镜头", "给你看一眼。", "", "selfie", "2:3"))
             svc._translate_to_tags = AsyncMock(return_value="english prompt")
             svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
             svc.send_action = AsyncMock()
@@ -2523,7 +2524,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             svc._llm_write_scene.assert_awaited_once()
             svc._translate_to_tags.assert_awaited_once_with("坐在窗边看向镜头", session_id=sid, view="selfie")
-            svc._do_generate.assert_awaited_once_with("english prompt", session_id=sid, one_shot_appearance="")
+            svc._do_generate.assert_awaited_once_with("english prompt", session_id=sid, one_shot_appearance="", orientation="2:3")
             svc.send_photo.assert_awaited_once_with(123, b"image", "给你看一眼。")
 
         asyncio.run(run())
@@ -2535,7 +2536,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             state = svc._get_session_state(sid)
             session_schema.set_outfit(state, "black hoodie")
             svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
-            svc._llm_write_scene = AsyncMock(return_value=("坐在窗边看向镜头", "给你看一眼。", "white dress", "selfie"))
+            svc._llm_write_scene = AsyncMock(return_value=("坐在窗边看向镜头", "给你看一眼。", "white dress", "selfie", "2:3"))
             svc._translate_to_tags = AsyncMock(return_value="english prompt")
             svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
             svc.send_action = AsyncMock()
@@ -2547,6 +2548,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "english prompt",
                 session_id=sid,
                 one_shot_appearance="white dress",
+                orientation="2:3",
             )
             self.assertEqual(session_schema.get_outfit(state), "black hoodie")
             self.assertEqual(state["sent_photos_history"][-1]["appearance"], "white dress")
@@ -2646,6 +2648,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 partner_in_frame=False,
                 device_in_frame=False,
                 clothing_off="",
+                orientation="2:3",
             )
             # 聊天途中的配图不带配文（聊天模型已经在文字里回复了）
             svc.send_photo.assert_awaited_once_with(123, b"image", "")

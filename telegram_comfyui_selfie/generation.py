@@ -1226,6 +1226,7 @@ async def _do_generate_animatool(
     scene_desc: str,
     session_id: str,
     seed: int,
+    orientation: str = "",
 ) -> tuple[bool, list[bytes], str]:
     """AnimaTool 生图：把槽位交给 LLM 直出 animatool JSON，失败回退旧逻辑。"""
     from .image_planning import plan_animatool_slots
@@ -1246,7 +1247,7 @@ async def _do_generate_animatool(
         llm_payload["filename_prefix"] = service.config.get("animatool_filename_prefix", "sucyubot_turbo")
         llm_payload["steps"] = int(float(service.config.get("animatool_turbo_steps", "10") or 10))
         llm_payload["cfg"] = float(service.config.get("animatool_turbo_cfg", "1.0") or 1.0)
-        aspect = _aspect_ratio_from_dimensions(service)
+        aspect = _aspect_ratio_from_dimensions(service, orientation)
         if aspect:
             llm_payload["aspect_ratio"] = aspect
         # 去掉 schema 不支持的内容字段（超参数保留）
@@ -1370,11 +1371,14 @@ async def submit_animatool_turbo(service: Any, positive: str, negative: str, see
         return False, [], f"AnimaTool turbo exception: {exc}"
 
 
-def _aspect_ratio_from_dimensions(service: Any) -> str:
+def _aspect_ratio_from_dimensions(service: Any, orientation: str = "") -> str:
     """从全局 width/height 推算画幅比例。
 
     只允许 2:3（竖版）和 3:2（横版），模拟真实相机画幅。
+    orientation 可传入 "2:3" 或 "3:2" 直接指定，跳过 width/height 推算。
     """
+    if orientation in ("2:3", "3:2"):
+        return orientation
     try:
         w = int(service.config.get("width", "832") or 832)
         h = int(service.config.get("height", "1216") or 1216)
@@ -1397,6 +1401,7 @@ async def do_generate(
     partner_in_frame: bool = False,
     device_in_frame: bool = False,
     clothing_off: str = "",
+    orientation: str = "",
 ) -> tuple[bool, list[bytes], str]:
     async with service._gen_lock:
         service._generating = True
@@ -1404,7 +1409,7 @@ async def do_generate(
             return await do_generate_locked(
                 service, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
                 is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
-                clothing_off=clothing_off,
+                clothing_off=clothing_off, orientation=orientation,
             )
         finally:
             service._generating = False
@@ -1420,6 +1425,7 @@ async def do_generate_locked(
     partner_in_frame: bool = False,
     device_in_frame: bool = False,
     clothing_off: str = "",
+    orientation: str = "",
 ) -> tuple[bool, list[bytes], str]:
     ensure_comfy_session(service)
     positive, negative = build_prompt(
@@ -1442,7 +1448,7 @@ async def do_generate_locked(
             f"seed={seed} scene={scene_desc} positive={positive} negative={negative}",
         )
     if str(service.config.get("image_backend", "native") or "native").lower() == "animatool":
-        return await _do_generate_animatool(service, scene_desc, session_id, seed)
+        return await _do_generate_animatool(service, scene_desc, session_id, seed, orientation=orientation)
     workflow = build_workflow(service, positive, negative, seed)
     try:
         async with service.comfy_session.post(f"{service.comfyui_url}/prompt", json={"prompt": workflow}) as resp:

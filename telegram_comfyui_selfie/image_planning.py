@@ -485,7 +485,10 @@ async def plan_roleplay_image(
         "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。"
         "selfie/portrait/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。"
         "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。"
-        "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third|portrait\",\"caption\":\"...\",\"new_appearance_tags\":\"...\",\"clothing_off\":\"...\",\"character_location\":\"...\",\"user_location\":\"...\",\"co_located\":true,\"is_intimate\":false,\"partner_in_frame\":false,\"device_in_frame\":false}。"
+        "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third|portrait\",\"aspect_ratio\":\"2:3|3:2\",\"caption\":\"...\",\"new_appearance_tags\":\"...\",\"clothing_off\":\"...\",\"character_location\":\"...\",\"user_location\":\"...\",\"co_located\":true,\"is_intimate\":false,\"partner_in_frame\":false,\"device_in_frame\":false}。"
+        "aspect_ratio 选画幅（重要）：只允许 2:3（竖版，832x1216）或 3:2（横版，1216x832）。"
+        "默认用 2:3 竖版；当场景以横向元素为主（如地平线、宽阔街景、双人并排、横向躺卧、风景全景）时用 3:2。"
+        "近景人像、自拍、特写、站姿、行走、坐姿等纵向构图一律用 2:3。"
         "character_location 填角色此刻所在场所的英文枚举（取值同 user_location，但不含 with_user/unknown）：若上面给出了角色地点约束，必须填那个枚举值；没有约束时按动线与对话自行判断。"
         "is_intimate 是布尔值，按上面的场景类型自判规则给出。"
         "partner_in_frame、device_in_frame 都是布尔值，按上面单人构图硬规则里的定义给出。"
@@ -561,6 +564,7 @@ async def plan_roleplay_image(
         return {
             "scene": fallback_scene,
             "view": fallback_view,
+            "aspect_ratio": "2:3",
             "new_appearance_tags": None,
             "clothing_off": clothing_off_hint,
             "is_intimate": intimate_hint,
@@ -619,9 +623,13 @@ async def plan_roleplay_image(
     # 确立/刷新：本图全裸 → 记成持久裸体态（带时间戳供 TTL 老化）。
     if "nude" in clothing_off.lower():
         session_schema.set_nudity(state, "completely nude", at=time.time())
+    # aspect_ratio 校验：只允许 2:3 和 3:2，默认 2:3
+    raw_ar = (parsed.get("aspect_ratio") or "").strip()
+    aspect_ratio = "3:2" if raw_ar == "3:2" else "2:3"
     return {
         "scene": scene,
         "view": final_view,
+        "aspect_ratio": aspect_ratio,
         "caption": (parsed.get("caption") or "").strip(),
         "new_appearance_tags": (parsed.get("new_appearance_tags") or "").strip(),
         "clothing_off": clothing_off,

@@ -66,7 +66,7 @@ class SchedulerRuntimeMixin:
     async def _llm_write_scene(self, mode, weather, weekday, time_period, recent_chat=None, session_id="", now=None, weather_data=None):
         from .image_planning import plan_roleplay_image
         if not self.has_llm_config("image"):
-            return None, None, None, None
+            return None, None, None, None, None
         plan = await plan_roleplay_image(
             self, session_id, mode=mode or "normal",
             weather_data=weather_data, now=now,
@@ -76,6 +76,7 @@ class SchedulerRuntimeMixin:
             plan.get("caption") or "",
             plan.get("new_appearance_tags") or "",
             plan.get("view") or "",
+            plan.get("aspect_ratio") or "",
         )
     # ---------------------------------------------------------------------
     # Weather / scheduler
@@ -502,7 +503,7 @@ class SchedulerRuntimeMixin:
                         )
                 except Exception:
                     logger.debug("world route log failed for scheduler push", exc_info=True)
-            scene, caption, new_app, view = await self._llm_write_scene(
+            scene, caption, new_app, view, orientation = await self._llm_write_scene(
                 mode,
                 weather,
                 WEEKDAY_NAMES[local_dt.weekday()],
@@ -520,6 +521,7 @@ class SchedulerRuntimeMixin:
                 is_ntr=(mode == "ntr"),
                 session_id=session_id,
                 one_shot_appearance=new_app or "",
+                orientation=orientation or "",
             )
             if ok and imgs:
                 await self.send_photo(chat_id, imgs[0], caption or "")

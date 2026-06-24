@@ -1078,7 +1078,7 @@ class CommandHandlersMixin:
         weather = f"{w['desc']} {w['temp']} C" if w else "未知"
         time_ctx = self._get_time_context(session_id, now=now, weather=w)
         time_period = time_ctx.get("period") or self._get_time_period(now.hour)
-        scene, caption, new_app, view = await self._llm_write_scene(
+        scene, caption, new_app, view, orientation = await self._llm_write_scene(
             "normal", weather, WEEKDAY_NAMES[now.weekday()], time_period, None, session_id, now=now, weather_data=w
         )
         if not scene:
@@ -1086,7 +1086,7 @@ class CommandHandlersMixin:
         # /自拍 命令明确要求自拍视角，强制 view=selfie，不受场景生成器偶然返回的 third 影响。
         view = "selfie"
         english = await self._translate_to_tags(scene, session_id=session_id, view=view)
-        ok, imgs, err = await self._do_generate(english, session_id=session_id, one_shot_appearance=new_app or "")
+        ok, imgs, err = await self._do_generate(english, session_id=session_id, one_shot_appearance=new_app or "", orientation=orientation or "")
         if not ok or not imgs:
             self._ulog(session_id, "ERROR", f"自拍生图失败: {err}")
             await self.send_message(chat_id, f"生图失败: {err}")
