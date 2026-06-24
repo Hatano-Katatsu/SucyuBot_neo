@@ -12,6 +12,7 @@ from . import appearance as appearance_rules
 from . import character_card
 from . import prompt_intake
 from . import session_schema
+from .command_aliases import resolve_command_alias
 from .defaults import INIT_GUIDE, MENU_BODY, MENU_TOPICS, MENU_TOPIC_ALIASES, OC_CREATE_HELP, SCENES, WEEKDAY_NAMES
 from .memory import format_memory_lines
 
@@ -54,6 +55,32 @@ OC_FIELD_ALIASES = {
     "名称": "name",
     "角色名": "name",
     "name": "name",
+    "角色出处": "source_identity",
+    "角色出处与原名": "source_identity",
+    "出处": "source_identity",
+    "来源": "source_identity",
+    "source_identity": "source_identity",
+    "source_type": "source_type",
+    "作品": "series",
+    "原作": "series",
+    "出处作品": "series",
+    "系列": "series",
+    "作品名": "series",
+    "series": "series",
+    "原名": "original_name",
+    "原角色名": "original_name",
+    "原作角色名": "original_name",
+    "original_name": "original_name",
+    "生图角色Tag": "visual_character",
+    "生图角色tag": "visual_character",
+    "生图角色": "visual_character",
+    "prompt_name": "visual_character",
+    "visual_character": "visual_character",
+    "生图作品Tag": "visual_series",
+    "生图作品tag": "visual_series",
+    "生图作品": "visual_series",
+    "prompt_series": "visual_series",
+    "visual_series": "visual_series",
     "角色类型": "role",
     "类型": "role",
     "身份": "role",
@@ -80,6 +107,14 @@ OC_FIELD_ALIASES = {
     "外型": "appearance",
     "身体特征": "appearance",
     "appearance": "appearance",
+    "外貌和穿搭": "appearance_outfit",
+    "外貌与穿搭": "appearance_outfit",
+    "外型和穿搭": "appearance_outfit",
+    "外型与穿搭": "appearance_outfit",
+    "appearance_outfit": "appearance_outfit",
+    "角色设定": "character_setting",
+    "设定": "character_setting",
+    "character_setting": "character_setting",
     "初始穿搭": "outfit",
     "穿搭": "outfit",
     "衣服": "outfit",
@@ -89,6 +124,9 @@ OC_FIELD_ALIASES = {
     "关系": "relationship",
     "空间关系": "relationship",
     "relationship": "relationship",
+    "关系和称呼": "relationship_address",
+    "关系与称呼": "relationship_address",
+    "relationship_address": "relationship_address",
     "所在城市": "city",
     "城市": "city",
     "地点": "city",
@@ -120,52 +158,42 @@ class CommandHandlersMixin:
     INIT_FLOW_STEPS = (
         (
             "name",
-            "第 1/10 步：新角色叫什么名字？\n"
-            "这是创建角色卡的必填项，例如：小雨。",
+            "第 1/8 步：新角色卡叫什么名字？\n"
+            "这是角色池里的主键和切换名称，必填。例如：小雨、爱丽丝。",
         ),
         (
-            "role",
-            "第 2/10 步：她/他的角色类型或职业身份是什么？\n"
-            "例如：大学生、上班族、护士、自由画师。回复“跳过”可留空。",
-        ),
-        (
-            "user_address",
-            "第 3/10 步：角色平时怎么称呼你？\n"
-            "例如：主人、前辈、哥哥、姐姐、老师。回复“跳过”可留空。",
-        ),
-        (
-            "persona",
-            "第 4/10 步：角色的性格、语气和习惯是什么？\n"
-            "例如：温柔慢热、说话简短、会认真回应你的情绪。回复“跳过”可留空。",
+            "source_identity",
+            "第 2/8 步：角色出处是什么？\n"
+            "原创角色回复“原创”。现有作品角色请写原作和角色名，最好用英文或罗马音，例如：Blue Archive / Tendou Aris。回复“跳过”按原创处理。",
         ),
         (
             "appearance",
-            "第 5/10 步：角色稳定外貌是什么？\n"
-            "例如：黑色短发、蓝眼睛、身材纤细、浅色皮肤。回复“跳过”可使用默认外貌。",
+            "第 3/8 步：角色外貌和初始穿搭是什么？\n"
+            "例如：黑色短发、蓝眼睛、身材纤细、白衬衫、深色百褶裙。回复“跳过”可使用默认外貌。",
         ),
         (
-            "outfit",
-            "第 6/10 步：角色初始穿搭是什么？\n"
-            "例如：白衬衫、深色百褶裙。回复“跳过”可留空。",
+            "role",
+            "第 4/8 步：角色设定是什么？\n"
+            "包括角色类型、职业身份、性格、语气和习惯。例如：大学生，温柔慢热，说话简短。回复“跳过”可留空。",
         ),
         (
             "relationship",
-            "第 7/10 步：你和角色是什么关系？\n"
-            "例如：同城恋人、室友、青梅竹马、刚认识。回复“跳过”可留空。",
+            "第 5/8 步：你和角色的关系、以及角色怎么称呼你？\n"
+            "例如：同城恋人，称呼我主人；或：同校朋友，叫我老师。回复“跳过”可留空。",
         ),
         (
             "city",
-            "第 8/10 步：你所在或故事发生的城市是哪里？\n"
+            "第 6/8 步：你所在或故事发生的城市是哪里？\n"
             "例如：上海、东京、纽约。回复“跳过”可之后再用 /天气设置 设置。",
         ),
         (
             "purity",
-            "第 9/10 步：纯良度设置为多少？\n"
+            "第 7/8 步：纯良度设置为多少？\n"
             "输入 0-10 的整数，数字越高越保守；也可以回复 auto。",
         ),
         (
             "push_frequency",
-            "第 10/10 步：每天主动推送几次？\n"
+            "第 8/8 步：每天主动推送几次？\n"
             "输入 0-20 的整数，0 表示关闭；也可以回复“默认”。",
         ),
     )
@@ -173,58 +201,7 @@ class CommandHandlersMixin:
     INIT_FLOW_CANCEL_WORDS = {"取消", "取消初始化", "退出", "退出初始化", "cancel", "stop", "结束"}
 
     async def dispatch_command(self, chat_id: int | str, session_id: str, command: str, arg: str):
-        aliases = {
-            "start": "初始化",
-            "help": "菜单",
-            "帮助": "菜单",
-            "menyu": "菜单",
-            "init": "初始化",
-            "oc": "创建OC",
-            "OC": "创建OC",
-            "创建oc": "创建OC",
-            "原创角色": "创建OC",
-            "外貌": "外型",
-            "外形": "外型",
-            "外貌自动": "外貌自动",
-            "人设定义": "人格",
-            "添加画风": "添加画风",
-            "删除画风": "删除画风",
-            "切换画风": "切换画风",
-            "memory": "记忆",
-            "remember": "记住",
-            "forget": "忘记",
-            "resetcontext": "新场景",
-            "上下文重置": "新场景",
-            "清空上下文": "新场景",
-            "relationship": "关系",
-            "空间关系": "关系",
-            "rollback": "回滚",
-            "undo": "回滚",
-            "回退": "回滚",
-            "撤回": "回滚",
-            "regenerate": "重答",
-            "redo": "重答",
-            "重新生成": "重答",
-            "重新回答": "重答",
-            "fullmenu": "完整菜单",
-            "full": "完整菜单",
-            "完整菜单": "完整菜单",
-            "webpass": "web密码",
-            "web密码": "web密码",
-            "webui": "webui",
-            "model": "模型",
-            "models": "模型",
-            "模型": "模型",
-            "modify-character": "修改角色",
-            "modify_character": "修改角色",
-            "修改角色": "修改角色",
-            "update": "更新",
-            "git-update": "更新",
-            "gitupdate": "更新",
-            "git更新": "更新",
-            "更新": "更新",
-        }
-        command = aliases.get(command, command)
+        command = resolve_command_alias(command)
         handlers = {
             "初始化": self.cmd_init_guide,
             "菜单": self.cmd_menu,
@@ -374,15 +351,16 @@ class CommandHandlersMixin:
     def _init_flow_create_oc_text(self, answers: dict[str, Any]) -> str:
         role = str(answers.get("role") or "").strip()
         lines = [f"名字：{str(answers.get('name') or '').strip()}"]
+        source_identity = str(answers.get("source_identity") or "").strip()
+        if source_identity:
+            lines.append(f"角色出处与原名：{source_identity}")
+        appearance = str(answers.get("appearance") or "").strip()
+        if appearance:
+            lines.append(f"外貌和穿搭：{appearance}")
         if role:
-            lines.append(f"角色类型：{role}")
-            lines.append(f"职业：{role}")
+            lines.append(f"角色设定：{role}")
         mapping = (
-            ("user_address", "对话称呼"),
-            ("persona", "性格"),
-            ("appearance", "外貌"),
-            ("outfit", "初始穿搭"),
-            ("relationship", "与你的关系"),
+            ("relationship", "关系和称呼"),
             ("city", "所在城市"),
         )
         for key, label in mapping:
@@ -402,7 +380,11 @@ class CommandHandlersMixin:
             self._save_session_state(session_id, state)
             await self.send_message(chat_id, "初始化需要先创建角色卡。请告诉我角色名。")
             return
-        await self.cmd_create_oc(chat_id, session_id, self._init_flow_create_oc_text(answers))
+        profile_text = self._init_flow_create_oc_text(answers)
+        fields = self._parse_oc_fields(profile_text)
+        intake = await self._normalize_prompt_intake(profile_text, context="init")
+        fields = prompt_intake.merge_oc_fields(fields, intake)
+        await self._create_oc_from_fields(chat_id, session_id, profile_text, fields, intake)
         state = self._get_session_state(session_id)
         session_schema.get_init_flow(state).clear()
         purity = str(answers.get("purity") or "").strip().lower()
@@ -446,7 +428,7 @@ class CommandHandlersMixin:
             line = raw_line.strip()
             if not line:
                 continue
-            if line.lower().strip() in ("/创建oc", "/创建OC".lower(), "/oc"):
+            if line.lower().strip() in ("/创建角色", "/新建角色", "/创建oc", "/创建OC".lower(), "/oc"):
                 continue
             match = re.match(r"^([^:：]{1,20})[:：]\s*(.*)$", line)
             if match:
@@ -483,6 +465,8 @@ class CommandHandlersMixin:
     def _oc_fields_need_intake(text: str, fields: dict[str, str]) -> bool:
         if not fields:
             return bool((text or "").strip())
+        if any(key in fields for key in ("source_identity", "appearance_outfit", "character_setting", "relationship_address")):
+            return True
         name = fields.get("name", "")
         return not name or "\n" in name
 
@@ -695,6 +679,9 @@ class CommandHandlersMixin:
     async def cmd_create_oc(self, chat_id, session_id, arg):
         text = (arg or "").strip()
         if not text:
+            await self.cmd_init_guide(chat_id, session_id, "")
+            return
+        if text.lower() in ("help", "帮助", "模板", "示例", "example"):
             await self.send_message(chat_id, OC_CREATE_HELP)
             return
         fields = self._parse_oc_fields(text)
@@ -710,6 +697,20 @@ class CommandHandlersMixin:
         if not name:
             await self.send_message(chat_id, "缺少 OC 名字。\n\n" + OC_CREATE_HELP)
             return
+        await self._create_oc_from_fields(chat_id, session_id, text, fields, intake)
+
+    async def _create_oc_from_fields(
+        self,
+        chat_id: int | str,
+        session_id: str,
+        text: str,
+        fields: dict[str, str],
+        intake: dict[str, Any],
+    ) -> None:
+        name = (fields.get("name") or "").strip()
+        if not name:
+            await self.send_message(chat_id, "缺少 OC 名字。\n\n" + OC_CREATE_HELP)
+            return
 
         state = self._get_session_state(session_id)
         switching = name != (session_schema.get_character_value(state, "custom_character", "") or "")
@@ -721,6 +722,23 @@ class CommandHandlersMixin:
         user_address = (fields.get("user_address") or "").strip()
         occupation = (fields.get("occupation") or "").strip()
         city = (fields.get("city") or "").strip()
+        source_identity = (fields.get("source_identity") or "").strip()
+        source_type = (fields.get("source_type") or "").strip().lower()
+        series = (fields.get("series") or "").strip()
+        original_name = (fields.get("original_name") or "").strip()
+        visual_character = (fields.get("visual_character") or "").strip()
+        visual_series = (fields.get("visual_series") or "").strip()
+        is_original = (
+            source_type in ("original", "oc", "原创", "原创角色")
+            or bool(source_identity and re.search(r"\boc\b|原创|自创|原创角色", source_identity, flags=re.IGNORECASE))
+        )
+        if is_original:
+            if series.lower() in ("original", "original character", "oc") or series in ("原创", "原创角色"):
+                series = ""
+            if original_name.lower() in ("original", "original character", "oc") or original_name in ("原创", "原创角色"):
+                original_name = ""
+            if visual_series.lower() in ("original", "original character", "oc") or visual_series in ("原创", "原创角色"):
+                visual_series = ""
         gender = self._oc_gender_tag(name, role, persona, appearance)
 
         age = ""
@@ -763,11 +781,11 @@ class CommandHandlersMixin:
         character_card.apply_card_to_state(state, {
             "count": gender,
             "character": name,
-            "series": "",
-            "visual_character": "",
-            "visual_series": "",
+            "series": series,
+            "visual_character": visual_character,
+            "visual_series": visual_series,
             "role_name": role,
-            "bot_name": name,
+            "bot_name": original_name or name,
             "user_address": user_address,
             "persona": persona_text,
             "appearance": appearance_tags,
@@ -791,17 +809,28 @@ class CommandHandlersMixin:
         self._snapshot_character(state)
         saved = session_schema.get_saved_characters(state)
         saved[name]["raw_profile"] = text
+        if source_identity:
+            saved[name]["source_identity"] = source_identity
+        if source_type:
+            saved[name]["source_type"] = source_type
+        if original_name:
+            saved[name]["original_name"] = original_name
         self._save_session_state(session_id, state)
         city_note = await self._apply_oc_city(session_id, city) if city else ""
         self._ulog(session_id, "SWITCH", f"创建 OC {name}" + ("（已清空对话上下文）" if switching else ""))
 
         lines = [
             f"OC 已创建: {name}",
+            f"作品: {series or '原创/未指定'}",
             f"角色类型: {role}",
             f"年龄段: {age or '自动推断'}",
             f"职业: {occupation or '自动推断'}",
             f"身体特征: {appearance_tags[:300]}",
         ]
+        if original_name and original_name != name:
+            lines.append(f"原名: {original_name}")
+        if visual_character or visual_series:
+            lines.append(f"生图识别: {visual_character or '（空）'}{(' / ' + visual_series) if visual_series else ''}")
         if outfit_tags:
             lines.append(f"初始穿搭: {outfit_tags[:200]}")
         if relationship:

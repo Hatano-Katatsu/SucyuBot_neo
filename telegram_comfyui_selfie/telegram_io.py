@@ -8,31 +8,10 @@ from typing import Any
 
 import aiohttp
 
+from .command_aliases import BARE_COMMAND_ALIASES, resolve_command_alias
 from . import session_schema
 
 logger = logging.getLogger(__name__)
-
-
-BARE_COMMAND_ALIASES = {
-    "\u81ea\u62cd": "\u81ea\u62cd",
-    "\u62cd\u7167": "\u81ea\u62cd",
-    "\u83dc\u5355": "\u83dc\u5355",
-    "\u5e2e\u52a9": "\u83dc\u5355",
-    "help": "\u83dc\u5355",
-    "start": "\u521d\u59cb\u5316",
-    "init": "\u521d\u59cb\u5316",
-    "\u521d\u59cb\u5316": "\u521d\u59cb\u5316",
-    "oc": "\u521b\u5efaOC",
-    "\u521b\u5efaoc": "\u521b\u5efaOC",
-    "\u521b\u5efaOC": "\u521b\u5efaOC",
-    "\u539f\u521b\u89d2\u8272": "\u521b\u5efaOC",
-    "\u65b0\u573a\u666f": "\u65b0\u573a\u666f",
-    "\u4e0a\u4e0b\u6587\u91cd\u7f6e": "\u65b0\u573a\u666f",
-    "\u6e05\u7a7a\u4e0a\u4e0b\u6587": "\u65b0\u573a\u666f",
-    "\u8c03\u5ea6": "\u8c03\u5ea6",
-    "\u751f\u56fe\u72b6\u6001": "\u751f\u56fe\u72b6\u6001",
-    "\u63d0\u793a\u8bcd": "\u63d0\u793a\u8bcd",
-}
 
 
 class TelegramIOMixin:
@@ -186,7 +165,7 @@ class TelegramIOMixin:
             if self._bot_username and mention.lower() != self._bot_username.lower():
                 return None, text
             first = command
-        return first.strip(), rest.strip()
+        return resolve_command_alias(first.strip()), rest.strip()
 
     @staticmethod
     def _message_plain_text(msg: dict[str, Any] | None) -> str:

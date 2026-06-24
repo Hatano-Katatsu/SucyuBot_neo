@@ -189,21 +189,23 @@ telegram_comfyui_selfie/
 
 ## 今日变更（2026-06-24）
 
-1. **初始化向导改为角色卡创建入口**：`/初始化` 进入逐题状态机，普通文本回复优先被向导消费；流程收集角色名、角色类型、角色对用户称呼、人格、外貌、初始穿搭、关系、城市、纯良度和推送频率，最后生成新角色卡。
-2. **角色称呼字段修正**：新增 `custom_user_address` / `user_address`，表示“角色对用户的称呼”，与角色名和角色自称分离，并注入聊天静态前缀。
-3. **WebUI 角色面板精简**：隐藏场景偏好/自拍偏好栏，保留内部兼容字段；快捷菜单包含 `/角色 list` 与 `/角色 load <名称>`。
-4. **缓存命中与上下文分层修复**：聊天历史窗口改为 checkpoint 锚定，不再逐轮滑动；照片历史改为真实历史 `system`；checkpoint 裁剪保证第一条为 `user`；dream 只读 `user/assistant`；动态 system 拆出天级稳定层和半稳定状态快照层。
-5. **长期记忆注入策略调整**：长期记忆直接按重要性取前 N 条注入，不维护 `hit_count`；checkpoint、角色历史、长期记忆三者职责重新分工。
-6. **视觉模型与图片/引用输入**：新增用户级 `vision_profile_id` 和全局 `default_vision_model_profile`；视觉模型默认留空，留空时跳过图片处理。配置后，用户图片和引用图片先转成中文描述，再作为纯文本注入 chat 输入。
-7. **模型管理重构**：WebUI 去掉 chat/fast 思考开关，思考状态完全绑定模型 profile；管理员可维护全局 profile，用户可维护私有 profile；模型 API key 返回掩码并支持保留旧密钥。
-8. **Telegram 引用增强**：支持 `quote.text`、`reply_to_message`、`external_reply` 的文本注入；引用中包含图片时交给视觉模型描述。
-9. **文档整理**：压缩旧时间线，把本次会话前的历史变更合并进当前架构状态；“今日变更”只保留 2026-06-24 新内容。
+1. **初始化向导改为角色卡创建入口**：`/创建角色`、`/初始化`、无参数 `/创建OC` 都进入逐题状态机，普通文本回复优先被向导消费；流程压缩为 8 步：角色卡主键、出处/原名、外貌和穿搭、角色设定、关系和称呼、城市、纯良度、推送频率。
+2. **初始化字段综合归档**：初始化收尾不再只依赖结构化行解析，会强制走一次 prompt intake，把外貌/穿搭、人格/类型、关系/称呼等非数值/固定格式字段交给 LLM 综合判断后合并。现有作品角色的 `original_name` 要求英文或姓氏在前罗马音，`series` 要求英文作品名，`visual_character` / `visual_series` 要求 Danbooru 风格标签；原创角色默认不写作品和视觉 tag。
+3. **角色称呼字段修正**：新增 `custom_user_address` / `user_address`，表示“角色对用户的称呼”，与角色名和角色自称分离，并注入聊天静态前缀。
+4. **WebUI 角色面板精简**：隐藏场景偏好/自拍偏好栏，保留内部兼容字段；快捷菜单包含 `/角色 list` 与 `/角色 load <名称>`。
+5. **缓存命中与上下文分层修复**：聊天历史窗口改为 checkpoint 锚定，不再逐轮滑动；照片历史改为真实历史 `system`；checkpoint 裁剪保证第一条为 `user`；dream 只读 `user/assistant`；动态 system 拆出天级稳定层和半稳定状态快照层。
+6. **长期记忆注入策略调整**：长期记忆直接按重要性取前 N 条注入，不维护 `hit_count`；checkpoint、角色历史、长期记忆三者职责重新分工。
+7. **视觉模型与图片/引用输入**：新增用户级 `vision_profile_id` 和全局 `default_vision_model_profile`；视觉模型默认留空，留空时跳过图片处理。配置后，用户图片和引用图片先转成中文描述，再作为纯文本注入 chat 输入。
+8. **模型管理重构**：WebUI 去掉 chat/fast 思考开关，思考状态完全绑定模型 profile；管理员可维护全局 profile，用户可维护私有 profile；模型 API key 返回掩码并支持保留旧密钥。
+9. **Telegram 引用增强**：支持 `quote.text`、`reply_to_message`、`external_reply` 的文本注入；引用中包含图片时交给视觉模型描述。
+10. **命令别名集中维护**：新增 `command_aliases.py`，命令别名按规范命令分组列表维护，并自动派生完整别名表与裸词快捷别名表；别名覆盖 `/创建角色`、`/新建角色`、`/角色创建`、`/menu`、`/拍照`、`/推送测试` 等正序/倒装写法。
+11. **文档整理**：压缩旧时间线，把本次会话前的历史变更合并进当前架构状态；“今日变更”只保留 2026-06-24 新内容。
 
 ## 最新验证
 
 - `python -m compileall -q telegram_comfyui_selfie`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; python -m unittest discover -s tests -p test_core.py -v`
-- 最新结果：`Ran 220 tests in 5.771s`，`OK (skipped=1)`
+- 最新结果：`Ran 225 tests in 5.390s`，`OK (skipped=1)`
 - 跳过项：未安装 `aiohttp_socks` 的 SOCKS 代理集成测试
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示
 

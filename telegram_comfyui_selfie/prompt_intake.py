@@ -7,6 +7,11 @@ from typing import Any
 
 INTAKE_FIELDS = (
     "name",
+    "source_type",
+    "series",
+    "original_name",
+    "visual_character",
+    "visual_series",
     "role",
     "age",
     "occupation",
@@ -66,6 +71,10 @@ USER_ADDRESS_RE = re.compile(
 STYLE_RE = re.compile(r"(画风|风格|artist|style|@)")
 SCENE_RE = re.compile(r"(公园|家里|家中|房间|公司|学校|商场|大街|街头|咖啡|餐厅|车站|海边|自拍|对镜)")
 PERSONA_RE = re.compile(r"(性格|人格|温柔|冷淡|强势|慢热|活泼|开朗|傲娇|病娇|认真|喜欢|习惯|说话|语气)")
+FIELD_PREFIX_RE = re.compile(
+    r"^(?:角色出处与原名|角色出处|出处|来源|外貌和穿搭|外貌与穿搭|外型和穿搭|外型与穿搭|"
+    r"角色设定|设定|关系和称呼|关系与称呼)[:：\s]*"
+)
 
 
 def blank_intake(raw_text: str = "") -> dict[str, str]:
@@ -130,7 +139,7 @@ def parse_llm_json(text: str, raw_text: str = "") -> dict[str, str]:
 
 
 def strip_command_prefix(text: str) -> str:
-    return re.sub(r"^\s*/?(?:创建OC|创建oc|oc)\s*", "", text or "", flags=re.IGNORECASE).strip()
+    return re.sub(r"^\s*/?(?:创建角色|新建角色|创建OC|创建oc|oc)\s*", "", text or "", flags=re.IGNORECASE).strip()
 
 
 def split_phrases(text: str) -> list[str]:
@@ -185,6 +194,9 @@ def append_field(data: dict[str, str], key: str, value: str):
 
 
 def classify_phrase(phrase: str, out: dict[str, str]):
+    phrase = clean_text(FIELD_PREFIX_RE.sub("", phrase or ""))
+    if not phrase:
+        return
     city = CITY_RE.search(phrase)
     if city:
         out["city"] = clean_text(city.group(1))
@@ -239,6 +251,11 @@ def merge_oc_fields(fields: dict[str, str], intake: dict[str, Any]) -> dict[str,
     intake = normalize_intake(intake)
     mapping = {
         "name": "name",
+        "source_type": "source_type",
+        "series": "series",
+        "original_name": "original_name",
+        "visual_character": "visual_character",
+        "visual_series": "visual_series",
         "role": "role",
         "age": "age",
         "occupation": "occupation",
@@ -259,6 +276,11 @@ def merge_oc_fields(fields: dict[str, str], intake: dict[str, Any]) -> dict[str,
 def useful_summary(intake: dict[str, Any]) -> str:
     intake = normalize_intake(intake)
     labels = (
+        ("source_type", "角色来源"),
+        ("series", "作品"),
+        ("original_name", "原名"),
+        ("visual_character", "生图角色Tag"),
+        ("visual_series", "生图作品Tag"),
         ("base_appearance", "基础外观"),
         ("dynamic_appearance", "穿搭/配饰"),
         ("style", "画风"),

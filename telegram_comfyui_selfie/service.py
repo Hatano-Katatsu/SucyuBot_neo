@@ -1983,7 +1983,12 @@ class TelegramComfyUIService(
         system = (
             "你是提示词槽位归档器，只输出 JSON。用户会自然描述角色、外观、穿搭、画风、场景偏好或关系。"
             "不要扩写，不要润色，不要替用户新增设定，只把原文按用途归档。"
-            "字段固定为: name, role, age, occupation, anchor, persona, user_address, base_appearance, dynamic_appearance, relationship, city, style, scene_preference, selfie_preference, unclassified。"
+            "字段固定为: name, source_type, series, original_name, visual_character, visual_series, role, age, occupation, anchor, persona, user_address, base_appearance, dynamic_appearance, relationship, city, style, scene_preference, selfie_preference, unclassified。"
+            "name 是本地角色卡主键，保留用户给的称呼。source_type 只允许 original/existing/空。"
+            "如果是原创角色，source_type 写 original，series/original_name/visual_character/visual_series 留空，除非用户明确给了可用标签。"
+            "如果是现有作品角色，source_type 写 existing。original_name 写英文官方名或罗马音，姓氏在前，不要写中文、日文假名或汉字。"
+            "series 写英文官方作品名或英文罗马音，不要写中文、日文假名或汉字。"
+            "visual_character 和 visual_series 写 Danbooru 风格标签：小写英文/罗马音、下划线分词、必要时用括号消歧义，例如 tendou_aris、aris_(blue_archive)、blue_archive；不要输出中文、日文假名或汉字。"
             "occupation 放角色的中文职业/身份原文（如 高中生/上班族/护士）；anchor 从职业推断白天去向枚举。"
             "user_address 放角色对用户的称呼（如 主人/前辈/哥哥/姐姐），不是角色自称，也不是角色名。"
             "base_appearance 只放稳定身体身份特征：性别、发色、发型、瞳色、肤色、体型、物种特征、伤疤、纹身等永久标志。"

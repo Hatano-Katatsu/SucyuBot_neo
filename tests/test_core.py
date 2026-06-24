@@ -19,6 +19,7 @@ from telegram_comfyui_selfie.commands import (
     _is_character_config_key,
     _is_transient_state_key,
 )
+from telegram_comfyui_selfie.command_aliases import COMMAND_ALIAS_GROUPS, resolve_command_alias
 from telegram_comfyui_selfie.prompt_intake import heuristic_intake
 from telegram_comfyui_selfie.webui import build_world_route_preview, cast_config_value, masked_config, serialize_prompt_slots, session_summary
 
@@ -80,11 +81,26 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(svc.parse_command("拍照"), ("自拍", ""))
         self.assertEqual(svc.parse_command(" 自拍 神户街头 "), ("自拍", "神户街头"))
         self.assertEqual(svc.parse_command(" /自拍 "), ("自拍", ""))
+        self.assertEqual(svc.parse_command("拍照 神户街头"), ("自拍", "神户街头"))
         self.assertEqual(svc.parse_command("菜单 动线"), ("菜单", "动线"))
+        self.assertEqual(svc.parse_command("menu 动线"), ("菜单", "动线"))
         self.assertEqual(svc.parse_command("初始化"), ("初始化", ""))
+        self.assertEqual(svc.parse_command("创建角色"), ("初始化", ""))
+        self.assertEqual(svc.parse_command("角色创建"), ("初始化", ""))
+        self.assertEqual(svc.parse_command("/角色创建"), ("初始化", ""))
+        self.assertEqual(svc.parse_command("新建角色"), ("初始化", ""))
         self.assertEqual(svc.parse_command("创建OC"), ("创建OC", ""))
         self.assertEqual(svc.parse_command("oc 名字：小雨"), ("创建OC", "名字：小雨"))
+        self.assertEqual(svc.parse_command("推送测试 normal"), ("测试推送", "normal"))
         self.assertEqual(svc.parse_command("我想看自拍"), (None, "我想看自拍"))
+
+    def test_command_aliases_are_grouped_lists_and_cover_reversed_forms(self):
+        self.assertIsInstance(COMMAND_ALIAS_GROUPS, tuple)
+        self.assertEqual(resolve_command_alias("角色创建"), "初始化")
+        self.assertEqual(resolve_command_alias("菜单查看"), "菜单")
+        self.assertEqual(resolve_command_alias("推送测试"), "测试推送")
+        self.assertEqual(resolve_command_alias("画风添加"), "添加画风")
+        self.assertEqual(resolve_command_alias("关系设置"), "关系")
 
     def test_bare_selfie_message_dispatches_to_selfie_command(self):
         async def run():
@@ -129,7 +145,27 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             text = svc.send_message.await_args.args[1]
             self.assertIn("初始化向导", text)
-            self.assertIn("第 1/10 步", text)
+            self.assertIn("第 1/8 步", text)
+
+        asyncio.run(run())
+
+    def test_dispatch_command_aliases_use_canonical_handlers(self):
+        async def run():
+            svc = self.make_service()
+            svc.cmd_init_guide = AsyncMock()
+            svc.cmd_menu = AsyncMock()
+            svc.cmd_selfie = AsyncMock()
+            svc.cmd_test_push = AsyncMock()
+
+            await svc.dispatch_command(1, "telegram:1", "创建角色", "")
+            await svc.dispatch_command(1, "telegram:1", "menu", "动线")
+            await svc.dispatch_command(1, "telegram:1", "拍照", "窗边")
+            await svc.dispatch_command(1, "telegram:1", "推送测试", "normal")
+
+            svc.cmd_init_guide.assert_awaited_once_with(1, "telegram:1", "")
+            svc.cmd_menu.assert_awaited_once_with(1, "telegram:1", "动线")
+            svc.cmd_selfie.assert_awaited_once_with(1, "telegram:1", "窗边")
+            svc.cmd_test_push.assert_awaited_once_with(1, "telegram:1", "normal")
 
         asyncio.run(run())
 
@@ -142,13 +178,13 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             await svc.handle_update({"message": {"chat": {"id": 123}, "text": "初始化"}})
             self.assertTrue(session_schema.get_init_flow(svc._get_session_state(sid)).get("active"))
-            self.assertIn("第 1/10 步", svc.send_message.await_args.args[1])
+            self.assertIn("第 1/8 步", svc.send_message.await_args.args[1])
 
             await svc.handle_update({"message": {"chat": {"id": 123}, "text": "小雨"}})
             self.assertEqual(session_schema.get_init_flow(svc._get_session_state(sid)).get("step"), 1)
-            self.assertIn("第 2/10 步", svc.send_message.await_args.args[1])
+            self.assertIn("第 2/8 步", svc.send_message.await_args.args[1])
 
-            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "大学生"}})
+            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "原创"}})
             state = svc._get_session_state(sid)
             self.assertEqual(session_schema.get_init_flow(state).get("step"), 2)
             self.assertEqual(state["custom_character"], "")
@@ -239,12 +275,10 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             for text in (
                 "初始化",
                 "小雨",
-                "大学生",
-                "主人",
-                "温柔、慢热",
-                "黑色短发，蓝眼睛",
-                "白衬衫，深色百褶裙",
-                "同城恋人",
+                "原创",
+                "黑色短发，蓝眼睛，白衬衫，深色百褶裙",
+                "大学生，温柔、慢热",
+                "同城恋人，称呼我主人",
                 "跳过",
                 "3",
                 "0",
@@ -268,6 +302,56 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_init_flow_uses_llm_intake_for_existing_character_identity(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc._normalize_prompt_intake = AsyncMock(return_value={
+                "source_type": "existing",
+                "series": "Blue Archive",
+                "original_name": "Tendou Aris",
+                "visual_character": "aris_(blue_archive)",
+                "visual_series": "blue_archive",
+                "role": "学生",
+                "age": "adult",
+                "occupation": "学生",
+                "anchor": "school",
+                "persona": "开朗、认真",
+                "base_appearance": "黑色长发，蓝眼睛",
+                "user_address": "老师",
+                "relationship": "同校朋友",
+            })
+            svc._translate_appearance_tags = AsyncMock(return_value="long black hair, blue eyes")
+            svc.send_message = AsyncMock()
+            svc.handle_chat = AsyncMock()
+
+            for text in (
+                "/创建角色",
+                "爱丽丝卡",
+                "Blue Archive / Tendou Aris",
+                "黑色长发，蓝眼睛，穿校服",
+                "学生，开朗、认真",
+                "同校朋友，称呼我老师",
+                "跳过",
+                "auto",
+                "默认",
+            ):
+                await svc.handle_update({"message": {"chat": {"id": 123}, "text": text}})
+
+            state = svc._get_session_state(sid)
+            self.assertEqual(state["custom_character"], "爱丽丝卡")
+            self.assertEqual(state["custom_bot_name"], "Tendou Aris")
+            self.assertEqual(state["custom_series"], "Blue Archive")
+            self.assertEqual(state["custom_visual_character"], "aris_(blue_archive)")
+            self.assertEqual(state["custom_visual_series"], "blue_archive")
+            self.assertEqual(state["custom_character_occupation"], "学生")
+            self.assertEqual(state["custom_character_day_anchor"], "school")
+            self.assertEqual(state["saved_characters"]["爱丽丝卡"]["original_name"], "Tendou Aris")
+            self.assertEqual(state["saved_characters"]["爱丽丝卡"]["visual_character"], "aris_(blue_archive)")
+            svc.handle_chat.assert_not_awaited()
+
+        asyncio.run(run())
+
     def test_character_panel_hides_preference_fields(self):
         app_js = (Path(__file__).resolve().parents[1] / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
         character_fields = app_js.split("const characterFieldSections = [", 1)[1].split("const commands =", 1)[0]
@@ -287,12 +371,27 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc = self.make_service()
             svc.send_message = AsyncMock()
 
-            await svc.cmd_create_oc(1, "telegram:1", "")
+            await svc.cmd_create_oc(1, "telegram:1", "help")
 
             text = svc.send_message.await_args.args[1]
-            self.assertIn("创建原创角色 OC", text)
+            self.assertIn("创建角色卡", text)
             self.assertIn("名字：小雨", text)
             self.assertIn("初始穿搭", text)
+
+        asyncio.run(run())
+
+    def test_create_oc_without_arg_starts_character_flow(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_create_oc(1, sid, "")
+
+            state = svc._get_session_state(sid)
+            self.assertTrue(session_schema.get_init_flow(state).get("active"))
+            self.assertIn("初始化向导", svc.send_message.await_args.args[1])
+            self.assertIn("第 1/8 步", svc.send_message.await_args.args[1])
 
         asyncio.run(run())
 
@@ -466,6 +565,23 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("宽松白毛衣", intake["dynamic_appearance"])
         self.assertIn("同城暧昧对象", intake["relationship"])
         self.assertEqual(intake["city"], "上海")
+
+    def test_prompt_intake_prompt_requires_romanized_danbooru_identity(self):
+        async def run():
+            svc = self.make_service()
+            svc.has_llm_config = lambda purpose="image": True
+            svc._call_llm = AsyncMock(return_value="{}")
+
+            await svc._normalize_prompt_intake("角色出处与原名：碧蓝档案 / 天童爱丽丝", context="init")
+
+            system = svc._call_llm.await_args.args[0]
+            self.assertIn("original_name", system)
+            self.assertIn("姓氏在前", system)
+            self.assertIn("Danbooru", system)
+            self.assertIn("visual_character", system)
+            self.assertNotIn("knowledge", system.lower())
+
+        asyncio.run(run())
 
     def test_create_oc_accepts_natural_profile_and_saves_raw_intake(self):
         async def run():
