@@ -275,7 +275,7 @@ custom_allow_llm_change_appearance : true   # 自动换装开着
 
 **LLM 请求调试日志（2026-06-24）**：`service._call_llm_messages()` 会把每次 LLM 调用的完整请求体、完整返回体、usage/cache 摘要按 `purpose:tag` 记录到用户日志目录的 `llm_debug.json`（默认 `data/logs/llm_debug.json`），用于排查 DeepSeek/OpenAI 兼容接口上下文缓存不命中。记录先进入内存缓冲，累计 10 条 LLM 记录后才落盘；落盘时读取旧 JSON、按类型合并并各自只保留最近 10 条，然后通过临时文件整体替换原文件，避免频繁 IO。服务关闭、Web 关闭服务和进程重启前会强制 flush 不足 10 条的尾部记录。
 
-**最新测试结果（2026-06-24）**：Miniforge 3.12 下执行 `$env:PYTHONUTF8='1'; python -m unittest discover -s tests -p test_core.py -v`，结果 `Ran 201 tests in 7.762s`，`OK (skipped=1)`；跳过项为未安装 `aiohttp_socks` 的 SOCKS 代理测试。测试临时文件继续落在 `.tmp/tests`，测试进程首次创建临时目录时自动清理上次残留。为避免 Windows SQLite 建库同步导致测试过慢，测试进程设置 `SUCYUBOT_TEST_FAST_SQLITE=1`，仅测试环境关闭 SQLite 同步/使用内存 journal，生产默认不受影响。
+**最新测试结果（2026-06-24）**：Miniforge 3.12 下执行 `$env:PYTHONUTF8='1'; python -m unittest discover -s tests -p test_core.py -v`，结果 `Ran 201 tests in 5.254s`，`OK`。SOCKS 代理测试已修复（`asyncio.run()` 包裹）。测试临时文件继续落在 `.tmp/tests`，测试进程首次创建临时目录时自动清理上次残留。为避免 Windows SQLite 建库同步导致测试过慢，测试进程设置 `SUCYUBOT_TEST_FAST_SQLITE=1`，仅测试环境关闭 SQLite 同步/使用内存 journal，生产默认不受影响。
 
 **⚠️ 重启线上 bot**：分盒迁移已接启动期检测。重启后旧 SQLite 会话会先自动备份 `memory.sqlite3` 为 `memory.box-migration-backup-<timestamp>.sqlite3`，再写回 `character/clothing/place/context/session` 盒；旧 `state.json` 首次迁移前也会备份为 `state.state-json-migration-backup-<timestamp>.json`。无需手动清理旧数据。
 
@@ -288,6 +288,16 @@ custom_allow_llm_change_appearance : true   # 自动换装开着
 3. ~~**scene 英文被换装去冲突逻辑损坏（P2）**~~ ✅ 已修复（2026-06-24）。`generation._strip_conflicting_scene_outfit` 的颜色词匹配改为禁止命中连字符复合词中段，`moon-white nightgown` 不再被改成 `moon-wearing the current outfit`；普通 `white nightgown` 仍会按冲突穿搭清理。
 
 4. ~~**outfit 写入时就重复（P2）**~~ ✅ 已修复（2026-06-24）。`cmd_create_oc` 写入前调用 `session_schema.normalize_outfit_string` 折空格+去重，`set_outfit` 内部二次归一，展示与存储两端干净。
+
+5. **负向提示词精简（2026-06-24）**。`defaults.py` 默认 neg 从 21 标签去重到 16（去掉 `fused fingers`/`too many fingers`/`mutated hands`/`disfigured`/`clothing`/`pixelated` 等语义重复项）；`generation.py` 手部标签从 10 去重到 3（`extra hands`/`poorly drawn hands`/`extra digits`）；`VISIBLE_PHONE_NEGATIVES` 从 17 去重到 7（保留 `holding phone`/`visible phone`/`smartphone`/`viewfinder`/`phone screen`/`camera UI`/`shutter button`）。
+
+6. **animatool neg 由 LLM 直出（2026-06-24）**。`plan_animatool_slots` 的 slot_info 移除 `negative`（避免 LLM 透传），新增 `view` 字段；system prompt 加视角与 neg 规则（selfie/portrait/pov 抑制手机 UI，mirror 允许镜子但不出现手机 UI）。LLM 根据 knowledge + view 独立生成 neg，代码层 `slots.negative` 仅作兜底。
+
+7. **WebUI 重启服务按钮（2026-06-24）**。`index.html` 右上角刷新按钮旁新增红色重启按钮（`admin-panel` 类，非管理员自动隐藏），`confirm` 二次确认后调用 `/api/service/restart`。CSS 用 `--warn` 红底白字，hover 保持红色。
+
+8. **SOCKS 代理测试修复（2026-06-24）**。`test_external_http_proxy_socks` 中 `ProxyConnector.from_url()` 需要运行中事件循环，改为 `asyncio.run()` 包裹。
+
+**最新测试结果（2026-06-24）**：`Ran 201 tests in 5.254s`，`OK`。
 
 ## 已知限制（暂不修，等模型能力）
 

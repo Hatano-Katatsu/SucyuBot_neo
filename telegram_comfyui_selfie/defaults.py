@@ -324,7 +324,7 @@ DEFAULT_CONFIG = {
     "positive_prefix": "masterpiece, best quality, absurdres, anime coloring, clean lineart, soft cel shading, detailed illustration, black long flowing hair, purple eyes",
     "default_hair": "black long flowing hair",
     "default_eyes": "purple eyes",
-    "negative_prompt": "extra fingers, fused fingers, too many fingers, mutated hands, bad hands, bad anatomy, deformed, disfigured, extra limbs, missing limbs, worst quality, low quality, photorealistic, 3d, child, loli, male, clothes, clothing, censor bar, mosaic, pixelated",
+    "negative_prompt": "bad anatomy, bad hands, extra fingers, extra limbs, deformed, missing limbs, worst quality, low quality, photorealistic, 3d, child, loli, male, clothes, censor bar, mosaic",
     "dynamic_appearance": "",
     "default_purity": "",
     "outfit_keywords": "dress\nshirt\nskirt\npants\njeans\nshorts\nuniform\nsuit\nblazer\njacket\ncoat\nhoodie\nsweater\ncheongsam\nkimono\nbikini\nlingerie\nswimsuit\nrobe\ngown\nbodysuit\npajama\nnightgown\nsleepwear\noutfit\nattire\ncostume\ngarment\nwear\nclothes\nclothing",

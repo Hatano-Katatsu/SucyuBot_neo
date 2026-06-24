@@ -11,6 +11,7 @@ import aiohttp
 
 from . import session_schema
 from .defaults import DEFAULT_CONFIG, WEEKDAY_NAMES
+from .generation import _infer_prompt_view
 
 logger = logging.getLogger(__name__)
 
@@ -675,7 +676,8 @@ async def plan_animatool_slots(
         ensure_ascii=False, indent=2,
     ) if content_fields else "（无内容字段）"
 
-    # 槽位信息
+    # 槽位信息（negative 不传给 LLM，由 LLM 根据 view 规则和 Knowledge 独立生成，代码层 slots.negative 兜底）
+    prompt_view = _infer_prompt_view(slots.scene or "")
     slot_info = {
         "quality": slots.quality or "",
         "count": slots.count or "",
@@ -686,7 +688,7 @@ async def plan_animatool_slots(
         "style_general": slots.style_general or "",
         "scene": slots.scene or "",
         "one_shot_appearance": slots.one_shot_appearance or "",
-        "negative": slots.negative or "",
+        "view": prompt_view,
     }
     slot_text = "\n".join(f"- {k}: {v}" for k, v in slot_info.items() if v)
 
@@ -735,6 +737,12 @@ async def plan_animatool_slots(
         "- style_general → style\n"
         "- scene → tags（改写成 3-5 句完整英文，把末尾的逗号标签堆融进句子，不要保留 Danbooru 逗号串）\n"
         "- negative → neg\n\n"
+        "## 视角与 neg 规则（重要）\n"
+        "根据 view 字段决定 neg 内容：\n"
+        "- selfie/portrait/pov：画面中不得出现手机、相机、UI 界面、取景框、快门按钮等任何拍摄设备元素。"
+        "neg 必须包含 holding phone, visible phone, smartphone, viewfinder, phone screen, shutter button。\n"
+        "- mirror：允许镜子和镜中反射，但不得出现手机 UI。neg 包含 foreground person, second body, multiple reflections。\n"
+        "- 空/其他：如 scene 中无手机/镜子相关描述，同样抑制手机 UI 元素。\n\n"
         "## 时间与光线（重要，必须体现）\n"
         f"当前时段: {time_period or '未知'}；光线参考: {time_light or '未知'}\n"
         f"{light_guard}\n"

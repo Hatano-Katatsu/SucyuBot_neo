@@ -1352,6 +1352,19 @@ async function runPromptCleanup(applyChanges, button) {
 async function initEvents() {
   $all(".nav").forEach(btn => btn.onclick = () => switchView(btn.dataset.view));
   $("#refresh-btn").onclick = () => loadAll().then(() => toast("已刷新"));
+  $("#restart-btn").onclick = async () => {
+    if (!confirm("确认重启服务？\n\n服务将短暂中断后自动恢复。")) return;
+    const btn = $("#restart-btn");
+    setBusy(btn, true);
+    try {
+      await api("/api/service/restart", { method: "POST" });
+      toast("重启指令已发送，服务将在几秒后恢复");
+    } catch (e) {
+      toast("重启失败: " + e.message, true);
+    } finally {
+      setBusy(btn, false);
+    }
+  };
   $("#reload-world-sessions").onclick = () => loadWorldSessions().then(() => toast("动线用户已刷新"));
   $("#world-refresh").onclick = () => loadWorldRoute().then(() => toast("动线已刷新"));
   $("#world-refresh-places").onclick = async (event) => {

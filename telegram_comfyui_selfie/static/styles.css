@@ -215,6 +215,19 @@ nav {
   flex: 0 0 auto;
 }
 
+.top-actions .restart-btn {
+  background: var(--warn);
+  color: #fff;
+  border-color: var(--warn);
+  margin-top: 0;
+}
+.top-actions .restart-btn:hover {
+  background: var(--warn);
+  color: #fff;
+  border-color: var(--warn);
+  opacity: 0.85;
+}
+
 /* Toast */
 .toast {
   padding: 12px 16px;

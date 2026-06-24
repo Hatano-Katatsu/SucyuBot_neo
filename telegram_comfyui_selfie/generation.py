@@ -25,10 +25,8 @@ ORIGINAL_SERIES_MARKERS = {"oc", "original", "original character", "原创", "�
 NON_LATIN_IDENTITY_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 EMPTY_IDENTITY_MARKERS = {"", "unknown", "none", "n/a", "na", "null", "-"}
 VISIBLE_PHONE_NEGATIVES = (
-    "holding phone", "visible phone", "phone in hand", "hand holding phone",
-    "phone visible in frame", "visible smartphone", "smartphone in hand",
-    "camera frame", "phone interface", "viewfinder", "screen border", "UI overlay",
-    "camera UI", "phone screen", "selfie frame", "record button", "shutter button",
+    "holding phone", "visible phone", "smartphone",
+    "viewfinder", "phone screen", "camera UI", "shutter button",
 )
 
 
@@ -835,11 +833,7 @@ def build_prompt(
     style_general = current_style if current_style and not current_style.startswith("@") else ""
 
     neg = service.config.get("negative_prompt", DEFAULT_CONFIG["negative_prompt"])
-    neg = _append_negatives(
-        neg,
-        "extra hands", "three hands", "three arms", "extra arms", "duplicate hands", "duplicate arms",
-        "malformed hands", "poorly drawn hands", "extra digits", "duplicated limbs",
-    )
+    neg = _append_negatives(neg, "extra hands", "poorly drawn hands", "extra digits")
     if state.get("custom_positive_prefix"):
         strip = {"clothes", "clothing"}
         if male:

@@ -1664,10 +1664,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("smartphone", pos.lower())
         self.assertNotIn("mirror reflection", pos.lower())
         neg_tokens = {item.strip().lower() for item in neg.split(",")}
-        self.assertNotIn("smartphone", neg_tokens)
         self.assertNotIn("phone", neg_tokens)
         self.assertIn("visible phone", neg.lower())
-        self.assertIn("phone in hand", neg.lower())
+        self.assertIn("holding phone", neg.lower())
         self.assertIn("mirror selfie", neg.lower())
 
     def test_selfie_prompt_removes_phone_screen_ui_without_breaking_sentence(self):
@@ -1706,9 +1705,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("smartphone", pos_lower)
         self.assertNotIn("front-facing phone camera", pos_lower)
         neg_lower = neg.lower()
-        self.assertIn("camera frame", neg_lower)
-        self.assertIn("phone interface", neg_lower)
-        self.assertIn("selfie frame", neg_lower)
+        self.assertIn("camera ui", neg_lower)
+        self.assertIn("viewfinder", neg_lower)
+        self.assertIn("shutter button", neg_lower)
 
     def test_prompt_rewrites_user_subject_and_removes_phone_clause(self):
         svc = self.make_service()
@@ -2103,8 +2102,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("smartphone", neg_tokens)
         self.assertNotIn("holding phone", neg_tokens)
         self.assertIn("two phones", neg_tokens)
-        self.assertIn("three hands", neg.lower())
-        self.assertIn("duplicate hands", neg.lower())
+        self.assertIn("extra hands", neg.lower())
+        self.assertIn("poorly drawn hands", neg.lower())
         self.assertIn("foreground person", neg.lower())
 
     def test_roleplay_image_tool_uses_image_planner_context(self):
@@ -4259,7 +4258,9 @@ class ExternalProxyTestCase(ServiceFixtureMixin, unittest.TestCase):
             from aiohttp_socks import ProxyConnector
         except ImportError:
             self.skipTest("aiohttp_socks not installed")
-        proxy, connector = svc._external_http_proxy()
+        async def _run():
+            return svc._external_http_proxy()
+        proxy, connector = asyncio.run(_run())
         self.assertIsNone(proxy)
         self.assertIsInstance(connector, ProxyConnector)
 
