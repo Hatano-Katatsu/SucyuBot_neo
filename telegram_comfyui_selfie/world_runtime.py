@@ -935,11 +935,12 @@ class WorldRuntimeMixin:
     def _world_relation_text(self, character_place: dict[str, Any], user_place: dict[str, Any] | None) -> str:
         if not user_place:
             return "用户当前位置未知；角色按日常动线行动。"
+        hedging = "（从近轮推断，用户本轮明确说的位置优先）" if user_place.get("source") == "checkpoint" else ""
         if user_place.get("co_located"):
-            return "用户和角色此刻在同一空间，适合写成 POV 或近距离第三人称的同框互动；不要写成角色独自一人的前摄自拍。"
+            return f"用户和角色此刻应在同一空间{hedging}，适合写成 POV 或近距离第三人称的同框互动；不要写成角色独自一人的前摄自拍。"
         if user_place["key"] == character_place["key"]:
-            return "用户和角色处于同类场所，可自然写成同地点互动；适合 POV 或第三人称近距离场景。"
-        return "用户和角色不在同一地点；优先写成消息、自拍、通勤或约定见面的场景，不要强行瞬移到用户身边。"
+            return f"用户和角色处于同类场所{hedging}，可自然写成同地点互动；适合 POV 或第三人称近距离场景。"
+        return f"用户和角色不在同一地点{hedging}；优先写成消息、自拍、通勤或约定见面的场景，不要强行瞬移到用户身边。"
 
     def _world_constraints(self, character_place: dict[str, Any], weather: Any) -> list[str]:
         constraints = []
@@ -1030,7 +1031,24 @@ class WorldRuntimeMixin:
         next_place = self._place_for_time(city, next_now, weather, mode=mode, profile=profile)
         user_place = self._active_user_place(state)
         if not user_place:
-            user_place = self._infer_user_place_from_checkpoint(session_id)
+            cp_inferred = self._infer_user_place_from_checkpoint(session_id)
+            if cp_inferred:
+                cp_key = cp_inferred.get("key", "")
+                cp_label = PLACE_TYPES.get(cp_key, {}).get("label", "") if cp_key else ""
+                user_disagrees = False
+                if user_text:
+                    ut = user_text
+                    if cp_key and cp_label and cp_label in ut:
+                        pass  # 用户消息印证了 checkpoint 推断
+                    else:
+                        for pk, pi in PLACE_TYPES.items():
+                            if pk == cp_key:
+                                continue
+                            if pi["label"] in ut:
+                                user_disagrees = True
+                                break
+                if not user_disagrees:
+                    user_place = cp_inferred
         place_history = session_schema.get_character_place_history(state)
         catalog = getattr(self, "city_place_catalogs", {}).get(self._city_catalog_key(city), {})
         enhanced = bool(isinstance(catalog, dict) and catalog.get("places"))
@@ -1093,10 +1111,19 @@ class WorldRuntimeMixin:
         else:
             next_line = "暂不确定"
         user = world.get("user_place")
-        user_text_line = f"{user['label']}（来自: {user.get('text') or '近期发言'}）" if user else "未知"
+        if user:
+            cp_source = user.get("source") or ""
+            if cp_source == "checkpoint":
+                user_text_line = f"{user['label']}（从近轮对话推断，可能已变化；用户本轮明确说的位置优先）"
+            elif cp_source == "llm":
+                user_text_line = f"{user['label']}（从生图/发言推断：{user.get('text') or ''}）"
+            else:
+                user_text_line = f"{user['label']}（{user.get('text') or '已确认'}）"
+        else:
+            user_text_line = "未知"
         identity = self._format_life_profile(world.get("life_profile"))
         lines = [
-            "当前世界状态（由现实时间、星期/节假日、天气、城市地点和动线自动推断；用户明确说的位置优先）:",
+            "当前世界状态（按以下优先级确定位置: 用户本轮声明 > 工具/系统记录 > 时钟动线推断；用户文字明确说的位置始终优先）:",
             f"- 城市/时间: {world['city']}，{now.strftime('%Y-%m-%d %H:%M')}，{world['day_type']}，{world['time_period']}",
             f"- 天气: {world['weather']}",
         ]
