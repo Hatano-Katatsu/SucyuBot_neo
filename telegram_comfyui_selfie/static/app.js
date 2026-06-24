@@ -82,6 +82,7 @@ const configSections = [
     ["long_memory_extract_enabled", "自动提取长期记忆", "bool"],
     ["long_memory_context_limit", "长期记忆注入条数", "number"],
     ["short_context_reset_gap_hours", "短期场景超时小时", "text"],
+    ["scene_stale_minutes", "场景断档感知分钟", "number"],
   ]],
 ];
 

@@ -93,7 +93,7 @@ memory:
   dream_source_hard_limit_chars: "50000"
   dream_morning_hour: "8"
   dream_idle_hours: "2"
-  short_context_reset_gap_hours: "6"
+  short_context_reset_gap_hours: "2"
 
 role_defaults:
   positive_prefix: "masterpiece, best quality, absurdres, anime coloring, clean lineart, soft cel shading, detailed illustration, black long flowing hair, purple eyes"

@@ -71,7 +71,7 @@
   "dream_source_hard_limit_chars": "50000",
   "dream_morning_hour": "8",
   "dream_idle_hours": "2",
-  "short_context_reset_gap_hours": "6",
+  "short_context_reset_gap_hours": "2",
   "user_log_enabled": true,
   "user_log_dir": "",
   "chat_reply_length": "",

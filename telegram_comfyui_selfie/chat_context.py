@@ -288,6 +288,18 @@ class ChatContextMixin:
         )
         if self._image_nudge_due(freq, session_schema.get_rounds_since_image(state)):
             system_dynamic += "发图提醒: 已有多轮未配图，本轮请优先调用 generate_roleplay_image。\n"
+        # 场景断档感知：距离上次对话超过阈值时提醒 LLM 旧场景可能已自然结束
+        try:
+            stale_minutes = float(self.config.get("scene_stale_minutes", "30") or 0)
+        except Exception:
+            stale_minutes = 30
+        previous_interaction = session_schema.get_last_interaction(state)
+        if stale_minutes > 0 and previous_interaction and time.time() - previous_interaction > stale_minutes * 60:
+            system_dynamic += (
+                "距离上次对话已过超过半小时，之前的日常场景可能已自然结束。"
+                "请优先依据结束前场景的特征和当前时间判断你此刻应在哪里——"
+                "除非对话里仍有明确的未了事件需要连续处理，否则以新场景自然开始。\n"
+            )
         # 对话进行中：对话已建立的场景优先，动线只作背景；只有冷启动/刚换场景才以动线引导，
         # 避免角色随现实时间被算法"传送"（家→公园这类飘移）。对话态不钉死时钟地点（pin_location=False）。
         active_dialog = bool(self._active_chat_history(state))
@@ -932,7 +944,7 @@ class ChatContextMixin:
         if SHORT_CONTEXT_RESET_RE.search(text or ""):
             return "用户显式切换或结束上一话题/场景"
         try:
-            gap_hours = float(self.config.get("short_context_reset_gap_hours", "6") or 0)
+            gap_hours = float(self.config.get("short_context_reset_gap_hours", "2") or 0)
         except Exception:
             gap_hours = 6
         if gap_hours > 0 and previous_interaction and time.time() - previous_interaction > gap_hours * 3600:

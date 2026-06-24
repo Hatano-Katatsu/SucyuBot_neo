@@ -51,7 +51,7 @@ CONFIG_GROUPS: dict[str, list[str]] = {
         "world_location_llm_extract", "world_holiday_dates", "world_workday_dates",
         "amap_api_key", "amap_poi_enabled", "amap_poi_per_type",
         "google_places_api_key", "google_places_enabled", "google_places_language",
-        "push_continuity_hours", "image_min_gap_rounds",
+        "push_continuity_hours", "image_min_gap_rounds", "scene_stale_minutes",
     ],
 }
 

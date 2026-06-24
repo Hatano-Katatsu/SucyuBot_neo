@@ -1166,7 +1166,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertTrue(preview["current"]["next_place"])
         self.assertTrue(preview["catalog"]["has_catalog"])
         self.assertIsInstance(preview["current"].get("character_place_history"), list)
-        self.assertEqual(len(preview["timeline"]), 8)
+        self.assertEqual(len(preview["timeline"]), 12)
         self.assertTrue(any(item["is_current_slot"] for item in preview["timeline"]))
 
     def test_webui_prompt_slot_preview_exposes_editable_fields(self):
@@ -4610,6 +4610,33 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         src = inspect.getsource(svc._generate_character_history_summary)
         self.assertIn("不要编造", src)
         self.assertIn("只基于日记原文", src)
+
+    def test_scene_stale_hint_when_gap_exceeds_threshold(self):
+        """场景断档感知: 距离上次对话超过阈值时在 system_dynamic 注入提示。"""
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        stale_sec = 30 * 60  # 默认 30 分钟
+        session_schema.set_last_interaction(state, time.time() - stale_sec - 60)
+        svc.config["scene_stale_minutes"] = "30"
+
+        # 避免 LLM 调用：_build_chat_messages 不调 LLM，只查 last_interaction + clock
+        messages = svc._build_chat_messages(sid, "你好")
+        all_system = "\n".join(m["content"] for m in messages if m.get("role") == "system")
+        self.assertIn("距离上次对话已过超过半小时", all_system)
+        self.assertIn("之前的日常场景可能已自然结束", all_system)
+
+    def test_no_scene_stale_hint_when_gap_within_threshold(self):
+        """断档未超阈值时不应注入场景提示。"""
+        svc = self.make_service()
+        sid = "telegram:2"
+        state = svc._get_session_state(sid)
+        session_schema.set_last_interaction(state, time.time() - 60)  # 仅 1 分钟前
+        svc.config["scene_stale_minutes"] = "30"
+
+        messages = svc._build_chat_messages(sid, "你好")
+        all_system = "\n".join(m["content"] for m in messages if m.get("role") == "system")
+        self.assertNotIn("距离上次对话已过超过半小时", all_system)
 
 
 class CheckpointTrimTestCase(ServiceFixtureMixin, unittest.TestCase):

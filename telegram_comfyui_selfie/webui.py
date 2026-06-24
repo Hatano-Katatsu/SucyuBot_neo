@@ -31,7 +31,7 @@ YAML_ONLY_CONFIG_KEYS = {
     "long_memory_db_path", "user_log_enabled", "user_log_dir",
     "web_enabled", "web_host", "web_port",
 }
-WORLD_TIMELINE_HOURS = (6, 8, 11, 13, 16, 18, 20, 23)
+WORLD_TIMELINE_HOURS = (0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22)
 
 
 def character_value(state: dict[str, Any], key: str, default: Any = "") -> Any:
