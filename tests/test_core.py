@@ -1165,6 +1165,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(preview["current"]["life_profile"]["day_anchor"], "company")
         self.assertTrue(preview["current"]["next_place"])
         self.assertTrue(preview["catalog"]["has_catalog"])
+        self.assertIsInstance(preview["current"].get("character_place_history"), list)
         self.assertEqual(len(preview["timeline"]), 8)
         self.assertTrue(any(item["is_current_slot"] for item in preview["timeline"]))
 
@@ -1347,7 +1348,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         fixed_now = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)
         svc._session_now = lambda session_id="": fixed_now
 
-        self.assertTrue(svc._update_user_place_from_text(sid, "我在商场等你"))
+        svc._apply_llm_user_location(sid, user_location="mall", co_located=False)
         messages = svc._build_chat_messages(sid, "晚上在哪见？")
         system = "\n".join(m["content"] for m in messages if m.get("role") == "system")
 
@@ -1588,32 +1589,6 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(world["character_place"]["label"], "博物馆")
 
         asyncio.run(run())
-
-    def test_new_leisure_place_categories_keyword_routing(self):
-        """新类目的中文关键词都能被 _infer_user_place 正确归类。"""
-        svc = self.make_service()
-        cases = {
-            "我正在海军博物馆里看展": "museum",
-            "周末去海边吹风": "beach",
-            "在图书馆自习": "library",
-            "去超市买菜": "supermarket",
-            "晚上在酒吧喝一杯": "bar",
-            "我在动物园看熊猫": "zoo",
-            "在神社祈愿": "temple",
-            "我在游乐园玩": "amusement",
-            "在书店看书": "bookstore",
-        }
-        for text, expected in cases.items():
-            self.assertEqual(svc._infer_user_place(text)[0], expected, f"{text} 应归类到 {expected}")
-
-    def test_library_supermarket_not_shadowed_by_old_categories(self):
-        """图书馆不再被 school 抢走、超市不再被 convenience 抢走。"""
-        svc = self.make_service()
-        self.assertEqual(svc._infer_user_place("我在图书馆")[0], "library")
-        self.assertEqual(svc._infer_user_place("我在超市")[0], "supermarket")
-        # 学校/便利店本身仍正常路由
-        self.assertEqual(svc._infer_user_place("我在学校上课")[0], "school")
-        self.assertEqual(svc._infer_user_place("我在便利店")[0], "convenience")
 
     def test_amap_poi_catalog_used_for_china_city(self):
         """LLM 判为中国城市时，目录用高德真实 POI，动线取名用它。"""
@@ -1936,14 +1911,6 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc.send_photo.assert_awaited_once()
 
         asyncio.run(run())
-
-    def test_user_place_inference_ignores_character_location_mentions(self):
-        svc = self.make_service()
-
-        self.assertEqual(svc._infer_user_place("那姐姐呢～不会在咖啡厅里吧"), (None, None))
-        self.assertEqual(svc._infer_user_place("我在咖啡厅里等着")[0], "cafe")
-        self.assertEqual(svc._infer_user_place("唉，姐姐其实我在上大学")[0], "school")
-        self.assertEqual(svc._infer_user_place("要不是有课要上我现在就过去")[0], "school")
 
     def test_long_memory_is_isolated_per_character(self):
         svc = self.make_service()

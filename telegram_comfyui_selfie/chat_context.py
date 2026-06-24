@@ -41,7 +41,6 @@ class ChatContextMixin:
         self._schedule_weather_refresh(session_id)  # 天气缓存过期则后台刷新，避免聊天天气停在早安推送那次
         if reset_reason:
             self._reset_short_context(state, reset_reason)
-        self._update_user_place_from_text(session_id, text)
         session_schema.set_last_message_text(state, text)
         session_schema.set_last_message_time(state, time.time())
         session_schema.set_recent_message_history(state, (session_schema.get_recent_message_history(state) + [{"text": text, "time": time.time()}])[-5:])
@@ -248,6 +247,7 @@ class ChatContextMixin:
             "不要只在文字里描述换装却不调用工具。"
             "\n位置持久化：当剧情里角色移动到新地点、或你明确交代了此刻在哪（出门、到公司、回家、到了某店等）时，调用 update_location 工具记录，"
             "这样之后的配图和推送会和你说的位置保持一致，不会无理由瞬移。位置没变就不用调。"
+            "当用户消息里明确透露了自己当前在哪（如「我刚到家」「在公司加班」「和你在一起」等），可调用 update_user_location 工具辅助记录。"
             "\n照片历史规则：历史中 role=system 且以「照片历史」开头的内容，是你之前发给用户的照片记录。"
             "当用户紧接照片历史回复，或提到“刚才那张/照片/图/自拍/画面/出来看看”等内容时，优先理解为用户在回应最近一张照片；"
             "依据照片历史自然承接，但不要主动复述系统记录。"
@@ -410,6 +410,24 @@ class ChatContextMixin:
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "update_user_location",
+                    "description": (
+                        "当你能从用户的消息或上下文推断出用户当前可能在哪时调用，例如用户说「我刚到家」「在公司加班」「在路上」等。"
+                        "place 用自然语言写用户当前所在（如\"家里\"\"公司\"\"商场\"\"咖啡店\"\"与角色同处\"等）。"
+                        "只在能合理推断或用户明确交代时调用；完全无法判断则不要编造。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "place": {"type": "string", "description": "用户当前所在的自然语言描述，或「与角色同处」。"},
+                        },
+                        "required": ["place"],
+                    },
+                },
+            },
         ]
 
     async def _execute_tool_call(self, chat_id: int | str, session_id: str, call: dict[str, Any]) -> str:
@@ -434,6 +452,8 @@ class ChatContextMixin:
             return await self.tool_change_appearance(session_id, args.get("description", ""), args.get("mode", "merge"))
         if fn == "update_location":
             return await self.tool_update_location(session_id, args.get("place", ""))
+        if fn == "update_user_location":
+            return await self.tool_update_user_location(session_id, args.get("place", ""))
         return f"未知工具: {fn}"
 
     @staticmethod

@@ -434,6 +434,20 @@ async def plan_roleplay_image(
         )
     if location_trail:
         system += f"\n近期位置轨迹（连续性参考，按时间正序）: {location_trail}。可据此判断动线方向。"
+    # 用户位置持久状态注入：引导规划器输出准确的 user_location（co_located 由代码推导）。
+    user_place = service._active_user_place(state) if hasattr(service, "_active_user_place") else None
+    if user_place:
+        if user_place.get("co_located"):
+            system += (
+                '\n用户位置状态（系统记录，基于此前对话/生图判断）: 用户此刻与角色在同一空间，user_location 应填 with_user。'
+                '除非最近对话明确表明用户已经离开（如「我走了」「到公司了」「我回家了」），否则应维持同处。'
+            )
+        else:
+            up_label = user_place.get("label") or user_place.get("key") or "未知"
+            system += (
+                f'\n用户位置状态（系统记录，基于此前对话/生图判断）: 用户此刻在「{up_label}」，与角色异地。'
+                '除非最近对话明确表明用户已来到角色身边（如「我到了」「开门」「我来找你」），否则 user_location 应填对应地点枚举。'
+            )
     system += (
         "\n场景类型自判: 只要角色与用户有贴身性接触（性交、骑乘、交合、爱抚、拥抱贴身、亲吻、前戏，"
         "或任何用户身体会与角色贴合入画的性暗示情形），都判为亲密场景 is_intimate=true；纯日常、无身体接触才是 false。"
@@ -485,17 +499,17 @@ async def plan_roleplay_image(
         "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。"
         "selfie/portrait/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。"
         "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。"
-        "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third|portrait\",\"aspect_ratio\":\"2:3|3:2\",\"caption\":\"...\",\"new_appearance_tags\":\"...\",\"clothing_off\":\"...\",\"character_location\":\"...\",\"user_location\":\"...\",\"co_located\":true,\"is_intimate\":false,\"partner_in_frame\":false,\"device_in_frame\":false}。"
+        "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third|portrait\",\"aspect_ratio\":\"2:3|3:2\",\"caption\":\"...\",\"new_appearance_tags\":\"...\",\"clothing_off\":\"...\",\"character_location\":\"...\",\"user_location\":\"...\",\"is_intimate\":false,\"partner_in_frame\":false,\"device_in_frame\":false}。"
         "aspect_ratio 选画幅（重要）：只允许 2:3（竖版，832x1216）或 3:2（横版，1216x832）。"
         "默认用 2:3 竖版；当场景以横向元素为主（如地平线、宽阔街景、双人并排、横向躺卧、风景全景）时用 3:2。"
         "近景人像、自拍、特写、站姿、行走、坐姿等纵向构图一律用 2:3。"
         "character_location 填角色此刻所在场所的英文枚举（取值同 user_location，但不含 with_user/unknown）：若上面给出了角色地点约束，必须填那个枚举值；没有约束时按动线与对话自行判断。"
         "is_intimate 是布尔值，按上面的场景类型自判规则给出。"
         "partner_in_frame、device_in_frame 都是布尔值，按上面单人构图硬规则里的定义给出。"
-        "co_located 是布尔值，表示你判断此刻用户是否和角色在同一空间。"
-        "user_location 填你判断的用户此刻所在场所：与角色同处填 with_user，完全无法判断填 unknown，"
+        "user_location 填你判断的用户此刻所在场所（关键）：与角色同处填 with_user，完全无法判断填 unknown，"
         "否则取其一: home/company/school/park/mall/street/cafe/restaurant/transit/convenience/cinema/hotel/hospital/gym/factory/farm/construction/"
         "museum/landmark/temple/library/zoo/amusement/bar/ktv/stadium/supermarket/bookstore/beach/salon。"
+        "系统会从 user_location 自动推导用户是否与角色同处（co_located），你不需要单独输出 co_located。"
         "new_appearance_tags 只填这张图需要额外强调的一次性服装、配饰、临时发型或发色瞳色变化，英文标签逗号分隔；"
         "这些标签只用于本次生图，不会写入长期外型。不要把姿势、表情、动作、场景、灯光写进去。没有一次性外观补充时留空。"
         "clothing_off 填这张图里【应当从角色当前着装中去掉/已脱下/未穿】的服装或配饰（英文标签逗号分隔，如 'cardigan, jacket'），"
@@ -575,13 +589,25 @@ async def plan_roleplay_image(
 
     scene = normalize_scene_visual_subject((parsed.get("scene") or fallback_scene).strip())
     planned_view = normalize_view(parsed.get("view"))
-    # 把 LLM 这次对“用户位置/是否同处”的判断持久化，供下次生图参考与 Web 显示（自带连续性迟滞）。
+    # co_located 从 user_location 推导，不靠 LLM 单独判断。
+    raw_user_loc = (parsed.get("user_location") or "").strip().lower()
+    derived_co_located = raw_user_loc in ("with_user", "with_character", "together")
+    # user_location 匹配角色地点 → 也算同处（用 build_world_state 拿角色地点，有时钟动线兜底）
+    if not derived_co_located and raw_user_loc and raw_user_loc != "unknown":
+        try:
+            world = service.build_world_state(session_id, now=now, mode="image") if hasattr(service, "build_world_state") else {}
+            char_key = (world.get("character_place") or {}).get("key", "")
+            if char_key and raw_user_loc == char_key:
+                derived_co_located = True
+        except Exception:
+            logger.debug("build_world_state for co_located derivation failed", exc_info=True)
+    # 持久化 user_location（co_located 由代码推导，不需要持久化）
     if hasattr(service, "_apply_llm_user_location"):
         try:
             service._apply_llm_user_location(
                 session_id,
-                user_location=parsed.get("user_location") or "",
-                co_located=bool(parsed.get("co_located")),
+                user_location=raw_user_loc,
+                co_located=derived_co_located,
                 now=now,
             )
         except Exception:
@@ -600,7 +626,7 @@ async def plan_roleplay_image(
     device_in_frame = bool(parsed.get("device_in_frame")) or device_hint
     two_person = is_intimate or partner_in_frame
     default_view = "selfie"
-    if two_person or bool(parsed.get("co_located")):
+    if two_person or derived_co_located:
         default_view = "pov"
     final_view = requested_view or planned_view or default_view
     if scene_implies_mirror_selfie(scene) and (device_in_frame or not two_person):

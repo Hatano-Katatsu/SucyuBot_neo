@@ -19,7 +19,7 @@ const viewMeta = {
   overview: ["总览", "服务状态、连接测试和快捷入口"],
   settings: ["设置", "连接、模型、生图和推送参数"],
   characters: ["角色", "角色池、角色设定、长期记忆与日记"],
-  world: ["动线", "按用户查看角色每日动线、城市地点和用户位置"],
+  world: ["动线", "按用户查看角色实时位置、后续去向、城市地点和用户位置"],
   logs: ["日志", "按用户查看活动日志"],
   usage: ["用量", "LLM 模型按任务维度的 token 消耗与缓存命中率"],
   actions: ["操作", "向指定 Chat ID 发送命令或文字"],
@@ -156,7 +156,7 @@ const commandHelp = {
   "自拍": ["按当前会话和聊天情境生成一张图。", ""],
   "拍照": ["等同于 /自拍。", ""],
   "天气": ["查看城市天气；留空时使用当前会话城市。", "上海"],
-  "天气设置": ["设置当前会话的城市、时区和天气来源；也会用于每日动线和城市地点增强。", "上海"],
+  "天气设置": ["设置当前会话的城市、时区和天气来源；也会用于动线和城市地点增强。", "上海"],
   "画风": ["查看、添加、删除或切换画风池。", "查看 / 添加 @artist / 删除 @artist / 切换 @artist"],
   "角色": ["设定角色，或管理角色档案。", "天童爱丽丝 / list / load 名称 / delete 名称 / clearup / reset"],
   "外型": ["查看或修改穿搭、物种特征、发型瞳色。", "black dress, glasses"],
@@ -982,7 +982,7 @@ async function loadWorldSessions() {
     if (!state.sessions.length) {
       state.selectedWorldSession = null;
       state.worldPreview = null;
-      $("#world-title").textContent = "每日动线";
+      $("#world-title").textContent = "实时动线";
       $("#world-subtitle").textContent = "暂无用户";
       $("#world-content").innerHTML = `<div class="empty-state">暂无用户。机器人收到 Telegram 消息后会自动出现在这里。</div>`;
       return;
@@ -1068,6 +1068,26 @@ function renderCatalog(catalog = {}) {
   return `<div class="catalog-list"><div class="catalog-head">城市地点目录${updated}</div>${rows}</div>`;
 }
 
+function renderPlaceHistory(history = []) {
+  if (!history.length) return `<div class="empty-state">还没有位置轨迹，对话几轮后会自动记录。</div>`;
+  const items = history.slice(-8);
+  return `<div class="timeline-list">${items.map((item, idx) => {
+    const isLast = idx === items.length - 1;
+    const classes = isLast ? "timeline-item now" : "timeline-item";
+    const sourceLabel = item.source === "tool" ? "工具声明" : item.source === "llm" ? "LLM 识别" : "";
+    return `
+      <article class="${classes}">
+        <time>${escapeHtml(item.ago || "")}</time>
+        <div>
+          <strong>${escapeHtml(item.label || item.key || "未知地点")}</strong>
+          ${sourceLabel ? `<p>来源 ${escapeHtml(sourceLabel)} · 置信度 ${Number(item.confidence || 0).toFixed(0)}%</p>` : ""}
+          ${isLast ? `<div class="tag-row"><span>📍 当前位置</span></div>` : ""}
+        </div>
+      </article>
+    `;
+  }).join("")}</div>`;
+}
+
 function renderTimeline(timeline = []) {
   if (!timeline.length) return `<div class="empty-state">没有可显示的动线。</div>`;
   return `<div class="timeline-list">${timeline.map(item => {
@@ -1096,10 +1116,10 @@ function renderWorldRoute(world) {
     return;
   }
   const session = world.session || {};
-  $("#world-title").textContent = worldSessionTitle(session) || "每日动线";
+  $("#world-title").textContent = worldSessionTitle(session) || "实时动线";
   $("#world-subtitle").textContent = `${world.city || "未设置城市"} · UTC${world.timezone || "-"} · ${world.weather || "天气未知"}`;
   if (!world.enabled) {
-    box.innerHTML = `<div class="empty-state">自动动线已关闭。可在“设置 → 推送与本地控制台 → 启用自动动线”打开。</div>`;
+    box.innerHTML = `<div class="empty-state">自动动线已关闭。可在"设置 → 推送与本地控制台 → 启用自动动线"打开。</div>`;
     return;
   }
   const current = world.current || {};
@@ -1129,7 +1149,11 @@ function renderWorldRoute(world) {
       ${override}
     </section>
     <section class="world-block">
-      <h4>候选地点</h4>
+      <h4>最近轨迹</h4>
+      ${renderPlaceHistory(current.character_place_history || [])}
+    </section>
+    <section class="world-block">
+      <h4>后续可能去向</h4>
       <div class="chip-row">${renderCandidateChips(current.character_candidates || [])}</div>
     </section>
     <section class="world-block">
@@ -1137,12 +1161,12 @@ function renderWorldRoute(world) {
       <ul class="constraint-list">${constraints || "<li>暂无额外约束</li>"}</ul>
     </section>
     <section class="world-block">
-      <h4>今日预览</h4>
-      ${renderTimeline(world.timeline || [])}
-    </section>
-    <section class="world-block">
       <h4>城市地点</h4>
       ${renderCatalog(world.catalog || {})}
+    </section>
+    <section class="world-block">
+      <h4>今日参考</h4>
+      ${renderTimeline(world.timeline || [])}
     </section>
   `;
 }

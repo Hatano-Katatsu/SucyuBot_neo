@@ -322,39 +322,6 @@ PLACE_TYPES: dict[str, dict[str, Any]] = {
     },
 }
 
-PLACE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("home", re.compile(r"(到家|回家|在家|家里|客厅|卧室|厨房|玄关|阳台|my home|at home)", re.I)),
-    ("company", re.compile(r"(公司|办公室|上班|工位|写字楼|公司楼下|office|work)", re.I)),
-    ("school", re.compile(r"(学校|大学|教室|上课|有课|放学|校园|school|college|university|classroom)", re.I)),
-    ("park", re.compile(r"(公园|湖边|草坪|散步|park)", re.I)),
-    ("mall", re.compile(r"(商场|购物中心|商城|试衣|逛街|mall|shopping)", re.I)),
-    ("street", re.compile(r"(大街|街上|路上|路口|商业街|street|road)", re.I)),
-    ("cafe", re.compile(r"(咖啡店|咖啡馆|咖啡厅|cafe|coffee)", re.I)),
-    ("restaurant", re.compile(r"(餐厅|饭店|吃饭|晚饭|午饭|restaurant|dinner|lunch)", re.I)),
-    ("transit", re.compile(r"(地铁|车站|公交|出租车|高铁|火车站|机场|station|subway|train|airport)", re.I)),
-    ("convenience", re.compile(r"(便利店|小卖部|convenience|store)", re.I)),
-    ("cinema", re.compile(r"(电影院|电影票|影厅|cinema|movie)", re.I)),
-    ("hotel", re.compile(r"(酒店|旅馆|民宿|hotel)", re.I)),
-    ("hospital", re.compile(r"(医院|诊所|候诊|hospital|clinic)", re.I)),
-    ("gym", re.compile(r"(健身房|健身|运动馆|gym)", re.I)),
-    ("factory", re.compile(r"(工厂|车间|厂里|流水线|生产线|factory|plant)", re.I)),
-    ("farm", re.compile(r"(田里|田间|地里|农田|菜地|果园|大棚|种地|farm|field)", re.I)),
-    ("construction", re.compile(r"(工地|脚手架|施工现场|construction site)", re.I)),
-    ("museum", re.compile(r"(博物馆|纪念馆|美术馆|科技馆|展览馆|展馆|museum|gallery)", re.I)),
-    ("landmark", re.compile(r"(景点|景区|名胜|地标|观景台|打卡点|attraction|landmark|scenic)", re.I)),
-    ("temple", re.compile(r"(寺庙|寺院|神社|道观|教堂|庙里|鸟居|参拜|temple|shrine|church)", re.I)),
-    ("library", re.compile(r"(图书馆|借阅|阅览室|library)", re.I)),
-    ("zoo", re.compile(r"(动物园|水族馆|海洋馆|植物园|温室馆|zoo|aquarium)", re.I)),
-    ("amusement", re.compile(r"(游乐园|游乐场|摩天轮|过山车|嘉年华|迪士尼|环球影城|amusement|theme park)", re.I)),
-    ("bar", re.compile(r"(酒吧|清吧|居酒屋|夜店|bar|pub|nightclub)", re.I)),
-    ("ktv", re.compile(r"(ktv|量贩|包厢|卡拉ok|karaoke)", re.I)),
-    ("stadium", re.compile(r"(体育馆|体育场|球场|竞技场|演唱会|演出场馆|stadium|arena)", re.I)),
-    ("supermarket", re.compile(r"(超市|大卖场|大润发|沃尔玛|山姆会员|supermarket)", re.I)),
-    ("bookstore", re.compile(r"(书店|书城|书吧|bookstore)", re.I)),
-    ("beach", re.compile(r"(海边|海滨|沙滩|海岸|海滩|beach|seaside)", re.I)),
-    ("salon", re.compile(r"(美容院|美发店|理发店|美甲店|做头发|spa|沙龙|salon)", re.I)),
-]
-
 CITY_CATALOG_KEYS = set(PLACE_TYPES)
 
 # 场所类目 → 高德 POI 关键字搜索用的中文关键字。只映射"有真实公共 POI"的类目；
@@ -705,37 +672,6 @@ class WorldRuntimeMixin:
             "co_located": False,
         }
 
-    def _infer_user_place(self, text: str) -> tuple[str, str] | tuple[None, None]:
-        text = text or ""
-        if re.search(r"(不在家|没在家|不在公司|没在公司|不是在)", text):
-            return None, None
-        for key, pattern in PLACE_PATTERNS:
-            match = pattern.search(text)
-            if match:
-                prefix = text[max(0, match.start() - 10):match.start()]
-                mentions_self = re.search(r"(我|俺|咱|本人|这边|这里|这儿)", prefix)
-                mentions_other = re.search(r"(你|姐姐|哥哥|妹妹|她|他|角色|蕾伊|小姐)", prefix)
-                if mentions_other and not mentions_self:
-                    continue
-                return key, match.group(0)
-        return None, None
-
-    def _update_user_place_from_text(self, session_id: str, text: str) -> bool:
-        if not session_id or not self._world_runtime_enabled():
-            return False
-        key, matched = self._infer_user_place(text)
-        if not key:
-            return False
-        state = self._get_session_state(session_id)
-        session_schema.set_user_place(
-            state, key=key, label=PLACE_TYPES[key]["label"],
-            text=matched or (text or "")[:40],
-            updated_at=time.time(), confidence=0.85,
-            co_located=False,  # 用户报了独立地点，清除同处标记
-        )
-        self._mark_dirty(session_id)
-        return True
-
     # ---- 角色位置持久化：对话/工具确立的位置在新鲜期内优先于时钟推断，消除跨上下文的位置漂移 ----
     def _active_character_place(self, state: dict[str, Any]) -> dict[str, Any] | None:
         try:
@@ -882,18 +818,79 @@ class WorldRuntimeMixin:
             return False
         return self._set_character_place(session_id, key, text, 0.8, source="llm", name=place_name)
 
+    def _infer_user_place_from_checkpoint(self, session_id: str) -> dict[str, Any] | None:
+        """从已有 checkpoint 摘要中推断用户位置，用于 user_place 过期/未知时的兜底。
+
+        不调 LLM——仅用 PLACE_TYPES 标签/示例与 checkpoint 文本做关键词匹配。
+        返回 dict 格式同 _active_user_place，或 None。
+        """
+        if not session_id or not self._world_runtime_enabled():
+            return None
+        cp_text = ""
+        try:
+            cp = self.app_store.get_checkpoint(session_id, self._context_character_key(session_id))
+            cp_text = (cp.get("summary") or "").strip()
+        except Exception:
+            pass
+        if not cp_text:
+            state = self._get_session_state(session_id)
+            cp_text = session_schema.get_checkpoint_summary(state) or ""
+        if not cp_text:
+            return None
+        for pkey, pinfo in PLACE_TYPES.items():
+            label = pinfo["label"]
+            if label in cp_text:
+                return {"key": pkey, "label": label, "co_located": False, "source": "checkpoint"}
+            for ex in pinfo.get("examples", []):
+                if ex in cp_text:
+                    return {"key": pkey, "label": label, "co_located": False, "source": "checkpoint"}
+        if any(w in cp_text for w in ("一起", "同处", "陪在", "在一起", "同一空间")):
+            return {"key": "", "label": "与角色同处", "co_located": True, "source": "checkpoint"}
+        return None
+
     async def tool_update_location(self, session_id: str, place: str = "") -> str:
         """聊天模型显式声明角色换到新地点时调用，持续生效，优先于时钟动线。"""
         place = (place or "").strip()
         if not place:
             return "未提供地点。"
-        key, matched = self._infer_user_place(place)
+        key = ""
+        for pkey, pinfo in PLACE_TYPES.items():
+            if pinfo["label"] in place or place in pinfo["label"]:
+                key = pkey
+                break
+            if any(ex in place for ex in pinfo.get("examples", [])):
+                key = pkey
+                break
         if not key:
             return f"无法识别地点「{place[:30]}」，位置未更新。可用：家/公司/学校/商场/咖啡店/餐厅/公园/街道/车站/便利店等。"
         # place 是模型给的完整地名（如"上海海军博物馆"），整段存为具体地名；key 仅作类别用于动线规则。
-        self._set_character_place(session_id, key, matched or place, 0.95, source="tool", name=place)
+        self._set_character_place(session_id, key, place, 0.95, source="tool", name=place)
         self._ulog(session_id, "MOVE", f"角色移动到 {PLACE_TYPES[key]['label']}（{place[:30]}）")
         return f"已记录角色当前在 {PLACE_TYPES[key]['label']}。"
+
+    async def tool_update_user_location(self, session_id: str, place: str = "") -> str:
+        """聊天模型从用户消息/上下文推断用户当前位置时调用，持续生效，覆盖冷启动未知状态。"""
+        place = (place or "").strip()
+        if not place:
+            return "用户位置: 未提供地点。"
+        co_located = any(w in place for w in ("同处", "一起", "同一空间", "在一起", "with_user", "with_character", "together"))
+        if co_located:
+            self._apply_llm_user_location(session_id, "with_user", True, text=f"工具推断：与角色同处（{place[:40]}）", source="tool")
+            self._ulog(session_id, "ULOC", f"聊天 LLM 判定用户与角色同处（{place[:30]}）")
+            return "已记录用户与角色同处。"
+        key = ""
+        for pkey, pinfo in PLACE_TYPES.items():
+            if pinfo["label"] in place or place in pinfo["label"]:
+                key = pkey
+                break
+            if any(ex in place for ex in pinfo.get("examples", [])):
+                key = pkey
+                break
+        if not key:
+            return f"无法识别用户地点「{place[:30]}」，未更新。可用：家/公司/学校/商场/咖啡店/餐厅/公园/街道/车站/便利店等。"
+        self._apply_llm_user_location(session_id, key, False, text=f"工具推断：{place[:40]}", source="tool")
+        self._ulog(session_id, "ULOC", f"聊天 LLM 判定用户在 {PLACE_TYPES[key]['label']}（{place[:30]}）")
+        return f"已记录用户当前在 {PLACE_TYPES[key]['label']}。"
 
     def _apply_llm_user_location(
         self,
@@ -901,8 +898,10 @@ class WorldRuntimeMixin:
         user_location: str,
         co_located: bool,
         now: datetime | None = None,
+        text: str = "",
+        source: str = "llm",
     ) -> bool:
-        """把生图前 LLM 对【用户当前位置 / 是否与角色同处】的判断写入会话状态。
+        """把 LLM 对【用户当前位置 / 是否与角色同处】的判断写入会话状态。
 
         带迟滞：判成 unknown（或非法值）时不清空旧状态，保留到 TTL 自然过期，
         避免视角在"同处/异地"之间来回抖动。具体地点或同处判断才覆盖。
@@ -915,22 +914,22 @@ class WorldRuntimeMixin:
         if co_located or loc in ("with_user", "with_character", "together", "同处", "一起"):
             session_schema.set_user_place(
                 state,
-                key="", label="与角色同处", text="生图前判断：与角色在同一空间",
-                updated_at=now_ts, confidence=None, co_located=True, source="llm",
+                key="", label="与角色同处", text=(text or "生图前判断：与角色在同一空间"),
+                updated_at=now_ts, confidence=None, co_located=True, source=source,
             )
             self._mark_dirty(session_id)
-            self._ulog(session_id, "LOC", f"规划器判定 co_located=True user_location={user_location or '-'} → 与角色同处(视角倾向 POV)")
+            self._ulog(session_id, "LOC", f"用户位置判定 co_located=True user_location={user_location or '-'} → 与角色同处")
             return True
         if loc in PLACE_TYPES:
             session_schema.set_user_place(
                 state,
-                key=loc, label=PLACE_TYPES[loc]["label"], text="生图前推断",
-                updated_at=now_ts, confidence=None, co_located=False, source="llm",
+                key=loc, label=PLACE_TYPES[loc]["label"], text=(text or "生图前推断"),
+                updated_at=now_ts, confidence=None, co_located=False, source=source,
             )
             self._mark_dirty(session_id)
-            self._ulog(session_id, "LOC", f"规划器判定 co_located=False user_location={user_location or '-'} → 用户在 {PLACE_TYPES[loc]['label']}(异地，视角倾向 selfie)")
+            self._ulog(session_id, "LOC", f"用户位置判定 co_located=False user_location={user_location or '-'} → 用户在 {PLACE_TYPES[loc]['label']}")
             return True
-        self._ulog(session_id, "LOC", f"规划器给出 co_located={co_located} user_location={user_location or '-'} → unknown/非法，迟滞保留旧状态")
+        self._ulog(session_id, "LOC", f"用户位置给出 co_located={co_located} user_location={user_location or '-'} → unknown/非法，迟滞保留旧状态")
         return False  # unknown / 非法值：迟滞，保留旧状态直到过期
 
     def _world_relation_text(self, character_place: dict[str, Any], user_place: dict[str, Any] | None) -> str:
@@ -1030,10 +1029,9 @@ class WorldRuntimeMixin:
         next_now, next_period = self._next_period_datetime(now)
         next_place = self._place_for_time(city, next_now, weather, mode=mode, profile=profile)
         user_place = self._active_user_place(state)
-        if user_text:
-            key, matched = self._infer_user_place(user_text)
-            if key:
-                user_place = {"key": key, "label": PLACE_TYPES[key]["label"], "text": matched or "", "updated_at": time.time()}
+        if not user_place:
+            user_place = self._infer_user_place_from_checkpoint(session_id)
+        place_history = session_schema.get_character_place_history(state)
         catalog = getattr(self, "city_place_catalogs", {}).get(self._city_catalog_key(city), {})
         enhanced = bool(isinstance(catalog, dict) and catalog.get("places"))
         return {
@@ -1051,6 +1049,7 @@ class WorldRuntimeMixin:
             "next_time_period": next_period,
             "life_profile": profile,
             "user_place": user_place,
+            "character_place_history": place_history,
             "relation": self._world_relation_text(character_place, user_place),
             "constraints": self._world_constraints(character_place, weather),
             "spatial_override": self._get_session_cfg(session_id, "spatial_relationship", ""),
