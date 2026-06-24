@@ -184,7 +184,7 @@ class ChatContextMixin:
             logger.warning("chat message sqlite append failed", exc_info=True)
         full_snapshot = list(history)
         # 仅做存储兜底裁剪（远高于 checkpoint 周期，正常不触及），并同步 short_context_start。
-        # 发给模型的窗口由 _chat_prompt_history（checkpoint 锚定）决定，不在这里逐轮滑动。
+        # 发给模型的窗口由 _active_chat_history 固定窗口 + checkpoint 前置决定。
         self._apply_history_trim(state, self._history_storage_cap())
         self._save_session_state(session_id, state)
         self._queue_checkpoint_if_needed(session_id, full_snapshot)
@@ -272,7 +272,7 @@ class ChatContextMixin:
             )
         # 对话进行中：对话已建立的场景优先，动线只作背景；只有冷启动/刚换场景才以动线引导，
         # 避免角色随现实时间被算法"传送"（家→公园这类飘移）。对话态不钉死时钟地点（pin_location=False）。
-        active_dialog = bool(self._chat_prompt_history(state))
+        active_dialog = bool(self._active_chat_history(state))
         world_context = self._format_world_context(
             session_id, user_text, mode="chat", pin_location=not active_dialog
         )
@@ -315,9 +315,9 @@ class ChatContextMixin:
                 "不要主动带入当前场景；只有用户明确说继续刚才、上一张、那个话题时才引用。\n"
             )
 
-        # ── 稳定上下文（仅在 checkpoint / dream 时更新，变化低频，适合作前缀缓存）──
-        # 包含：checkpoint 摘要、角色历史提要、长期记忆。放在历史之后、动态 system 之前，
-        # 使 [静态 system] + [历史] + [稳定上下文] 构成可缓存前缀；仅动态部分（时间/光线/世界状态）逐轮冲刷。
+        # ── 稳定上下文（仅在 checkpoint / dream 时更新，变化低频）──
+        # 包含：checkpoint 摘要、角色历史提要、长期记忆。放在历史之前，与静态 system
+        # 共同构成缓存前缀；历史用固定长度滑动窗口，前缀结构每轮一致。
         stable_parts: list[str] = []
         checkpoint_context = self._checkpoint_context(session_id)
         if checkpoint_context:
@@ -339,17 +339,14 @@ class ChatContextMixin:
                 f"{memory_context}"
             )
 
-        # 拼接顺序刻意为前缀缓存优化：
-        #   [静态 system] + [聊天历史] + [照片注入] + [稳定上下文] + [动态 system] + [本轮 user]
-        # 静态前缀与逐轮追加的历史构成稳定前缀；照片注入每隔几轮就变，必须放在历史之后，
-        # 否则它一变就会作废后面整段历史的前缀缓存（checkpoint 攒下的命中红利会被清零）。
-        # 稳定上下文（checkpoint/历史提要/记忆）变化低频，放在照片之后、动态之前，
-        # 使 [静态+历史+照片+稳定] 在两次 checkpoint/dream 之间几乎不动，最大化前缀缓存命中。
+        # 拼接顺序：
+        #   [静态 system] + [稳定上下文: checkpoint/历史提要/记忆] + [历史(固定窗口)] + [照片注入] + [动态 system] + [本轮 user]
+        # 静态 + 稳定 + 历史（固定长度）构成稳定前缀，最大化 DeepSeek 前缀缓存命中。
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_static}]
-        messages.extend(self._chat_prompt_history(state))
-        self._inject_photo_history_messages(messages, state)
         if stable_parts:
             messages.append({"role": "system", "content": "\n\n".join(stable_parts)})
+        messages.extend(self._active_chat_history(state, self._checkpoint_keep_message_limit()))
+        self._inject_photo_history_messages(messages, state)
         messages.append({"role": "system", "content": system_dynamic})
         messages.append({"role": "user", "content": user_text})
         return messages
@@ -666,7 +663,7 @@ class ChatContextMixin:
     def _history_storage_cap(self) -> int:
         """chat_history 的存储兜底上限：取 checkpoint 周期阈值的 3 倍，远大于正常运行所需。
 
-        发给模型的窗口由 checkpoint 折叠 + _chat_prompt_history 决定，这里只在 checkpoint
+        发给模型的窗口由 _active_chat_history 固定窗口决定，这里只在 checkpoint
         长期失联（任务 hang、反复异常）时防止 chat_history 无限膨胀，正常运行永不触及。
         """
         return self._context_window_message_limit() * 3
@@ -690,7 +687,7 @@ class ChatContextMixin:
         """把 chat_history 从头部裁到 limit 条，并同步下移 short_context_start。
 
         short_context_start 是 chat_history 的下标（短期场景起点）。从头部删消息会让
-        所有下标左移，必须同量下移这个起点，否则 _chat_prompt_history 的切片会错位
+        所有下标左移，必须同量下移这个起点，否则 _active_chat_history 的切片会错位
         （丢掉本应保留的当前场景消息，甚至取到空窗口）。
         """
         history = session_schema.get_chat_history(state)

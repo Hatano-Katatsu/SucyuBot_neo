@@ -26,15 +26,6 @@ logger = logging.getLogger(__name__)
 
 
 class SchedulerRuntimeMixin:
-    def _get_recent_chat_history(self, state: dict[str, Any], session_id: str = "") -> str | None:
-        recent = []
-        now_ts = time.time()
-        for msg in session_schema.get_recent_message_history(state):
-            if now_ts - msg.get("time", 0) < 3 * 3600:
-                dt = datetime.fromtimestamp(msg["time"], self._session_tz(session_id))
-                recent.append(f"[{dt.strftime('%H:%M')}] 用户: {msg.get('text', '')}")
-        return "\n".join(recent) if recent else None
-
     def _format_scene_continuity_context(
         self,
         state: dict[str, Any],
@@ -73,156 +64,19 @@ class SchedulerRuntimeMixin:
         )
 
     async def _llm_write_scene(self, mode, weather, weekday, time_period, recent_chat=None, session_id="", now=None, weather_data=None):
+        from .image_planning import plan_roleplay_image
         if not self.has_llm_config("image"):
             return None, None, None, None
-        state = self._get_session_state(session_id)
-        spatial = self._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])
-        spatial_hint = f"默认物理空间设定（{spatial}）" if str(spatial).strip() else "默认无固定空间设定"
-        purity = self._get_purity(session_id)
-        if hasattr(self, "_ensure_life_profile"):
-            try:
-                await self._ensure_life_profile(session_id)
-            except Exception:
-                logger.debug("life profile ensure failed for scheduler scene", exc_info=True)
-
-        # 复用完整的聊天上下文（静态 + 稳定 + 动态），只追加场景生成的特定指令。
-        system_base = self._build_scene_system_prompt(session_id, weather=weather_data or weather, mode=mode, now=now)
-        system = (
-            f"{system_base}\n\n"
-            "主动推送时优先遵守当前世界状态：把画面写成角色日常动线里的一个自然片段，不要无理由瞬移到用户身边。"
-            "但如果后面存在短期连续性上下文，短期连续性优先于自动动线。\n"
-            "Scene boundary: write scene as environment, camera framing, action, lighting, mood, and spatial context. "
-            "Do not restate stable character appearance that is already in persona/current appearance/photo memory, such as hair color, eye color, body traits, species traits, or permanent accessories. "
-            "Scheduled pushes should not invent persistent outfit or appearance changes unless the user has explicitly asked for them.\n"
-            "你只需要构思发送给用户的画面，输出简短中文画面描述 scene 和一句中文台词 caption，不要输出英文画图标签。\n"
-            "户外、办公室等公开场景必须穿着得体；深夜和私密场合可更放松。"
-            "\n画面主体规则: 图片主体默认必须是角色，不要把'你/用户'写成画面中被观看的主角。"
-            "用户只能作为视角来源、互动对象或少量局部元素出现；只有用户明确要求双人同框时，才允许用户作为第二主体。"
-            "如果草案写成'你坐着/你躺着/你穿着'，必须改写为'角色坐着/她躺着/角色穿着'。"
-            "角色名只用于台词称呼；默认或原创角色不要把名字当作画面标签，画面描述应依靠角色类型和外貌特征。既有作品角色可以保留角色名和作品名。"
-            "\n模式要求:\n"
-            "morning: 必须使用 pov，刚睡醒、厨房或卧室早安场景。\n"
-            f"normal: 根据{spatial_hint}和近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror。\n"
-            f"ntr: 用户超过 {self._compute_ntr_threshold(purity)} 天没有互动时的冷落惩罚推送，强烈 NTR 危机感，通常 portrait（他人帮角色拍）、selfie 或分屏。\n"
-            "取景物理规则: view=selfie 是前摄自拍（伸手举手机），画面中不得出现手机本体、手机 UI、相机、镜子或拿手机的手；"
-            "view=portrait 是他人帮角色拍的照片（拍摄者在画面外、角色看向镜头，画面里只有角色），NTR 冷落场景适合用，同样不出现手机/相机/镜子；"
-            "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。\n"
-            "selfie/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。\n"
-            "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。\n"
-            "必须输出严格 JSON: {\"scene\":\"...\",\"caption\":\"...\",\"view\":\"selfie|mirror|pov|third|portrait\"}。"
+        plan = await plan_roleplay_image(
+            self, session_id, mode=mode or "normal",
+            weather_data=weather_data, now=now,
         )
-        prompt = f"当前时段: {time_period}，星期: {weekday}，天气: {weather}，推送模式: {mode}。"
-        if recent_chat:
-            prompt += f"\n近期对话:\n{recent_chat}\n请呼应这些上下文。"
-        try:
-            text = await self._call_llm(system, prompt, temp=float(self._get_llm_value("image", "temperature_scene", "0.95")), tag="scene", purpose="image")
-            parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
-            view = (parsed.get("view") or "").strip().lower()
-            if view not in VALID_VIEWS:
-                view = "pov" if mode == "morning" else "selfie"
-            # normal 模式定时推送是角色主动发给用户的消息，应避免使用 third 第三人称
-            # （那样会失去"角色主动分享自己视角"的推送感），统一回退到 selfie。
-            if mode == "normal" and view == "third":
-                view = "selfie"
-            scene = normalize_scene_visual_subject(parsed.get("scene") or "")
-            if scene_implies_mirror_selfie(scene):
-                view = "mirror"
-            # 主动推送/自拍不再让场景生成器自主换装：旧的"随机惊喜换装"已移除，且本条管道的
-            # system prompt 输出的是中文，若读取 new_appearance_tags 会把未翻译的中文塞进 one_shot_appearance。
-            # 一次性换装仍由聊天配图的 image_planning（英文 new_appearance_tags）负责。
-            return scene, parsed.get("caption") or "", None, view
-        except Exception as exc:
-            logger.error("LLM scene generation failed: %s", exc)
-            return None, None, None, None
-        persona = self._get_effective_persona(session_id)
-        spatial = self._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])
-        spatial_hint = f"默认物理空间设定（{spatial}）" if str(spatial).strip() else "默认无固定空间设定"
-        state = self._get_session_state(session_id)
-        role_name, bot_name, bot_self_name = self._session_role_identity(session_id)
-        dynamic = self._effective_dynamic_appearance(session_id)
-        prompt_prefs = self._prompt_scene_preferences(session_id) if hasattr(self, "_prompt_scene_preferences") else {}
-        purity = self._get_purity(session_id)
-        safety = self._get_effective_safety(session_id)
-        world_context = ""
-        if hasattr(self, "_ensure_life_profile"):
-            try:
-                await self._ensure_life_profile(session_id)
-            except Exception:
-                logger.debug("life profile ensure failed for scheduler scene", exc_info=True)
-        if hasattr(self, "_format_world_context"):
-            try:
-                world_context = self._format_world_context(session_id, "", weather=weather_data or weather, mode=mode, now=now)
-            except Exception:
-                logger.debug("world context build failed for scheduler scene", exc_info=True)
-        continuity_context = self._format_scene_continuity_context(state, session_id, now=now)
-        time_light = self._format_time_context(session_id, now=now, weather=weather_data or weather)
-        light_guard = self._format_light_guard(session_id, now=now, weather=weather_data or weather)
-
-        system = (
-            f"{persona}\n\n"
-            "Scene boundary: write scene as environment, camera framing, action, lighting, mood, and spatial context. "
-            "Do not restate stable character appearance that is already in persona/current appearance/photo memory, such as hair color, eye color, body traits, species traits, or permanent accessories. "
-            "Scheduled pushes should not invent persistent outfit or appearance changes unless the user has explicitly asked for them.\n"
-            f"角色身份: 当前角色是「{bot_name}」（{role_name}），优先使用「{bot_self_name}」作为自称；不要写成其他默认角色。\n"
-            f"当前附加外貌: {dynamic or '无'}\n"
-            f"用户画面偏好: 场景偏好={prompt_prefs.get('scene_preference') or '无'}；自拍偏好={prompt_prefs.get('selfie_preference') or '无'}。\n"
-            f"角色性观念: {self._purity_directive(purity)}\n"
-            f"当前场合: {time_period}, {weekday}, {safety.get('context', '')}。\n"
-            f"季节与自然光: {time_light}。\n"
-            f"{light_guard}\n"
-            "你只需要构思发送给用户的画面，输出简短中文画面描述 scene 和一句中文台词 caption，不要输出英文画图标签。\n"
-            "户外、办公室等公开场景必须穿着得体；深夜和私密场合可更放松。"
+        return (
+            plan.get("scene") or "",
+            plan.get("caption") or "",
+            plan.get("new_appearance_tags") or "",
+            plan.get("view") or "",
         )
-        if world_context:
-            system += (
-                f"\n{world_context}\n"
-                "主动推送时优先遵守当前世界状态：把画面写成角色日常动线里的一个自然片段，不要无理由瞬移到用户身边。"
-                "但如果后面存在短期连续性上下文，短期连续性优先于自动动线。"
-            )
-        if continuity_context:
-            system += f"\n{continuity_context}"
-        system += (
-            "\n画面主体规则: 图片主体默认必须是角色，不要把“你/用户”写成画面中被观看的主角。"
-            "用户只能作为视角来源、互动对象或少量局部元素出现；只有用户明确要求双人同框时，才允许用户作为第二主体。"
-            "如果草案写成“你坐着/你躺着/你穿着”，必须改写为“角色坐着/她躺着/角色穿着”。"
-            "角色名只用于台词称呼；默认或原创角色不要把名字当作画面标签，画面描述应依靠角色类型和外貌特征。既有作品角色可以保留角色名和作品名。"
-        )
-        system += (
-            "\n模式要求:\n"
-            "morning: 必须使用 pov，刚睡醒、厨房或卧室早安场景。\n"
-            f"normal: 根据{spatial_hint}和近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror。\n"
-            f"ntr: 用户超过 {self._compute_ntr_threshold(purity)} 天没有互动时的冷落惩罚推送，强烈 NTR 危机感，通常 portrait（他人帮角色拍）、selfie 或分屏。\n"
-            "取景物理规则: view=selfie 是前摄自拍（伸手举手机），画面中不得出现手机本体、手机 UI、相机、镜子或拿手机的手；"
-            "view=portrait 是他人帮角色拍的照片（拍摄者在画面外、角色看向镜头，画面里只有角色），NTR 冷落场景适合用，同样不出现手机/相机/镜子；"
-            "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。\n"
-            "selfie/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。\n"
-            "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。\n"
-            "必须输出严格 JSON: {\"scene\":\"...\",\"caption\":\"...\",\"view\":\"selfie|mirror|pov|third|portrait\"}。"
-        )
-        prompt = f"当前时段: {time_period}，星期: {weekday}，天气: {weather}，推送模式: {mode}。"
-        if recent_chat:
-            prompt += f"\n近期对话:\n{recent_chat}\n请呼应这些上下文。"
-        try:
-            text = await self._call_llm(system, prompt, temp=float(self._get_llm_value("image", "temperature_scene", "0.95")), tag="scene", purpose="image")
-            parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
-            view = (parsed.get("view") or "").strip().lower()
-            if view not in VALID_VIEWS:
-                view = "pov" if mode == "morning" else "selfie"
-            # normal 模式定时推送是角色主动发给用户的消息，应避免使用 third 第三人称
-            # （那样会失去“角色主动分享自己视角”的推送感），统一回退到 selfie。
-            if mode == "normal" and view == "third":
-                view = "selfie"
-            scene = normalize_scene_visual_subject(parsed.get("scene") or "")
-            if scene_implies_mirror_selfie(scene):
-                view = "mirror"
-            # 主动推送/自拍不再让场景生成器自主换装：旧的“随机惊喜换装”已移除，且本条管道的
-            # system prompt 输出的是中文，若读取 new_appearance_tags 会把未翻译的中文塞进 one_shot_appearance。
-            # 一次性换装仍由聊天配图的 image_planning（英文 new_appearance_tags）负责。
-            return scene, parsed.get("caption") or "", None, view
-        except Exception as exc:
-            logger.error("LLM scene generation failed: %s", exc)
-            return None, None, None, None
-
     # ---------------------------------------------------------------------
     # Weather / scheduler
     # ---------------------------------------------------------------------
@@ -619,7 +473,6 @@ class SchedulerRuntimeMixin:
             self._ulog(session_id, "PUSH", f"触发 mode={mode}")
             w = await self._fetch_weather(session_id=session_id)
             weather = f"{w['desc']} {w['temp']} C" if w else "未知"
-            recent = self._get_recent_chat_history(state, session_id)
             time_ctx = self._get_time_context(session_id, now=local_dt, weather=w)
             time_period = time_ctx.get("period") or self._get_time_period(local_dt.hour)
             if hasattr(self, "_ensure_life_profile"):
@@ -649,7 +502,7 @@ class SchedulerRuntimeMixin:
                 weather,
                 WEEKDAY_NAMES[local_dt.weekday()],
                 time_period,
-                recent,
+                None,
                 session_id,
                 now=local_dt,
                 weather_data=w,
@@ -667,7 +520,7 @@ class SchedulerRuntimeMixin:
                 await self.send_photo(chat_id, imgs[0], caption or "")
                 source = self._format_image_source_description(
                     intent=f"{mode} 模式自动推送，时段: {time_period}，天气: {weather}",
-                    prompt=recent or "",
+                    prompt=caption or "",
                 )
                 self._record_sent_photo(session_id, scene, caption or "", appearance=new_app or None, view=view, source_description=source)
             else:

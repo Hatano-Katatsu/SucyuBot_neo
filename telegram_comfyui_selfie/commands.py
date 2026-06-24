@@ -837,15 +837,13 @@ class CommandHandlersMixin:
             await self.send_message(chat_id, "正在拍照中，请稍后再试。")
             return
         await self.send_action(chat_id, "upload_photo")
-        state = self._get_session_state(session_id)
         now = self._session_now(session_id)
         w = await self._fetch_weather(session_id=session_id)
         weather = f"{w['desc']} {w['temp']} C" if w else "未知"
         time_ctx = self._get_time_context(session_id, now=now, weather=w)
         time_period = time_ctx.get("period") or self._get_time_period(now.hour)
-        recent = self._get_recent_chat_history(state, session_id)
         scene, caption, new_app, view = await self._llm_write_scene(
-            "normal", weather, WEEKDAY_NAMES[now.weekday()], time_period, recent, session_id, now=now, weather_data=w
+            "normal", weather, WEEKDAY_NAMES[now.weekday()], time_period, None, session_id, now=now, weather_data=w
         )
         if not scene:
             scene, caption = random.choice(SCENES)
@@ -860,9 +858,10 @@ class CommandHandlersMixin:
         await self.send_photo(chat_id, imgs[0], caption or "")
         for extra in imgs[1:]:
             await self.send_photo(chat_id, extra)
+        state = self._get_session_state(session_id)
         source = self._format_image_source_description(
             intent=f"自拍命令生成的 normal 模式画面，时段: {time_period}，天气: {weather}",
-            prompt=recent or "",
+            prompt=caption or "",
         )
         self._record_sent_photo(
             session_id,

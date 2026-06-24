@@ -224,27 +224,13 @@ def normalize_scene_visual_subject(scene: str) -> str:
 
 def format_dialog_context(service: Any, state: dict[str, Any], session_id: str = "", limit: int = 12) -> str | None:
     lines = []
-    history = session_schema.get_chat_history(state)
-    try:
-        start = session_schema.get_short_context_start(state)
-    except Exception:
-        start = 0
-    if start < 0 or start > len(history):
-        start = 0
-    for msg in history[start:][-limit:]:
+    for msg in service._active_chat_history(state, limit):
         content = (msg.get("content") or "").strip()
         if not content:
             continue
         role = "用户" if msg.get("role") == "user" else "角色"
         lines.append(f"{role}: {content}")
 
-    recent = []
-    for msg in session_schema.get_recent_message_history(state):
-        if service._within(msg.get("time", 0), 3 * 3600):
-            dt = datetime.fromtimestamp(msg["time"], service._session_tz(session_id))
-            recent.append(f"[{dt.strftime('%H:%M')}] 用户: {msg.get('text', '')}")
-    if recent:
-        lines.append("近 3 小时用户发言:\n" + "\n".join(recent))
     return "\n".join(lines) if lines else None
 
 
@@ -278,17 +264,23 @@ async def plan_roleplay_image(
     service: Any,
     session_id: str,
     *,
+    mode: str = "chat",
     intent: str = "",
     mood: str = "",
     must_include: str = "",
     prompt: str = "",
     view: str = "",
+    weather_data: Any = None,
+    now: Any = None,
 ) -> dict[str, Any]:
     requested_view = normalize_view(view)
     fallback_scene = (prompt or intent or must_include).strip()
     fallback_intimate_hint = _detect_intimate_context(intent, mood, prompt)
     fallback_device_hint = _detect_device_context(intent, mood, prompt)
     fallback_clothing_off = _infer_clothing_off_fallback(intent, mood, prompt)
+    needs_caption = mode != "chat"
+    if now is None:
+        now = service._session_now(session_id)
     if not service.has_llm_config("image"):
         fallback_view = requested_view
         if fallback_intimate_hint and not fallback_device_hint and fallback_view in {"selfie", "mirror"}:
@@ -301,6 +293,7 @@ async def plan_roleplay_image(
             "is_intimate": fallback_intimate_hint,
             "partner_in_frame": False,
             "device_in_frame": fallback_device_hint,
+            "caption": "",
         }
 
     state = service._get_session_state(session_id)
@@ -364,17 +357,38 @@ async def plan_roleplay_image(
     user_gender = service._get_user_gender(session_id) if hasattr(service, "_get_user_gender") else "male"
     user_g_zh = "女性" if user_gender == "female" else "男性"
 
+    is_push = mode in ("normal", "morning", "ntr")
+    spatial_hint = service._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])
+    spatial_label = f"默认物理空间设定（{spatial_hint}）" if str(spatial_hint).strip() else "默认无固定空间设定"
+
     system = (
         f"{service._get_effective_persona(session_id)}\n\n"
         "Scene boundary: write scene as environment, camera framing, action, lighting, mood, and spatial context. "
         "Do not restate stable character appearance that is already in persona/current appearance/photo memory, such as hair color, eye color, body traits, species traits, or permanent accessories. "
         "Only mention clothing/accessories in scene when they are a deliberate one-shot visual change for this image; put one-shot visual tags in new_appearance_tags.\n"
-        "你是角色扮演图片导演，负责把聊天模型给出的图片意图整合成最终画面。\n"
-        f"角色身份: 当前角色是「{bot_name}」（{role_name}），优先使用「{bot_self_name}」作为自称；不要写成其他默认角色。\n"
+    )
+    if is_push:
+        system += (
+            f"你是角色扮演推送图片导演。当前推送模式: {mode}。\n"
+            "主动推送时把画面写成角色日常动线里的自然片段，不要无理由瞬移到用户身边；短期连续性上下文优先于自动动线。\n"
+            f"角色身份: 当前角色是「{bot_name}」（{role_name}），优先使用「{bot_self_name}」作为自称；不要写成其他默认角色。\n"
+            f"模式要求:\n"
+            "morning: 必须使用 pov，刚睡醒、厨房或卧室早安场景。\n"
+            f"normal: 根据{spatial_label}和近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror。\n"
+            f"ntr: 用户长时间未互动的冷落惩罚推送，强烈 NTR 危机感，通常 portrait（他人帮角色拍）、selfie 或分屏。\n"
+        )
+        temporal = time_period
+    else:
+        system += (
+            f"你是角色扮演图片导演，负责把聊天模型给出的图片意图整合成最终画面。\n"
+            f"角色身份: 当前角色是「{bot_name}」（{role_name}），优先使用「{bot_self_name}」作为自称；不要写成其他默认角色。\n"
+        )
+        temporal = f"{time_period}, {weekday}"
+    system += (
         f"当前附加外貌: {dynamic or '无'}\n"
         f"用户画面偏好: 场景偏好={prompt_prefs.get('scene_preference') or '无'}；自拍偏好={prompt_prefs.get('selfie_preference') or '无'}。\n"
         f"角色性观念: {service._purity_directive(purity)}\n"
-        f"当前场合: {time_period}, {weekday}, {safety.get('context', '')}。\n"
+        f"当前场合: {temporal}, {safety.get('context', '')}。\n"
         f"季节与自然光: {time_light}。\n"
         f"{light_guard}\n"
         f"{spatial_line}"
@@ -464,7 +478,7 @@ async def plan_roleplay_image(
         "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。"
         "selfie/portrait/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。"
         "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。"
-        "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third|portrait\",\"new_appearance_tags\":\"...\",\"clothing_off\":\"...\",\"character_location\":\"...\",\"user_location\":\"...\",\"co_located\":true,\"is_intimate\":false,\"partner_in_frame\":false,\"device_in_frame\":false}。"
+        "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third|portrait\",\"caption\":\"...\",\"new_appearance_tags\":\"...\",\"clothing_off\":\"...\",\"character_location\":\"...\",\"user_location\":\"...\",\"co_located\":true,\"is_intimate\":false,\"partner_in_frame\":false,\"device_in_frame\":false}。"
         "character_location 填角色此刻所在场所的英文枚举（取值同 user_location，但不含 with_user/unknown）：若上面给出了角色地点约束，必须填那个枚举值；没有约束时按动线与对话自行判断。"
         "is_intimate 是布尔值，按上面的场景类型自判规则给出。"
         "partner_in_frame、device_in_frame 都是布尔值，按上面单人构图硬规则里的定义给出。"
@@ -472,7 +486,6 @@ async def plan_roleplay_image(
         "user_location 填你判断的用户此刻所在场所：与角色同处填 with_user，完全无法判断填 unknown，"
         "否则取其一: home/company/school/park/mall/street/cafe/restaurant/transit/convenience/cinema/hotel/hospital/gym/factory/farm/construction/"
         "museum/landmark/temple/library/zoo/amusement/bar/ktv/stadium/supermarket/bookstore/beach/salon。"
-        "聊天模型已经给出文字回复，这张图只配画面、不需要任何台词或配文，不要输出 caption 字段。"
         "new_appearance_tags 只填这张图需要额外强调的一次性服装、配饰、临时发型或发色瞳色变化，英文标签逗号分隔；"
         "这些标签只用于本次生图，不会写入长期外型。不要把姿势、表情、动作、场景、灯光写进去。没有一次性外观补充时留空。"
         "clothing_off 填这张图里【应当从角色当前着装中去掉/已脱下/未穿】的服装或配饰（英文标签逗号分隔，如 'cardigan, jacket'），"
@@ -482,6 +495,16 @@ async def plan_roleplay_image(
         "填了裸露/脱衣后，scene 里不要再把已脱下的衣服写成穿着或贴身（如『湿裙子贴着胸口』），改写裸露肌肤或仅用床单/泡沫等遮挡。"
         "这是一次性的、只影响本图，绝不写入长期衣柜（事后会自动恢复原着装）。没有脱衣/裸露时留空。"
     )
+
+    if needs_caption:
+        system += (
+            "\ncaption 填一句简短的中文台词（纯文本，角色口吻），本图的配文。"
+            "scene 描述本次画面的英文自然语言场景（不要中文）。"
+        )
+    else:
+        system += (
+            "\n聊天模型已经给出文字回复，这张图只配画面、不需要任何台词或配文，不要输出 caption 字段。"
+        )
 
     if str(service.config.get("image_backend", "native") or "native").lower() == "animatool":
         try:
@@ -494,14 +517,19 @@ async def plan_roleplay_image(
         if turbo_hint:
             system += turbo_hint
 
-    user = (
-        f"当前天气: {weather}\n"
-        f"图片意图: {intent or '未提供'}\n"
-        f"情绪/关系推进: {mood or '未提供'}\n"
-        f"必须包含: {must_include or '无'}\n"
-        f"聊天模型画面草案: {prompt or '无'}\n"
-        f"用户指定视角: {requested_view or '未指定'}"
-    )
+    if is_push:
+        user = (
+            f"当前时段: {time_period}，星期: {weekday}，天气: {weather}，推送模式: {mode}。"
+        )
+    else:
+        user = (
+            f"当前天气: {weather}\n"
+            f"图片意图: {intent or '未提供'}\n"
+            f"情绪/关系推进: {mood or '未提供'}\n"
+            f"必须包含: {must_include or '无'}\n"
+            f"聊天模型画面草案: {prompt or '无'}\n"
+            f"用户指定视角: {requested_view or '未指定'}"
+        )
     if dialog_context:
         user += f"\n\n对话上下文:\n{dialog_context}"
     if photo_context:
@@ -531,6 +559,7 @@ async def plan_roleplay_image(
             "is_intimate": intimate_hint,
             "partner_in_frame": False,
             "device_in_frame": device_hint,
+            "caption": "",
         }
 
     scene = normalize_scene_visual_subject((parsed.get("scene") or fallback_scene).strip())
@@ -586,6 +615,7 @@ async def plan_roleplay_image(
     return {
         "scene": scene,
         "view": final_view,
+        "caption": (parsed.get("caption") or "").strip(),
         "new_appearance_tags": (parsed.get("new_appearance_tags") or "").strip(),
         "clothing_off": clothing_off,
         "is_intimate": is_intimate,
