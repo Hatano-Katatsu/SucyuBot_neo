@@ -323,7 +323,7 @@ def _strip_conflicting_scene_outfit(scene_desc: str, outfit_override: list[str],
     outfit_alt = "|".join(sorted(keywords, key=len, reverse=True))
     patterns = [
         rf"\b(?:wears?|wearing|dressed\s+in)\s+[^,.;]*(?:{outfit_alt})[^,.;]*",
-        rf"\b(?:black|white|blue|red|pink|purple|green|yellow|brown|gray|grey|dark|light)\s+[^,.;]*(?:{outfit_alt})[^,.;]*",
+        rf"(?<![A-Za-z-])(?:black|white|blue|red|pink|purple|green|yellow|brown|gray|grey|dark|light)\s+[^,.;]*(?:{outfit_alt})[^,.;]*",
     ]
     text = scene_desc
     for pattern in patterns:

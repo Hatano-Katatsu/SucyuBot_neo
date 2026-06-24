@@ -2,7 +2,7 @@ import asyncio
 import copy
 import json
 import os
-import tempfile
+import shutil
 import time
 import unittest
 from datetime import datetime, timezone
@@ -13,7 +13,7 @@ from telegram_comfyui_selfie import TelegramComfyUIService
 from telegram_comfyui_selfie import appearance as appearance_rules
 from telegram_comfyui_selfie import character_card
 from telegram_comfyui_selfie import session_schema
-from telegram_comfyui_selfie.image_planning import _detect_intimate_context, _detect_nudity_context, format_dialog_context, format_sent_photo_context, normalize_scene_visual_subject, plan_roleplay_image
+from telegram_comfyui_selfie.image_planning import _detect_intimate_context, _detect_nudity_context, _infer_clothing_off_fallback, format_dialog_context, format_sent_photo_context, normalize_scene_visual_subject, plan_roleplay_image
 from telegram_comfyui_selfie.commands import (
     SESSION_GLOBAL_STATE_KEYS,
     _is_character_config_key,
@@ -21,6 +21,29 @@ from telegram_comfyui_selfie.commands import (
 )
 from telegram_comfyui_selfie.prompt_intake import heuristic_intake
 from telegram_comfyui_selfie.webui import build_world_route_preview, cast_config_value, masked_config, serialize_prompt_slots, session_summary
+
+
+os.environ.setdefault("SUCYUBOT_TEST_FAST_SQLITE", "1")
+
+TEST_TMP_ROOT = Path(__file__).resolve().parents[1] / ".tmp" / "tests"
+_TEST_TMP_READY = False
+_TEST_TMP_COUNTER = 0
+
+
+def make_project_temp_dir(prefix: str = "case") -> Path:
+    """为测试创建项目内临时目录；每次测试进程启动先清理上次残留。"""
+    global _TEST_TMP_READY, _TEST_TMP_COUNTER
+    if not _TEST_TMP_READY:
+        if TEST_TMP_ROOT.exists():
+            shutil.rmtree(TEST_TMP_ROOT, ignore_errors=True)
+        TEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+        _TEST_TMP_READY = True
+    _TEST_TMP_COUNTER += 1
+    path = TEST_TMP_ROOT / f"{prefix}_{int(time.time() * 1000)}_{_TEST_TMP_COUNTER}"
+    if path.exists():
+        shutil.rmtree(path, ignore_errors=True)
+    path.mkdir(parents=True, exist_ok=False)
+    return path
 
 
 def make_mock_request(app, path, method="GET", admin=False, query=None):
@@ -32,16 +55,17 @@ def make_mock_request(app, path, method="GET", admin=False, query=None):
     return req
 
 
-class ServiceTestCase(unittest.TestCase):
+class ServiceFixtureMixin:
     def make_service(self):
-        tmp = tempfile.TemporaryDirectory()
-        root = Path(tmp.name)
+        root = make_project_temp_dir("service")
         cfg = root / "config.json"
         state = root / "state.json"
         cfg.write_text(json.dumps({"telegram_bot_token": "TEST"}, ensure_ascii=False), encoding="utf-8")
         svc = TelegramComfyUIService(cfg, state)
-        self.addCleanup(tmp.cleanup)
         return svc
+
+
+class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
     def test_parse_command_with_bot_mention(self):
         svc = self.make_service()
@@ -2611,6 +2635,8 @@ class ServiceTestCase(unittest.TestCase):
             "outfit": "white shirt, dark pleated skirt",
             "allow_change_appearance": "false",
         })
+        self.assertEqual(state["character"]["custom_character"], "小雨")
+        self.assertEqual(state["character"]["custom_allow_llm_change_appearance"], False)
         self.assertEqual(session_schema.get_outfit(state), "white shirt, dark pleated skirt")
         self.assertIs(state["custom_allow_llm_change_appearance"], False)
         card = svc._character_export_payload(state)
@@ -2619,6 +2645,7 @@ class ServiceTestCase(unittest.TestCase):
         # 三态空 → 跟随全局(None)
         svc._apply_character_payload(state, {"allow_change_appearance": ""})
         self.assertIsNone(state["custom_allow_llm_change_appearance"])
+        self.assertIsNone(state["character"]["custom_allow_llm_change_appearance"])
 
     def test_character_card_schema_single_source(self):
         """角色卡字段集单一来源（character_card）：导出/快照/默认卡共用同一字段集，
@@ -2643,6 +2670,8 @@ class ServiceTestCase(unittest.TestCase):
         payload = {k: v for k, v in export.items() if k != "id"}
         fresh = svc._get_session_state("telegram:2")
         svc._apply_character_payload(fresh, payload)
+        self.assertEqual(fresh["character"]["custom_character"], payload["character"])
+        self.assertEqual(fresh["custom_character"], payload["character"])
         self.assertEqual(
             {k: v for k, v in svc._character_export_payload(fresh).items() if k != "id"},
             payload,
@@ -2769,7 +2798,7 @@ class ServiceTestCase(unittest.TestCase):
             "session",
         })
         self.assertEqual(set(ss.CHARACTER_CONFIG_EXTRA_KEYS),
-                         {"purity", "purity_user_set", "persona_user_set"})
+                         {"character", "purity", "purity_user_set", "persona_user_set"})
         # clothing 三字段已收进 clothing 盒；reset 保留的短期态单元现为 clothing + life_profile。
         self.assertEqual(set(ss.RESET_PRESERVED_TRANSIENT_KEYS),
                          {"clothing", "life_profile"})
@@ -2777,6 +2806,7 @@ class ServiceTestCase(unittest.TestCase):
         defaults = ss.state_defaults()
         self.assertIn("last_interaction", defaults)          # 动态时间戳
         self.assertEqual(defaults["custom_bot_name"], "")
+        self.assertEqual(defaults["character"], {})
         self.assertIsNone(defaults["purity"])
         self.assertEqual(defaults["clothing"]["wardrobe"], {})  # 衣柜在 clothing 盒内
         self.assertNotIn("ntr_affection_reset", defaults)    # 动态产生，无默认
@@ -2792,6 +2822,47 @@ class ServiceTestCase(unittest.TestCase):
             ]
             self.assertEqual(hits.count(True), 1, f"{k} 必须恰好属于一类，实际命中 {hits}")
 
+    def test_character_box_migration_and_accessors(self):
+        """character box：旧扁平角色配置迁移进盒、访问器读写、双写兼容、幂等。"""
+        from telegram_comfyui_selfie import session_schema as ss
+
+        self.assertEqual(ss.box_for("character"), ss.BOX_CHARACTER)
+        self.assertEqual(ss.box_for("custom_bot_name"), ss.BOX_CHARACTER)
+        self.assertEqual(ss.box_for("purity"), ss.BOX_CHARACTER)
+        self.assertEqual(ss.box_for("life_profile"), ss.BOX_CONTEXT)
+
+        legacy = {
+            "custom_bot_name": "林翩翩",
+            "custom_positive_prefix": "1girl, blue eyes",
+            "purity": 6,
+            "some_other": "keep",
+        }
+        box = ss.ensure_character_box(legacy)
+        self.assertIn("custom_bot_name", legacy)  # 非破坏迁移，旧扁平键保留
+        self.assertEqual(box["custom_bot_name"], "林翩翩")
+        self.assertEqual(box["custom_positive_prefix"], "1girl, blue eyes")
+        self.assertEqual(box["purity"], 6)
+        self.assertEqual(ss.get_character_value(legacy, "custom_bot_name"), "林翩翩")
+        self.assertEqual(ss.get_custom_value(legacy, "bot_name"), "林翩翩")
+
+        # 扁平直写仍优先，并同步回盒，保证旧访问点兼容。
+        legacy["custom_bot_name"] = "新名字"
+        self.assertEqual(ss.get_character_value(legacy, "custom_bot_name"), "新名字")
+        self.assertEqual(legacy["character"]["custom_bot_name"], "新名字")
+
+        ss.set_character_value(legacy, "custom_current_style", "@00 gx4")
+        self.assertEqual(legacy["character"]["custom_current_style"], "@00 gx4")
+        self.assertEqual(legacy["custom_current_style"], "@00 gx4")
+
+        boxed_only = {"character": {"custom_bot_name": "盒内角色", "custom_positive_prefix": "silver hair"}}
+        ss.ensure_character_box(boxed_only)
+        self.assertEqual(boxed_only["custom_bot_name"], "盒内角色")
+        self.assertEqual(ss.get_character_value(boxed_only, "custom_positive_prefix"), "silver hair")
+
+        before = copy.deepcopy(legacy["character"])
+        ss.ensure_character_box(legacy)
+        self.assertEqual(legacy["character"], before)
+
     def test_clothing_box_migration_and_accessors(self):
         """clothing box：旧扁平字段迁移进盒、访问器读写、子键补齐、幂等。"""
         from telegram_comfyui_selfie import session_schema as ss
@@ -2800,7 +2871,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(ss.box_for("place"), ss.BOX_PLACE)
         self.assertEqual(ss.box_for("custom_bot_name"), ss.BOX_CHARACTER)
         self.assertEqual(ss.box_for("chat_history"), ss.BOX_CONTEXT)
-        self.assertEqual(ss.box_for("life_profile"), ss.BOX_CHARACTER)
+        self.assertEqual(ss.box_for("life_profile"), ss.BOX_CONTEXT)
 
         # 旧扁平持久态：顶层有 dynamic_appearance/wardrobe/wardrobe_closet → 迁移进盒并删顶层
         legacy = {
@@ -3426,11 +3497,22 @@ class ServiceTestCase(unittest.TestCase):
         self.assertTrue(_detect_nudity_context("两人做爱中"))
         self.assertTrue(_detect_nudity_context("她全裸躺在床上"))
         self.assertTrue(_detect_nudity_context("把衣服都脱了"))
+        self.assertTrue(_detect_nudity_context("衣服脱了"))
+        self.assertTrue(_detect_nudity_context("脱了衣服"))
         # 暧昧/可能已重新着装的词不触发（宁可漏判不可误脱）
         self.assertFalse(_detect_nudity_context("事后温存，相拥而眠"))
         self.assertFalse(_detect_nudity_context("刚洗完澡出来"))
         self.assertFalse(_detect_nudity_context("今天穿了新裙子"))
+        self.assertFalse(_detect_nudity_context("脱了外套"))
+        self.assertFalse(_detect_nudity_context("寝衣滑落到手肘"))
         self.assertFalse(_detect_nudity_context(""))
+
+    def test_clothing_off_fallback_distinguishes_full_and_partial_nudity(self):
+        self.assertEqual(_infer_clothing_off_fallback("衣服脱了"), "completely nude")
+        self.assertEqual(_infer_clothing_off_fallback("她宽衣解带坐到床边"), "completely nude")
+        self.assertEqual(_infer_clothing_off_fallback("寝衣滑落到手肘"), "topless")
+        self.assertEqual(_infer_clothing_off_fallback("衣襟敞开，露出胸口"), "topless")
+        self.assertEqual(_infer_clothing_off_fallback("脱了外套"), "")
 
     def test_planner_nudity_fallback_fills_clothing_off(self):
         """规划器漏填 clothing_off 但对话有明确裸体信号时，兜底补 completely nude；
@@ -3452,8 +3534,14 @@ class ServiceTestCase(unittest.TestCase):
             # ① 意图含明确性爱/裸体 → 兜底补 nude
             plan = await plan_roleplay_image(svc, "telegram:101", intent="做爱后想要一张全裸的照片")
             self.assertEqual(plan["clothing_off"], "completely nude")
+            plan = await plan_roleplay_image(svc, "telegram:104", intent="衣服脱了")
+            self.assertEqual(plan["clothing_off"], "completely nude")
 
-            # ② 普通意图 → 不补
+            # ② 半脱语义 → 只补局部裸露，不误判全裸；普通意图/脱外套 → 不补
+            plan = await plan_roleplay_image(svc, "telegram:105", intent="寝衣滑落到手肘")
+            self.assertEqual(plan["clothing_off"], "topless")
+            plan = await plan_roleplay_image(svc, "telegram:106", intent="脱了外套")
+            self.assertEqual(plan["clothing_off"], "")
             plan = await plan_roleplay_image(svc, "telegram:102", intent="看看你在客厅做什么")
             self.assertEqual(plan["clothing_off"], "")
 
@@ -3642,6 +3730,24 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("oversized white sweater", low)
         self.assertNotIn("dark brown hair", low)
         self.assertNotIn("black fitted dress", low)
+
+    def test_scene_outfit_cleanup_does_not_split_hyphenated_color_words(self):
+        from telegram_comfyui_selfie.generation import _strip_conflicting_scene_outfit
+
+        kept = _strip_conflicting_scene_outfit(
+            "moon-white nightgown slips to her elbows",
+            ["current hanfu"],
+            ["nightgown"],
+        )
+        self.assertIn("moon-white nightgown", kept)
+        self.assertNotIn("moon-wearing the current outfit", kept)
+
+        replaced = _strip_conflicting_scene_outfit(
+            "white nightgown slips to her elbows",
+            ["current hanfu"],
+            ["nightgown"],
+        )
+        self.assertIn("wearing the current outfit", replaced)
 
     def test_daytime_prompt_rewrites_premature_sunset_terms(self):
         svc = self.make_service()
@@ -4017,7 +4123,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("partial male body visible", pos_lower)
 
 
-class CheckpointTrimTestCase(ServiceTestCase):
+class CheckpointTrimTestCase(ServiceFixtureMixin, unittest.TestCase):
     """TODO #9.4: checkpoint 裁剪测试 — 51+ messages 后 checkpoint，窗口 10 messages，不能 assistant 开头。"""
 
     def test_checkpoint_trims_to_keep_and_never_starts_with_assistant(self):
@@ -4058,7 +4164,7 @@ class CheckpointTrimTestCase(ServiceTestCase):
         asyncio.run(run())
 
 
-class DreamManualMemoryTestCase(ServiceTestCase):
+class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
     """TODO #9.5: dream 记忆整理测试 — manual 记忆不被 update/delete。"""
 
     def test_dream_memory_organize_skips_manual(self):
@@ -4096,7 +4202,7 @@ class DreamManualMemoryTestCase(ServiceTestCase):
         asyncio.run(run())
 
 
-class GitUpdatePermissionTestCase(ServiceTestCase):
+class GitUpdatePermissionTestCase(ServiceFixtureMixin, unittest.TestCase):
     """TODO #9: Git 更新权限测试 — 仅管理员可触发。"""
 
     def test_is_admin_chat_uses_admin_chat_ids_first(self):
@@ -4140,7 +4246,7 @@ class GitUpdatePermissionTestCase(ServiceTestCase):
         asyncio.run(run())
 
 
-class ExternalProxyTestCase(ServiceTestCase):
+class ExternalProxyTestCase(ServiceFixtureMixin, unittest.TestCase):
     """外部 POI 请求复用 Telegram 代理配置。"""
 
     def test_external_http_proxy_disabled(self):
@@ -4171,7 +4277,7 @@ class ExternalProxyTestCase(ServiceTestCase):
         self.assertIsInstance(connector, ProxyConnector)
 
 
-class LLMUsageTestCase(ServiceTestCase):
+class LLMUsageTestCase(ServiceFixtureMixin, unittest.TestCase):
     """LLM usage 记录与看板接口测试。"""
 
     def test_record_usage_from_response_with_cache_hit_tokens(self):
@@ -4301,8 +4407,67 @@ class LLMUsageTestCase(ServiceTestCase):
 
         asyncio.run(run())
 
+    def test_llm_debug_records_are_buffered_and_keep_recent_ten(self):
+        svc = self.make_service()
+        path = svc._llm_debug_log_path()
+        resolved = {
+            "profile_id": "debug-profile",
+            "model": "debug-model",
+            "thinking": False,
+        }
 
-class ModelProfileTestCase(ServiceTestCase):
+        def record(index: int, tag: str = "reply"):
+            svc._record_llm_debug(
+                purpose="chat",
+                tag=tag,
+                session_id="telegram:1",
+                resolved=resolved,
+                request_url="https://example.invalid/v1/chat/completions",
+                request_body={
+                    "model": "debug-model",
+                    "messages": [{"role": "user", "content": f"message-{index}"}],
+                },
+                response={
+                    "choices": [{"message": {"content": f"response-{index}"}}],
+                    "usage": {
+                        "prompt_tokens": 100 + index,
+                        "completion_tokens": 10,
+                        "total_tokens": 110 + index,
+                        "prompt_cache_hit_tokens": 80 + index,
+                    },
+                },
+                status=200,
+            )
+
+        for i in range(9):
+            record(i)
+        self.assertFalse(path.exists(), "不足 10 条时不应落盘，避免频繁 IO")
+
+        record(9)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        entries = data["entries_by_type"]["chat:reply"]
+        self.assertEqual(len(entries), 10)
+        self.assertEqual(entries[0]["request"]["body"]["messages"][0]["content"], "message-0")
+        self.assertEqual(entries[-1]["response"]["choices"][0]["message"]["content"], "response-9")
+        self.assertEqual(entries[-1]["usage"]["cached_tokens"], 89)
+        self.assertIn("replace whole file after 10", data.get("flush_policy", ""))
+
+        for i in range(10, 20):
+            record(i)
+        data2 = json.loads(path.read_text(encoding="utf-8"))
+        entries2 = data2["entries_by_type"]["chat:reply"]
+        self.assertEqual(len(entries2), 10)
+        self.assertEqual(entries2[0]["request"]["body"]["messages"][0]["content"], "message-10")
+        self.assertEqual(entries2[-1]["request"]["body"]["messages"][0]["content"], "message-19")
+
+        record(20, tag="scene")
+        svc._flush_llm_debug(force=True)
+        data3 = json.loads(path.read_text(encoding="utf-8"))
+        self.assertIn("chat:reply", data3["entries_by_type"])
+        self.assertEqual(data3["entries_by_type"]["chat:scene"][-1]["request"]["body"]["messages"][0]["content"], "message-20")
+
+
+class ModelProfileTestCase(ServiceFixtureMixin, unittest.TestCase):
     """模型 profile 固定思考、去 kimi 等配置测试。"""
 
     def test_default_profiles_contain_only_expected_models(self):
@@ -4421,18 +4586,16 @@ models:
         self.assertIn("\n", flatten_config(rt)["outfit_keywords"])
 
     def make_temp_dir(self) -> str:
-        import tempfile
-        return tempfile.mkdtemp()
+        return str(make_project_temp_dir("config"))
 
 
-class SessionStateMigrationTestCase(ServiceTestCase):
+class SessionStateMigrationTestCase(ServiceFixtureMixin, unittest.TestCase):
     """state.json -> SQLite 迁移测试。"""
 
     def test_state_json_migrates_to_sqlite_on_first_load(self):
-        import tempfile
         import json as _json
 
-        tmp = Path(tempfile.mkdtemp())
+        tmp = make_project_temp_dir("state_json")
         config_path = tmp / "config.yml"
         config_path.write_text("telegram:\n  telegram_bot_token: \"t\"\n", encoding="utf-8")
         state_path = tmp / "state.json"
@@ -4470,10 +4633,46 @@ class SessionStateMigrationTestCase(ServiceTestCase):
         self.assertTrue(svc.app_store.has_session_states())
         sqlite_state = svc.app_store.load_session_state("telegram:42")
         self.assertEqual(sqlite_state["custom_character"], "迁移测试角色")
+        self.assertEqual(sqlite_state["character"]["custom_bot_name"], "迁移测试")
+        self.assertIn("context", sqlite_state)
+        self.assertTrue(list(tmp.glob("state.state-json-migration-backup-*.json")))
 
         # city_catalogs 也应在 SQLite
         sqlite_catalog = svc.app_store.load_city_catalog("shanghai")
         self.assertEqual(sqlite_catalog["city"], "上海")
+
+    def test_legacy_sqlite_state_boxes_migrate_on_restart_with_backup(self):
+        tmp = make_project_temp_dir("sqlite_box_migration")
+        config_path = tmp / "config.json"
+        state_path = tmp / "state.json"
+        config_path.write_text(json.dumps({"telegram_bot_token": "TEST"}, ensure_ascii=False), encoding="utf-8")
+
+        svc = TelegramComfyUIService(config_path, state_path)
+        sid = "telegram:box"
+        svc.app_store.save_session_state(sid, {
+            "custom_bot_name": "旧角色",
+            "custom_positive_prefix": "1girl, red eyes",
+            "purity": 5,
+            "dynamic_appearance": "blue dress",
+            "chat_history": [{"role": "user", "content": "旧消息"}],
+            "user_place": "home",
+            "saved_characters": {"旧角色": {"character": "旧角色"}},
+        })
+        self.assertFalse(list(tmp.glob("memory.box-migration-backup-*.sqlite3")))
+
+        restarted = TelegramComfyUIService(config_path, state_path)
+        loaded = restarted.app_store.load_session_state(sid)
+        self.assertEqual(loaded["character"]["custom_bot_name"], "旧角色")
+        self.assertEqual(loaded["character"]["custom_positive_prefix"], "1girl, red eyes")
+        self.assertEqual(loaded["clothing"]["dynamic_appearance"], "blue dress")
+        self.assertEqual(loaded["context"]["chat_history"][0]["content"], "旧消息")
+        self.assertEqual(loaded["place"]["user_place"], "home")
+        self.assertEqual(loaded["session"]["saved_characters"]["旧角色"]["character"], "旧角色")
+        backups = list(tmp.glob("memory.box-migration-backup-*.sqlite3"))
+        self.assertEqual(len(backups), 1)
+
+        TelegramComfyUIService(config_path, state_path)
+        self.assertEqual(len(list(tmp.glob("memory.box-migration-backup-*.sqlite3"))), 1)
 
     def test_save_and_load_session_state_via_sqlite(self):
         svc = self.make_service()

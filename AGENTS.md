@@ -271,17 +271,21 @@ custom_allow_llm_change_appearance : true   # 自动换装开着
 
 ## 交接任务（2026-06-24）：脱衣/外观污染 + 分盒重构进行中
 
-**当前进度（数据结构分盒重构）**：阶段 1（scope 表单一来源）✅、`clothing` 盒切换 ✅、持久裸体态 ✅、穿搭串归一（去重+空格）✅、OC 创建发瞳过滤 ✅、`place` 盒切换 ✅、`context` 盒切换 ✅、`session` 盒切换 ✅。下一步按路线图砌 `character` 盒（最重，~254 个访问点）。
+**当前进度（数据结构分盒重构）**：阶段 1（scope 表单一来源）✅、`clothing` 盒切换 ✅、持久裸体态 ✅、穿搭串归一（去重+空格）✅、OC 创建发瞳过滤 ✅、`place` 盒切换 ✅、`context` 盒切换 ✅、`session` 盒切换 ✅、`character` 盒迁移/访问器/启动备份 ✅、角色卡 + service 共享入口 + commands/WebUI 主要角色写路径访问器化 ✅。`character` 采用非破坏共存策略：旧扁平键保留，访问器和角色卡写入会双写盒与扁平键；盒内已有数据也会反补旧扁平键，保证旧调用点和重启迁移兼容。
 
-**⚠️ 重启线上 bot**：place box 懒迁移依赖 `_get_session_state` → `ensure_place_box`，重启后所有老数据的 14 个扁平位置字段自动收敛到 `state["place"]` 盒。与 clothing box 同理——重启即生效，无需手动清理。
+**LLM 请求调试日志（2026-06-24）**：`service._call_llm_messages()` 会把每次 LLM 调用的完整请求体、完整返回体、usage/cache 摘要按 `purpose:tag` 记录到用户日志目录的 `llm_debug.json`（默认 `data/logs/llm_debug.json`），用于排查 DeepSeek/OpenAI 兼容接口上下文缓存不命中。记录先进入内存缓冲，累计 10 条 LLM 记录后才落盘；落盘时读取旧 JSON、按类型合并并各自只保留最近 10 条，然后通过临时文件整体替换原文件，避免频繁 IO。服务关闭、Web 关闭服务和进程重启前会强制 flush 不足 10 条的尾部记录。
+
+**最新测试结果（2026-06-24）**：Miniforge 3.12 下执行 `$env:PYTHONUTF8='1'; python -m unittest discover -s tests -p test_core.py -v`，结果 `Ran 201 tests in 7.762s`，`OK (skipped=1)`；跳过项为未安装 `aiohttp_socks` 的 SOCKS 代理测试。测试临时文件继续落在 `.tmp/tests`，测试进程首次创建临时目录时自动清理上次残留。为避免 Windows SQLite 建库同步导致测试过慢，测试进程设置 `SUCYUBOT_TEST_FAST_SQLITE=1`，仅测试环境关闭 SQLite 同步/使用内存 journal，生产默认不受影响。
+
+**⚠️ 重启线上 bot**：分盒迁移已接启动期检测。重启后旧 SQLite 会话会先自动备份 `memory.sqlite3` 为 `memory.box-migration-backup-<timestamp>.sqlite3`，再写回 `character/clothing/place/context/session` 盒；旧 `state.json` 首次迁移前也会备份为 `state.state-json-migration-backup-<timestamp>.json`。无需手动清理旧数据。
 
 **线上日志（2026-06-24 00:11–00:14，新角色林翩翩）暴露的待修问题**：
 
-1. **「衣服脱了」不触发裸体（P1，最严重）**。用户「…衣服脱了」、角色「寝衣滑落」，但自拍仍全套汉服。两因叠加：①`image_planning.NUDITY_CONTEXT_ZH` 缺倒装/含蓄词（有「脱掉衣服/脱下衣服/衣服都脱」，**没有「衣服脱了/脱了衣服/宽衣解带/敞开/滑落/褪下」**）；②规划器只写「半脱」（nightgown slips to elbows）、`clothing_off` 留空。方向：补关键词表 + 让明确「半脱/敞胸」也按程度填 `clothing_off`（topless 等）。
+1. ~~**「衣服脱了」不触发裸体（P1，最严重）**~~ ✅ 已修复（2026-06-24）。`image_planning.py` 新增 `_infer_clothing_off_fallback()`：强裸体/性行为/「衣服脱了」「脱了衣服」「宽衣解带」兜底为 `completely nude`；「寝衣滑落」「衣襟敞开」「露出胸口」等半脱语义兜底为 `topless`；「脱了外套」不误判全裸。规划器显式给 `clothing_off` 时仍不覆盖。
 
 2. ~~**新角色被默认魅魔发/瞳污染（P1，根因）**~~ ✅ 已修复（2026-06-24）。`cmd_create_oc` 的 `outfit_tags` 写入前经 `parse_appearance` 分槽剔除 hair/eyes，只保留 outfit/accessory/other。穿搭去重同步修复。
 
-3. **scene 英文被换装去冲突逻辑损坏（P2）**。`generation._strip_conflicting_scene_outfit` 把 `moon-white nightgown…` 替换成 `moon-wearing the current outfit`——颜色词正则 `\b(white|…)` 命中 `moon-white` 的 `white`，把 `moon-` 拦腰截断。方向：替换前要求颜色词左边是空白/句首边界，别截断连字符复合词。
+3. ~~**scene 英文被换装去冲突逻辑损坏（P2）**~~ ✅ 已修复（2026-06-24）。`generation._strip_conflicting_scene_outfit` 的颜色词匹配改为禁止命中连字符复合词中段，`moon-white nightgown` 不再被改成 `moon-wearing the current outfit`；普通 `white nightgown` 仍会按冲突穿搭清理。
 
 4. ~~**outfit 写入时就重复（P2）**~~ ✅ 已修复（2026-06-24）。`cmd_create_oc` 写入前调用 `session_schema.normalize_outfit_string` 折空格+去重，`set_outfit` 内部二次归一，展示与存储两端干净。
 
@@ -308,21 +312,21 @@ custom_allow_llm_change_appearance : true   # 自动换装开着
 | `place` | 短期态 | 14 | ~39 | ✅ 已切（见阶段 2） | world_runtime 为主（最集中） |
 | `context` | 短期态 | 17→盒(+3) | ~61 | ✅ 已切（见阶段 2.5） | chat_context / image_planning / scheduler_runtime / commands(回滚/重答) |
 | `session` | 全局 | 13→盒 | ~62 | ✅ 已切（见阶段 3） | scheduler_runtime / telegram_io(frozen) / commands / service / webui |
-| `character` | **配置** | 28 | **~254** | ⬜ 待切（**最后做**） | 几乎所有模块 + `_get_session_cfg` 动态 `custom_{key}` + character_card + 切角色机器 |
+| `character` | **配置** | 28 | **~254** | ✅ 核心读写已切：迁移/访问器/启动备份、character_card、service 共享入口、commands/WebUI 主要角色写路径 | 后续只需收尾零散旧读点；`custom_user_gender`/`custom_daily_selfie_limit` 不是 character 盒字段 |
 
 ### 建议顺序与理由
 
 1. ~~**`place`（先做）**~~ ✅ 已切（2026-06-24）。字段多但消费几乎全在 `world_runtime.py`，自洽、好测；位置子模型（user/character 各 value/label/text/updated_at/confidence）顺势可收成结构化子对象（阶段 2 位置子对象完成）。
 2. **`context`**——hot 路径集中在 `_build_chat_messages`/`format_dialog_context`/`format_sent_photo_context`/续场，量中等。注意 `chat_history` 与 SQLite `chat_messages` 是双真相（病根 ③），切 context 盒时**不要**顺手改去重，去重留给独立的「阶段 3 对话上下文去重」。
 3. **`session`**——注意 `saved_characters`/`character_contexts` 是**切角色机器自身的容器**（freeze/restore 读写它们），盒化时这两个键的读写在 commands 切角色链路里要一起改、先加测试再动。
-4. **`character`（最后，最重）**——254 个访问点 + 两个深坑：①`_get_session_cfg` 用 `state.get(f"custom_{key}")` **动态键**访问，访问器要支持「按 custom_{key} 读盒」；②character_card 的 `CARD_STRING_FIELDS` 全是 custom_* state 键，切盒时它与卡的 17 个映射要一起走访问器。建议拆成多个小 commit（按消费方分批）。
+4. ~~**`character`（最后，最重）**~~ ✅ 核心读写已切（2026-06-24）。已处理两个深坑：①`_get_session_cfg` 改走 `session_schema.get_custom_value()`，支持动态 `custom_{key}` 读盒；②character_card 的 `CARD_STRING_FIELDS` 改走 `get_character_value()` / `set_character_value()`，导出、快照、导入、WebUI 角色卡保存都会双写盒与旧扁平键。commands/WebUI 的角色创建、加载、导入、删除、个性设置、纯良度、外观基础字段和角色激活等主要写路径也已改为访问器。
 
 ### 横切规则（每砌一盒都遵守）
 
-- **盒必须 scope 纯净**：一个盒只装一种 scope。**当前唯一不纯**：`life_profile`（短期态缓存）被 `box_for` 归进了 `character` 盒（该盒主要是配置）。切 `character`/`context` 盒时**把 `life_profile` 挪进纯短期态盒（归 context）**，使 `character` 盒 = 纯配置。否则「scope 退化成按盒」不成立。
-- **分类器按盒名归类的暗坑**：freeze/clear/snapshot 现在遍历**顶层键**按 scope 分类。字段进盒后顶层键变成**盒名**。clothing 盒名恰好被分类成短期态（对，clothing 是短期态）属侥幸。切 `character` 盒时，盒名 `"character"` 不带 `custom_` 前缀 → 会被误判成短期态（实为配置，应走 saved_characters 卡而非 context 冻结）。**这正是「per-field scope 收敛成 per-box scope」的触发点**：切 character 盒时，把分类器改成认「盒名→scope」（session=全局 / character=配置 / clothing,place,context=短期态），同时 `_conversation_context_payload`/`_clear_transient_state`/`_snapshot_character` 改成按盒操作。
+- **盒必须 scope 纯净**：一个盒只装一种 scope。`life_profile`（短期态缓存）已从 `character` 归回 `context`，保持 `character` 盒 = 纯配置。后续新增字段时继续先判 scope，再判 box，避免把短期态混进角色卡。
+- **分类器按盒名归类的暗坑**：已修复 `character` 盒归类，`box_for("character") == BOX_CHARACTER`，`life_profile` 归 `BOX_CONTEXT`，不再进入角色短期态冻结。freeze/clear/snapshot 仍保留非破坏共存策略：旧扁平字段继续存在，访问器双写，按字段分类路径仍能工作；后续终局可再收敛成纯按盒分类。
 - **`config["xxx"]` 是另一命名空间**：`dynamic_appearance`/`scheduled_persona`/`positive_prefix` 等在 config(全局默认)里同名存在，切盒只动 `state[...]`，**绝不碰 config 那份**（默认角色卡读写它）。
-- **老数据零手动迁移**：靠 `ensure_<box>_box` 在 `_get_session_state` 里懒迁移；不写一次性迁移脚本。
+- **老数据零手动迁移**：靠 `ensure_<box>_box` 在 `_get_session_state` 里懒迁移；启动期也会批量检测旧结构并备份后写回 SQLite。不要写一次性外部迁移脚本。
 
 ### 终局（全部砌完后）
 
@@ -336,9 +340,11 @@ custom_allow_llm_change_appearance : true   # 自动换装开着
 
 改 Prompt 或生图流程时，优先增加小而具体的测试，再改实现。每次改完至少运行：
 
-```bash
-python -m unittest tests.test_core -v
+```powershell
+$env:PYTHONUTF8='1'; python -m unittest discover -s tests -p test_core.py -v
 ```
+
+Miniforge 3.12 环境中 `python -m unittest tests.test_core -v` 会误导入 site-packages 里的 `tests` 包；必须用 discover 指定本项目 `tests` 目录。测试临时文件统一落在项目内 `.tmp/tests`，每次测试进程首次创建临时目录时会清理上次残留。
 
 如果只改文档或 WebUI 文案，可以不跑完整测试，但要在最终回复里说明未运行测试的原因。
 
@@ -370,7 +376,7 @@ python -m unittest tests.test_core -v
 
 ### 当前高风险点
 
-- ~~未跑测试~~ 已跑全量测试：1203 tests OK（1 skipped），与本次改动无关。
+- ~~未跑测试~~ 已跑全量测试：200 tests OK（1 skipped，未安装 `aiohttp_socks`），最新结果见 2026-06-24 交接任务段。
 - WebUI 前端可能有未绑定按钮或 JS 运行时错误。
 - `requirements.txt` 尚未加入 `aiohttp_socks`。
 - ~~config.example.json / config.example.yml 尚未更新~~ 已更新。

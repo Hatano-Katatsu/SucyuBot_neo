@@ -10,6 +10,7 @@ from typing import Any
 from aiohttp import web
 
 from . import session_schema
+from .commands import SESSION_CUSTOM_RESET_KEYS
 from .world_runtime import PLACE_TYPES
 
 
@@ -28,6 +29,19 @@ YAML_ONLY_CONFIG_KEYS = {
     "web_enabled", "web_host", "web_port",
 }
 WORLD_TIMELINE_HOURS = (6, 8, 11, 13, 16, 18, 20, 23)
+
+
+def character_value(state: dict[str, Any], key: str, default: Any = "") -> Any:
+    return session_schema.get_character_value(state, key, default)
+
+
+def active_character_id(state: dict[str, Any]) -> str:
+    return (
+        character_value(state, "custom_character", "")
+        or character_value(state, "custom_bot_name", "")
+        or character_value(state, "custom_role_name", "")
+        or ""
+    ).strip()
 
 
 @web.middleware
@@ -379,8 +393,8 @@ def session_summary(service, session_id: str, state: dict[str, Any]) -> dict[str
     return {
         "session_id": session_id,
         "chat_id": service.chat_id_from_session(session_id),
-        "character": state.get("custom_character") or "",
-        "series": state.get("custom_series") or "",
+        "character": character_value(state, "custom_character", "") or "",
+        "series": character_value(state, "custom_series", "") or "",
         "purity": service._get_purity(session_id),
         "style": service._get_current_style(session_id),
         "location": service._get_session_cfg(session_id, "location", ""),
@@ -551,14 +565,14 @@ def serialize_prompt_slots(service, session_id: str, scene: str = "{场景描述
         "negative": negative,
         "items": items,
         "editable": {
-            "custom_count": state.get("custom_count", ""),
-            "custom_positive_prefix": state.get("custom_positive_prefix", ""),
-            "custom_default_hair": state.get("custom_default_hair", ""),
-            "custom_default_eyes": state.get("custom_default_eyes", ""),
-            "custom_current_style": state.get("custom_current_style", ""),
+            "custom_count": character_value(state, "custom_count", ""),
+            "custom_positive_prefix": character_value(state, "custom_positive_prefix", ""),
+            "custom_default_hair": character_value(state, "custom_default_hair", ""),
+            "custom_default_eyes": character_value(state, "custom_default_eyes", ""),
+            "custom_current_style": character_value(state, "custom_current_style", ""),
             "dynamic_appearance": session_schema.get_outfit(state),
-            "custom_scene_preference": state.get("custom_scene_preference", ""),
-            "custom_selfie_preference": state.get("custom_selfie_preference", ""),
+            "custom_scene_preference": character_value(state, "custom_scene_preference", ""),
+            "custom_selfie_preference": character_value(state, "custom_selfie_preference", ""),
         },
         # 只读：当前衣柜按槽位拆分（编辑仍走上面的 dynamic_appearance 扁平框，保存后会自动重新分槽）。
         "wardrobe": service._get_wardrobe(state),
@@ -679,7 +693,11 @@ async def api_update_session(request: web.Request):
     profile_touched = False
     for key in allowed:
         if key in payload:
-            state[key] = "" if payload[key] is None else str(payload[key])
+            value = "" if payload[key] is None else str(payload[key])
+            if key in session_schema.STATE_SCHEMA and session_schema.is_character_config_key(key):
+                session_schema.set_character_value(state, key, value)
+            else:
+                state[key] = value
             if key in life_profile_keys:
                 profile_touched = True
     # dynamic_appearance 现走 clothing box（不在 allowed 里直写顶层，避免遗留陈旧顶层键）。
@@ -690,17 +708,17 @@ async def api_update_session(request: web.Request):
     if "purity" in payload:
         raw = str(payload["purity"]).strip()
         if raw:
-            state["purity"] = max(0, min(10, int(raw)))
-            state["purity_user_set"] = True
+            session_schema.set_character_value(state, "purity", max(0, min(10, int(raw))))
+            session_schema.set_character_value(state, "purity_user_set", True)
         else:
-            state["purity"] = None
-            state["purity_user_set"] = False
+            session_schema.set_character_value(state, "purity", None)
+            session_schema.set_character_value(state, "purity_user_set", False)
     if "custom_allow_llm_change_appearance" in payload:
         value = payload["custom_allow_llm_change_appearance"]
         if value in ("", None, "default"):
-            state["custom_allow_llm_change_appearance"] = None
+            session_schema.set_character_value(state, "custom_allow_llm_change_appearance", None)
         else:
-            state["custom_allow_llm_change_appearance"] = parse_bool(value)
+            session_schema.set_character_value(state, "custom_allow_llm_change_appearance", parse_bool(value))
     service._save_session_state(sid, state)
     return json_ok({"session": session_summary(service, sid, state), "state": state})
 
@@ -802,7 +820,7 @@ async def api_characters(request: web.Request):
     if hasattr(service, "_snapshot_character"):
         service._snapshot_character(state)
     characters = dict(session_schema.get_saved_characters(state))
-    active_id = (state.get("custom_character") or state.get("custom_bot_name") or state.get("custom_role_name") or "").strip()
+    active_id = active_character_id(state)
     # 如果当前会话已有角色身份但尚未保存进角色池，自动把当前态注入为可编辑条目
     if active_id and active_id not in characters:
         current = service._character_export_payload(state) if hasattr(service, "_character_export_payload") else {}
@@ -841,21 +859,21 @@ async def api_save_character(request: web.Request):
     if is_default_card:
         service._apply_default_character_payload(payload)
         return json_ok({
-            "active_id": state.get("custom_character") or "",
+            "active_id": character_value(state, "custom_character", "") or "",
             "current": service._character_export_payload(state),
             "characters": saved,
             "default": service._default_character_payload(),
         })
-    active_id = state.get("custom_character") or state.get("custom_bot_name") or ""
+    active_id = active_character_id(state)
     force_activate = parse_bool(payload.get("activate")) if "activate" in payload else False
     if hasattr(service, "_apply_character_payload"):
         if force_activate or not active_id or active_id == key:
             service._apply_character_payload(state, payload)
-            if not state.get("custom_character"):
-                state["custom_character"] = key
+            if not character_value(state, "custom_character", ""):
+                session_schema.set_character_value(state, "custom_character", key)
     session_schema.get_saved_characters(state)[key] = {k: v for k, v in payload.items() if k != "id"}
     service._save_session_state(sid, state)
-    return json_ok({"active_id": state.get("custom_character") or "", "current": service._character_export_payload(state), "characters": session_schema.get_saved_characters(state)})
+    return json_ok({"active_id": character_value(state, "custom_character", "") or "", "current": service._character_export_payload(state), "characters": session_schema.get_saved_characters(state)})
 
 
 async def api_delete_character(request: web.Request):
@@ -871,10 +889,20 @@ async def api_delete_character(request: web.Request):
     if is_default_card:
         return json_error("系统默认角色不能删除", status=403)
     saved.pop(character_id, None)
-    if state.get("custom_character") == character_id and hasattr(service, "_clear_conversation_context"):
-        service._clear_conversation_context(state)
+    if character_value(state, "custom_character", "") == character_id:
+        for key in SESSION_CUSTOM_RESET_KEYS:
+            session_schema.set_character_value(state, key, "")
+        session_schema.set_outfit(state, "")
+        session_schema.set_wardrobe(state, {})
+        session_schema.set_closet(state, {})
+        session_schema.clear_nudity(state)
+        session_schema.set_character_value(state, "persona_user_set", False)
+        session_schema.set_character_value(state, "purity", None)
+        session_schema.set_character_value(state, "purity_user_set", False)
+        if hasattr(service, "_clear_conversation_context"):
+            service._clear_conversation_context(state)
     service._save_session_state(sid, state)
-    return json_ok({"active_id": state.get("custom_character") or "", "characters": saved})
+    return json_ok({"active_id": character_value(state, "custom_character", "") or "", "characters": saved})
 
 
 async def api_activate_character(request: web.Request):
@@ -888,36 +916,27 @@ async def api_activate_character(request: web.Request):
     data = saved.get(character_id)
     if not data:
         return json_error("角色不存在", status=404)
-    switching = (data.get("character", "") or "") != (state.get("custom_character") or "")
+    switching = (data.get("character", "") or "") != (character_value(state, "custom_character", "") or "")
     if switching and hasattr(service, "_save_current_character_context"):
         service._save_current_character_context(state)
     if hasattr(service, "_snapshot_character"):
         service._snapshot_character(state)
-    state["custom_character"] = data.get("character", "")
-    state["custom_series"] = data.get("series", "")
-    state["custom_role_name"] = data.get("role_name", "") if switching else (state.get("custom_role_name") or data.get("role_name", ""))
-    state["custom_bot_name"] = data.get("bot_name") or data.get("character", "")
-    state["custom_bot_self_name"] = data.get("bot_self_name", "") if switching else (state.get("custom_bot_self_name") or data.get("bot_self_name", ""))
-    state["custom_visual_character"] = data.get("visual_character", "")
-    state["custom_visual_series"] = data.get("visual_series", "")
-    state["custom_scheduled_persona"] = data.get("persona", "")
-    state["custom_positive_prefix"] = data.get("appearance", "")
-    state["custom_count"] = data.get("count", "")
-    state["custom_character_age_stage"] = data.get("age_stage", "")
-    state["custom_character_occupation"] = data.get("occupation", "")
-    state["custom_character_day_anchor"] = data.get("day_anchor", "")
-    state["custom_spatial_relationship"] = data.get("relationship", "") if switching else (state.get("custom_spatial_relationship") or data.get("relationship", ""))
-    state["custom_scene_preference"] = data.get("scene_preference", "")
-    state["custom_selfie_preference"] = data.get("selfie_preference", "")
-    if data.get("style"):
-        state["custom_current_style"] = data.get("style", "")
-    if data.get("purity") is not None and not state.get("purity_user_set"):
-        state["purity"] = data.get("purity")
+    payload = dict(data)
+    if not switching:
+        payload["role_name"] = character_value(state, "custom_role_name", "") or data.get("role_name", "")
+        payload["bot_self_name"] = character_value(state, "custom_bot_self_name", "") or data.get("bot_self_name", "")
+        payload["relationship"] = character_value(state, "custom_spatial_relationship", "") or data.get("relationship", "")
+    if not data.get("style"):
+        payload.pop("style", None)
+    if data.get("purity") is None or character_value(state, "purity_user_set", False):
+        payload.pop("purity", None)
+    if hasattr(service, "_apply_character_payload"):
+        service._apply_character_payload(state, payload)
     if switching and hasattr(service, "_restore_character_context"):
         service._restore_character_context(sid, state)
     state.pop("life_profile", None)
     service._save_session_state(sid, state)
-    return json_ok({"active_id": state.get("custom_character") or "", "current": service._character_export_payload(state), "characters": session_schema.get_saved_characters(state)})
+    return json_ok({"active_id": character_value(state, "custom_character", "") or "", "current": service._character_export_payload(state), "characters": session_schema.get_saved_characters(state)})
 
 
 async def api_diaries(request: web.Request):
@@ -1115,9 +1134,9 @@ async def api_admin_llm_usage(request: web.Request):
     except ValueError:
         after = now - 86400
     try:
-        before = float(query.get("before") or 0) or now
+        before = float(query.get("before") or 0) or (now + 0.001)
     except ValueError:
-        before = now
+        before = now + 0.001
     group_by = [c.strip() for c in (query.get("group_by") or "profile_id,model,purpose,tag").split(",") if c.strip()]
     valid_cols = {"profile_id", "model", "purpose", "tag", "session_id"}
     group_by = [c for c in group_by if c in valid_cols]
@@ -1196,7 +1215,7 @@ async def api_freeze_inactive(request: web.Request):
             frozen_list.append({
                 "session_id": sid,
                 "chat_id": service.chat_id_from_session(sid),
-                "character": state.get("custom_character") or "",
+                "character": character_value(state, "custom_character", "") or "",
                 "last_interaction_ago": human_ago(time.time() - last),
             })
     service._flush_sessions(force=True)
@@ -1300,7 +1319,7 @@ async def api_logs(request: web.Request):
             items.append({
                 "chat_id": chat_id,
                 "session_id": sid,
-                "character": state.get("custom_character") or "",
+                "character": character_value(state, "custom_character", "") or "",
                 "size": stat.st_size,
                 "mtime": stat.st_mtime,
                 "mtime_ago": human_ago(time.time() - stat.st_mtime),

@@ -285,7 +285,7 @@ class CommandHandlersMixin:
         # Only apply strings that look usable by the image prompt renderer. Chinese-only style hints are kept in
         # custom_prompt_intake for later review instead of being injected into Anima directly.
         if "@" in style or re.search(r"[A-Za-z]", style):
-            state["custom_current_style"] = style
+            session_schema.set_character_value(state, "custom_current_style", style)
             return style
         return ""
 
@@ -294,7 +294,7 @@ class CommandHandlersMixin:
         if not city:
             return ""
         state = self._get_session_state(session_id)
-        state["custom_location"] = city
+        session_schema.set_character_value(state, "custom_location", city)
         note = f"城市: {city}"
         try:
             weather = await self._fetch_weather(city, session_id=session_id)
@@ -304,7 +304,7 @@ class CommandHandlersMixin:
         if weather:
             off = await self._resolve_city_timezone(city, weather.get("lon"))
             if off is not None:
-                state["custom_timezone_offset"] = str(off)
+                session_schema.set_character_value(state, "custom_timezone_offset", str(off))
                 note += f" / UTC{off:+g}"
             note += f" / {weather.get('desc', '未知')} {weather.get('temp', '?')} C"
         else:
@@ -321,10 +321,10 @@ class CommandHandlersMixin:
     def _missing_character_slots(state: dict[str, Any]) -> list[str]:
         """返回角色建档后仍为空、值得提醒用户补的槽位中文名。"""
         checks = [
-            ("年龄段", state.get("custom_character_age_stage")),
-            ("职业", state.get("custom_character_occupation")),
-            ("关系", state.get("custom_spatial_relationship")),
-            ("城市", state.get("custom_location")),
+            ("年龄段", session_schema.get_character_value(state, "custom_character_age_stage")),
+            ("职业", session_schema.get_character_value(state, "custom_character_occupation")),
+            ("关系", session_schema.get_character_value(state, "custom_spatial_relationship")),
+            ("城市", session_schema.get_character_value(state, "custom_location")),
         ]
         return [label for label, val in checks if not str(val or "").strip()]
 
@@ -509,7 +509,7 @@ class CommandHandlersMixin:
             return
 
         state = self._get_session_state(session_id)
-        switching = name != (state.get("custom_character") or "")
+        switching = name != (session_schema.get_character_value(state, "custom_character", "") or "")
         role = (fields.get("role") or "原创角色").strip()
         persona = (fields.get("persona") or "").strip()
         appearance = (fields.get("appearance") or "").strip()
@@ -556,24 +556,26 @@ class CommandHandlersMixin:
             self._save_current_character_context(state)
             self._snapshot_character(state)
 
-        state["custom_count"] = gender
-        state["custom_character"] = name
-        state["custom_series"] = ""
-        state["custom_visual_character"] = ""
-        state["custom_visual_series"] = ""
-        state["custom_role_name"] = role
-        state["custom_bot_name"] = name
-        state["custom_scheduled_persona"] = persona_text
-        state["custom_positive_prefix"] = appearance_tags
-        state["custom_spatial_relationship"] = relationship
-        state["custom_scene_preference"] = intake.get("scene_preference", "")
-        state["custom_selfie_preference"] = intake.get("selfie_preference", "")
-        state["custom_raw_profile_text"] = text
-        state["custom_prompt_intake"] = intake
-        state["custom_character_age_stage"] = age
-        state["custom_character_occupation"] = occupation
-        state["custom_character_day_anchor"] = anchor
-        state["persona_user_set"] = True
+        character_card.apply_card_to_state(state, {
+            "count": gender,
+            "character": name,
+            "series": "",
+            "visual_character": "",
+            "visual_series": "",
+            "role_name": role,
+            "bot_name": name,
+            "persona": persona_text,
+            "appearance": appearance_tags,
+            "relationship": relationship,
+            "scene_preference": intake.get("scene_preference", ""),
+            "selfie_preference": intake.get("selfie_preference", ""),
+            "age_stage": age,
+            "occupation": occupation,
+            "day_anchor": anchor,
+        })
+        session_schema.set_character_value(state, "custom_raw_profile_text", text)
+        session_schema.set_character_value(state, "custom_prompt_intake", intake)
+        session_schema.set_character_value(state, "persona_user_set", True)
         applied_style = self._apply_intake_style(state, intake)
         state.pop("life_profile", None)
         if switching:
@@ -802,11 +804,11 @@ class CommandHandlersMixin:
             await self.send_message(chat_id, f"无法获取城市 {city} 的天气，设置失败。")
             return
         state = self._get_session_state(session_id)
-        state["custom_location"] = city
+        session_schema.set_character_value(state, "custom_location", city)
         off = await self._resolve_city_timezone(city, w.get("lon"))
         note = ""
         if off is not None:
-            state["custom_timezone_offset"] = str(off)
+            session_schema.set_character_value(state, "custom_timezone_offset", str(off))
             note = f"\n已自动识别本会话时区为 UTC{off:+g}（忽略夏令时）"
         self._save_session_state(session_id, state)
         catalog_note = ""
@@ -958,8 +960,8 @@ class CommandHandlersMixin:
         if self.config.get("current_style") == removed:
             self.config["current_style"] = pool[0]
         for sid, state in self.sessions.items():
-            if state.get("custom_current_style") == removed:
-                state["custom_current_style"] = ""
+            if session_schema.get_character_value(state, "custom_current_style", "") == removed:
+                session_schema.set_character_value(state, "custom_current_style", "")
                 self._mark_dirty(sid)
         self.save_config()
         self._flush_sessions(force=True)
@@ -973,7 +975,7 @@ class CommandHandlersMixin:
             return
         if target.lower() in ("style reset", "clear", "默认", "全局"):
             state = self._get_session_state(session_id)
-            state["custom_current_style"] = ""
+            session_schema.set_character_value(state, "custom_current_style", "")
             self._save_session_state(session_id, state)
             await self.send_message(chat_id, f"已清除当前会话画风覆盖，当前画风: {self._get_current_style(session_id)}")
             return
@@ -1054,12 +1056,15 @@ class CommandHandlersMixin:
     async def cmd_persona_show(self, chat_id, session_id, arg):
         state = self._get_session_state(session_id)
         lines = ["当前会话个性化设置"]
-        lines.append(f"人设: {state.get('custom_scheduled_persona') or '（默认）'}")
-        ch = state.get("custom_character", "")
+        lines.append(f"人设: {session_schema.get_character_value(state, 'custom_scheduled_persona', '') or '（默认）'}")
+        ch = session_schema.get_character_value(state, "custom_character", "")
         if ch:
-            lines.append(f"角色: {ch}{'（' + state.get('custom_series', '') + '）' if state.get('custom_series') else ''}")
-        if state.get("custom_visual_character") or state.get("custom_visual_series"):
-            lines.append(f"生图识别: {state.get('custom_visual_character') or '（空）'}{('（' + state.get('custom_visual_series', '') + '）') if state.get('custom_visual_series') else ''}")
+            series = session_schema.get_character_value(state, "custom_series", "")
+            lines.append(f"角色: {ch}{'（' + series + '）' if series else ''}")
+        visual_character = session_schema.get_character_value(state, "custom_visual_character", "")
+        visual_series = session_schema.get_character_value(state, "custom_visual_series", "")
+        if visual_character or visual_series:
+            lines.append(f"生图识别: {visual_character or '（空）'}{('（' + visual_series + '）') if visual_series else ''}")
         lines.append(f"身体特征: {self._get_session_cfg(session_id, 'positive_prefix', '')[:300] or '（未设置）'}")
         lines.append(f"画风: {self._get_current_style(session_id)}")
         if session_schema.get_outfit(state):
@@ -1075,8 +1080,8 @@ class CommandHandlersMixin:
             await self.send_message(chat_id, f"当前人格:\n{self._get_effective_persona(session_id)}\n\n用法: /人格 <文本>")
             return
         state = self._get_session_state(session_id)
-        state["custom_scheduled_persona"] = text
-        state["persona_user_set"] = True
+        session_schema.set_character_value(state, "custom_scheduled_persona", text)
+        session_schema.set_character_value(state, "persona_user_set", True)
         state.pop("life_profile", None)
         self._save_session_state(session_id, state)
         await self.send_message(chat_id, "人格已更新。")
@@ -1089,16 +1094,16 @@ class CommandHandlersMixin:
         发言会被重新喂回模型，导致即使系统提示已换成默认人设，模型仍沿用旧人设回应。
         """
         for key in SESSION_CUSTOM_RESET_KEYS:
-            state[key] = ""
+            session_schema.set_character_value(state, key, "")
         state.pop("custom_daily_selfie_limit", None)
-        state["custom_allow_llm_change_appearance"] = None
+        session_schema.set_character_value(state, "custom_allow_llm_change_appearance", None)
         session_schema.set_outfit(state, "")
         session_schema.set_wardrobe(state, {})
         session_schema.set_closet(state, {})
         session_schema.clear_nudity(state)
-        state["persona_user_set"] = False
-        state["purity"] = None
-        state["purity_user_set"] = False
+        session_schema.set_character_value(state, "persona_user_set", False)
+        session_schema.set_character_value(state, "purity", None)
+        session_schema.set_character_value(state, "purity_user_set", False)
         session_schema.set_daily_trigger_date(state, "")  # 让随机推送计划按全局默认重新生成
         session_schema.get_saved_characters(state).clear()  # 清空本会话角色池
         state.pop("life_profile", None)
@@ -1131,7 +1136,11 @@ class CommandHandlersMixin:
 
     @staticmethod
     def _character_context_key_from_state(state: dict[str, Any]) -> str:
-        return (state.get("custom_character") or state.get("custom_bot_name") or "__default__").strip() or "__default__"
+        return (
+            session_schema.get_character_value(state, "custom_character", "")
+            or session_schema.get_character_value(state, "custom_bot_name", "")
+            or "__default__"
+        ).strip() or "__default__"
 
     @staticmethod
     def _conversation_context_payload(state: dict[str, Any]) -> dict[str, Any]:
@@ -1160,7 +1169,11 @@ class CommandHandlersMixin:
 
     @staticmethod
     def _character_export_payload(state: dict[str, Any]) -> dict[str, Any]:
-        key = (state.get("custom_character") or state.get("custom_bot_name") or "default").strip() or "default"
+        key = (
+            session_schema.get_character_value(state, "custom_character", "")
+            or session_schema.get_character_value(state, "custom_bot_name", "")
+            or "default"
+        ).strip() or "default"
         # 字段表由 character_card 单一来源派生（见模块说明）。
         return {"id": key, **character_card.card_from_state(state)}
 
@@ -1171,7 +1184,7 @@ class CommandHandlersMixin:
     @staticmethod
     def _snapshot_character(state: dict[str, Any]):
         """保存当前角色最新状态到 saved_characters 快照。字段表由 character_card 单一来源派生。"""
-        name = (state.get("custom_character") or "").strip()
+        name = (session_schema.get_character_value(state, "custom_character", "") or "").strip()
         if not name:
             return
         card = character_card.card_from_state(state)
@@ -1183,12 +1196,12 @@ class CommandHandlersMixin:
         state = self._get_session_state(session_id)
         if not text:
             p = self._get_purity(session_id)
-            src = "手动设定" if state.get("purity_user_set") else "自动/默认"
+            src = "手动设定" if session_schema.get_character_value(state, "purity_user_set", False) else "自动/默认"
             await self.send_message(chat_id, f"当前纯良度: {p}/10（{src}）\nNTR 触发周期: {self._compute_ntr_threshold(p)}天\n用法: /纯良度 0~10 或 /纯良度 auto")
             return
         if text in ("auto", "默认", "reset", "自动"):
-            state["purity"] = None
-            state["purity_user_set"] = False
+            session_schema.set_character_value(state, "purity", None)
+            session_schema.set_character_value(state, "purity_user_set", False)
             self._save_session_state(session_id, state)
             await self.send_message(chat_id, f"已恢复自动/默认纯良度: {self._get_purity(session_id)}/10")
             return
@@ -1197,8 +1210,8 @@ class CommandHandlersMixin:
         except ValueError:
             await self.send_message(chat_id, "请输入 0~10 的整数，或 auto。")
             return
-        state["purity"] = val
-        state["purity_user_set"] = True
+        session_schema.set_character_value(state, "purity", val)
+        session_schema.set_character_value(state, "purity_user_set", True)
         self._save_session_state(session_id, state)
         await self.send_message(chat_id, f"纯良度已设定为 {val}/10\nNTR 触发周期: {self._compute_ntr_threshold(val)}天")
 
@@ -1243,12 +1256,14 @@ class CommandHandlersMixin:
         if not text or lower in ("查看", "show"):
             lines = ["当前角色设定"]
             default_id = self._default_character_payload().get("id") or ""
-            on_default = not (state.get("custom_character") or state.get("persona_user_set"))
-            lines.append(f"角色: {state.get('custom_character') or (f'{default_id}（默认）' if on_default and default_id else '（未设定）')}")
-            if state.get("custom_series"):
-                lines.append(f"作品: {state['custom_series']}")
-            lines.append(f"人设: {(state.get('custom_scheduled_persona') or '（未设定）')[:300]}")
-            lines.append(f"身体特征: {(state.get('custom_positive_prefix') or '（未设定）')[:300]}")
+            current_character = session_schema.get_character_value(state, "custom_character", "")
+            on_default = not (current_character or session_schema.get_character_value(state, "persona_user_set", False))
+            lines.append(f"角色: {current_character or (f'{default_id}（默认）' if on_default and default_id else '（未设定）')}")
+            series = session_schema.get_character_value(state, "custom_series", "")
+            if series:
+                lines.append(f"作品: {series}")
+            lines.append(f"人设: {(session_schema.get_character_value(state, 'custom_scheduled_persona', '') or '（未设定）')[:300]}")
+            lines.append(f"身体特征: {(session_schema.get_character_value(state, 'custom_positive_prefix', '') or '（未设定）')[:300]}")
             pool = ([f"{default_id}(默认)"] if default_id and default_id not in saved else []) + list(saved.keys())
             lines.append(f"已保存角色: {', '.join(pool) or '无'}")
             lines.append("\n用法: /角色 <角色名> | /角色 load <名称> | /角色 list | /角色 delete <名称>")
@@ -1277,7 +1292,10 @@ class CommandHandlersMixin:
         if sub in ("list", "ls"):
             default = self._default_character_payload()
             default_id = default.get("id") or ""
-            on_default = not (state.get("custom_character") or state.get("persona_user_set"))
+            on_default = not (
+                session_schema.get_character_value(state, "custom_character", "")
+                or session_schema.get_character_value(state, "persona_user_set", False)
+            )
             lines = []
             if default_id:
                 lines.append(f"{default_id}: 系统默认角色" + ("（当前）" if on_default else ""))
@@ -1307,8 +1325,8 @@ class CommandHandlersMixin:
             self._save_current_character_context(state)
             self._snapshot_character(state)
             self._apply_character_payload(state, payload)
-            if not state.get("custom_character"):
-                state["custom_character"] = key
+            if not session_schema.get_character_value(state, "custom_character", ""):
+                session_schema.set_character_value(state, "custom_character", key)
             saved[key] = {k: v for k, v in payload.items() if k != "id"}
             self._restore_character_context(session_id, state)
             self._save_session_state(session_id, state)
@@ -1322,30 +1340,30 @@ class CommandHandlersMixin:
             if not data:
                 await self.send_message(chat_id, f"未找到角色 {sub_arg}。")
                 return
-            switching = (data.get("character", "") or "") != (state.get("custom_character") or "")
+            current_character = session_schema.get_character_value(state, "custom_character", "")
+            switching = (data.get("character", "") or "") != (current_character or "")
             if switching:
                 self._save_current_character_context(state)
                 self._snapshot_character(state)
-            state["custom_character"] = data.get("character", "")
-            state["custom_series"] = data.get("series", "")
-            state["custom_role_name"] = data.get("role_name", "") if switching else (state.get("custom_role_name") or data.get("role_name", ""))
-            state["custom_bot_name"] = data.get("bot_name") or data.get("character", "")
-            state["custom_bot_self_name"] = data.get("bot_self_name", "") if switching else (state.get("custom_bot_self_name") or data.get("bot_self_name", ""))
-            state["custom_visual_character"] = data.get("visual_character", "")
-            state["custom_visual_series"] = data.get("visual_series", "")
-            state["custom_scheduled_persona"] = data.get("persona", "")
-            state["custom_positive_prefix"] = data.get("appearance", "")
-            state["custom_count"] = data.get("count", "")
-            state["custom_character_age_stage"] = data.get("age_stage", "")
-            state["custom_character_occupation"] = data.get("occupation", "")
-            state["custom_character_day_anchor"] = data.get("day_anchor", "")
-            state["custom_spatial_relationship"] = data.get("relationship", "") if switching else (state.get("custom_spatial_relationship") or data.get("relationship", ""))
-            state["custom_scene_preference"] = data.get("scene_preference", "")
-            state["custom_selfie_preference"] = data.get("selfie_preference", "")
-            if data.get("style"):
-                state["custom_current_style"] = data.get("style", "")
-            if data.get("purity") is not None and not state.get("purity_user_set"):
-                state["purity"] = data.get("purity")
+            payload = dict(data)
+            if not switching:
+                payload["role_name"] = (
+                    session_schema.get_character_value(state, "custom_role_name", "")
+                    or data.get("role_name", "")
+                )
+                payload["bot_self_name"] = (
+                    session_schema.get_character_value(state, "custom_bot_self_name", "")
+                    or data.get("bot_self_name", "")
+                )
+                payload["relationship"] = (
+                    session_schema.get_character_value(state, "custom_spatial_relationship", "")
+                    or data.get("relationship", "")
+                )
+            if not data.get("style"):
+                payload.pop("style", None)
+            if data.get("purity") is None or session_schema.get_character_value(state, "purity_user_set", False):
+                payload.pop("purity", None)
+            self._apply_character_payload(state, payload)
             if switching:
                 # 短期态（含 dynamic_appearance/wardrobe）现已随 character_contexts 冻结/解冻：
                 # 切回的角色拿回自己存档的穿搭，新角色则被清空——不再需要在此硬抹（那会覆盖存档）。
@@ -1366,21 +1384,21 @@ class CommandHandlersMixin:
             # 删的若是当前角色，必须同步清空当前角色态：否则下次 _snapshot_character（load/
             # 切换/create_oc/设定角色都会触发）会用 state["custom_character"] 把刚删的角色重新
             # 写回 saved_characters，表现为"删了又出现"。这里只复用字段清理原语，不动其它角色。
-            is_current = (state.get("custom_character") or "") == sub_arg
+            is_current = (session_schema.get_character_value(state, "custom_character", "") or "") == sub_arg
             note = ""
             contexts = session_schema.get_character_contexts(state)
             if isinstance(contexts, dict):
                 contexts.pop(sub_arg, None)
             if is_current:
                 for key in SESSION_CUSTOM_RESET_KEYS:
-                    state[key] = ""
+                    session_schema.set_character_value(state, key, "")
                 session_schema.set_outfit(state, "")
                 session_schema.set_wardrobe(state, {})
                 session_schema.set_closet(state, {})
                 session_schema.clear_nudity(state)
-                state["persona_user_set"] = False
-                state["purity"] = None
-                state["purity_user_set"] = False
+                session_schema.set_character_value(state, "persona_user_set", False)
+                session_schema.set_character_value(state, "purity", None)
+                session_schema.set_character_value(state, "purity_user_set", False)
                 self._clear_conversation_context(state)
                 self._ulog(session_id, "DELETE", f"删除当前角色 {sub_arg} 并回退全局默认")
                 note = "\n当前角色已回退到全局默认。"
@@ -1393,7 +1411,7 @@ class CommandHandlersMixin:
 
         if not self.has_llm_config("image"):
             if "," in text or re.search(r"[a-zA-Z]{3,}", text):
-                state["custom_positive_prefix"] = text
+                session_schema.set_character_value(state, "custom_positive_prefix", text)
                 self._save_session_state(session_id, state)
                 await self.send_message(chat_id, "LLM 未配置，已按英文 tags 写入身体特征。")
             else:
@@ -1407,7 +1425,7 @@ class CommandHandlersMixin:
             return
         if result.get("type") == "character":
             name = result.get("name", text)
-            switching = name != (state.get("custom_character") or "")
+            switching = name != (session_schema.get_character_value(state, "custom_character", "") or "")
             if switching:
                 self._save_current_character_context(state)
                 self._snapshot_character(state)
@@ -1417,31 +1435,31 @@ class CommandHandlersMixin:
             if m:
                 count_tag = m.group(1)
                 raw_appearance = raw_appearance[m.end():].strip(" ,")
-            state["custom_character"] = name
-            state["custom_series"] = result.get("series", "")
-            state["custom_role_name"] = result.get("role_name") or result.get("role") or ""
-            state["custom_bot_name"] = name
+            session_schema.set_character_value(state, "custom_character", name)
+            session_schema.set_character_value(state, "custom_series", result.get("series", ""))
+            session_schema.set_character_value(state, "custom_role_name", result.get("role_name") or result.get("role") or "")
+            session_schema.set_character_value(state, "custom_bot_name", name)
             if switching:
-                state["custom_bot_self_name"] = ""
+                session_schema.set_character_value(state, "custom_bot_self_name", "")
                 session_schema.set_outfit(state, "")  # 既有角色不继承上一个角色/默认的临时穿搭，初始服装交给画面规划器按场景决定
-            state["custom_visual_character"] = result.get("prompt_name") or result.get("visual_name") or result.get("image_name") or ""
-            state["custom_visual_series"] = result.get("prompt_series") or result.get("visual_series") or result.get("image_series") or ""
-            state["custom_scheduled_persona"] = result.get("persona", "")
-            state["custom_positive_prefix"] = raw_appearance
+            session_schema.set_character_value(state, "custom_visual_character", result.get("prompt_name") or result.get("visual_name") or result.get("image_name") or "")
+            session_schema.set_character_value(state, "custom_visual_series", result.get("prompt_series") or result.get("visual_series") or result.get("image_series") or "")
+            session_schema.set_character_value(state, "custom_scheduled_persona", result.get("persona", ""))
+            session_schema.set_character_value(state, "custom_positive_prefix", raw_appearance)
             if count_tag:
-                state["custom_count"] = count_tag
+                session_schema.set_character_value(state, "custom_count", count_tag)
             # 补齐 age/职业/白天去向/关系：大模型认识该角色，可直接判断；anchor 缺失时由职业派生。
             occupation = (result.get("occupation") or "").strip()
             anchor = self._normalize_day_anchor(result.get("anchor")) or self._normalize_day_anchor(occupation)
-            state["custom_character_age_stage"] = self._normalize_age_stage(result.get("age"))
-            state["custom_character_occupation"] = occupation
-            state["custom_character_day_anchor"] = anchor
+            session_schema.set_character_value(state, "custom_character_age_stage", self._normalize_age_stage(result.get("age")))
+            session_schema.set_character_value(state, "custom_character_occupation", occupation)
+            session_schema.set_character_value(state, "custom_character_day_anchor", anchor)
             relationship = (result.get("relationship") or "").strip()
-            if relationship and (switching or not state.get("custom_spatial_relationship")):
-                state["custom_spatial_relationship"] = relationship
-            if result.get("purity") is not None and not state.get("purity_user_set"):
+            if relationship and (switching or not session_schema.get_character_value(state, "custom_spatial_relationship", "")):
+                session_schema.set_character_value(state, "custom_spatial_relationship", relationship)
+            if result.get("purity") is not None and not session_schema.get_character_value(state, "purity_user_set", False):
                 try:
-                    state["purity"] = max(0, min(10, int(result["purity"])))
+                    session_schema.set_character_value(state, "purity", max(0, min(10, int(result["purity"]))))
                 except (TypeError, ValueError):
                     pass
             self._snapshot_character(state)
@@ -1450,9 +1468,16 @@ class CommandHandlersMixin:
             self._save_session_state(session_id, state)
             self._ulog(session_id, "SWITCH", f"设定角色 {name}" + ("（已清空对话上下文）" if switching else ""))
             visual_note = ""
-            if state.get("custom_visual_character") or state.get("custom_visual_series"):
-                visual_note = f"\n生图识别: {state.get('custom_visual_character') or '（空）'}{(' / ' + state.get('custom_visual_series', '')) if state.get('custom_visual_series') else ''}"
-            reply = f"已设定角色: {name}\n作品: {state['custom_series'] or '（未指定）'}{visual_note}\n人设: {state['custom_scheduled_persona'][:200]}\n身体特征: {state['custom_positive_prefix'][:250]}"
+            visual_character = session_schema.get_character_value(state, "custom_visual_character", "")
+            visual_series = session_schema.get_character_value(state, "custom_visual_series", "")
+            if visual_character or visual_series:
+                visual_note = f"\n生图识别: {visual_character or '（空）'}{(' / ' + visual_series) if visual_series else ''}"
+            reply = (
+                f"已设定角色: {name}\n"
+                f"作品: {session_schema.get_character_value(state, 'custom_series', '') or '（未指定）'}{visual_note}\n"
+                f"人设: {session_schema.get_character_value(state, 'custom_scheduled_persona', '')[:200]}\n"
+                f"身体特征: {session_schema.get_character_value(state, 'custom_positive_prefix', '')[:250]}"
+            )
             hint = self._slot_fill_hint(self._missing_character_slots(state))
             if hint:
                 reply += "\n\n" + hint
@@ -1464,11 +1489,11 @@ class CommandHandlersMixin:
             if m:
                 count_tag = m.group(1)
                 raw_tags = raw_tags[m.end():].strip(" ,")
-            state["custom_positive_prefix"] = raw_tags
+            session_schema.set_character_value(state, "custom_positive_prefix", raw_tags)
             if count_tag:
-                state["custom_count"] = count_tag
+                session_schema.set_character_value(state, "custom_count", count_tag)
             self._save_session_state(session_id, state)
-            await self.send_message(chat_id, f"身体特征已更新:\n{state['custom_positive_prefix']}")
+            await self.send_message(chat_id, f"身体特征已更新:\n{session_schema.get_character_value(state, 'custom_positive_prefix', '')}")
         else:
             await self.send_message(chat_id, f"LLM 返回了无法识别的结果: {result}")
 
@@ -1481,8 +1506,8 @@ class CommandHandlersMixin:
         if not action:
             lines = ["其余设置（空=使用全局默认）"]
             for label, key, _ in PERSONALIZE_FIELDS:
-                lines.append(f"{label}: {state.get(key, '') or '（默认）'}")
-            lines.append(f"关系设定: {state.get('custom_spatial_relationship', '') or '（默认）'}（用 /关系 修改）")
+                lines.append(f"{label}: {session_schema.get_character_value(state, key, '') or '（默认）'}")
+            lines.append(f"关系设定: {session_schema.get_character_value(state, 'custom_spatial_relationship', '') or '（默认）'}（用 /关系 修改）")
             lines.append("人格文本: 用 /人格 查看或修改")
             lines.append("\n用法: /个性设置 <项> <值> 覆盖单项。/角色 reset 仅清对话上下文，/角色 clearup 硬重置。")
             await self.send_message(chat_id, "\n".join(lines))
@@ -1495,12 +1520,12 @@ class CommandHandlersMixin:
             await self.send_message(chat_id, f"未知设置项: {action}，可用: {', '.join(mapping.keys())}")
             return
         if not value:
-            await self.send_message(chat_id, f"当前 {action}: {state.get(key, '') or '（默认）'}")
+            await self.send_message(chat_id, f"当前 {action}: {session_schema.get_character_value(state, key, '') or '（默认）'}")
             return
-        state[key] = value
+        session_schema.set_character_value(state, key, value)
         if key == "custom_character_occupation":
             # 职业是用户面向字段，白天去向枚举由职业后台派生。
-            state["custom_character_day_anchor"] = self._normalize_day_anchor(value)
+            session_schema.set_character_value(state, "custom_character_day_anchor", self._normalize_day_anchor(value))
         if key in PERSONALIZE_LIFE_PROFILE_KEYS:
             state.pop("life_profile", None)
         self._save_session_state(session_id, state)
@@ -1510,7 +1535,7 @@ class CommandHandlersMixin:
         state = self._get_session_state(session_id)
         value = (arg or "").strip()
         if not value:
-            current = state.get("custom_spatial_relationship", "") or "（默认）"
+            current = session_schema.get_character_value(state, "custom_spatial_relationship", "") or "（默认）"
             await self.send_message(
                 chat_id,
                 f"当前你和角色的关系: {current}\n\n"
@@ -1519,17 +1544,17 @@ class CommandHandlersMixin:
                 "可写同居、异地、同公司、同学校等；作为高级覆盖项，不替代自动动线。",
             )
             return
-        state["custom_spatial_relationship"] = value
+        session_schema.set_character_value(state, "custom_spatial_relationship", value)
         self._save_session_state(session_id, state)
         await self.send_message(chat_id, f"你和角色的关系已设为: {value[:200]}")
 
     def _replace_appearance_slot(self, state: dict[str, Any], slot: str, value: str) -> None:
         """把当前角色 base（custom_positive_prefix）里某个外观槽（hair/eyes）整体替换为 value。
         发/瞳是角色 base 的一部分、per-character；改完由调用方 _snapshot_character 写回卡。"""
-        base = state.get("custom_positive_prefix", "") or ""
+        base = session_schema.get_character_value(state, "custom_positive_prefix", "") or ""
         slots = self._parse_appearance(base)
         slots[slot] = [v.strip() for v in str(value or "").split(",") if v.strip()]
-        state["custom_positive_prefix"] = appearance_rules.slots_to_string(slots)
+        session_schema.set_character_value(state, "custom_positive_prefix", appearance_rules.slots_to_string(slots))
 
     async def cmd_appearance(self, chat_id, session_id, arg):
         tags = arg.strip()
@@ -1540,9 +1565,9 @@ class CommandHandlersMixin:
                 chat_id,
                 "当前外型设置\n"
                 f"衣柜（按槽位）:\n{wardrobe_view}\n"
-                f"物种特征: {(state.get('custom_positive_prefix') or '（默认）')[:200]}\n"
-                f"默认发色: {state.get('custom_default_hair') or self.config.get('default_hair')}\n"
-                f"默认瞳色: {state.get('custom_default_eyes') or self.config.get('default_eyes')}\n"
+                f"物种特征: {(session_schema.get_character_value(state, 'custom_positive_prefix', '') or '（默认）')[:200]}\n"
+                f"默认发色: {session_schema.get_character_value(state, 'custom_default_hair', '') or self.config.get('default_hair')}\n"
+                f"默认瞳色: {session_schema.get_character_value(state, 'custom_default_eyes', '') or self.config.get('default_eyes')}\n"
                 f"模型自主改外型: {'允许' if self._allow_llm_change_appearance(session_id) else '禁止'}\n\n"
                 "换装直接说穿/换/脱即可（上衣/下装/连衣裙/外套/内衣/袜/鞋分槽，同槽自动替换，连衣裙覆盖上下装）。\n"
                 "用法: /外型 <换装描述，如 换上红色旗袍 / 脱掉外套 / 只换黑色胸罩> | /外型 归档 <描述> | /外型 特征 <标签> | /外型 发色 <标签> | /外型 瞳色 <标签> | /外型 自动变装 on/off | /外型 reset",
@@ -1562,21 +1587,21 @@ class CommandHandlersMixin:
             sub_arg = parts[1].strip() if len(parts) > 1 else ""
         if sub in ("特征", "traits"):
             if not sub_arg:
-                await self.send_message(chat_id, f"当前物种特征: {state.get('custom_positive_prefix') or '（默认）'}")
+                await self.send_message(chat_id, f"当前物种特征: {session_schema.get_character_value(state, 'custom_positive_prefix', '') or '（默认）'}")
                 return
             if re.search(r"[\u4e00-\u9fff]", sub_arg):
                 sub_arg = await self._translate_appearance_tags(sub_arg)
-            state["custom_positive_prefix"] = sub_arg
+            session_schema.set_character_value(state, "custom_positive_prefix", sub_arg)
             self._save_session_state(session_id, state)
             await self.send_message(chat_id, f"物种特征已更新: {sub_arg[:300]}")
             return
         if sub in ("发色", "hair"):
             if not sub_arg:
                 if self._is_character_set(session_id):
-                    cur = ", ".join(self._parse_appearance(state.get("custom_positive_prefix", "")).get("hair", [])) or "（未设定，见身体特征）"
+                    cur = ", ".join(self._parse_appearance(session_schema.get_character_value(state, "custom_positive_prefix", "")).get("hair", [])) or "（未设定，见身体特征）"
                     await self.send_message(chat_id, f"当前角色发色: {cur}")
                 else:
-                    await self.send_message(chat_id, f"当前默认发色: {state.get('custom_default_hair') or self.config.get('default_hair')}")
+                    await self.send_message(chat_id, f"当前默认发色: {session_schema.get_character_value(state, 'custom_default_hair', '') or self.config.get('default_hair')}")
                 return
             if re.search(r"[\u4e00-\u9fff]", sub_arg):
                 sub_arg = await self._translate_appearance_tags(sub_arg)
@@ -1587,17 +1612,17 @@ class CommandHandlersMixin:
                 self._save_session_state(session_id, state)
                 await self.send_message(chat_id, f"角色发色已更新: {sub_arg}")
             else:
-                state["custom_default_hair"] = sub_arg
+                session_schema.set_character_value(state, "custom_default_hair", sub_arg)
                 self._save_session_state(session_id, state)
                 await self.send_message(chat_id, f"默认发色已更新: {sub_arg}")
             return
         if sub in ("瞳色", "eyes"):
             if not sub_arg:
                 if self._is_character_set(session_id):
-                    cur = ", ".join(self._parse_appearance(state.get("custom_positive_prefix", "")).get("eyes", [])) or "（未设定，见身体特征）"
+                    cur = ", ".join(self._parse_appearance(session_schema.get_character_value(state, "custom_positive_prefix", "")).get("eyes", [])) or "（未设定，见身体特征）"
                     await self.send_message(chat_id, f"当前角色瞳色: {cur}")
                 else:
-                    await self.send_message(chat_id, f"当前默认瞳色: {state.get('custom_default_eyes') or self.config.get('default_eyes')}")
+                    await self.send_message(chat_id, f"当前默认瞳色: {session_schema.get_character_value(state, 'custom_default_eyes', '') or self.config.get('default_eyes')}")
                 return
             if re.search(r"[\u4e00-\u9fff]", sub_arg):
                 sub_arg = await self._translate_appearance_tags(sub_arg)
@@ -1608,7 +1633,7 @@ class CommandHandlersMixin:
                 self._save_session_state(session_id, state)
                 await self.send_message(chat_id, f"角色瞳色已更新: {sub_arg}")
             else:
-                state["custom_default_eyes"] = sub_arg
+                session_schema.set_character_value(state, "custom_default_eyes", sub_arg)
                 self._save_session_state(session_id, state)
                 await self.send_message(chat_id, f"默认瞳色已更新: {sub_arg}")
             return
@@ -1627,15 +1652,16 @@ class CommandHandlersMixin:
             applied = []
             if base_src:
                 gender = self._oc_gender_tag(
-                    state.get("custom_character", ""),
-                    state.get("custom_role_name", ""),
-                    state.get("custom_scheduled_persona", ""),
+                    session_schema.get_character_value(state, "custom_character", ""),
+                    session_schema.get_character_value(state, "custom_role_name", ""),
+                    session_schema.get_character_value(state, "custom_scheduled_persona", ""),
                     base_src,
                 )
                 base_tags = await self._oc_translate_tags(base_src)
-                state["custom_positive_prefix"] = self._merge_appearance(state.get("custom_positive_prefix", ""), base_tags)
-                if not state.get("custom_count"):
-                    state["custom_count"] = gender
+                merged = self._merge_appearance(session_schema.get_character_value(state, "custom_positive_prefix", ""), base_tags)
+                session_schema.set_character_value(state, "custom_positive_prefix", merged)
+                if not session_schema.get_character_value(state, "custom_count", ""):
+                    session_schema.set_character_value(state, "custom_count", gender)
                 applied.append(f"基础外观: {base_tags[:180]}")
             if dynamic_src:
                 # 服装/配饰走衣柜分槽（同槽替换、连衣裙互斥），不再扁平合并。
@@ -1647,12 +1673,12 @@ class CommandHandlersMixin:
             scene_pref = (intake.get("scene_preference") or "").strip()
             selfie_pref = (intake.get("selfie_preference") or "").strip()
             if scene_pref:
-                state["custom_scene_preference"] = scene_pref
+                session_schema.set_character_value(state, "custom_scene_preference", scene_pref)
                 applied.append(f"场景偏好: {scene_pref[:120]}")
             if selfie_pref:
-                state["custom_selfie_preference"] = selfie_pref
+                session_schema.set_character_value(state, "custom_selfie_preference", selfie_pref)
                 applied.append(f"自拍偏好: {selfie_pref[:120]}")
-            state["custom_prompt_intake"] = intake
+            session_schema.set_character_value(state, "custom_prompt_intake", intake)
             if applied:
                 self._save_session_state(session_id, state)
                 await self.send_message(chat_id, "已按槽位自动归档：\n" + "\n".join(applied))
@@ -1697,15 +1723,15 @@ class CommandHandlersMixin:
         state = self._get_session_state(session_id)
         val = (val or "").strip().lower()
         if val in ("on", "1", "开", "允许", "启用", "true", "yes"):
-            state["custom_allow_llm_change_appearance"] = True
+            session_schema.set_character_value(state, "custom_allow_llm_change_appearance", True)
             self._save_session_state(session_id, state)
             await self.send_message(chat_id, "已允许模型自主修改外型。")
         elif val in ("off", "0", "关", "禁止", "禁用", "false", "no"):
-            state["custom_allow_llm_change_appearance"] = False
+            session_schema.set_character_value(state, "custom_allow_llm_change_appearance", False)
             self._save_session_state(session_id, state)
             await self.send_message(chat_id, "已禁止模型自主修改外型。")
         elif val in ("reset", "clear", "默认", "全局"):
-            state["custom_allow_llm_change_appearance"] = None
+            session_schema.set_character_value(state, "custom_allow_llm_change_appearance", None)
             self._save_session_state(session_id, state)
             await self.send_message(chat_id, f"已恢复全局设置: {'允许' if self._allow_llm_change_appearance(session_id) else '禁止'}")
         else:

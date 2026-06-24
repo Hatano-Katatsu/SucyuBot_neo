@@ -81,11 +81,12 @@ def parse_allow_change_appearance(raw: Any) -> bool | None:
 def card_from_state(state: dict[str, Any]) -> dict[str, Any]:
     """从会话 state 抽出可移植角色卡（不含 id）。导出与快照共用。"""
     card: dict[str, Any] = {
-        card_key: state.get(state_key, "") for card_key, state_key in CARD_STRING_FIELDS
+        card_key: session_schema.get_character_value(state, state_key, "")
+        for card_key, state_key in CARD_STRING_FIELDS
     }
     card["outfit"] = session_schema.get_outfit(state)  # 当前穿搭来自 clothing box
-    card["allow_change_appearance"] = state.get(ALLOW_KEY)
-    card["purity"] = state.get("purity")
+    card["allow_change_appearance"] = session_schema.get_character_value(state, ALLOW_KEY)
+    card["purity"] = session_schema.get_character_value(state, "purity")
     return card
 
 
@@ -93,21 +94,25 @@ def apply_card_to_state(state: dict[str, Any], data: dict[str, Any]) -> None:
     """把角色卡 payload 写回 state（导入 / 修改角色）。只写 data 里出现的字段。"""
     for card_key, state_key in CARD_STRING_FIELDS:
         if card_key in data:
-            state[state_key] = "" if data[card_key] is None else str(data[card_key])
+            session_schema.set_character_value(
+                state, state_key, "" if data[card_key] is None else str(data[card_key])
+            )
     if "outfit" in data:  # 当前穿搭写进 clothing box
         session_schema.set_outfit(state, "" if data["outfit"] is None else str(data["outfit"]))
     if "allow_change_appearance" in data:
-        state[ALLOW_KEY] = parse_allow_change_appearance(data.get("allow_change_appearance"))
+        session_schema.set_character_value(
+            state, ALLOW_KEY, parse_allow_change_appearance(data.get("allow_change_appearance"))
+        )
     if "purity" in data:
         raw = data.get("purity")
         s = str(raw).strip() if raw is not None else ""
         if s:
             try:
-                state["purity"] = max(0, min(10, int(s)))
-                state["purity_user_set"] = True
+                session_schema.set_character_value(state, "purity", max(0, min(10, int(s))))
+                session_schema.set_character_value(state, "purity_user_set", True)
             except (TypeError, ValueError):
-                state["purity"] = None
-                state["purity_user_set"] = False
+                session_schema.set_character_value(state, "purity", None)
+                session_schema.set_character_value(state, "purity_user_set", False)
         else:
-            state["purity"] = None
-            state["purity_user_set"] = False
+            session_schema.set_character_value(state, "purity", None)
+            session_schema.set_character_value(state, "purity_user_set", False)

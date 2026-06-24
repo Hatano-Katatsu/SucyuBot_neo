@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import time
@@ -94,6 +95,10 @@ class LongTermMemoryStore:
     def _connect(self):
         conn = sqlite3.connect(self.path, timeout=10)
         conn.row_factory = sqlite3.Row
+        if os.environ.get("SUCYUBOT_TEST_FAST_SQLITE"):
+            conn.execute("PRAGMA journal_mode=MEMORY")
+            conn.execute("PRAGMA synchronous=OFF")
+            conn.execute("PRAGMA temp_store=MEMORY")
         return conn
 
     def _init_schema(self):

@@ -110,6 +110,8 @@ except Exception as exc:
         self._restart_requested = True
         try:
             self._flush_sessions(force=True)
+            if hasattr(self, "_flush_llm_debug"):
+                self._flush_llm_debug(force=True)
             self.save_config()
             helper_pid = self._spawn_restart_helper()
             return {
@@ -136,6 +138,8 @@ except Exception as exc:
         """完全关闭服务（停机器人 + Web 控制台 + 退出进程），不重启。"""
         try:
             self._flush_sessions(force=True)
+            if hasattr(self, "_flush_llm_debug"):
+                self._flush_llm_debug(force=True)
             self.save_config()
         except Exception:
             logger.debug("flush/save on service shutdown failed", exc_info=True)

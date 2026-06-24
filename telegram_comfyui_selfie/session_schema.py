@@ -127,7 +127,8 @@ STATE_SCHEMA: dict[str, Field] = {
     "persona_user_set": Field(C, default=False),
     "purity": Field(C, default=None),
     "purity_user_set": Field(C, default=False),
-
+    # —— character box：角色配置字段的嵌套容器（非破坏共存，保留上方 C 字段注册）——
+    "character": Field(C, default={}),
     # —— 角色短期态：对话上下文 ——
     "recent_message_history": Field(T, default=[]),
     "chat_history": Field(T, default=[]),
@@ -256,7 +257,7 @@ _CLOTHING_KEYS = frozenset({"clothing"})
 _PLACE_KEYS = frozenset({"place"})
 _CONTEXT_KEYS = frozenset({"context"})
 # 短期态但归属角色域的派生缓存（生活档案：年龄段/职业/白天去向推断）。
-_CHARACTER_DOMAIN_TRANSIENT = frozenset({"life_profile"})
+_CHARACTER_DOMAIN_TRANSIENT = frozenset()
 
 
 def box_for(key: str) -> str:
@@ -275,13 +276,76 @@ def box_for(key: str) -> str:
     if key in _CONTEXT_KEYS:
         return BOX_CONTEXT
     if key in _CHARACTER_DOMAIN_TRANSIENT:
-        return BOX_CHARACTER
+        return BOX_CONTEXT
     return BOX_CONTEXT
 
 
 # 已登记字段 → box（派生表，便于查阅/测试）。
 BOX_OF: dict[str, str] = {key: box_for(key) for key in STATE_SCHEMA}
 
+
+# ──────────────────────────────────────────────────────────────────────────
+# character box：第五个切换的盒。把角色配置字段（custom_* + purity 标志）从扁平
+# 顶层收进 state["character"]。采用非破坏共存 + 双写：旧扁平键保留，未迁移调用点仍可读写；
+# 新访问器优先读取扁平键，盒内值随之同步，确保旧数据重启后自动补盒。
+# ──────────────────────────────────────────────────────────────────────────
+
+_CHARACTER_DEFAULT: dict[str, Any] = {
+    key: field.make_default()
+    for key, field in STATE_SCHEMA.items()
+    if field.scope == CHARACTER_CONFIG and key != BOX_CHARACTER and field.has_default()
+}
+_LEGACY_CHARACTER_FLAT_KEYS = tuple(_CHARACTER_DEFAULT.keys())
+
+
+def ensure_character_box(state: dict[str, Any]) -> dict[str, Any]:
+    """保证 state["character"] 存在且子键补齐；盒与旧扁平角色配置双向补齐（幂等）。
+
+    与 context/session box 同构：不弹出扁平键，旧代码可继续 state["custom_*"]；
+    访问器写入时盒与扁平键双写。这样线上只需重启，旧数据会自动拥有 character 盒。
+    如果数据已经只有盒、缺旧扁平键，也会补回扁平键，避免旧调用点读不到。
+    """
+    box = state.get("character")
+    if not isinstance(box, dict):
+        box = {}
+        state["character"] = box
+    for key in _LEGACY_CHARACTER_FLAT_KEYS:
+        if key in state:
+            if key not in box:
+                box[key] = state[key]
+        elif key in box:
+            state[key] = box[key]
+    for key, default in _CHARACTER_DEFAULT.items():
+        if key not in box:
+            box[key] = copy.deepcopy(default)
+        if key not in state:
+            state[key] = copy.deepcopy(box[key])
+    return box
+
+
+def get_character_value(state: dict[str, Any], key: str, default: Any = None) -> Any:
+    """读取角色配置字段。key 使用完整 state 键名，如 custom_bot_name / purity。"""
+    box = ensure_character_box(state)
+    if key in state:
+        flat = state[key]
+        if box.get(key) != flat:
+            box[key] = flat
+        return flat
+    if key in box:
+        return box[key]
+    return default
+
+
+def set_character_value(state: dict[str, Any], key: str, value: Any) -> None:
+    """写入角色配置字段：盒 + 扁平键双写（向后兼容）。"""
+    box = ensure_character_box(state)
+    box[key] = value
+    state[key] = value
+
+
+def get_custom_value(state: dict[str, Any], key: str, default: Any = None) -> Any:
+    """按配置键读取会话级 custom_ 覆盖，例如 key=positive_prefix。"""
+    return get_character_value(state, f"custom_{key}", default)
 
 # ──────────────────────────────────────────────────────────────────────────
 # clothing box：第一个真正切换的盒。把穿搭/衣柜/收藏从扁平顶层收进 state["clothing"]，
@@ -1078,3 +1142,31 @@ def get_init_flow(state) -> dict[str, Any]:
     box["init_flow"] = new
     state["init_flow"] = new
     return new
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 启动期迁移检测：服务在写回任何盒迁移前据此创建旧数据备份。
+# ──────────────────────────────────────────────────────────────────────────
+
+def _box_missing_or_incomplete(state: dict[str, Any], box_name: str, keys: tuple[str, ...]) -> bool:
+    box = state.get(box_name)
+    if not isinstance(box, dict):
+        return True
+    return any(key in state and key not in box for key in keys)
+
+
+def state_needs_box_migration(state: dict[str, Any]) -> bool:
+    """判断会话 state 是否需要启动期盒迁移。只检测结构，不修改 state。"""
+    if not isinstance(state, dict):
+        return False
+    if _box_missing_or_incomplete(state, BOX_CHARACTER, _LEGACY_CHARACTER_FLAT_KEYS):
+        return True
+    if not isinstance(state.get(BOX_CLOTHING), dict) or any(key in state for key in _LEGACY_CLOTHING_FLAT_KEYS):
+        return True
+    if not isinstance(state.get(BOX_PLACE), dict) or any(key in state for key in _LEGACY_PLACE_FLAT_KEYS):
+        return True
+    if _box_missing_or_incomplete(state, BOX_CONTEXT, _LEGACY_CONTEXT_FLAT_KEYS):
+        return True
+    if _box_missing_or_incomplete(state, BOX_SESSION, _LEGACY_SESSION_FLAT_KEYS):
+        return True
+    return False

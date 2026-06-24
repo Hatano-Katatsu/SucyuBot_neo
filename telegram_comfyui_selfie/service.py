@@ -109,6 +109,7 @@ class TelegramComfyUIService(
         self.app_store = AppStateStore(self.memory.path)
         self.sessions: dict[str, dict[str, Any]] = {}
         self.city_place_catalogs: dict[str, dict[str, Any]] = {}
+        self.startup_backup_paths: list[str] = []
         self._load_state()
 
         self.http: aiohttp.ClientSession | None = None
@@ -126,6 +127,8 @@ class TelegramComfyUIService(
         self._bot_tasks: list[asyncio.Task] = []
         self._checkpoint_tasks: dict[str, asyncio.Task] = {}
         self._dream_tasks: dict[str, asyncio.Task] = {}
+        self._llm_debug_buffer: list[dict[str, Any]] = []
+        self._llm_debug_flush_threshold = 10
         self._web_runner: Any = None
         self._stop_event: asyncio.Event | None = None
         self.process_started_at = time.time()
@@ -238,6 +241,7 @@ class TelegramComfyUIService(
 
     async def close(self):
         self._flush_sessions(force=True)
+        self._flush_llm_debug(force=True)
         if self.comfy_session and not self.comfy_session.closed:
             await self.comfy_session.close()
 
@@ -296,9 +300,27 @@ class TelegramComfyUIService(
                 self._migrate_from_state_json()
             # 城市目录独立加载（可能先于会话写入）
             self.city_place_catalogs = self.app_store.load_all_city_catalogs()
+            self._migrate_session_boxes_on_startup()
         except Exception as exc:
             logger.warning("加载状态失败，使用空状态: %s", exc)
         self._migrate_legacy_personas()
+
+    def _backup_file(self, source: Path, reason: str) -> str:
+        """在自动迁移写回前备份旧数据文件。"""
+        if not source.exists():
+            return ""
+        stamp = int(time.time())
+        base = f"{source.stem}.{reason}-backup-{stamp}"
+        backup = source.with_name(f"{base}{source.suffix}")
+        index = 1
+        while backup.exists():
+            backup = source.with_name(f"{base}-{index}{source.suffix}")
+            index += 1
+        backup.write_bytes(source.read_bytes())
+        path = str(backup)
+        self.startup_backup_paths.append(path)
+        logger.info("已备份旧状态文件: %s -> %s", source, backup)
+        return path
 
     def _migrate_from_state_json(self):
         """从旧版 state.json 迁移数据到 SQLite。"""
@@ -308,13 +330,15 @@ class TelegramComfyUIService(
                 return
             data = json.loads(raw)
             sessions = data.get("sessions", {})
+            catalogs = data.get("city_place_catalogs", {})
+            if (isinstance(sessions, dict) and sessions) or (isinstance(catalogs, dict) and catalogs):
+                self._backup_file(self.state_path, "state-json-migration")
             if isinstance(sessions, dict):
                 self.sessions = sessions
                 for sid, state in sessions.items():
                     if isinstance(state, dict):
                         self.app_store.save_session_state(sid, state)
                 logger.info("Migrated %d sessions from %s to SQLite", len(sessions), self.state_path)
-            catalogs = data.get("city_place_catalogs", {})
             if isinstance(catalogs, dict):
                 self.city_place_catalogs = catalogs
                 for key, catalog in catalogs.items():
@@ -322,6 +346,29 @@ class TelegramComfyUIService(
                         self.app_store.save_city_catalog(key, catalog)
         except Exception as exc:
             logger.warning("state.json 迁移失败: %s", exc)
+
+    def _ensure_session_boxes(self, state: dict[str, Any]) -> None:
+        """补齐所有 state 分盒；老扁平数据在各 ensure_* 内幂等迁移。"""
+        session_schema.ensure_character_box(state)
+        session_schema.ensure_clothing_box(state)
+        session_schema.ensure_place_box(state)
+        session_schema.ensure_context_box(state)
+        session_schema.ensure_session_box(state)
+
+    def _migrate_session_boxes_on_startup(self) -> None:
+        """重启即迁移旧 state 结构，并在写回前备份 SQLite。"""
+        candidates = [
+            (sid, state)
+            for sid, state in self.sessions.items()
+            if isinstance(state, dict) and session_schema.state_needs_box_migration(state)
+        ]
+        if not candidates:
+            return
+        self._backup_file(self.app_store.path, "box-migration")
+        for sid, state in candidates:
+            self._ensure_session_boxes(state)
+            self.app_store.save_session_state(sid, state)
+        logger.info("已迁移 %d 个会话 state 分盒结构", len(candidates))
 
     # 老数据迁移：早期把身份/关系焊进了 custom_scheduled_persona，现已改为读时组装。
     # 启动时把这两类前缀剥掉，让人设串退化成纯人格描述（幂等，剥干净后不再变动）。
@@ -341,9 +388,11 @@ class TelegramComfyUIService(
         for state in self.sessions.values():
             if not isinstance(state, dict):
                 continue
-            new, ch = self._strip_legacy_persona_bakein(state.get("custom_scheduled_persona"))
+            new, ch = self._strip_legacy_persona_bakein(
+                session_schema.get_character_value(state, "custom_scheduled_persona")
+            )
             if ch:
-                state["custom_scheduled_persona"] = new
+                session_schema.set_character_value(state, "custom_scheduled_persona", new)
                 changed = True
             saved = session_schema.get_saved_characters(state)
             if isinstance(saved, dict):
@@ -455,8 +504,12 @@ class TelegramComfyUIService(
         if session_id not in self.sessions:
             self.sessions[session_id] = {}
         state = self.sessions[session_id]
+        # character 要先补盒再补扁平默认值；否则盒内旧数据会被刚 setdefault 出来的空扁平键遮住。
+        session_schema.ensure_character_box(state)
         for key, val in self._session_state_defaults().items():
             state.setdefault(key, val)
+        # character 字段已收进 state["character"] 盒；保留旧扁平 custom_* 兼容读写。
+        session_schema.ensure_character_box(state)
         # clothing 字段已收进 state["clothing"] 盒；迁移旧扁平持久态并补齐子键。
         session_schema.ensure_clothing_box(state)
         # place 字段已收进 state["place"] 盒；迁移旧扁平持久态并补齐子键。
@@ -526,7 +579,7 @@ class TelegramComfyUIService(
     def _get_session_cfg(self, session_id: str, key: str, default=None):
         if session_id:
             state = self._get_session_state(session_id)
-            override = state.get(f"custom_{key}")
+            override = session_schema.get_custom_value(state, key)
             if override not in (None, ""):
                 return override
         return self.config.get(key, default)
@@ -547,25 +600,30 @@ class TelegramComfyUIService(
     def _session_role_identity(self, session_id: str = "") -> tuple[str, str, str]:
         """返回当前会话的角色类型、角色名、自称；角色态不回落到全局默认角色名。"""
         state = self._get_session_state(session_id) if session_id else {}
-        if session_id and self._is_character_set(session_id) and state.get("custom_character"):
+        character = session_schema.get_character_value(state, "custom_character", "") if state else ""
+        series = session_schema.get_character_value(state, "custom_series", "") if state else ""
+        role_override = session_schema.get_character_value(state, "custom_role_name", "") if state else ""
+        bot_override = session_schema.get_character_value(state, "custom_bot_name", "") if state else ""
+        self_name = session_schema.get_character_value(state, "custom_bot_self_name", "") if state else ""
+        if session_id and self._is_character_set(session_id) and character:
             role_name = (
-                state.get("custom_role_name")
-                or state.get("custom_series")
+                role_override
+                or series
                 or "角色"
             )
             bot_name = (
-                state.get("custom_bot_name")
-                or state.get("custom_character")
+                bot_override
+                or character
                 or self.config.get("bot_name", "蕾伊")
             )
-            bot_self_name = state.get("custom_bot_self_name") or "我"
+            bot_self_name = self_name or "我"
             return role_name, bot_name, bot_self_name
         # 角色态但 custom_character 为空（persona_user_set=True 但未填角色名）：用 neutral 占位，
         # 避免回退到全局默认魅魔/蕾伊串到其他 OC 角色。
         if session_id and self._is_character_set(session_id):
-            bot = state.get("custom_bot_name") or self.config.get("bot_name", "角色")
-            role = state.get("custom_role_name") or state.get("custom_series") or "角色"
-            return role, bot, state.get("custom_bot_self_name") or "我"
+            bot = bot_override or self.config.get("bot_name", "角色")
+            role = role_override or series or "角色"
+            return role, bot, self_name or "我"
         return (
             self._get_session_cfg(session_id, "role_name", "魅魔"),
             self._get_session_cfg(session_id, "bot_name", "蕾伊"),
@@ -605,11 +663,14 @@ class TelegramComfyUIService(
 
     def _is_character_set(self, session_id: str) -> bool:
         state = self._get_session_state(session_id)
-        return bool(state.get("custom_character") or state.get("persona_user_set"))
+        return bool(
+            session_schema.get_character_value(state, "custom_character", "")
+            or session_schema.get_character_value(state, "persona_user_set", False)
+        )
 
     def _get_purity(self, session_id: str) -> int:
         state = self._get_session_state(session_id) if session_id else {}
-        raw = state.get("purity")
+        raw = session_schema.get_character_value(state, "purity") if state else None
         if raw is not None:
             try:
                 return max(0, min(10, int(raw)))
@@ -683,11 +744,12 @@ class TelegramComfyUIService(
         state = self._get_session_state(session_id)
         char_set = self._is_character_set(session_id)
         if char_set:
-            base = state.get("custom_scheduled_persona", "")
-            if state.get("custom_character"):
+            base = session_schema.get_character_value(state, "custom_scheduled_persona", "")
+            character = session_schema.get_character_value(state, "custom_character", "")
+            if character:
                 base = self._persona_with_character_identity(
-                    state.get("custom_character", ""),
-                    state.get("custom_series", ""),
+                    character,
+                    session_schema.get_character_value(state, "custom_series", ""),
                     base,
                 )
         else:
@@ -695,10 +757,11 @@ class TelegramComfyUIService(
         if not base:
             # 角色态下人设为空时，用角色名构造最小身份，避免回退到全局默认（魅魔蕾伊）串到其他 OC 角色。
             # 非角色态（无角色/全局默认）才回退到全局 scheduled_persona。
-            if char_set and state.get("custom_character"):
-                base = f"你是{state['custom_character']}。"
+            character = session_schema.get_character_value(state, "custom_character", "")
+            if char_set and character:
+                base = f"你是{character}。"
             elif char_set:
-                bot = state.get("custom_bot_name") or self.config.get("bot_name", "角色")
+                bot = session_schema.get_character_value(state, "custom_bot_name", "") or self.config.get("bot_name", "角色")
                 base = f"你是{bot}。"
             else:
                 base = self.config.get("scheduled_persona") or DEFAULT_CONFIG["scheduled_persona"]
@@ -721,7 +784,7 @@ class TelegramComfyUIService(
 
     def _allow_llm_change_appearance(self, session_id: str) -> bool:
         state = self._get_session_state(session_id)
-        override = state.get("custom_allow_llm_change_appearance")
+        override = session_schema.get_character_value(state, "custom_allow_llm_change_appearance")
         if isinstance(override, bool):
             return override
         if isinstance(override, str) and override.strip():
@@ -754,7 +817,7 @@ class TelegramComfyUIService(
         pool = self._normalize_style_pool()
         if session_id:
             state = self._get_session_state(session_id)
-            custom = str(state.get("custom_current_style", "")).strip()
+            custom = str(session_schema.get_character_value(state, "custom_current_style", "")).strip()
             if custom:
                 return custom
         current = str(self.config.get("current_style", "")).strip()
@@ -765,7 +828,7 @@ class TelegramComfyUIService(
             raise ValueError(f"未知画风: {style}")
         if session_id:
             state = self._get_session_state(session_id)
-            state["custom_current_style"] = style
+            session_schema.set_character_value(state, "custom_current_style", style)
             self._save_session_state(session_id, state)
         else:
             self.config["current_style"] = style
@@ -947,9 +1010,11 @@ class TelegramComfyUIService(
                 "custom_series",
                 "custom_visual_character",
                 "custom_visual_series",
-                state.get("custom_positive_prefix", ""),
+                session_schema.get_character_value(state, "custom_positive_prefix", ""),
                 session_schema.get_outfit(state),
             ):
+                session_schema.set_character_value(state, "custom_visual_character", state.get("custom_visual_character", ""))
+                session_schema.set_character_value(state, "custom_visual_series", state.get("custom_visual_series", ""))
                 sessions_updated += 1
                 updates.append(f"{sid}: {state.get('custom_character') or '-'} -> {state.get('custom_visual_character') or '(blank)'} / {state.get('custom_visual_series') or '(blank)'}")
             saved = session_schema.get_saved_characters(state)
@@ -1004,8 +1069,8 @@ class TelegramComfyUIService(
     def _preview_current_style(self, state: dict[str, Any] | None = None, saved: dict[str, Any] | None = None) -> str:
         if saved and str(saved.get("style") or "").strip():
             return str(saved.get("style") or "").strip()
-        if state and str(state.get("custom_current_style") or "").strip():
-            return str(state.get("custom_current_style") or "").strip()
+        if state and str(session_schema.get_character_value(state, "custom_current_style", "") or "").strip():
+            return str(session_schema.get_character_value(state, "custom_current_style", "") or "").strip()
         current = str(self.config.get("current_style") or "").strip()
         if current:
             return current
@@ -1073,7 +1138,7 @@ class TelegramComfyUIService(
 
         for sid in list(self.sessions.keys()):
             state = self._get_session_state(sid)
-            state_clean = self._clean_prompt_prefix_value(state.get("custom_positive_prefix", ""))
+            state_clean = self._clean_prompt_prefix_value(session_schema.get_character_value(state, "custom_positive_prefix", ""))
             if state_clean:
                 style_before = self._preview_current_style(state)
                 style_after = self._combine_prompt_styles(style_before, state_clean["moved_style"])
@@ -1081,7 +1146,7 @@ class TelegramComfyUIService(
                     "scope": "session",
                     "label": f"{sid}.custom_positive_prefix",
                     "session_id": sid,
-                    "character": state.get("custom_character") or "",
+                    "character": session_schema.get_character_value(state, "custom_character", "") or "",
                     "field": "custom_positive_prefix",
                     "style_field": "custom_current_style",
                     "style_before": style_before,
@@ -1152,11 +1217,11 @@ class TelegramComfyUIService(
             state = self._get_session_state(sid)
             removed_count = (change.get("removed_count") or "").strip()
             if scope == "session":
-                state["custom_positive_prefix"] = change["after"]
+                session_schema.set_character_value(state, "custom_positive_prefix", change["after"])
                 if change["moved_style"]:
-                    state["custom_current_style"] = change["style_after"]
-                if removed_count and not state.get("custom_count"):
-                    state["custom_count"] = removed_count
+                    session_schema.set_character_value(state, "custom_current_style", change["style_after"])
+                if removed_count and not session_schema.get_character_value(state, "custom_count", ""):
+                    session_schema.set_character_value(state, "custom_count", removed_count)
                     count_migrated += 1
                 touched_sessions.add(sid)
             elif scope == "saved_character":
@@ -1227,7 +1292,7 @@ class TelegramComfyUIService(
     def _effective_visual_prompt_tags(self, session_id: str) -> str:
         state = self._get_session_state(session_id)
         if self._is_character_set(session_id):
-            base = state.get("custom_positive_prefix", "") or self.config.get("positive_prefix", "")
+            base = session_schema.get_character_value(state, "custom_positive_prefix", "") or self.config.get("positive_prefix", "")
         else:
             base = self._get_session_cfg(session_id, "positive_prefix", "")
         return self._inject_appearance(base, session_id).strip()
@@ -1326,9 +1391,10 @@ class TelegramComfyUIService(
 
     def _prompt_scene_preferences(self, session_id: str) -> dict[str, str]:
         state = self._get_session_state(session_id)
-        intake = state.get("custom_prompt_intake") if isinstance(state.get("custom_prompt_intake"), dict) else {}
-        scene_preference = state.get("custom_scene_preference") or intake.get("scene_preference") or ""
-        selfie_preference = state.get("custom_selfie_preference") or intake.get("selfie_preference") or ""
+        raw_intake = session_schema.get_character_value(state, "custom_prompt_intake")
+        intake = raw_intake if isinstance(raw_intake, dict) else {}
+        scene_preference = session_schema.get_character_value(state, "custom_scene_preference", "") or intake.get("scene_preference") or ""
+        selfie_preference = session_schema.get_character_value(state, "custom_selfie_preference", "") or intake.get("selfie_preference") or ""
         return {
             "scene_preference": str(scene_preference).strip(),
             "selfie_preference": str(selfie_preference).strip(),
@@ -1455,6 +1521,126 @@ class TelegramComfyUIService(
             total_tokens=total_tokens or prompt_tokens + completion_tokens,
         )
 
+    @staticmethod
+    def _json_safe(value: Any) -> Any:
+        """把调试数据压成可 JSON 序列化结构，避免日志写入影响主请求。"""
+        try:
+            return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+        except Exception:
+            return str(value)
+
+    @staticmethod
+    def _llm_usage_debug_summary(data: dict[str, Any] | None) -> dict[str, Any]:
+        usage = (data or {}).get("usage") if isinstance(data, dict) else {}
+        usage = usage if isinstance(usage, dict) else {}
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
+        cached_tokens = int(
+            usage.get("prompt_cache_hit_tokens")
+            or usage.get("prompt_cached_tokens")
+            or 0
+        )
+        miss_tokens = int(usage.get("prompt_cache_miss_tokens") or 0)
+        if not cached_tokens and miss_tokens and prompt_tokens:
+            cached_tokens = max(0, prompt_tokens - miss_tokens)
+        return {
+            "raw": dict(usage),
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "cached_tokens": cached_tokens,
+            "cache_miss_tokens": miss_tokens,
+            "cache_hit_rate": round(cached_tokens / prompt_tokens, 4) if prompt_tokens else 0,
+        }
+
+    def _llm_debug_log_path(self) -> Path:
+        return self._user_log_dir() / "llm_debug.json"
+
+    def _flush_llm_debug(self, *, force: bool = False) -> None:
+        pending = getattr(self, "_llm_debug_buffer", [])
+        if not pending:
+            return
+        threshold = int(getattr(self, "_llm_debug_flush_threshold", 10) or 10)
+        if not force and len(pending) < threshold:
+            return
+        batch = list(pending)
+        try:
+            path = self._llm_debug_log_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {}
+            else:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            grouped = data.get("entries_by_type")
+            if not isinstance(grouped, dict):
+                grouped = {}
+            for entry in batch:
+                key = str(entry.get("type") or "unknown:untagged")
+                entries = grouped.get(key)
+                if not isinstance(entries, list):
+                    entries = []
+                entries.append(entry)
+                grouped[key] = entries[-10:]
+            updated_at = batch[-1].get("time") or datetime.now().isoformat(timespec="seconds")
+            data = {
+                "schema_version": 1,
+                "updated_at": updated_at,
+                "retention": "last 10 entries per purpose:tag",
+                "flush_policy": f"replace whole file after {threshold} buffered LLM records",
+                "entries_by_type": grouped,
+            }
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(path)
+            del pending[:len(batch)]
+        except Exception as exc:
+            logger.debug("flush llm debug failed: %s", exc)
+
+    def _record_llm_debug(
+        self,
+        *,
+        purpose: str,
+        tag: str,
+        session_id: str,
+        resolved: dict[str, Any],
+        request_url: str,
+        request_body: dict[str, Any],
+        response: Any,
+        status: int | None = None,
+        error: str = "",
+    ) -> None:
+        """按 purpose:tag 保存最近 10 次完整 LLM 请求/返回，供上下文缓存命中分析。"""
+        key = f"{purpose or 'unknown'}:{tag or 'untagged'}"
+        now = time.time()
+        entry = {
+            "ts": now,
+            "time": datetime.fromtimestamp(now).isoformat(timespec="seconds"),
+            "type": key,
+            "purpose": purpose or "",
+            "tag": tag or "",
+            "session_id": session_id or "",
+            "profile_id": str(resolved.get("profile_id") or ""),
+            "model": str(resolved.get("model") or ""),
+            "thinking": bool(resolved.get("thinking")),
+            "status": status,
+            "request": {
+                "url": request_url,
+                "body": self._json_safe(request_body),
+            },
+            "response": self._json_safe(response),
+            "usage": self._llm_usage_debug_summary(response if isinstance(response, dict) else None),
+        }
+        if error:
+            entry["error"] = error
+        self._llm_debug_buffer.append(entry)
+        self._flush_llm_debug(force=False)
+
     def _get_llm_value(self, purpose: str, name: str, default=None):
         prefix = "chat_llm" if purpose == "chat" else "image_llm"
         value = self.config.get(f"{prefix}_{name}")
@@ -1518,24 +1704,47 @@ class TelegramComfyUIService(
             body["enable_thinking"] = False
         elif disable_thinking:
             body["thinking"] = {"type": "disabled"}
+        request_url = f"{api_base}/chat/completions"
         async with aiohttp.ClientSession(
             trust_env=True,
             timeout=aiohttp.ClientTimeout(total=float(resolved.get("timeout") or 120)),
             headers={"Accept-Encoding": "gzip, deflate"},
         ) as s:
             async with s.post(
-                f"{api_base}/chat/completions",
+                request_url,
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept-Encoding": "gzip, deflate"},
                 json=body,
             ) as resp:
                 if resp.status != 200:
-                    raise RuntimeError(f"LLM request failed: {resp.status} {await resp.text()}")
+                    text = await resp.text()
+                    self._record_llm_debug(
+                        purpose=purpose,
+                        tag=tag,
+                        session_id=session_id,
+                        resolved=resolved,
+                        request_url=request_url,
+                        request_body=body,
+                        response={"status": resp.status, "text": text},
+                        status=resp.status,
+                        error=f"LLM request failed: {resp.status}",
+                    )
+                    raise RuntimeError(f"LLM request failed: {resp.status} {text}")
                 data = await resp.json()
         # 记录 token 消耗（不阻塞主链路，解析失败仅记录日志）。
         try:
             self._record_llm_usage_from_response(data, resolved, tag=tag, purpose=purpose, session_id=session_id)
         except Exception as exc:
             logger.debug("record llm usage failed: %s", exc)
+        self._record_llm_debug(
+            purpose=purpose,
+            tag=tag,
+            session_id=session_id,
+            resolved=resolved,
+            request_url=request_url,
+            request_body=body,
+            response=data,
+            status=200,
+        )
         return data
 
     async def _call_llm(self, system: str, user: str, temp: float = 0.3, tag: str = "", purpose: str = "image", disable_thinking: bool | None = None, session_id: str = "") -> str:
@@ -1562,7 +1771,7 @@ class TelegramComfyUIService(
             view = ""
         char_prefix = self._get_session_cfg(session_id, "positive_prefix", "")
         state = self._get_session_state(session_id) if session_id else {}
-        persisted_count = (state.get("custom_count") or "").strip()
+        persisted_count = (session_schema.get_character_value(state, "custom_count", "") or "").strip()
         gender = appearance_rules.infer_gender_from_count(persisted_count) if persisted_count else self._infer_gender_from_prefix(char_prefix)
         opener = self._view_opener(view, gender) if view else ""
         light_guard = self._format_light_guard(session_id)
@@ -1987,9 +2196,11 @@ class TelegramComfyUIService(
         lines = [f"地区设定总览\n全局默认城市: {self.config.get('location')} | 时区: UTC+{self.config.get('timezone_offset')}", ""]
         found = False
         for sid, state in self.sessions.items():
-            if state.get("custom_location") or state.get("custom_timezone_offset"):
+            custom_location = session_schema.get_character_value(state, "custom_location", "")
+            custom_timezone = session_schema.get_character_value(state, "custom_timezone_offset", "")
+            if custom_location or custom_timezone:
                 found = True
-                lines.append(f"{sid}: {state.get('custom_location') or '(全局)'} | UTC{state.get('custom_timezone_offset') or self.config.get('timezone_offset')}")
+                lines.append(f"{sid}: {custom_location or '(全局)'} | UTC{custom_timezone or self.config.get('timezone_offset')}")
         if not found:
             lines.append("所有会话均使用全局默认地区设置。")
         return "\n".join(lines)

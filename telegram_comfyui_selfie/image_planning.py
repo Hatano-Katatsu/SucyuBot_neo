@@ -141,8 +141,8 @@ def _detect_device_context(*sources: str) -> bool:
 
 
 # 明确的"角色此刻裸体/正在脱光"信号。clothing_off 是唯一没有确定性兜底的判定项——
-# 规划器一漏填，持久穿搭就原样画回来（"脱不掉衣服"bug）。这里只收**强信号**（明确性行为
-# 或明确脱光/裸体词），刻意不收 沐浴/事后/余韵 等可能已重新着装的暧昧词，宁可漏判不可误脱。
+# 规划器一漏填，持久穿搭就原样画回来（"脱不掉衣服"bug）。强裸体词只覆盖明确性行为
+# 或明确脱光/裸体；半脱/滑落另由 _infer_clothing_off_fallback 返回 topless 等更窄提示。
 NUDITY_CONTEXT_ZH = frozenset({
     # 明确性行为（隐含裸体）
     "做爱", "性爱", "交合", "交媾", "插入", "抽插", "进入她", "进入体内",
@@ -150,17 +150,50 @@ NUDITY_CONTEXT_ZH = frozenset({
     "口交", "肉棒", "阴茎", "龟头",
     # 明确裸体 / 脱光
     "裸体", "全裸", "赤裸", "赤身", "裸身", "裸着", "光着身", "光溜溜",
-    "脱光", "一丝不挂", "没穿衣服", "衣服都脱", "褪去衣物", "脱掉衣服",
-    "脱下衣服", "扒光", "扒掉衣服",
+    "脱光", "一丝不挂", "没穿衣服", "衣服都脱", "衣服脱了", "脱了衣服",
+    "褪去衣物", "褪下衣物", "褪下衣服", "脱掉衣服", "脱下衣服",
+    "宽衣解带", "扒光", "扒掉衣服",
 })
+
+_PARTIAL_TOPLESS_RE = re.compile(
+    r"(?:衣襟|领口|襟口|上衣|睡衣|寝衣|衬衫|衣物|衣服).{0,8}(?:敞开|滑落|褪下|褪到|落到|滑到)|"
+    r"(?:敞开|拉开|扯开).{0,8}(?:衣襟|领口|胸口|上衣|睡衣|寝衣|衬衫)|"
+    r"(?:露出|裸露).{0,8}(?:胸|乳|肩膀|锁骨)|"
+    r"(?:敞胸|半裸|上身裸|上半身裸|衣不蔽体)",
+)
+_PARTIAL_BOTTOMLESS_RE = re.compile(
+    r"(?:裙子|裙摆|短裙|内裤|裤子|下装).{0,8}(?:脱下|褪下|滑落|褪到|落到|滑到|掀起)|"
+    r"(?:露出|裸露).{0,8}(?:大腿根|臀|下身|私处)",
+)
+
+
+def _combined_context(*sources: str) -> str:
+    return " ".join(str(s) for s in sources if s)
 
 
 def _detect_nudity_context(*sources: str) -> bool:
-    combined = " ".join(s for s in sources if s)
+    combined = _combined_context(*sources)
     if not combined:
         return False
     return any(kw in combined for kw in NUDITY_CONTEXT_ZH)
 
+
+def _infer_clothing_off_fallback(*sources: str) -> str:
+    """从中文上下文给 clothing_off 的确定性兜底。
+
+    返回空表示不确定；强裸体返回 completely nude；半脱只返回局部裸露词，避免把
+    "脱了外套"、"领口敞开"之类误判成全裸。
+    """
+    combined = _combined_context(*sources)
+    if not combined:
+        return ""
+    if _detect_nudity_context(combined):
+        return "completely nude"
+    if _PARTIAL_TOPLESS_RE.search(combined):
+        return "topless"
+    if _PARTIAL_BOTTOMLESS_RE.search(combined):
+        return "bottomless"
+    return ""
 
 # 持久裸体态的 TTL 兜底：超过这个时长没有任何新裸体信号，就当她已经穿回衣服了。
 # 主要靠换装(change_appearance)和 /新场景 主动解除，TTL 只是防"永远卡裸体"的保险。
@@ -255,7 +288,7 @@ async def plan_roleplay_image(
     fallback_scene = (prompt or intent or must_include).strip()
     fallback_intimate_hint = _detect_intimate_context(intent, mood, prompt)
     fallback_device_hint = _detect_device_context(intent, mood, prompt)
-    fallback_nudity_hint = _detect_nudity_context(intent, mood, prompt)
+    fallback_clothing_off = _infer_clothing_off_fallback(intent, mood, prompt)
     if not service.has_llm_config("image"):
         fallback_view = requested_view
         if fallback_intimate_hint and not fallback_device_hint and fallback_view in {"selfie", "mirror"}:
@@ -264,7 +297,7 @@ async def plan_roleplay_image(
             "scene": fallback_scene,
             "view": fallback_view,
             "new_appearance_tags": None,
-            "clothing_off": "completely nude" if fallback_nudity_hint else "",
+            "clothing_off": fallback_clothing_off,
             "is_intimate": fallback_intimate_hint,
             "partner_in_frame": False,
             "device_in_frame": fallback_device_hint,
@@ -327,7 +360,7 @@ async def plan_roleplay_image(
 
     intimate_hint = _detect_intimate_context(intent, mood, prompt, dialog_context or "")
     device_hint = _detect_device_context(intent, mood, prompt, dialog_context or "")
-    nudity_hint = _detect_nudity_context(intent, mood, prompt, dialog_context or "")
+    clothing_off_hint = _infer_clothing_off_fallback(intent, mood, prompt, dialog_context or "")
     user_gender = service._get_user_gender(session_id) if hasattr(service, "_get_user_gender") else "male"
     user_g_zh = "女性" if user_gender == "female" else "男性"
 
@@ -494,7 +527,7 @@ async def plan_roleplay_image(
             "scene": fallback_scene,
             "view": fallback_view,
             "new_appearance_tags": None,
-            "clothing_off": "completely nude" if nudity_hint else "",
+            "clothing_off": clothing_off_hint,
             "is_intimate": intimate_hint,
             "partner_in_frame": False,
             "device_in_frame": device_hint,
@@ -539,8 +572,8 @@ async def plan_roleplay_image(
     # clothing_off 兜底：规划器漏填、但对话/意图有明确裸体/性爱信号时，强制本图裸体——
     # 否则持久穿搭会原样画回来（"脱不掉衣服"bug）。只在留空时兜底，不覆盖规划器的显式判断。
     clothing_off = (parsed.get("clothing_off") or "").strip()
-    if not clothing_off and nudity_hint:
-        clothing_off = "completely nude"
+    if not clothing_off and clothing_off_hint:
+        clothing_off = clothing_off_hint
     # 持久裸体态（根治）：一旦剧情脱光，后续每张图自动续上裸体，直到换装/新场景/超 TTL。
     # 续上（规划器本图没判脱衣，但新鲜期内仍处裸体）：
     if not clothing_off and session_schema.get_nudity(state) and service._within(
