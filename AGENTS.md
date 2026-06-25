@@ -212,6 +212,7 @@ telegram_comfyui_selfie/
 12. **生图规划与 AnimaTool 适配层隔离**：`plan_roleplay_image()` 不再把 AnimaTool Turbo schema/knowledge 拼进业务图片规划 prompt，避免业务 schema 的 `scene` 被后端 schema 的 `tags` 污染；新增图片计划 scene 归一化，兼容旧 `tags` 返回并在 strong 地点锁定时给泛化 scene 补地点锚点，防止餐厅/家/商场等场景在最终生图 prompt 中丢失。
 13. **生图天气贯通**：`plan_roleplay_image()` 优先使用调用方传入的 `weather_data`，避免推送链路重复拉取后前后不一致；`_translate_to_tags()` 与 `plan_animatool_slots()` 都显式注入当前天气文本，要求雨、雪、雾、风、冷热等可见天气在最终英文 tags 中通过窗外、地面、伞、湿痕、空气质感和光线体现。
 14. **同空间视角终裁**：`image_planning.py` 新增 `_resolve_roleplay_view()`，对 LLM 给出的 `requested_view/planned_view` 做最终业务校正：同空间且无明确自拍/对镜/录像信号时，不再允许普通配图落到 `selfie/mirror`；普通同空间单人场景改压到 `third`，近距离互动改压到 `pov`，明确“帮忙拍一张”改为 `portrait`，并在 `user_location` 缺失时回退使用持久 `co_located` 状态。新增 3 条回归测试锁定这三种分支。
+15. **自动配图 judge 视角收敛**：定位到 `chat:image-judge` 仍会把“凑近镜头确认论文”这类同空间日常陪伴场景错误写成 `view=selfie`，而线上服务进程启动时间早于 `b4d75ac`，当天日志仍在跑旧代码。`chat_context.py` 新增 `_sanitize_judge_view_hint()`：自动配图判断器只有在文本里出现明确自拍/对镜/拿手机拍/帮忙拍照等硬相机约束时才保留 `view`，其余普通日常场景一律清空，交给后续 `plan_roleplay_image()` 再按同空间规则判成 `pov/third/portrait`。同时把 `JUDGE` 日志补充为可打印 `view=...` 方便排查，并新增 3 条测试覆盖“论文场景误自拍清空 / 明确自拍保留 / judge 误传 selfie 时 planner 仍强制改成 pov”。
 
 ## 今日变更（2026-06-24）
 
@@ -235,7 +236,7 @@ telegram_comfyui_selfie/
 
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m compileall -q telegram_comfyui_selfie`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core -v`
-- 最新结果：`Ran 252 tests in 15.242s`，`OK`
+- 最新结果：`Ran 255 tests in 17.251s`，`OK`
 - 真实 API 缓存探针：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。
 - 新增核心测试 `test_live_chat_context_cache_probe_uses_current_config_when_available`：使用当前配置文件中的模型连接信息，但运行态 state / SQLite / 用户日志均隔离在测试临时目录；通过真实 `handle_chat()` 链路连续回答三轮预设问题，assistant 回复采用真实 AI 返回，并在最终总结行输出三轮回复片段与缓存命中率。模型临时未返回可用回复时跳过；最近一次成功单测输出：`round1=0/2562 (0.00%)`、`round2=2560/2586 (98.99%)`、`round3=2560/2608 (98.16%)`。
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示

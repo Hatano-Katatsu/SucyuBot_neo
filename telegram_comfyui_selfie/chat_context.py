@@ -38,6 +38,29 @@ DSML_INVOKE_RE = re.compile(rf"<{DSML_MARK}invoke\b(?P<attrs>[^>]*)>(?P<body>.*?
 DSML_PARAMETER_RE = re.compile(rf"<{DSML_MARK}parameter\b(?P<attrs>[^>]*)>(?P<body>.*?)</{DSML_MARK}parameter>", re.IGNORECASE | re.DOTALL)
 DSML_ATTR_RE = re.compile(r"""([A-Za-z_][\w.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
 DSML_ANY_TAG_RE = re.compile(rf"</?{DSML_MARK}[^>]*>", re.IGNORECASE | re.DOTALL)
+JUDGE_VALID_VIEWS = {"selfie", "mirror", "pov", "third", "portrait"}
+JUDGE_EXPLICIT_SELF_CAMERA_RE = re.compile(
+    r"(自拍|selfie|对镜|镜子|mirror|前摄|前置|拿着手机|举着手机|手机自拍|自拍分享|自拍道晚安|录视频|录像)",
+    re.IGNORECASE,
+)
+JUDGE_EXPLICIT_PORTRAIT_RE = re.compile(
+    r"(帮(?:我|她|忙)?拍|给(?:我|她)拍|替(?:我|她)拍|让我拍|请你拍|请人拍|摆拍|拍一张照片|拍张照片|来一张照片|再拍一张|再来一张)",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_judge_view_hint(view: str | None, *sources: str) -> str:
+    """自动配图判断器的 view 只保留硬相机约束，普通场景交给后续规划器决策。"""
+    normalized = (view or "").strip().lower()
+    if normalized not in JUDGE_VALID_VIEWS:
+        return ""
+    combined = "\n".join(part for part in sources if part)
+    if normalized in {"selfie", "mirror"}:
+        return normalized if JUDGE_EXPLICIT_SELF_CAMERA_RE.search(combined) else ""
+    if normalized == "portrait":
+        return normalized if JUDGE_EXPLICIT_PORTRAIT_RE.search(combined) else ""
+    # 自动判断阶段不强推 pov/third，避免把“近景/看向镜头”误解释成硬视角。
+    return ""
 
 class ChatContextMixin:
     async def handle_chat(self, chat_id: int | str, session_id: str, text: str):
@@ -220,7 +243,11 @@ class ChatContextMixin:
         self._save_session_state(session_id, state)
         self._queue_checkpoint_if_needed(session_id, full_snapshot)
         if judge_decision:
-            self._ulog(session_id, "JUDGE", f"配图时机=发 intent={judge_decision.get('intent','')[:60]}")
+            judge_view = (judge_decision.get("view") or "").strip()
+            if judge_view:
+                self._ulog(session_id, "JUDGE", f"配图时机=发 view={judge_view} intent={judge_decision.get('intent','')[:60]}")
+            else:
+                self._ulog(session_id, "JUDGE", f"配图时机=发 intent={judge_decision.get('intent','')[:60]}")
             asyncio.create_task(self.tool_generate_image(
                 chat_id, session_id,
                 intent=judge_decision.get("intent", ""),
@@ -686,6 +713,8 @@ class ChatContextMixin:
             "适合发：用户想看角色、聊到穿搭/外貌/场景、画面感强、调情或推进氛围的时刻。\n"
             "不适合发：纯逻辑问答、简单寒暄确认、话题与画面无关、角色刚回复没有可拍的动作/地点/穿搭、或刚刚才发过图。\n"
             "若决定发图，intent 必须严格贴合“角色刚回复”的地点、动作、情绪和用户刚说的话；不要另起一个新场景，不要改写成角色刚才没提到的地点。\n"
+            "view 字段只有在用户或角色刚刚明确提出了硬视角/拍摄方式时才填写：例如自拍、对镜、拿手机拍、帮忙拍一张照片。\n"
+            "像“凑近镜头”“看向镜头”“分享一下现在的样子”这类普通画面感，不等于自拍要求；同空间陪伴、一起看东西、递咖啡、坐在沙发上说话等日常场景，view 留空交给后续规划器判断。\n"
             f"{light_guard}\n"
             f"发图门槛: {tendency}\n"
             + ("已经较久没有配图了，如有合适时机可适当倾向于发。\n" if overdue else "")
@@ -710,7 +739,13 @@ class ChatContextMixin:
         return {
             "intent": intent,
             "mood": (parsed.get("mood") or "").strip(),
-            "view": (parsed.get("view") or "").strip(),
+            "view": _sanitize_judge_view_hint(
+                parsed.get("view"),
+                intent,
+                parsed.get("mood") or "",
+                user_text,
+                draft_reply,
+            ),
         }
 
     def _checkpoint_context(self, session_id: str) -> str:

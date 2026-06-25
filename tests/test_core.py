@@ -5186,6 +5186,88 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_judge_clears_non_explicit_selfie_view_hint(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({"chat_llm_api_key": "k", "chat_llm_model": "m", "chat_llm_api_base": "http://x", "selfie_frequency": "适度"})
+            sid = "telegram:1"
+            svc._get_session_state(sid)["rounds_since_image"] = 3
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "send": True,
+                "intent": "凑近镜头确认论文，表情带点紧张又可爱的陪伴感",
+                "mood": "好奇又怕看不懂，但愿意陪主人的撒娇感",
+                "view": "selfie",
+            }, ensure_ascii=False))
+
+            decision = await svc._judge_image_moment(
+                sid,
+                "汐汐一会儿陪我看两篇论文吧",
+                "（凑过来看了一眼，又缩回去）不过既然是主人要看的，汐汐就陪着～是什么论文呀？",
+            )
+
+            self.assertIsNotNone(decision)
+            self.assertEqual(decision["intent"], "凑近镜头确认论文，表情带点紧张又可爱的陪伴感")
+            self.assertEqual(decision["view"], "")
+
+        asyncio.run(run())
+
+    def test_judge_keeps_explicit_selfie_view_hint(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({"chat_llm_api_key": "k", "chat_llm_model": "m", "chat_llm_api_base": "http://x", "selfie_frequency": "适度"})
+            sid = "telegram:1"
+            svc._get_session_state(sid)["rounds_since_image"] = 3
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "send": True,
+                "intent": "铺好被子后，自拍道晚安，确认要一起睡时的害羞又甜蜜的轻松感",
+                "mood": "温馨甜蜜，略带害羞的放松",
+                "view": "selfie",
+            }, ensure_ascii=False))
+
+            decision = await svc._judge_image_moment(
+                sid,
+                "好了不",
+                "（轻快地把被子铺好，拍了拍枕头）好啦~被子铺得松松软软的，晚安啦主人，做个好梦~",
+            )
+
+            self.assertIsNotNone(decision)
+            self.assertEqual(decision["view"], "selfie")
+
+        asyncio.run(run())
+
+    def test_roleplay_image_planner_coerces_judge_selfie_hint_in_same_space_close_interaction(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._fetch_weather = AsyncMock(return_value={"desc": "小雨", "temp": "23"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "沙发角落，室内暖光柔和，角色捧着杯子微微前倾，带着紧张又可爱的神情确认要陪你看论文",
+                "view": "selfie",
+                "new_appearance_tags": "",
+                "user_location": "with_user",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            }, ensure_ascii=False))
+
+            plan = await plan_roleplay_image(
+                svc,
+                sid,
+                intent="凑近镜头确认论文，表情带点紧张又可爱的陪伴感",
+                prompt="（凑过来看了一眼，又缩回去）不过既然是主人要看的，汐汐就陪着～是什么论文呀？",
+                view="selfie",
+            )
+
+            self.assertEqual(plan["view"], "pov")
+            self.assertFalse(plan["device_in_frame"])
+
+        asyncio.run(run())
+
     def test_intimate_context_detection_chinese_keywords(self):
         self.assertTrue(_detect_intimate_context("角色正在与用户交合时的面部特写"))
         self.assertTrue(_detect_intimate_context("", "", "进入她体内"))
