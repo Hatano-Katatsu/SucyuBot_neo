@@ -12,6 +12,7 @@ import aiohttp
 from . import session_schema
 from .defaults import DEFAULT_CONFIG, WEEKDAY_NAMES
 from .generation import _infer_prompt_view
+from .world_runtime import PLACE_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +222,71 @@ def normalize_scene_visual_subject(scene: str) -> str:
     if not scene:
         return scene
     return USER_VISUAL_SUBJECT_RE.sub(lambda m: m.group(0).replace("你", "角色", 1), scene, count=1)
+
+
+_PLACE_SCENE_ANCHORS: dict[str, tuple[str, ...]] = {
+    "home": ("home", "living room", "bedroom", "kitchen", "sofa"),
+    "company": ("office", "workplace", "desk", "meeting room"),
+    "school": ("school", "classroom", "campus", "library"),
+    "park": ("park", "bench", "lawn", "trees"),
+    "mall": ("shopping mall", "mall", "store", "atrium"),
+    "street": ("street", "sidewalk", "road", "crosswalk"),
+    "cafe": ("cafe", "coffee shop", "café", "coffee table"),
+    "restaurant": ("restaurant", "dining table", "booth", "table", "counter"),
+    "transit": ("station", "train", "subway", "platform", "bus stop"),
+    "convenience": ("convenience store", "store shelf", "checkout counter"),
+    "cinema": ("cinema", "movie theater", "theater lobby"),
+    "hotel": ("hotel", "hotel room", "hotel corridor"),
+    "hospital": ("hospital", "clinic", "waiting area"),
+    "gym": ("gym", "fitness room", "treadmill"),
+    "factory": ("factory", "workshop", "production line"),
+    "farm": ("farm", "field", "greenhouse"),
+    "construction": ("construction site", "scaffold", "worksite"),
+    "museum": ("museum", "exhibition hall", "gallery"),
+    "landmark": ("landmark", "tourist spot", "viewpoint"),
+    "temple": ("temple", "shrine", "torii"),
+    "library": ("library", "bookshelf", "reading room"),
+    "zoo": ("zoo", "aquarium", "animal exhibit"),
+    "amusement": ("amusement park", "carousel", "ferris wheel"),
+    "bar": ("bar", "bar counter", "booth"),
+    "ktv": ("karaoke room", "ktv", "private booth"),
+    "stadium": ("stadium", "arena", "bleachers"),
+    "supermarket": ("supermarket", "grocery aisle", "shopping cart"),
+    "bookstore": ("bookstore", "book shelf", "reading corner"),
+    "beach": ("beach", "shore", "seaside"),
+    "salon": ("salon", "beauty salon", "mirror station"),
+}
+
+
+def _scene_has_place_anchor(scene: str, place_key: str) -> bool:
+    lowered = (scene or "").lower()
+    return any(anchor in lowered for anchor in _PLACE_SCENE_ANCHORS.get(place_key, ()))
+
+
+def _place_scene_anchor_phrase(place_key: str, place_label: str = "", place_name: str = "") -> str:
+    if place_key == "restaurant":
+        detail = place_name or place_label or "the current restaurant"
+        return f"inside {detail}, at the restaurant table or booth"
+    examples = PLACE_TYPES.get(place_key, {}).get("examples") or []
+    example = str(examples[0]) if examples else ""
+    label = place_name or place_label or PLACE_TYPES.get(place_key, {}).get("label") or place_key
+    return f"inside the current {place_key} setting ({label}{', ' + example if example else ''})"
+
+
+def _normalize_image_plan_scene(parsed: dict[str, Any], fallback_scene: str, strong_pin: dict[str, Any] | None) -> str:
+    # 业务规划层只承认 scene；tags 只是兼容旧污染返回的止血兜底，避免把有效画面描述丢掉。
+    raw_scene = (parsed.get("scene") or parsed.get("tags") or fallback_scene or "").strip()
+    scene = normalize_scene_visual_subject(raw_scene)
+    if strong_pin:
+        place_key = str(strong_pin.get("key") or "").strip().lower()
+        if place_key and not _scene_has_place_anchor(scene, place_key):
+            anchor = _place_scene_anchor_phrase(
+                place_key,
+                str(strong_pin.get("label") or ""),
+                str(strong_pin.get("name") or ""),
+            )
+            scene = f"{anchor}, {scene}" if scene else anchor
+    return scene
 
 
 def format_dialog_context(service: Any, state: dict[str, Any], session_id: str = "", limit: int = 12) -> str | None:
@@ -564,17 +630,6 @@ async def plan_roleplay_image(
             "\n聊天模型已经给出文字回复，这张图只配画面、不需要任何台词或配文，不要输出 caption 字段。"
         )
 
-    if str(service.config.get("image_backend", "native") or "native").lower() == "animatool":
-        try:
-            knowledge = await _fetch_animatool_turbo_knowledge(service)
-            schema = await _fetch_animatool_turbo_schema(service)
-        except Exception:
-            knowledge = {}
-            schema = {}
-        turbo_hint = _build_animatool_turbo_hint(knowledge, schema)
-        if turbo_hint:
-            system += turbo_hint
-
     if is_push:
         user = (
             f"当前时段: {time_period}，星期: {weekday}，天气: {weather}，推送模式: {mode}。"
@@ -621,7 +676,7 @@ async def plan_roleplay_image(
             "caption": "",
         }
 
-    scene = normalize_scene_visual_subject((parsed.get("scene") or fallback_scene).strip())
+    scene = _normalize_image_plan_scene(parsed, fallback_scene, strong_pin)
     planned_view = normalize_view(parsed.get("view"))
     # co_located 从 user_location 推导，不靠 LLM 单独判断。
     raw_user_loc = (parsed.get("user_location") or "").strip().lower()

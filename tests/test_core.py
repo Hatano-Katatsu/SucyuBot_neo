@@ -3251,6 +3251,89 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_roleplay_image_planner_does_not_embed_animatool_schema(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_backend": "animatool",
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "A close pov shot across a restaurant table",
+                "view": "pov",
+                "character_location": "restaurant",
+                "user_location": "with_user",
+            }, ensure_ascii=False))
+
+            await plan_roleplay_image(svc, sid, intent="坐在餐厅里看过来")
+
+            system = svc._call_llm.await_args.args[0]
+            self.assertIn('"scene"', system)
+            self.assertNotIn("AnimaTool Turbo", system)
+            self.assertNotIn("quality_meta_year_safe", system)
+            self.assertNotIn("必填: quality_meta_year_safe", system)
+
+        asyncio.run(run())
+
+    def test_roleplay_image_planner_accepts_legacy_tags_without_losing_place(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_backend": "animatool",
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._set_character_place(sid, "restaurant", "餐厅", 0.8, name="Bistro.Bond")
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "aspect_ratio": "2:3",
+                "quality_meta_year_safe": "masterpiece, best quality, highres, newest, year 2025, sensitive",
+                "count": "1girl",
+                "tags": (
+                    "A girl is sitting back in a restaurant booth, looking at the viewer with a gentle smile. "
+                    "Warm afternoon sunlight and cozy restaurant lighting create a tender atmosphere."
+                ),
+            }, ensure_ascii=False))
+
+            plan = await plan_roleplay_image(svc, sid, intent="坐回座位戳脸倒计时")
+
+            self.assertIn("restaurant booth", plan["scene"])
+            self.assertNotIn("坐回座位戳脸倒计时", plan["scene"])
+            self.assertEqual(session_schema.get_character_place(svc._get_session_state(sid)), "restaurant")
+
+        asyncio.run(run())
+
+    def test_roleplay_image_planner_reinforces_strong_place_when_scene_is_generic(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._set_character_place(sid, "restaurant", "餐厅", 0.8, name="Bistro.Bond")
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "A finger gently pokes your cheek in warm natural light.",
+                "view": "pov",
+                "character_location": "home",
+            }, ensure_ascii=False))
+
+            plan = await plan_roleplay_image(svc, sid, intent="坐回座位戳脸倒计时")
+
+            self.assertIn("inside Bistro.Bond", plan["scene"])
+            self.assertIn("restaurant table", plan["scene"])
+            self.assertEqual(session_schema.get_character_place(svc._get_session_state(sid)), "restaurant")
+
+        asyncio.run(run())
+
     def test_image_planner_writes_back_location_when_unpinned(self):
         async def run():
             svc = self.make_service()
