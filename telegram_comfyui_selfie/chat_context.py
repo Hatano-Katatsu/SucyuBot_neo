@@ -40,7 +40,7 @@ class ChatContextMixin:
         self._touch(session_id)
         self._schedule_weather_refresh(session_id)  # 天气缓存过期则后台刷新，避免聊天天气停在早安推送那次
         if reset_reason:
-            self._reset_short_context(state, reset_reason)
+            self._reset_short_context(state, reset_reason, session_id=session_id)
         session_schema.set_last_message_text(state, text)
         session_schema.set_last_message_time(state, time.time())
         session_schema.set_recent_message_history(state, (session_schema.get_recent_message_history(state) + [{"text": text, "time": time.time()}])[-5:])
@@ -251,16 +251,19 @@ class ChatContextMixin:
             "\n照片历史规则：历史中 role=system 且以「照片历史」开头的内容，是你之前发给用户的照片记录。"
             "当用户紧接照片历史回复，或提到“刚才那张/照片/图/自拍/画面/出来看看”等内容时，优先理解为用户在回应最近一张照片；"
             "依据照片历史自然承接，但不要主动复述系统记录。"
-            "\n发图节奏规则：根据下方发图频率和可见历史里的「照片历史」记录自行判断是否该补图；"
-            "如果可见历史中已经连续多轮没有照片，且当前对话有明确画面感、穿搭/外貌/地点展示或关系推进，优先调用 generate_roleplay_image。"
+            "\n发图节奏规则：用户明确要图或动态提醒要求补图时优先调用 generate_roleplay_image；其余频率细节以下方对话控制为准。"
             "\n语言理解规则：用户的日常表述（如自夸、调侃、闲聊、陈述事实）默认是普通对话，不是表白或调情。"
             "只有当用户明确使用恋爱/亲密相关词汇（喜欢你、想你、爱你、亲一下、抱抱等）时才理解为亲密信号。"
             "不要把「我是好人」「今天天气不错」「我吃饭了」等日常表述曲解为暗示或直球表白。"
-            "\n对话自然度规则：不要反复提及同一个具体物件、食物或配饰（如芝士蛋糕、发卡、某个礼物），除非用户本轮主动提起或上下文自然需要。"
-            "已经提过一次的细节，后续对话中不必每轮都念叨；保持话题新鲜感，避免车轱辘话。"
+            "\n对话推进规则：优先回应用户本轮话题、情绪和问题，不要因为某条长期记忆很重要就主动跳出用户正在聊的内容。"
+            "长期记忆只在与本轮话题直接相关时自然融入，不要逐条复述。"
+            "不要连续几轮发出结构、语义或情绪走向都类似的信息；不要反复提及同一个具体物件、食物、配饰或旧事件，"
+            "除非用户本轮主动提起或上下文确实需要。"
         )
 
-        # ── 半稳定状态快照（外型/衣橱：中低频变化，独立放在 checkpoint 前）──
+        active_dialog = bool(self._active_chat_history(state))
+
+        # ── 半稳定状态快照（外型/衣橱/世界模板：中低频变化，独立放在 checkpoint 前）──
         semistable_parts: list[str] = []
         visual_context = self._chat_visible_appearance_context(session_id)
         if visual_context:
@@ -276,16 +279,20 @@ class ChatContextMixin:
                 f"{closet_context}\n"
                 "用户点名某件、或剧情/场合自然需要时（出门、睡前、洗澡后、约会等），可以让角色换上其中一件；不要无缘无故频繁换装。"
             )
+        if hasattr(self, "_format_world_semistable_context"):
+            world_semistable = self._format_world_semistable_context(
+                session_id, mode="chat", now=now, pin_location=not active_dialog
+            )
+            if world_semistable:
+                semistable_parts.append(world_semistable)
+        if light_guard:
+            semistable_parts.append(light_guard)
         semistable_context = "\n\n".join(semistable_parts)
         self._track_semistable_context_change(session_id, semistable_context)
 
-        # ── 动态后缀（每请求变化：时间/光线/世界状态/本轮位置判断/发图 overdue）──
+        # ── 动态后缀（每请求变化：精确时间/本轮位置判断/发图 overdue）──
         freq = self.config.get("selfie_frequency", "频繁")
-        system_dynamic = (
-            f"当前时间: {now.strftime('%H:%M')} ({weekday}) {time_period}。\n"
-            f"季节与自然光: {time_light}。\n"
-            f"{light_guard}\n"
-        )
+        system_dynamic = f"当前时间: {now.strftime('%H:%M')} ({weekday}) {time_period}。\n"
         if self._image_nudge_due(freq, session_schema.get_rounds_since_image(state)):
             system_dynamic += "发图提醒: 已有多轮未配图，本轮请优先调用 generate_roleplay_image。\n"
         # 场景断档感知：距离上次对话超过阈值时提醒 LLM 旧场景可能已自然结束
@@ -296,31 +303,17 @@ class ChatContextMixin:
         previous_interaction = session_schema.get_last_interaction(state)
         if stale_minutes > 0 and previous_interaction and time.time() - previous_interaction > stale_minutes * 60:
             system_dynamic += (
-                "距离上次对话已过超过半小时，请优先依据结束前场景和动作的特征判断其是否延续。"
+                "距离上次对话已过超过半小时，之前的日常场景可能已自然结束；请优先依据结束前场景和动作的特征判断其是否延续。"
                 "重新思考你和用户的位置关系。\n"
             )
-        # 对话进行中：对话已建立的场景优先，动线只作背景；只有冷启动/刚换场景才以动线引导，
-        # 避免角色随现实时间被算法"传送"（家→公园这类飘移）。对话态不钉死时钟地点（pin_location=False）。
-        active_dialog = bool(self._active_chat_history(state))
-        world_context = self._format_world_context(
-            session_id, user_text, mode="chat", pin_location=not active_dialog
-        )
-        if world_context:
-            if active_dialog:
-                system_dynamic += (
-                    f"\n{world_context}\n"
-                    "以上是你的日常动线背景参考。当前正在进行的对话场景优先级最高："
-                    "如果对话里你已经处在某个地点（在家、在车站、在仓库等），或刚说过自己在哪，就保持那个地点不变，"
-                    "不要因为上面动线显示的时间点不同，就擅自把自己挪到别处。"
-                    "只有在开启全新话题、对话出现明显时间跳跃、或需要交代你独自近况时，才依据动线更新所在地。"
-                    "无论如何不要无理由瞬移；与用户不在同一地点时，用消息、自拍、电话或约定见面推进。\n"
-                )
-            else:
-                system_dynamic += (
-                    f"\n{world_context}\n"
-                    "聊天时可参考这个世界状态自然提及所在与去向（例如“我现在在公司”、“等会儿要去逛商场”），但不要机械地报地点。"
-                    "不要让角色无理由瞬移；如果用户和角色不在同一地点，优先用消息、自拍、电话或约定见面推进。\n"
-                )
+        # 对话进行中：对话已建立的场景优先，动线只作背景。低频世界模板在 semistable，
+        # 这里只保留本轮用户位置/空间关系等高频尾部。
+        if hasattr(self, "_format_world_dynamic_context"):
+            world_dynamic = self._format_world_dynamic_context(
+                session_id, user_text, mode="chat", now=now, pin_location=not active_dialog
+            )
+            if world_dynamic:
+                system_dynamic += f"\n{world_dynamic}\n"
         if session_schema.get_replying_to_selfie(state):
             session_schema.set_replying_to_selfie(state, False)
         # ── 天级/低频稳定上下文（角色历史、长期记忆、配置控制）──
@@ -348,7 +341,7 @@ class ChatContextMixin:
         ) if checkpoint_context else ""
 
         # 拼接顺序：
-        #   [静态 system] + [天级/低频稳定层] + [半稳定状态快照] + [checkpoint 会话连续性] + [历史(checkpoint 锚定，含照片 system 记录)] + [动态 system] + [本轮 user]
+        #   [静态 system] + [天级/低频稳定层] + [半稳定状态/世界模板] + [checkpoint 会话连续性] + [历史(checkpoint 锚定，含照片 system 记录)] + [动态 system] + [本轮 user]
         # 静态 + 低频稳定 + 半稳定 + checkpoint + 未折叠历史构成只追加不左移的前缀；checkpoint 落地时才整体归位。
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_static}]
         if durable_parts:
@@ -505,10 +498,10 @@ class ChatContextMixin:
         length_directive = self._reply_length_directive()
         if length_directive:
             lines.append(length_directive)
-        if session_schema.get_short_context_start(state):
+        if session_schema.get_short_context_start(state) or session_schema.get_short_context_reset_reason(state):
             lines.append(
-                "短期注意规则: 用户已经切换过话题或场景。切换点之前的聊天、地点、动作、服装、冲突和图片只作历史背景，"
-                "不要主动带入当前场景；只有用户明确说继续刚才、上一张、那个话题时才引用。"
+                "短期注意规则: 用户已经切换过话题或场景。切换点之前的短期聊天和 checkpoint 已从当前模型上下文移除，"
+                "不要主动延续旧地点、旧动作、旧冲突或旧图片；只有用户明确说继续刚才、上一张、那个话题时才引用长期背景。"
             )
         return "对话控制（低频配置；变化时才会影响历史前缀）:\n" + "\n".join(lines)
 
@@ -894,10 +887,11 @@ class ChatContextMixin:
             # 回退到 chat 模型
             system = (
                 "You are a checkpoint summarizer for a long roleplay chat. Merge the existing checkpoint "
-                "and the overflowed dialogue into one recent-continuity summary. Focus on the current or recent "
-                "scene, unresolved actions, promises, immediate emotions, places, and photo/system records that "
-                "the next few turns may need. Do not duplicate broad character-history arcs, permanent profile facts, "
-                "stable preferences, boundaries, or corrections that belong in long-term memory. "
+                "and the overflowed dialogue into one short-term continuity summary for the next few turns only. "
+                "Focus on the current or most recent scene, unfinished actions, immediate emotions, near-term promises, "
+                "current places, and the latest photo only when the dialogue is directly responding to it. "
+                "Do not duplicate character-history arcs, durable relationship progress, permanent profile facts, "
+                "stable preferences, boundaries, corrections, or memory-worthy facts. "
                 f"Soft limit: {soft} Chinese characters. Output only the summary text. "
                 "Do not invent, infer, or add details not explicitly present in the source dialogue. "
                 "Only include rules, promises, constraints, or events that were literally stated by the user or character. "
@@ -907,10 +901,11 @@ class ChatContextMixin:
             return await self._call_llm(system, user, temp=0.1, tag="checkpoint", purpose="chat", disable_thinking=True, session_id=session_id)
         system = (
             "You are a checkpoint summarizer for a long roleplay chat. Merge the existing checkpoint "
-            "and the overflowed dialogue into one recent-continuity summary. Focus on the current or recent "
-            "scene, unresolved actions, promises, immediate emotions, places, and photo/system records that "
-            "the next few turns may need. Do not duplicate broad character-history arcs, permanent profile facts, "
-            "stable preferences, boundaries, or corrections that belong in long-term memory. "
+            "and the overflowed dialogue into one short-term continuity summary for the next few turns only. "
+            "Focus on the current or most recent scene, unfinished actions, immediate emotions, near-term promises, "
+            "current places, and the latest photo only when the dialogue is directly responding to it. "
+            "Do not duplicate character-history arcs, durable relationship progress, permanent profile facts, "
+            "stable preferences, boundaries, corrections, or memory-worthy facts. "
             f"Soft limit: {soft} Chinese characters. Output only the summary text. "
             "Do not invent, infer, or add details not explicitly present in the source dialogue. "
             "Only include rules, promises, constraints, or events that were literally stated by the user or character. "
@@ -950,16 +945,32 @@ class ChatContextMixin:
             return f"距离上次互动超过 {gap_hours:g} 小时，开启新的短期上下文"
         return ""
 
-    def _reset_short_context(self, state: dict[str, Any], reason: str):
-        # 短期/新场景重置：注意力边界前移 + 清空轻量近期 buffer，但**位置不硬清空**（连续而非瞬移）：
+    def _reset_short_context(self, state: dict[str, Any], reason: str, *, session_id: str = ""):
+        # 短期/新场景重置：清空模型侧未折叠历史 + 轻量近期 buffer，但**位置不硬清空**（连续而非瞬移）：
         #   · user_place：交给 4h TTL 自然老化（B 方案）——换话题不代表用户物理移动；
         #   · character_place：降级为 weak（见 _demote_character_place），新场景不钉死生图、仍作背景，
         #     等新场景的位置声明覆盖或 TTL 过期。
         # 两个位置字段在本路径**对称处理**（都不清空），消除原先“SR 清 user 不清 character”的不对称。
-        session_schema.set_short_context_start(state, len(session_schema.get_chat_history(state)))
+        session_schema.set_chat_history(state, [])
+        session_schema.set_short_context_start(state, 0)
         session_schema.set_short_context_reset_time(state, time.time())
         session_schema.set_short_context_reset_reason(state, reason)
         session_schema.set_recent_message_history(state, [])
+        latest_id = 0
+        if session_id:
+            key = self._context_character_key(session_id)
+            scope = f"{session_id}\n{key}"
+            task = getattr(self, "_checkpoint_tasks", {}).get(scope)
+            if task and not task.done():
+                task.cancel()
+            try:
+                latest_id = self.app_store.latest_message_id(session_id, key)
+                self.app_store.clear_checkpoint(session_id, key, source_until_id=latest_id)
+            except Exception:
+                logger.warning("short context checkpoint clear failed", exc_info=True)
+        session_schema.set_checkpoint_summary(state, "")
+        session_schema.set_checkpoint_message_id(state, latest_id)
+        session_schema.set_last_checkpoint_at(state, time.time() if session_id else 0)
         self._demote_character_place(state)
         session_schema.clear_nudity(state)  # 新场景：不再续上上一幕的裸体态
 

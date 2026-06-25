@@ -819,21 +819,39 @@ class TelegramComfyUIService(
         if session_id:
             state = self._get_session_state(session_id)
             custom = str(session_schema.get_character_value(state, "custom_current_style", "")).strip()
-            if custom:
+            if custom or self._is_character_set(session_id):
                 return custom
         current = str(self.config.get("current_style", "")).strip()
         return current if current in pool else pool[0]
 
     def _set_current_style(self, session_id: str, style: str):
-        if style not in self._normalize_style_pool():
-            raise ValueError(f"未知画风: {style}")
+        style = (style or "").strip()
         if session_id:
             state = self._get_session_state(session_id)
             session_schema.set_character_value(state, "custom_current_style", style)
+            if hasattr(self, "_snapshot_character"):
+                self._snapshot_character(state)
             self._save_session_state(session_id, state)
         else:
+            pool = self._normalize_style_pool()
+            if style and style not in pool:
+                pool.append(style)
+                self.config["style_pool"] = "\n".join(pool)
             self.config["current_style"] = style
             self.save_config()
+
+    def _ensure_style_pool_entry(self, style: str) -> bool:
+        """把角色卡里出现的新画风补进全局画风池，供其他用户参考。"""
+        style = (style or "").strip()
+        if not style:
+            return False
+        pool = self._normalize_style_pool()
+        if any(style.lower() == item.lower() for item in pool):
+            return False
+        pool.append(style)
+        self.config["style_pool"] = "\n".join(pool)
+        self.save_config()
+        return True
 
     @staticmethod
     def _purity_directive(purity: int) -> str:
@@ -1887,7 +1905,14 @@ class TelegramComfyUIService(
         text = re.sub(r"\n```$", "", text).strip()
         return text
 
-    async def _translate_to_tags(self, natural: str, session_id: str = "", view: str = "", is_intimate: bool = False) -> str:
+    async def _translate_to_tags(
+        self,
+        natural: str,
+        session_id: str = "",
+        view: str = "",
+        is_intimate: bool = False,
+        free_composition: bool = False,
+    ) -> str:
         if not self.has_llm_config("image"):
             return natural
         view = (view or "").strip().lower()
@@ -1897,9 +1922,23 @@ class TelegramComfyUIService(
         state = self._get_session_state(session_id) if session_id else {}
         persisted_count = (session_schema.get_character_value(state, "custom_count", "") or "").strip()
         gender = appearance_rules.infer_gender_from_count(persisted_count) if persisted_count else self._infer_gender_from_prefix(char_prefix)
-        opener = self._view_opener(view, gender) if view else ""
+        opener = self._view_opener(view, gender) if view and not free_composition else ""
         light_guard = self._format_light_guard(session_id)
-        if view:
+        if free_composition:
+            system = (
+                "Visual subject rule: the image subject remains the roleplay scene, usually the character, "
+                "but the user's explicit composition request has highest priority. "
+                "For default or original characters, do not turn role names into English names or visual tags; describe appearance and action instead. "
+                "Only keep a character name when it is paired with its published series. "
+                "Stable appearance is injected later; do not invent or restate stable hair, eye, body, species, or accessory traits unless the source explicitly asks for a one-shot change. "
+                f"{light_guard}"
+                "你是专业的 Anima3 提示词工程师。把中文场景重构为英文自然语言画面描述，后接少量 danbooru 补强标签。"
+                "直接输出英文提示词，不要 JSON、不要解释，不要压缩成纯标签列表。"
+                "保留用户指定的视角、机位、远近、焦段、构图和局部特写；不要自动改写成自拍、POV 或看镜头。"
+                "允许部位特写、背影、环境承接、道具或手机/相机入画，只要原文明确要求。"
+                "自然语言句子尽量不要使用逗号。输出格式: English visual sentence. key tag, key tag, key tag"
+            )
+        elif view:
             if view == "mirror":
                 view_rule = "固定视角是 mirror 对镜自拍；系统会添加镜子和一部手机，你不要重复输出 mirror/phone/smartphone。"
             elif view == "selfie":
@@ -2093,6 +2132,7 @@ class TelegramComfyUIService(
         mood: str = "",
         must_include: str = "",
         defer_photo_history: bool = False,
+        planning_mode: str = "chat",
     ) -> str:
         if not any((prompt, intent, must_include)):
             return "缺少图片意图"
@@ -2111,6 +2151,7 @@ class TelegramComfyUIService(
             must_include=must_include,
             prompt=prompt,
             view=view,
+            mode=planning_mode or "chat",
         )
         scene = (plan.get("scene") or "").strip()
         if not scene:
@@ -2124,7 +2165,15 @@ class TelegramComfyUIService(
         orientation = (plan.get("aspect_ratio") or "").strip()
         state = self._get_session_state(session_id)
         # 伴侣同框时也套用翻译护栏（对方只画局部、不画成完整第二人）。
-        english = await self._translate_to_tags(scene, session_id=session_id, view=final_view, is_intimate=is_intimate or partner_in_frame)
+        free_composition = (planning_mode or "").strip().lower() == "illustration"
+        translate_kwargs = {
+            "session_id": session_id,
+            "view": final_view,
+            "is_intimate": is_intimate or partner_in_frame,
+        }
+        if free_composition:
+            translate_kwargs["free_composition"] = True
+        english = await self._translate_to_tags(scene, **translate_kwargs)
         ok, imgs, err = await self._do_generate(
             english, session_id=session_id, one_shot_appearance=new_app or "",
             is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,

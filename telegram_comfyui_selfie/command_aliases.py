@@ -21,6 +21,11 @@ COMMAND_ALIAS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "selfie", "photo", "pic", "picture", "image",
         "拍照", "照片", "发图", "生成照片", "照片生成", "生成图片", "图片生成",
     )),
+    ("配图", (
+        "illustration", "illustrate", "scene-image", "sceneimage",
+        "画图", "绘图", "生图", "出图", "生成图",
+        "场景图", "剧情图", "画面", "按场景配图", "当前场景配图",
+    )),
     ("天气", (
         "weather", "天气查询", "查询天气", "查天气", "天气查看", "查看天气",
     )),
@@ -142,6 +147,7 @@ BARE_COMMAND_CANONICALS = {
     "菜单",
     "创建OC",
     "自拍",
+    "配图",
     "新场景",
     "调度",
     "测试推送",

@@ -5,6 +5,7 @@ import os
 import shutil
 import time
 import unittest
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -13,6 +14,7 @@ from telegram_comfyui_selfie import TelegramComfyUIService
 from telegram_comfyui_selfie import appearance as appearance_rules
 from telegram_comfyui_selfie import character_card
 from telegram_comfyui_selfie import session_schema
+from telegram_comfyui_selfie.config_store import flatten_config, load_simple_yaml
 from telegram_comfyui_selfie.image_planning import _detect_intimate_context, _detect_nudity_context, _infer_clothing_off_fallback, format_dialog_context, format_sent_photo_context, normalize_scene_visual_subject, plan_roleplay_image
 from telegram_comfyui_selfie.commands import (
     SESSION_GLOBAL_STATE_KEYS,
@@ -65,6 +67,26 @@ class ServiceFixtureMixin:
         svc = TelegramComfyUIService(cfg, state)
         return svc
 
+    def make_service_from_current_config(self):
+        root = make_project_temp_dir("live_config")
+        project_root = Path(__file__).resolve().parents[1]
+        source_cfg = project_root / "data" / "config.yml"
+        if not source_cfg.exists():
+            source_cfg = project_root / "data" / "config.json"
+        state = root / "state.json"
+        svc = TelegramComfyUIService(root / "config.yml", state)
+        if source_cfg.exists():
+            if source_cfg.suffix.lower() in (".yml", ".yaml"):
+                loaded = flatten_config(load_simple_yaml(source_cfg))
+            else:
+                loaded = json.loads(source_cfg.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                svc.config.update(loaded)
+        svc.config["long_memory_db_path"] = ""
+        svc.config["user_log_enabled"] = False
+        svc.config["user_log_dir"] = str(root / "logs")
+        return svc
+
 
 class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
@@ -91,6 +113,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(svc.parse_command("新建角色"), ("初始化", ""))
         self.assertEqual(svc.parse_command("创建OC"), ("创建OC", ""))
         self.assertEqual(svc.parse_command("oc 名字：小雨"), ("创建OC", "名字：小雨"))
+        self.assertEqual(svc.parse_command("/画图 低机位手部特写"), ("配图", "低机位手部特写"))
+        self.assertEqual(svc.parse_command("配图 车窗外远景"), ("配图", "车窗外远景"))
         self.assertEqual(svc.parse_command("推送测试 normal"), ("测试推送", "normal"))
         self.assertEqual(svc.parse_command("我想看自拍"), (None, "我想看自拍"))
 
@@ -101,6 +125,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(resolve_command_alias("推送测试"), "测试推送")
         self.assertEqual(resolve_command_alias("画风添加"), "添加画风")
         self.assertEqual(resolve_command_alias("关系设置"), "关系")
+        self.assertEqual(resolve_command_alias("画图"), "配图")
 
     def test_bare_selfie_message_dispatches_to_selfie_command(self):
         async def run():
@@ -155,16 +180,19 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc.cmd_init_guide = AsyncMock()
             svc.cmd_menu = AsyncMock()
             svc.cmd_selfie = AsyncMock()
+            svc.cmd_scene_image = AsyncMock()
             svc.cmd_test_push = AsyncMock()
 
             await svc.dispatch_command(1, "telegram:1", "创建角色", "")
             await svc.dispatch_command(1, "telegram:1", "menu", "动线")
             await svc.dispatch_command(1, "telegram:1", "拍照", "窗边")
+            await svc.dispatch_command(1, "telegram:1", "画图", "远景")
             await svc.dispatch_command(1, "telegram:1", "推送测试", "normal")
 
             svc.cmd_init_guide.assert_awaited_once_with(1, "telegram:1", "")
             svc.cmd_menu.assert_awaited_once_with(1, "telegram:1", "动线")
             svc.cmd_selfie.assert_awaited_once_with(1, "telegram:1", "窗边")
+            svc.cmd_scene_image.assert_awaited_once_with(1, "telegram:1", "远景")
             svc.cmd_test_push.assert_awaited_once_with(1, "telegram:1", "normal")
 
         asyncio.run(run())
@@ -363,8 +391,97 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         app_js = (Path(__file__).resolve().parents[1] / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
         model_section = app_js.split("async function loadModels()", 1)[1].split("function worldSessionTitle", 1)[0]
         self.assertIn('name="vision_profile_id"', model_section)
+        for field in ["profile_id", "name", "base_url", "api_key", "model", "max_tokens", "timeout"]:
+            self.assertIn(f'name="{field}"', model_section)
+        self.assertNotIn('name="json"', model_section)
+        self.assertNotIn("<textarea name=\"json\"", model_section)
         self.assertNotIn("chat_thinking", model_section)
         self.assertNotIn("fast_thinking", model_section)
+        self.assertNotIn("disable_thinking", model_section)
+        self.assertNotIn("thinking_fixed", model_section)
+        self.assertNotIn("thinking_control", model_section)
+        self.assertNotIn("api_key_no_think", model_section)
+        self.assertNotIn("model_no_think", model_section)
+        self.assertNotIn("model_think", model_section)
+
+    def test_overview_feedback_board_uses_todo_api(self):
+        root = Path(__file__).resolve().parents[1]
+        index_html = (root / "telegram_comfyui_selfie" / "static" / "index.html").read_text(encoding="utf-8")
+        app_js = (root / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="feedback-list"', index_html)
+        self.assertIn('id="feedback-form"', index_html)
+        self.assertIn("loadFeedbackBoard", app_js)
+        self.assertIn("/api/feedback", app_js)
+        self.assertIn("state.selectedSession", app_js)
+
+    def test_feedback_api_scopes_todo_sections_by_session_and_role(self):
+        async def run():
+            from aiohttp import web
+            from telegram_comfyui_selfie.webui import api_feedback, api_submit_feedback
+
+            class RequestStub(dict):
+                def __init__(self, app, *, auth, query=None, payload=None):
+                    super().__init__()
+                    self.app = app
+                    self.query = query or {}
+                    self["web_auth"] = auth
+                    self._payload = payload or {}
+
+                async def json(self):
+                    return self._payload
+
+            svc = self.make_service()
+            tmp = make_project_temp_dir("feedback")
+            todo = tmp / "TODO.md"
+            todo.write_text("# old plan\n\n## 无 session 的旧段落\n不会显示在反馈板。\n", encoding="utf-8")
+            svc.feedback_file_path = todo
+            state1 = svc._get_session_state("telegram:1")
+            state2 = svc._get_session_state("telegram:2")
+            session_schema.set_character_value(state1, "custom_character", "小雨")
+            session_schema.set_character_value(state2, "custom_character", "小雪")
+            app = web.Application()
+            app["service"] = svc
+
+            req1 = RequestStub(
+                app,
+                auth={"role": "user", "user_id": "1", "token": "u1"},
+                payload={"content": "希望反馈板能看到自己的内容"},
+            )
+            await api_submit_feedback(req1)
+            req2 = RequestStub(
+                app,
+                auth={"role": "user", "user_id": "2", "token": "u2"},
+                payload={"content": "另一个用户的反馈"},
+            )
+            await api_submit_feedback(req2)
+
+            text = todo.read_text(encoding="utf-8")
+            self.assertIn("## 小雨", text)
+            self.assertIn("<!-- session_id: telegram:1 -->", text)
+            self.assertIn("## 小雪", text)
+            self.assertIn("<!-- session_id: telegram:2 -->", text)
+
+            user_resp = await api_feedback(RequestStub(
+                app,
+                auth={"role": "user", "user_id": "1", "token": "u1"},
+            ))
+            user_data = json.loads(user_resp.text)
+            self.assertEqual(len(user_data["sections"]), 1)
+            self.assertEqual(user_data["sections"][0]["user_name"], "小雨")
+            self.assertIn("自己的内容", user_data["sections"][0]["content"])
+            self.assertNotIn("另一个用户", user_data["sections"][0]["content"])
+
+            admin_resp = await api_feedback(RequestStub(
+                app,
+                auth={"role": "admin", "user_id": "admin", "token": "a"},
+                query={"session_id": "telegram:1"},
+            ))
+            admin_data = json.loads(admin_resp.text)
+            self.assertEqual({item["session_id"] for item in admin_data["sections"]}, {"telegram:1", "telegram:2"})
+            self.assertEqual(admin_data["current_user_name"], "小雨")
+
+        asyncio.run(run())
 
     def test_create_oc_help_includes_template(self):
         async def run():
@@ -820,6 +937,83 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         svc = self.make_service()
         svc.config["style_pool"] = "@a; @b\n@a"
         self.assertEqual(svc._normalize_style_pool(), ["@a", "@b"])
+
+    def test_style_command_saves_unlisted_style_to_current_character_card(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.config["style_pool"] = "@base"
+            svc.config["current_style"] = "@base"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "小雨")
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_style(1, sid, "@new_style, artist:wlop")
+
+            self.assertEqual(session_schema.get_character_value(state, "custom_current_style", ""), "@new_style, artist:wlop")
+            self.assertEqual(session_schema.get_saved_characters(state)["小雨"]["style"], "@new_style, artist:wlop")
+            self.assertEqual(svc._normalize_style_pool(), ["@base"])
+            svc.send_message.assert_awaited_once()
+            self.assertIn("当前角色画风已设为", svc.send_message.await_args.args[1])
+
+        asyncio.run(run())
+
+    def test_style_command_can_clear_current_character_style_field(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.config["style_pool"] = "@base"
+            svc.config["current_style"] = "@base"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "小雨")
+            session_schema.set_character_value(state, "custom_current_style", "@old_style")
+            svc._snapshot_character(state)
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_style(1, sid, "清空")
+
+            self.assertEqual(session_schema.get_character_value(state, "custom_current_style", ""), "")
+            self.assertEqual(session_schema.get_saved_characters(state)["小雨"]["style"], "")
+            self.assertEqual(svc._get_current_style(sid), "")
+            pos, _ = svc._build_prompt("standing", session_id=sid)
+            self.assertNotIn("@base", pos)
+            svc.send_message.assert_awaited_once()
+            self.assertIn("已清空当前角色画风字段", svc.send_message.await_args.args[1])
+
+        asyncio.run(run())
+
+    def test_character_webui_style_field_uses_pool_datalist_and_manual_input(self):
+        async def run():
+            from aiohttp import web
+            from aiohttp.test_utils import make_mocked_request
+            from telegram_comfyui_selfie.webui import api_characters
+
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.config["style_pool"] = "@base\n@dream_style"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "小雨")
+            svc._snapshot_character(state)
+            app = web.Application()
+            app["service"] = svc
+            req = make_mocked_request(
+                "GET",
+                f"/api/sessions/{sid}/characters",
+                app=app,
+                match_info={"session_id": sid},
+            )
+            req["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+
+            resp = await api_characters(req)
+            data = json.loads(resp.text)
+
+            self.assertEqual(data["style_pool"], ["@base", "@dream_style"])
+            app_js = (Path(__file__).resolve().parents[1] / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
+            self.assertIn('["style", "画风", "style_combo"]', app_js)
+            self.assertIn("state.characterData?.style_pool", app_js)
+            self.assertIn("留空表示本角色不注入画风", app_js)
+
+        asyncio.run(run())
 
     def test_purity_threshold_edges(self):
         svc = self.make_service()
@@ -1971,6 +2165,57 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("聊聊晚饭吃什么", packed)
         self.assertNotIn("卧室窗边", packed)
 
+    def test_new_scene_command_clears_prompt_history_and_checkpoint_but_keeps_dream_source(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            key = svc._context_character_key(sid)
+            svc.send_message = AsyncMock()
+            old_messages = [
+                {"role": "user", "content": "上一幕还在卧室窗边等我"},
+                {"role": "assistant", "content": "我靠在卧室窗边看着你。"},
+            ]
+            ids = svc.app_store.append_messages(sid, key, old_messages)
+            state = svc._get_session_state(sid)
+            session_schema.set_chat_history(state, old_messages)
+            svc.app_store.upsert_checkpoint(sid, key, "旧 checkpoint：卧室窗边未完成拥抱", ids[-1])
+            session_schema.set_checkpoint_summary(state, "旧 checkpoint：卧室窗边未完成拥抱")
+            session_schema.set_checkpoint_message_id(state, ids[-1])
+
+            await svc.cmd_new_scene(1, sid, "")
+
+            state = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_chat_history(state), [])
+            self.assertEqual(session_schema.get_checkpoint_summary(state), "")
+            self.assertEqual(session_schema.get_checkpoint_message_id(state), ids[-1])
+            cp = svc.app_store.get_checkpoint(sid, key)
+            self.assertEqual(cp.get("summary"), "")
+            self.assertEqual(int(cp.get("source_until_id") or 0), ids[-1])
+
+            messages = svc._build_chat_messages(sid, "新场景聊晚饭")
+            packed = "\n".join(m.get("content", "") for m in messages)
+            self.assertIn("短期注意规则", packed)
+            self.assertIn("新场景聊晚饭", packed)
+            self.assertNotIn("卧室窗边", packed)
+            self.assertNotIn("旧 checkpoint", packed)
+
+            captured = {}
+
+            async def fake_write_dream_diary(session_id, diary_date, source_text, existing_diary="", *, reason=""):
+                captured["source_text"] = source_text
+                return "dream diary"
+
+            svc._write_dream_diary = fake_write_dream_diary
+            svc._organize_memories_after_dream = AsyncMock()
+            svc._generate_character_history_summary = AsyncMock()
+
+            await svc._dream_once(sid, key, datetime(2026, 6, 25, tzinfo=timezone.utc), reason="manual")
+
+            self.assertIn("上一幕还在卧室窗边等我", captured.get("source_text", ""))
+            self.assertIn("我靠在卧室窗边看着你。", captured.get("source_text", ""))
+
+        asyncio.run(run())
+
     def test_short_context_reset_filters_old_chat_and_photos_from_image_context(self):
         svc = self.make_service()
         sid = "telegram:123"
@@ -2627,6 +2872,267 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_live_chat_context_cache_probe_uses_current_config_when_available(self):
+        async def run():
+            svc = self.make_service_from_current_config()
+            try:
+                sid = f"telegram:cache-probe-{int(time.time() * 1000)}"
+                if not svc.has_llm_config("chat", sid):
+                    self.skipTest("当前配置没有可用 chat 模型，跳过真实缓存命中测试")
+                resolved = svc._resolved_llm_config("chat", sid)
+                if str(resolved.get("api_key") or "").strip() in {"", "********"}:
+                    self.skipTest("当前配置没有可用 chat API key，跳过真实缓存命中测试")
+
+                profiles = svc.config.get("global_model_profiles") or {}
+                if isinstance(profiles, dict):
+                    for profile in profiles.values():
+                        if isinstance(profile, dict):
+                            profile["max_tokens"] = 96
+                svc.config["chat_llm_max_tokens"] = "96"
+                svc.config["context_window_message_limit"] = "30"
+                svc.config["checkpoint_keep_message_limit"] = "10"
+                svc.config["long_memory_extract_enabled"] = False
+                svc.config["selfie_frequency"] = "关闭"
+
+                fixed_now = datetime(2026, 6, 25, 19, 40, tzinfo=timezone.utc)
+                svc._session_now = lambda session_id="": fixed_now
+                state = svc._get_session_state(sid)
+                suffix = str(int(time.time() * 1000))[-6:]
+                state.update({
+                    "custom_character": f"缓存测试角色{suffix}",
+                    "custom_bot_name": f"澪{suffix}",
+                    "custom_bot_self_name": "我",
+                    "custom_role_name": "同城朋友",
+                    "custom_scheduled_persona": "温柔、克制、回复简短，会自然承接用户话题。",
+                    "custom_positive_prefix": "1girl, black short hair, blue eyes",
+                    "custom_location": "上海",
+                    "custom_character_age_stage": "adult",
+                    "custom_character_day_anchor": "home",
+                    "custom_spatial_relationship": "同城异地，偶尔线下见面",
+                })
+                session_schema.set_outfit(state, "white blouse, dark pleated skirt")
+                session_schema.set_chat_history(state, [
+                    {"role": "user", "content": "我刚下班，路上有点堵。"},
+                    {"role": "assistant", "content": "那你慢慢来，我在家里把灯留着。"},
+                    {"role": "user", "content": "你先别睡，等我一会儿。"},
+                    {"role": "assistant", "content": "嗯，我会等你，但你别急。"},
+                ])
+                svc.app_store.upsert_checkpoint(
+                    sid,
+                    svc._context_character_key(sid),
+                    "用户下班在路上，角色在家等他回来，情绪温柔安定；没有固定新地点。",
+                    0,
+                )
+                svc.memory.add_memory(
+                    sid,
+                    "preference",
+                    "用户喜欢角色回复简短自然，不要连续重复同一件事。",
+                    character=svc._context_character_key(sid),
+                    importance=5,
+                    tags=["对话"],
+                )
+
+                questions = [
+                    "我大概还有十分钟到。",
+                    "你现在在客厅还是卧室？",
+                    "到楼下了，电梯有点慢。",
+                ]
+                cached_counts: list[int] = []
+                prompt_counts: list[int] = []
+                replies: list[str] = []
+
+                svc.send_action = AsyncMock()
+                sent_messages: list[str] = []
+
+                async def capture_send_message(chat_id, text, **kwargs):
+                    sent_messages.append(str(text or ""))
+
+                svc.send_message = AsyncMock(side_effect=capture_send_message)
+                svc._update_character_place_from_text = AsyncMock(return_value=None)
+
+                def latest_usage_id() -> int:
+                    with closing(svc.app_store._connect()) as conn:
+                        row = conn.execute("SELECT COALESCE(MAX(id), 0) AS max_id FROM llm_usage").fetchone()
+                        return int(row["max_id"] or 0)
+
+                def chat_usage_after(after_id: int) -> dict[str, int]:
+                    with closing(svc.app_store._connect()) as conn:
+                        row = conn.execute(
+                            """
+                            SELECT prompt_tokens, cached_tokens
+                            FROM llm_usage
+                            WHERE id > ?
+                              AND session_id = ?
+                              AND purpose = 'chat'
+                              AND tag = 'chat'
+                            ORDER BY id ASC
+                            LIMIT 1
+                            """,
+                            (after_id, sid),
+                        ).fetchone()
+                    if not row:
+                        return {"prompt_tokens": 0, "cached_tokens": 0}
+                    return {
+                        "prompt_tokens": int(row["prompt_tokens"] or 0),
+                        "cached_tokens": int(row["cached_tokens"] or 0),
+                    }
+
+                for text in questions:
+                    before_usage_id = latest_usage_id()
+                    before_sent = len(sent_messages)
+                    await svc.handle_chat(123, sid, text)
+                    await asyncio.sleep(0)
+                    usage = chat_usage_after(before_usage_id)
+                    prompt_counts.append(usage["prompt_tokens"])
+                    cached_counts.append(usage["cached_tokens"])
+                    self.assertGreater(len(sent_messages), before_sent, "handle_chat 应发送真实 AI 回复")
+                    reply = sent_messages[-1].strip()
+                    if "回复生成失败" in reply:
+                        self.skipTest("真实 chat 模型未返回可用回复，跳过连续缓存探针")
+                    replies.append(reply[:80])
+
+                if not any(prompt_counts):
+                    self.skipTest("模型返回中没有 prompt usage，无法判断缓存命中")
+                rates = [
+                    (cached / prompt if prompt else 0.0)
+                    for cached, prompt in zip(cached_counts, prompt_counts)
+                ]
+                rate_text = ", ".join(
+                    f"round{i + 1}={cached_counts[i]}/{prompt_counts[i]} ({rates[i]:.2%})"
+                    for i in range(len(prompt_counts))
+                )
+                reply_text = " | ".join(f"round{i + 1} reply={replies[i]}" for i in range(len(replies)))
+                print(f"\n真实配置缓存探针总结: {reply_text}; cache_hit_rates: {rate_text}")
+                self.assertGreater(
+                    max(cached_counts[1:] or [0]),
+                    0,
+                    f"连续真实请求未报告缓存命中: prompt={prompt_counts}, cached={cached_counts}",
+                )
+            finally:
+                await svc.close()
+
+        asyncio.run(run())
+
+    def test_cmd_scene_image_uses_full_context_with_user_prompt_priority(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            state["chat_history"] = [
+                {"role": "user", "content": "我们在车站等车，雨下得有点大"},
+                {"role": "assistant", "content": "我把伞往你那边偏了一点。"},
+            ]
+            svc.tool_generate_image = AsyncMock(return_value="图片已生成并发送。画面: x")
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_scene_image(123, sid, "低机位，只拍她握伞的手部特写")
+
+            svc.tool_generate_image.assert_awaited_once()
+            kwargs = svc.tool_generate_image.await_args.kwargs
+            self.assertEqual(kwargs["planning_mode"], "illustration")
+            self.assertIn("低机位", kwargs["prompt"])
+            self.assertIn("手部特写", kwargs["must_include"])
+            svc.send_message.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_scene_image_tool_passes_free_composition_to_planner_and_translator(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            state["chat_history"] = [
+                {"role": "user", "content": "刚才我们在书店门口躲雨"},
+                {"role": "assistant", "content": "我靠在玻璃门边看着雨。"},
+            ]
+            svc._fetch_weather = AsyncMock(return_value={"desc": "小雨", "temp": "18"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "低机位近景，只拍角色握着伞柄的手，背景是雨中的书店门口",
+                "view": "third",
+                "aspect_ratio": "3:2",
+                "character_location": "bookstore",
+                "user_location": "with_user",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            }, ensure_ascii=False))
+            svc._translate_to_tags = AsyncMock(return_value="english tags")
+            svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
+            svc.send_action = AsyncMock()
+            svc.send_photo = AsyncMock()
+
+            result = await svc.tool_generate_image(
+                123,
+                sid,
+                intent="根据当前聊天场景配图，并优先满足用户输入的画面参数",
+                prompt="低机位手部特写",
+                must_include="低机位手部特写",
+                planning_mode="illustration",
+            )
+
+            self.assertIn("图片已生成并发送", result)
+            planner_system = svc._call_llm.await_args.args[0]
+            planner_user = svc._call_llm.await_args.args[1]
+            self.assertIn("完整聊天上下文", planner_system)
+            self.assertIn("用户本次 /配图 后输入", planner_system)
+            self.assertIn("slot/外观/偏好只作为参考", planner_system)
+            self.assertIn("刚才我们在书店门口躲雨", planner_user)
+            self.assertIn("低机位手部特写", planner_user)
+            self.assertNotIn("视角固定为 pov", planner_system)
+            svc._translate_to_tags.assert_awaited_once_with(
+                "低机位近景，只拍角色握着伞柄的手，背景是雨中的书店门口",
+                session_id=sid,
+                view="third",
+                is_intimate=False,
+                free_composition=True,
+            )
+            svc._do_generate.assert_awaited_once_with(
+                "english tags",
+                session_id=sid,
+                one_shot_appearance="",
+                is_intimate=False,
+                partner_in_frame=False,
+                device_in_frame=False,
+                clothing_off="",
+                orientation="3:2",
+            )
+
+        asyncio.run(run())
+
+    def test_illustration_planner_does_not_force_intimate_selfie_to_pov(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "手机录像视角里只有角色和画面边缘的伴侣手臂",
+                "view": "mirror",
+                "is_intimate": True,
+                "partner_in_frame": True,
+                "device_in_frame": True,
+            }, ensure_ascii=False))
+
+            plan = await plan_roleplay_image(
+                svc,
+                sid,
+                mode="illustration",
+                prompt="对镜录像，近距离拍身体局部",
+            )
+
+            self.assertEqual(plan["view"], "mirror")
+
+        asyncio.run(run())
+
     def test_roleplay_image_planner_coerces_mirror_scene_to_mirror_view(self):
         async def run():
             svc = self.make_service()
@@ -3043,6 +3549,31 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             self.assertEqual(state["custom_current_style"], "@00 gx4, artist:wlop")
             self.assertEqual(state["custom_positive_prefix"], "1girl, black hair")
+
+        asyncio.run(run())
+
+    def test_character_load_empty_style_clears_previous_style(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "A")
+            session_schema.set_character_value(state, "custom_current_style", "@old_style")
+            state["saved_characters"] = {
+                "A": {
+                    "character": "A",
+                    "series": "",
+                    "persona": "你是 A。",
+                    "appearance": "1girl, black hair",
+                    "style": "",
+                },
+            }
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_character(1, sid, "load A")
+
+            self.assertEqual(session_schema.get_character_value(state, "custom_current_style", ""), "")
+            self.assertEqual(svc._get_current_style(sid), "")
 
         asyncio.run(run())
 
@@ -4786,6 +5317,55 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("User: 用户真实对话", source_text)
             self.assertIn("Assistant: 角色真实回复", source_text)
             self.assertNotIn("照片历史 system 不应进入 dream", source_text)
+
+        asyncio.run(run())
+
+    def test_dream_adds_current_character_style_to_global_pool(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "小雨")
+            session_schema.set_character_value(state, "custom_current_style", "@new_style, artist:wlop")
+            key = svc._context_character_key(sid)
+            svc.config["style_pool"] = "@base"
+            svc.config["current_style"] = "@base"
+            svc.app_store.append_messages(sid, key, [
+                {"role": "user", "content": "用户真实对话"},
+                {"role": "assistant", "content": "角色真实回复"},
+            ])
+            svc._write_dream_diary = AsyncMock(return_value="梦境日记")
+            svc._organize_memories_after_dream = AsyncMock()
+            svc._generate_character_history_summary = AsyncMock()
+
+            await svc._dream_once(sid, key, datetime(2026, 6, 24, tzinfo=timezone.utc), reason="manual")
+
+            self.assertEqual(svc._normalize_style_pool(), ["@base", "@new_style, artist:wlop"])
+            self.assertEqual(svc.config["current_style"], "@base")
+
+        asyncio.run(run())
+
+    def test_dream_does_not_add_empty_character_style_to_pool(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "小雨")
+            session_schema.set_character_value(state, "custom_current_style", "")
+            key = svc._context_character_key(sid)
+            svc.config["style_pool"] = "@base"
+            svc.config["current_style"] = "@base"
+            svc.app_store.append_messages(sid, key, [
+                {"role": "user", "content": "用户真实对话"},
+                {"role": "assistant", "content": "角色真实回复"},
+            ])
+            svc._write_dream_diary = AsyncMock(return_value="梦境日记")
+            svc._organize_memories_after_dream = AsyncMock()
+            svc._generate_character_history_summary = AsyncMock()
+
+            await svc._dream_once(sid, key, datetime(2026, 6, 24, tzinfo=timezone.utc), reason="manual")
+
+            self.assertEqual(svc._normalize_style_pool(), ["@base"])
 
         asyncio.run(run())
 

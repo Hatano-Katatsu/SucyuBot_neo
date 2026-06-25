@@ -207,6 +207,7 @@ class CommandHandlersMixin:
             "菜单": self.cmd_menu,
             "创建OC": self.cmd_create_oc,
             "自拍": self.cmd_selfie,
+            "配图": self.cmd_scene_image,
             "天气": self.cmd_weather,
             "天气设置": self.cmd_set_location,
             "测试推送": self.cmd_test_push,
@@ -948,7 +949,7 @@ class CommandHandlersMixin:
 
     async def cmd_new_scene(self, chat_id, session_id, arg):
         state = self._get_session_state(session_id)
-        self._reset_short_context(state, "用户手动开启新短期场景")
+        self._reset_short_context(state, "用户手动开启新短期场景", session_id=session_id)
         self._save_session_state(session_id, state)
         await self.send_message(chat_id, "已开启新的短期场景。之后默认不会主动延续切换前的话题、画面和动作。")
 
@@ -1108,6 +1109,25 @@ class CommandHandlersMixin:
             source_description=source,
         )
 
+    async def cmd_scene_image(self, chat_id, session_id, arg):
+        if self._gen_lock.locked():
+            await self.send_message(chat_id, "正在生图中，请稍后再试。")
+            return
+        text = (arg or "").strip()
+        intent = "根据当前聊天场景配一张图"
+        if text:
+            intent = "根据当前聊天场景配图，并优先满足用户输入的画面参数"
+        result = await self.tool_generate_image(
+            chat_id,
+            session_id,
+            prompt=text,
+            intent=intent,
+            must_include=text,
+            planning_mode="illustration",
+        )
+        if result.startswith("生图失败") or result == "缺少图片意图":
+            await self.send_message(chat_id, result)
+
     async def cmd_test_push(self, chat_id, session_id, arg):
         mode = (arg or "normal").strip() or "normal"
         await self.send_message(chat_id, f"正在强制触发 {mode} 模式推送。")
@@ -1133,8 +1153,6 @@ class CommandHandlersMixin:
             await self.cmd_del_style(chat_id, session_id, val)
         elif action in ("切换", "switch"):
             await self.cmd_switch_style(chat_id, session_id, val)
-        elif sub.startswith("@"):
-            await self.cmd_add_style(chat_id, session_id, sub)
         else:
             await self.cmd_switch_style(chat_id, session_id, sub)
 
@@ -1151,7 +1169,7 @@ class CommandHandlersMixin:
                 marks.append("全局")
             marker = " <- " + " / ".join(marks) if marks else ""
             lines.append(f"{i}. {style}{marker}")
-        lines.append("\n用法: /画风 添加 @xxx | /画风 删除 序号 | /画风 切换 序号")
+        lines.append("\n用法: /画风 <画风名> | /画风 清空 | /画风 添加 @xxx | /画风 删除 序号")
         return "\n".join(lines)
 
     async def cmd_add_style(self, chat_id, session_id, arg):
@@ -1208,11 +1226,9 @@ class CommandHandlersMixin:
         if not target or target.lower() in ("查看", "list", "ls", "show"):
             await self.send_message(chat_id, self._style_list_text(session_id))
             return
-        if target.lower() in ("style reset", "clear", "默认", "全局"):
-            state = self._get_session_state(session_id)
-            session_schema.set_character_value(state, "custom_current_style", "")
-            self._save_session_state(session_id, state)
-            await self.send_message(chat_id, f"已清除当前会话画风覆盖，当前画风: {self._get_current_style(session_id)}")
+        if target.lower() in ("style reset", "clear", "reset", "none", "empty", "默认", "全局", "清空", "留空", "无"):
+            self._set_current_style(session_id, "")
+            await self.send_message(chat_id, f"已清空当前角色画风字段，当前有效画风: {self._get_current_style(session_id)}")
             return
         chosen = None
         try:
@@ -1222,17 +1238,9 @@ class CommandHandlersMixin:
         except ValueError:
             pass
         if chosen is None:
-            matches = [s for s in pool if target.lower() in s.lower()]
-            if len(matches) == 1:
-                chosen = matches[0]
-            elif len(matches) > 1:
-                await self.send_message(chat_id, "匹配多个:\n" + "\n".join(f"{i+1}. {m}" for i, m in enumerate(matches)))
-                return
-        if not chosen:
-            await self.send_message(chat_id, "未找到画风，用 /画风 查看全部。")
-            return
+            chosen = target
         self._set_current_style(session_id, chosen)
-        await self.send_message(chat_id, f"当前会话画风已切换到 {chosen}")
+        await self.send_message(chat_id, f"当前角色画风已设为 {chosen}")
 
     async def cmd_turbo(self, chat_id, session_id, arg):
         val = arg.strip().lower()
@@ -1594,7 +1602,7 @@ class CommandHandlersMixin:
                     session_schema.get_character_value(state, "custom_spatial_relationship", "")
                     or data.get("relationship", "")
                 )
-            if not data.get("style"):
+            if "style" not in data:
                 payload.pop("style", None)
             if data.get("purity") is None or session_schema.get_character_value(state, "purity_user_set", False):
                 payload.pop("purity", None)
@@ -1667,7 +1675,7 @@ class CommandHandlersMixin:
                     session_schema.get_character_value(state, "custom_spatial_relationship", "")
                     or data.get("relationship", "")
                 )
-            if not data.get("style"):
+            if "style" not in data:
                 payload.pop("style", None)
             if data.get("purity") is None or session_schema.get_character_value(state, "purity_user_set", False):
                 payload.pop("purity", None)

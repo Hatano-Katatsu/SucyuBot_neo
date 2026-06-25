@@ -21,6 +21,7 @@ SECRET_KEYS = {
 }
 MODEL_SECRET_PLACEHOLDER = "********"
 MODEL_SECRET_KEYS = {"api_key", "api_key_no_think"}
+FEEDBACK_MAX_LENGTH = 6000
 YAML_ONLY_CONFIG_KEYS = {
     "comfyui_url", "image_backend", "animatool_turbo_steps", "animatool_turbo_cfg",
     "animatool_filename_prefix", "unet_model", "clip_model", "vae_model",
@@ -117,6 +118,8 @@ def create_web_app(service) -> web.Application:
     app.router.add_get("/api/auth/me", api_auth_me)
     app.router.add_static("/static/", static_dir)
     app.router.add_get("/api/status", api_status)
+    app.router.add_get("/api/feedback", api_feedback)
+    app.router.add_post("/api/feedback", api_submit_feedback)
     app.router.add_get("/api/config", api_config)
     app.router.add_post("/api/config", api_save_config)
     app.router.add_get("/api/sessions", api_sessions)
@@ -346,6 +349,104 @@ def json_ok(data: dict[str, Any] | None = None):
 
 def json_error(message: str, status: int = 400):
     return web.json_response({"ok": False, "error": message}, status=status)
+
+
+def feedback_file_path(service) -> Path:
+    configured = getattr(service, "feedback_file_path", None)
+    if configured:
+        return Path(configured)
+    return Path(__file__).resolve().parents[1] / "TODO.md"
+
+
+def feedback_user_name(service, session_id: str) -> str:
+    state = getattr(service, "sessions", {}).get(session_id) or {}
+    name = active_character_id(state) or str(service.chat_id_from_session(session_id) if hasattr(service, "chat_id_from_session") else session_id)
+    name = str(name or session_id).replace("\r", " ").replace("\n", " ").strip()
+    return name[:80] or session_id
+
+
+def feedback_session_for_request(request: web.Request, data: dict[str, Any] | None = None) -> str:
+    data = data or {}
+    if _is_admin(request):
+        return str(data.get("session_id") or request.query.get("session_id") or "").strip()
+    user_id = (request.get("web_auth") or {}).get("user_id", "")
+    return f"telegram:{user_id}" if user_id else ""
+
+
+def parse_feedback_sections(text: str) -> list[dict[str, Any]]:
+    lines = (text or "").splitlines()
+    headers = [idx for idx, line in enumerate(lines) if line.startswith("## ")]
+    sections: list[dict[str, Any]] = []
+    for pos, start in enumerate(headers):
+        end = headers[pos + 1] if pos + 1 < len(headers) else len(lines)
+        title = lines[start][3:].strip()
+        body_lines = lines[start + 1:end]
+        session_id = ""
+        visible_lines: list[str] = []
+        for line in body_lines:
+            stripped = line.strip()
+            if stripped.startswith("<!--") and stripped.endswith("-->") and "session_id:" in stripped:
+                session_id = stripped.split("session_id:", 1)[1].split("-->", 1)[0].strip()
+                continue
+            visible_lines.append(line)
+        sections.append({
+            "title": title,
+            "session_id": session_id,
+            "content": "\n".join(visible_lines).strip(),
+            "start": start,
+            "end": end,
+        })
+    return sections
+
+
+def feedback_entry_lines(content: str) -> list[str]:
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    lines = [f"- {stamp}"]
+    for line in content.strip().splitlines():
+        lines.append(f"  {line.rstrip()}")
+    return lines
+
+
+def upsert_feedback_text(text: str, *, session_id: str, user_name: str, content: str) -> str:
+    lines = (text or "# WebUI 用户反馈\n").splitlines()
+    sections = parse_feedback_sections("\n".join(lines))
+    entry = feedback_entry_lines(content)
+    for section in sections:
+        if section.get("session_id") == session_id:
+            insert_at = int(section["end"])
+            insert = []
+            if insert_at > 0 and lines[insert_at - 1].strip():
+                insert.append("")
+            insert.extend(entry)
+            lines[insert_at:insert_at] = insert
+            return "\n".join(lines).rstrip() + "\n"
+
+    if lines and lines[-1].strip():
+        lines.append("")
+    lines.extend([
+        f"## {user_name}",
+        f"<!-- session_id: {session_id} -->",
+        "",
+        *entry,
+    ])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+async def read_feedback_text(path: Path) -> str:
+    def _read() -> str:
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8")
+    return await asyncio.to_thread(_read)
+
+
+async def write_feedback_text(path: Path, text: str) -> None:
+    def _write() -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(path)
+    await asyncio.to_thread(_write)
 
 
 def masked_config(service) -> dict[str, Any]:
@@ -719,6 +820,64 @@ async def api_sessions(request: web.Request):
     return json_ok({"sessions": sessions})
 
 
+async def api_feedback(request: web.Request):
+    service = service_from(request)
+    sid = feedback_session_for_request(request)
+    if sid and not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    path = feedback_file_path(service)
+    text = await read_feedback_text(path)
+    sections = [
+        {
+            "session_id": item.get("session_id", ""),
+            "user_name": item.get("title", ""),
+            "content": item.get("content", ""),
+        }
+        for item in parse_feedback_sections(text)
+        if item.get("session_id")
+    ]
+    if not _is_admin(request):
+        sections = [item for item in sections if item.get("session_id") == sid]
+    current_name = feedback_user_name(service, sid) if sid else ""
+    return json_ok({
+        "sections": sections,
+        "current_session_id": sid,
+        "current_user_name": current_name,
+        "is_admin": _is_admin(request),
+    })
+
+
+async def api_submit_feedback(request: web.Request):
+    service = service_from(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        return json_error("反馈数据格式不正确")
+    sid = feedback_session_for_request(request, payload)
+    if not sid:
+        return json_error("请先选择会话")
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    content = str(payload.get("content") or "").strip()
+    if not content:
+        return json_error("反馈内容不能为空")
+    if len(content) > FEEDBACK_MAX_LENGTH:
+        return json_error(f"反馈内容过长，最多 {FEEDBACK_MAX_LENGTH} 字符")
+    user_name = feedback_user_name(service, sid)
+    path = feedback_file_path(service)
+    lock = getattr(service, "_feedback_file_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        service._feedback_file_lock = lock
+    async with lock:
+        text = await read_feedback_text(path)
+        updated = upsert_feedback_text(text, session_id=sid, user_name=user_name, content=content)
+        await write_feedback_text(path, updated)
+    return await api_feedback(request)
+
+
 async def api_session_detail(request: web.Request):
     service = service_from(request)
     sid = request.match_info["session_id"]
@@ -894,6 +1053,7 @@ async def api_characters(request: web.Request):
         "active_id": active_id,
         "default_id": default_id,
         "current": service._character_export_payload(state) if hasattr(service, "_character_export_payload") else {},
+        "style_pool": service._normalize_style_pool() if hasattr(service, "_normalize_style_pool") else [],
         "characters": characters,
     })
 
@@ -985,7 +1145,7 @@ async def api_activate_character(request: web.Request):
         payload["role_name"] = character_value(state, "custom_role_name", "") or data.get("role_name", "")
         payload["bot_self_name"] = character_value(state, "custom_bot_self_name", "") or data.get("bot_self_name", "")
         payload["relationship"] = character_value(state, "custom_spatial_relationship", "") or data.get("relationship", "")
-    if not data.get("style"):
+    if "style" not in data:
         payload.pop("style", None)
     if data.get("purity") is None or character_value(state, "purity_user_set", False):
         payload.pop("purity", None)

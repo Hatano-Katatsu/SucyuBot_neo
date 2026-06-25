@@ -304,6 +304,44 @@ class AppStateStore:
             )
             conn.commit()
 
+    def clear_checkpoint(self, session_id: str, character_key: str, *, source_until_id: int = 0):
+        """清空 checkpoint 摘要，并把 checkpoint 边界推进到指定消息。
+
+        /新场景 需要让旧摘要不再进入模型上下文，但旧聊天仍保留在 chat_messages，
+        供 dream 之后继续整理。因此这里不删除消息，只建立新的 checkpoint 边界。
+        """
+        now = _now()
+        until = int(source_until_id or 0)
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO checkpoints(session_id, character_key, summary, source_until_id, updated_at, version)
+                VALUES (?, ?, '', ?, ?, 1)
+                ON CONFLICT(session_id, character_key) DO UPDATE SET
+                    summary = '',
+                    source_until_id = excluded.source_until_id,
+                    updated_at = excluded.updated_at,
+                    version = checkpoints.version + 1
+                """,
+                (session_id, character_key or "", until, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO context_meta(session_id, character_key, last_checkpoint_at, last_checkpoint_message_id)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(session_id, character_key) DO UPDATE SET
+                    last_checkpoint_at = excluded.last_checkpoint_at,
+                    last_checkpoint_message_id = excluded.last_checkpoint_message_id
+                """,
+                (session_id, character_key or "", now, until),
+            )
+            if until > 0:
+                conn.execute(
+                    "UPDATE chat_messages SET checkpointed = 1 WHERE session_id = ? AND character_key = ? AND id <= ?",
+                    (session_id, character_key or "", until),
+                )
+            conn.commit()
+
     def get_context_meta(self, session_id: str, character_key: str) -> dict[str, Any]:
         with closing(self._connect()) as conn:
             row = conn.execute(

@@ -359,6 +359,53 @@ nav {
   gap: 16px;
 }
 
+.feedback-panel {
+  margin-top: 16px;
+}
+
+.feedback-list {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.feedback-item {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-subtle);
+  padding: 12px;
+}
+
+.feedback-item-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.feedback-item-head strong {
+  font-size: 14px;
+  color: var(--text);
+}
+
+.feedback-item-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.feedback-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.feedback-form textarea {
+  min-height: 96px;
+}
+
 .session-layout {
   display: grid;
   grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
@@ -461,6 +508,13 @@ label {
   color: var(--text-secondary);
   font-size: 13px;
   font-weight: 500;
+}
+
+.field-hint {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 input, textarea, select {

@@ -274,17 +274,18 @@ async def plan_roleplay_image(
     weather_data: Any = None,
     now: Any = None,
 ) -> dict[str, Any]:
+    free_composition = (mode or "").strip().lower() == "illustration"
     requested_view = normalize_view(view)
     fallback_scene = (prompt or intent or must_include).strip()
     fallback_intimate_hint = _detect_intimate_context(intent, mood, prompt)
     fallback_device_hint = _detect_device_context(intent, mood, prompt)
     fallback_clothing_off = _infer_clothing_off_fallback(intent, mood, prompt)
-    needs_caption = mode != "chat"
+    needs_caption = mode not in ("chat", "illustration")
     if now is None:
         now = service._session_now(session_id)
     if not service.has_llm_config("image"):
         fallback_view = requested_view
-        if fallback_intimate_hint and not fallback_device_hint and fallback_view in {"selfie", "mirror"}:
+        if not free_composition and fallback_intimate_hint and not fallback_device_hint and fallback_view in {"selfie", "mirror"}:
             fallback_view = "pov"
         return {
             "scene": fallback_scene,
@@ -380,10 +381,21 @@ async def plan_roleplay_image(
         )
         temporal = time_period
     else:
-        system += (
-            f"你是角色扮演图片导演，负责把聊天模型给出的图片意图整合成最终画面。\n"
-            f"角色身份: 当前角色是「{bot_name}」（{role_name}），优先使用「{bot_self_name}」作为自称；不要写成其他默认角色。\n"
-        )
+        if free_composition:
+            system += (
+                f"你是角色扮演配图导演，负责把完整聊天上下文和用户在 /配图 后输入的画面要求整合成最终画面。\n"
+                f"角色身份: 当前角色是「{bot_name}」（{role_name}），优先使用「{bot_self_name}」作为自称；不要写成其他默认角色。\n"
+                "优先级: 用户本次 /配图 后输入的场景、视角、机位、远近、焦段、构图、部位特写或道具要求最高；"
+                "最近聊天上下文、照片历史、世界状态和记忆用于补全人物、情绪、地点和连续性；"
+                "slot/外观/偏好只作为参考，不能覆盖用户本次明确要求。\n"
+                "自由构图: 不强制自拍、不强制看镜头、不强制 portrait/pov；允许低机位、俯拍、远景、极近特写、部位特写、背影、环境承接、道具或手机/相机入画。"
+                "若用户没有指定构图，再根据当前聊天场景自然选择。"
+            )
+        else:
+            system += (
+                f"你是角色扮演图片导演，负责把聊天模型给出的图片意图整合成最终画面。\n"
+                f"角色身份: 当前角色是「{bot_name}」（{role_name}），优先使用「{bot_self_name}」作为自称；不要写成其他默认角色。\n"
+            )
         temporal = f"{time_period}, {weekday}"
     system += (
         f"当前附加外貌: {dynamic or '无'}\n"
@@ -455,32 +467,45 @@ async def plan_roleplay_image(
         "同样判为 is_intimate=true（不要因为‘性行为已结束’就当成日常）。"
         "请在 JSON 里输出 is_intimate 布尔值。"
         + ("系统初步判断本次可能属于亲密场景，请重点确认。" if intimate_hint else "")
-        + "\n【以下亲密交互规则仅当你判定 is_intimate=true 时适用；若判定为日常/非性场景，请完全忽略本段，按通用规则写】:\n"
-        "- 视角固定为 pov（用户第一人称视角），严禁 selfie 或 mirror，不需要第三人称全景。\n"
-        f"- 用户身体归属（关键，针对双人误画）: 画面焦点永远是角色（一名女性）。用户作为亲密伴侣入画时，只画用户的【{user_g_zh}】身体局部（手、手臂、胸膛或胸部、腹、背、腿），"
-        "绝不能把用户写成有完整面部、发型、表情、迷离眼神的第二个主角，更不能让用户喧宾夺主。\n"
-        f"凡“你的手/你的胸/你的背/你的腿”等用户身体部位，scene 要写成可见的{user_g_zh}身体局部，不要写成“另一个角色/她/第二个人”。"
-        "除非用户明确要求双人同框，画面里被完整刻画的人物只有角色一名。\n"
-        f"- 只画用户身体局部（手/臂/胸/腹/背/腿），不要画完整的{user_g_zh}全身或面部。\n"
-        "- 人物优先: 重点在角色的表情（迷离、红晕、咬唇）、身体反应（汗水、潮红、轻颤）和互动姿态，弱化环境背景。\n"
-        "- 场景精简: 环境灯光压到最短；构图近距离特写或半身近景。\n"
-        "- 自拍物理规则不变: 默认不得出现手机、相机、镜子或拿手机的手；"
-        "但若用户明确要求在亲密时拍照/录像/对镜（device_in_frame=true），则按其要求放行对应的 selfie/mirror 视角与手机/镜子入画。\n"
-        "- new_appearance_tags 仍只填临时外观变化，不要把情绪或动作写进去。"
     )
+    if free_composition:
+        system += (
+            "\n【自由配图模式的亲密构图】若 is_intimate=true，仍要避免把用户误画成抢主体的完整第二人；"
+            f"用户身体默认只作为{user_g_zh}局部、手臂、胸腹、背或腿入画。"
+            "但用户本次明确指定的视角、机位、远近、局部特写、手机/相机/镜子入画优先，不要硬改成 POV。"
+            "new_appearance_tags 仍只填临时外观变化，不要把情绪或动作写进去。"
+        )
+    else:
+        system += (
+            "\n【以下亲密交互规则仅当你判定 is_intimate=true 时适用；若判定为日常/非性场景，请完全忽略本段，按通用规则写】:\n"
+            "- 视角固定为 pov（用户第一人称视角），严禁 selfie 或 mirror，不需要第三人称全景。\n"
+            f"- 用户身体归属（关键，针对双人误画）: 画面焦点永远是角色（一名女性）。用户作为亲密伴侣入画时，只画用户的【{user_g_zh}】身体局部（手、手臂、胸膛或胸部、腹、背、腿），"
+            "绝不能把用户写成有完整面部、发型、表情、迷离眼神的第二个主角，更不能让用户喧宾夺主。\n"
+            f"凡“你的手/你的胸/你的背/你的腿”等用户身体部位，scene 要写成可见的{user_g_zh}身体局部，不要写成“另一个角色/她/第二个人”。"
+            "除非用户明确要求双人同框，画面里被完整刻画的人物只有角色一名。\n"
+            f"- 只画用户身体局部（手/臂/胸/腹/背/腿），不要画完整的{user_g_zh}全身或面部。\n"
+            "- 人物优先: 重点在角色的表情（迷离、红晕、咬唇）、身体反应（汗水、潮红、轻颤）和互动姿态，弱化环境背景。\n"
+            "- 场景精简: 环境灯光压到最短；构图近距离特写或半身近景。\n"
+            "- 自拍物理规则不变: 默认不得出现手机、相机、镜子或拿手机的手；"
+            "但若用户明确要求在亲密时拍照/录像/对镜（device_in_frame=true），则按其要求放行对应的 selfie/mirror 视角与手机/镜子入画。\n"
+            "- new_appearance_tags 仍只填临时外观变化，不要把情绪或动作写进去。"
+        )
     system += (
         "\n画面主体规则: 图片主体默认必须是角色，不要把“你/用户”写成画面中被观看的主角。"
         "用户只能作为视角来源、互动对象或少量局部元素出现；只有用户明确要求双人同框时，才允许用户作为第二主体。"
         "如果草案写成“你坐着/你躺着/你穿着”，必须改写为“角色坐着/她躺着/角色穿着”。"
         "角色名只用于台词称呼；默认或原创角色不要把名字当作画面标签，画面描述应依靠角色类型和外貌特征。既有作品角色可以保留角色名和作品名。"
     )
+    if not free_composition:
+        system += (
+            "\n单人构图硬规则: 当视角是 selfie 前摄自拍或 mirror 对镜自拍时，画面里【只能有角色一个人】，"
+            "scene 绝不能写入第二个人（用户、伴侣、他、她、对方、男人、女人）或对方的完整身体、面部。"
+            "如果此刻用户/伴侣的身体会和角色同框入画（如躺在身边、被搂着、贴身依偎），默认不要用 selfie/mirror，"
+            "改用 pov，并且只把对方写成画面边缘的身体局部（手、手臂、胸膛、腿等），不要写成完整的第二个人。"
+            "唯一例外是用户明确要求拍照/录像/对镜（device_in_frame=true）：此时可保留其要求的 selfie/mirror 视角，"
+            "但对方依然只画身体局部，不得写成完整的第二个主角。\n"
+        )
     system += (
-        "\n单人构图硬规则: 当视角是 selfie 前摄自拍或 mirror 对镜自拍时，画面里【只能有角色一个人】，"
-        "scene 绝不能写入第二个人（用户、伴侣、他、她、对方、男人、女人）或对方的完整身体、面部。"
-        "如果此刻用户/伴侣的身体会和角色同框入画（如躺在身边、被搂着、贴身依偎），默认不要用 selfie/mirror，"
-        "改用 pov，并且只把对方写成画面边缘的身体局部（手、手臂、胸膛、腿等），不要写成完整的第二个人。"
-        "唯一例外是用户明确要求拍照/录像/对镜（device_in_frame=true）：此时可保留其要求的 selfie/mirror 视角，"
-        "但对方依然只画身体局部，不得写成完整的第二个主角。\n"
         "partner_in_frame: 当画面里会出现用户/伴侣的身体（哪怕只是局部）时置 true；纯角色单人时 false。\n"
         "device_in_frame: 仅当用户明确要求把手机/相机/镜子作为拍照、录像、对镜的道具拍进画面时置 true；否则 false。"
     )
@@ -490,15 +515,24 @@ async def plan_roleplay_image(
         "如果角色有连续动作（如转身→走开→回头），只选取其中最具表现力的一帧，不要把多帧塞进同一张图。"
         "不要在 scene 里写叙事推进或时间线（先…然后…最后…），只写此刻定格的画面。"
     )
+    if free_composition:
+        system += (
+            "\n视角规则: 优先服从用户本次给出的视角、机位、远近和构图；未指定时才根据上下文选择 pov/third/selfie/mirror/portrait。"
+            "允许部位特写、超近景、远景、低机位、俯拍、侧后方、环境或道具承接；不要为了自拍偏好强行改写。"
+            "手部规则: 用户明确要求手部或局部特写时保留；否则仍避免复杂手势和多余手臂。"
+        )
+    else:
+        system += (
+            "\n视角规则: 身处同一空间或用户明确要靠近互动时优先 pov；"
+            "异地、展示穿搭或回复照片请求时优先 selfie/mirror；需要叙事全景时用 third。"
+            "取景物理规则: view=selfie 是前摄自拍（角色伸手举着手机自拍），但画面中【不得出现手机本体、手机屏幕 UI、相机、镜子或拿手机的手】，只靠伸手取景和看向镜头表现自拍；"
+            "view=portrait 是别人（用户或他人）帮角色拍的照片：角色看向镜头、为镜头摆姿势，拍摄者在画面外，画面里只有角色一个人，同样不得出现手机、相机、镜子。"
+            "portrait 只在两种情况下用：①用户与角色【同处一地】且角色明确说想让用户/他人帮忙拍一张照片；②NTR 场景（他人给角色拍照）。其余展示穿搭/异地/回复照片仍用 selfie。"
+            "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。"
+            "selfie/portrait/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。"
+            "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。"
+        )
     system += (
-        "\n视角规则: 身处同一空间或用户明确要靠近互动时优先 pov；"
-        "异地、展示穿搭或回复照片请求时优先 selfie/mirror；需要叙事全景时用 third。"
-        "取景物理规则: view=selfie 是前摄自拍（角色伸手举着手机自拍），但画面中【不得出现手机本体、手机屏幕 UI、相机、镜子或拿手机的手】，只靠伸手取景和看向镜头表现自拍；"
-        "view=portrait 是别人（用户或他人）帮角色拍的照片：角色看向镜头、为镜头摆姿势，拍摄者在画面外，画面里只有角色一个人，同样不得出现手机、相机、镜子。"
-        "portrait 只在两种情况下用：①用户与角色【同处一地】且角色明确说想让用户/他人帮忙拍一张照片；②NTR 场景（他人给角色拍照）。其余展示穿搭/异地/回复照片仍用 selfie。"
-        "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。"
-        "selfie/portrait/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。"
-        "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。"
         "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third|portrait\",\"aspect_ratio\":\"2:3|3:2\",\"caption\":\"...\",\"new_appearance_tags\":\"...\",\"clothing_off\":\"...\",\"character_location\":\"...\",\"user_location\":\"...\",\"is_intimate\":false,\"partner_in_frame\":false,\"device_in_frame\":false}。"
         "aspect_ratio 选画幅（重要）：只允许 2:3（竖版，832x1216）或 3:2（横版，1216x832）。"
         "默认用 2:3 竖版；当场景以横向元素为主（如地平线、宽阔街景、双人并排、横向躺卧、风景全景）时用 3:2。"
@@ -573,7 +607,7 @@ async def plan_roleplay_image(
     except Exception as exc:
         logger.error("roleplay image planning failed: %s", exc)
         fallback_view = requested_view
-        if intimate_hint and not device_hint and fallback_view in {"selfie", "mirror"}:
+        if not free_composition and intimate_hint and not device_hint and fallback_view in {"selfie", "mirror"}:
             fallback_view = "pov"
         return {
             "scene": fallback_scene,
@@ -633,7 +667,7 @@ async def plan_roleplay_image(
         final_view = "mirror"
     # 亲密/伴侣同框画面里前摄自拍、对镜自拍物理上讲不通（自拍框 + 第二人会画出断臂/双人）：硬性改 POV。
     # 例外：用户明确要拍照/录像/对镜（device_in_frame）时尊重其 selfie/mirror 视角。
-    if two_person and not device_in_frame and final_view in {"selfie", "mirror"}:
+    if not free_composition and two_person and not device_in_frame and final_view in {"selfie", "mirror"}:
         final_view = "pov"
     # clothing_off 兜底：规划器漏填、但对话/意图有明确裸体/性爱信号时，强制本图裸体——
     # 否则持久穿搭会原样画回来（"脱不掉衣服"bug）。只在留空时兜底，不覆盖规划器的显式判断。

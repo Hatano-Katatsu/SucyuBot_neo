@@ -105,6 +105,7 @@ telegram_comfyui_selfie/
 - `default_chat_model_profile` 用于聊天模型，`default_fast_model_profile` 用于生图辅助模型，`default_vision_model_profile` 用于用户图片/引用图片理解模型。
 - 视觉模型默认留空；留空时不处理图片输入和引用图片。
 - WebUI/API 返回模型 `api_key` / `api_key_no_think` 时显示为 `********`；保存空值或 `********` 会保留旧密钥。
+- WebUI 模型 profile 编辑器只暴露常用字段（profile id、名称、base_url、api_key、model、max_tokens、timeout），不要求用户填写 JSON，也不暴露 thinking / fixed thinking 等内部兼容字段。
 
 ### 聊天上下文
 
@@ -112,10 +113,10 @@ telegram_comfyui_selfie/
 
 1. 静态 system：身份、人设、关系、工具规则、照片历史规则、固定发图节奏规则。
 2. 天级/低频稳定层：低频对话控制、角色历史提要、按重要性选取的长期记忆。
-3. 半稳定状态快照：当前可见外型、衣橱、当前附加外貌。
+3. 半稳定状态快照：当前可见外型、衣橱、当前附加外貌、低频世界模板（天气/光线阶段/角色身份/日常动线背景/场景约束）。
 4. checkpoint 会话连续性：近期已折叠对话摘要。
 5. 未折叠历史：checkpoint 之后的真实 `user/assistant/system` 历史。
-6. 动态尾部：时间、光线、世界状态、本轮位置判断、overdue 发图提醒、当前用户输入。
+6. 动态尾部：精确当前时间、本轮用户位置/空间关系判断、overdue 发图提醒、场景断档提醒、当前用户输入。
 
 关键约束：
 
@@ -124,6 +125,8 @@ telegram_comfyui_selfie/
 - dream 和 dream 记忆整理只读取实际 `user/assistant` 对话，不消费照片历史 system。
 - 照片历史是真正的历史 `system` 消息，保留到被正常历史裁剪为止，并参与 checkpoint 摘要。
 - 半稳定层变化时，如果未折叠历史达到 `context_window_message_limit / 2`，会异步强制 checkpoint 一次，近似恢复后续前缀稳定。
+- 天气、光线阶段、城市、角色身份和动线背景已从每轮 dynamic system 拆入 semistable；本轮用户位置仍保留在 dynamic tail，避免把用户当前位置缓存成旧状态。
+- `/新场景` / `/上下文重置` 会清空当前模型侧 `chat_history` 和 checkpoint 摘要，并把 checkpoint 边界推进到当前最新消息；SQLite `chat_messages` 不删除，后续 dream 仍会读取真实 `user/assistant` 对话。
 
 ### 记忆与角色历史
 
@@ -139,6 +142,7 @@ telegram_comfyui_selfie/
 - `character_card.py` 是角色卡字段单一来源；导出、快照、导入/写回共用同一字段表。
 - `custom_scheduled_persona` 只存纯人格描述，禁止把身份、角色类型、关系、职业焊进人格文本。
 - 身份、角色类型、关系、职业等信息各有独立字段，读取侧实时组装：`_get_effective_persona()`、`_build_chat_messages()`、生图/推送身份行各自拼接。
+- 画风 `style` 跟随角色卡保存；`/画风 <画风名>` 不要求画风已在池中，会直接写入当前角色卡字段。空画风是有效状态，表示该角色不注入画风/画师，不回退全局默认。
 - 当前角色切换会保存离开角色的可变状态，切回时恢复该角色的上下文、衣柜、位置和照片历史。
 - `/角色 reset` 是硬重置入口；轻量上下文切场景使用 `/新场景` 或相关别名。
 
@@ -159,6 +163,7 @@ telegram_comfyui_selfie/
 - `one_shot_appearance` 是本轮临时补充，不持久化。
 - OC 不把中文名、昵称或作品名塞进视觉 identity；只有已知公开角色才注入角色/作品 tag。
 - 亲密场景默认走 POV，只允许用户/伴侣身体局部入画；除非用户明确要求拍照、录像或对镜，才允许设备入画。
+- `/配图`（同义词 `/画图`、`/绘图` 等）按当前聊天场景生成图片，不强制自拍或看镜头；命令后的参数作为最高优先级场景/视角/机位/远近/局部特写要求，但规划器仍会参考完整聊天上下文、照片历史、世界状态和记忆。
 - 画幅只允许 2:3（竖版）和 3:2（横版），模拟真实相机画幅；负向提示词包含 `split screen, grid, multiple panels, collage` 防止四宫格/分格出图。
 
 ### Telegram 输入增强
@@ -175,11 +180,13 @@ telegram_comfyui_selfie/
 - 管理员可以查看用量、维护全局模型 profile、执行 Git 更新、重启服务、冻结不活跃用户。
 - 基础设施/运维配置如 Web host/port、日志路径、数据库路径仍只允许 YAML 修改，不通过通用 Web 配置表单写入。
 - WebUI 角色面板不展示场景偏好/自拍偏好栏；这些字段保留为内部数据和兼容字段。
+- WebUI 总览页包含反馈板：反馈运行时读写项目根目录 `TODO.md`，按 `## 角色名` + `<!-- session_id: ... -->` 分段；普通用户只看到自己的反馈，管理员可见全部。`TODO.md` 是运行时文件，已加入 `.gitignore`，不要提交。
 
 ## 关键行为规则
 
 - `view=selfie` 是前摄自拍：角色看向镜头、伸手自拍，但画面中不得出现手机本体、手机 UI、消息界面、倒计时界面。正向提示词不要写 `off-frame front-facing phone camera` 这类容易诱发手机 UI 的措辞。
 - `view=portrait` 是别人帮角色拍的照片：角色看向镜头、摆姿势，拍摄者在画面外，画面里只有角色。
+- `/配图` / `/画图` 是自由配图：允许用户覆盖视角、机位、距离、构图和部位特写，不套用 `/自拍` 的前摄自拍硬设定。
 - 只有 `view=mirror` 才允许同时出现镜子和手机。
 - 非 mirror 场景负面提示词要压制 `holding phone`、`visible phone`、`phone in hand`、`mirror selfie` 等。
 - 用户性别由全局 `user_gender` 或会话 `custom_user_gender` 控制，影响亲密场景中用户身体局部的描述。
@@ -187,6 +194,19 @@ telegram_comfyui_selfie/
 - 长期记忆不写临时服装、上一轮场景台词、一次性道具；这些属于短期上下文、衣柜或照片历史。
 - fire-and-forget `asyncio.create_task` 内异常可能被静默吞掉；排查生图/推送失败优先看 service log。
 - `_get_llm_value("chat", "temperature")` 的 legacy 回退会落到 `llm_temperature_scene`，除非 `chat_llm_temperature` 显式设置。
+
+## 今日变更（2026-06-25）
+
+1. **聊天 dynamic system 拆分**：`_build_chat_messages()` 将低频世界模板和自然光硬规则并入 semistable；dynamic tail 只保留精确当前时间、本轮用户位置/空间关系、发图提醒和场景断档提醒。`world_runtime.py` 新增 `_format_world_semistable_context()` / `_format_world_dynamic_context()`，原 `_format_world_context()` 保持给生图/推送链路使用。
+2. **semistable checkpoint 收敛复用**：新增世界模板参与 semistable 签名；天气、光线阶段、城市、角色身份或动线模板变化时，继续复用 `_track_semistable_context_change()`，在 checkpoint 后 pending 达到 `context_window_message_limit / 2` 时 force checkpoint。
+3. **真实缓存复测**：使用 `deepseek-pro` / `deepseek-v4-pro` 和 `llm_debug - 副本.json` 的真实 entry 3/4/5 请求体，验证 tools 字段 JSON 位置不影响缓存；热缓存后原结构与拆分后结构连续请求均达到 99%+ 命中。拆分后模拟请求 dynamic tail 从约 642 字符降到 63 字符；新 semistable 首轮有冷缓存成本，第二轮恢复 99%+。
+4. **角色扮演 prompt 精简**：静态聊天提示去掉重复发图节奏描述，补强“优先回应用户本轮话题、避免连续类似回复、不要因重要记忆主动跳题”的规则；checkpoint 摘要进一步限定为短期连续性，不承载长期记忆/角色弧线职责。
+5. **dream 新一天指导**：dream 日记和角色历史提要可生成“新一天演绎提示”，只给基于事件与角色情绪的灵活方向，不写死台词、地点、日程或剧情。
+6. **自由配图命令**：新增 `/配图`，并加入 `/画图`、`/绘图`、`/生图` 等同义词；该命令复用完整聊天上下文，但允许用户通过参数优先覆盖场景、视角、机位、远近和局部特写，不再套用 `/自拍` 的硬设定。
+7. **新场景上下文硬切换**：`/新场景` 不再只移动 `short_context_start`，而是清空模型侧未折叠对话历史和 checkpoint 摘要，同时在 `app_store.checkpoints` 中把边界推进到当前最新消息；旧聊天仍保留在 `chat_messages`，不影响后续 dream。
+8. **角色画风字段化**：`/画风 <画风名>` 可直接写入当前角色卡 `style`，不再要求命中画风池；`/画风 清空` 会把角色画风字段置空且生图不回退全局画风。dream 会把当前角色的非空画风补入全局画风池，WebUI 角色设定面板提供画风池下拉与手动输入。
+9. **WebUI 模型 profile 表单字段化**：模型 profile 编辑不再要求填写 JSON，改为 profile id、名称、base_url、api_key、model、max_tokens、timeout 等显式字段；thinking / fixed thinking 控制保持为内部兼容配置，不在 WebUI 中让用户填写。
+10. **WebUI 反馈板**：总览页底部新增反馈板，异步读取 `/api/feedback`，不阻塞页面主状态加载；提交内容写入项目根目录 `TODO.md`，按当前会话激活角色名分 `##` 段并带 session 标记防冲突。普通用户只读写自己的段落，管理员可查看全部反馈。
 
 ## 今日变更（2026-06-24）
 
@@ -208,9 +228,11 @@ telegram_comfyui_selfie/
 
 ## 最新验证
 
-- `python -m compileall -q telegram_comfyui_selfie`
-- `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; python -m unittest discover -s tests -p test_core.py -v`
-- 最新结果：`Ran 229 tests in 3.570s`，`OK`
+- `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m compileall -q telegram_comfyui_selfie`
+- `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core -v`
+- 最新结果：`Ran 241 tests in 10.222s`，`OK (skipped=1)`
+- 真实 API 缓存探针：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。
+- 新增核心测试 `test_live_chat_context_cache_probe_uses_current_config_when_available`：使用当前配置文件中的模型连接信息，但运行态 state / SQLite / 用户日志均隔离在测试临时目录；通过真实 `handle_chat()` 链路连续回答三轮预设问题，assistant 回复采用真实 AI 返回，并在最终总结行输出三轮回复片段与缓存命中率。模型临时未返回可用回复时跳过；最近一次成功单测输出：`round1=0/2562 (0.00%)`、`round2=2560/2586 (98.99%)`、`round3=2560/2608 (98.16%)`。
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示
 
 ## 已知限制

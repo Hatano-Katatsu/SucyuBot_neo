@@ -104,7 +104,7 @@ const characterFieldSections = [
     ["count", "人数标签", "text"],
     ["appearance", "身体特征", "textarea"],
     ["outfit", "服装标签", "textarea"],
-    ["style", "画风", "text"],
+    ["style", "画风", "style_combo"],
     ["allow_change_appearance", "自动换装", "tristate"],
   ]],
   ["关系与背景", [
@@ -158,7 +158,7 @@ const commandHelp = {
   "拍照": ["等同于 /自拍。", ""],
   "天气": ["查看城市天气；留空时使用当前会话城市。", "上海"],
   "天气设置": ["设置当前会话的城市、时区和天气来源；也会用于动线和城市地点增强。", "上海"],
-  "画风": ["查看、添加、删除或切换画风池。", "查看 / 添加 @artist / 删除 @artist / 切换 @artist"],
+  "画风": ["设置当前角色画风；可直接输入未在池中的画风，dream 后会补入画风池。", "@artist / 清空 / 添加 @artist / 删除 @artist"],
   "角色": ["设定角色，或管理角色档案。", "天童爱丽丝 / list / load 名称 / delete 名称 / clearup / reset"],
   "外型": ["查看或修改穿搭、物种特征、发型瞳色。", "black dress, glasses"],
   "人格": ["直接改角色性格、语气和习惯。", "温柔、黏人、说话简短一点"],
@@ -229,6 +229,7 @@ function switchView(name) {
   $all(".view").forEach(view => view.classList.toggle("active", view.id === `view-${name}`));
   $("#view-title").textContent = viewMeta[name][0];
   $("#view-subtitle").textContent = viewMeta[name][1];
+  if (name === "overview") loadFeedbackBoard();
   if (name === "world") loadWorldSessions();
   if (name === "logs") loadLogs();
   if (name === "usage") loadUsage();
@@ -277,6 +278,7 @@ async function loadAll() {
     }
   }
   renderSessionSelector();
+  loadFeedbackBoard();
   // 获取模型 profile 列表供配置页下拉框使用
   try {
     const modelData = await api(modelApiUrl());
@@ -329,6 +331,7 @@ async function selectSession(sessionId) {
   if (!sessionId) return;
   state.selectedSession = sessionId;
   renderSessionSelector();
+  loadFeedbackBoard();
   if (document.querySelector('.nav[data-view="characters"].active')) {
     await loadCharacterPage();
   }
@@ -365,6 +368,46 @@ function renderStatus() {
   $("#status-vision-llm-model").textContent = s.vision_llm_model ? `${s.vision_llm_model} @ ${s.vision_llm_api_base}` : "未配置";
 }
 
+function feedbackApiPath() {
+  const sid = state.selectedSession || "";
+  return sid ? `/api/feedback?session_id=${encodeURIComponent(sid)}` : "/api/feedback";
+}
+
+function renderFeedback(data) {
+  const list = $("#feedback-list");
+  const scope = $("#feedback-scope");
+  if (!list || !scope) return;
+  const currentName = data.current_user_name || sessionLabel(data.current_session_id || state.selectedSession || "") || "当前用户";
+  scope.textContent = data.is_admin
+    ? `管理员视图：显示全部反馈；当前提交身份为 ${currentName}`
+    : `当前身份：${currentName}`;
+  const sections = data.sections || [];
+  if (!sections.length) {
+    list.innerHTML = `<div class="empty-state">暂无反馈。</div>`;
+    return;
+  }
+  list.innerHTML = sections.map(item => `
+    <article class="feedback-item">
+      <div class="feedback-item-head">
+        <strong>${escapeHtml(item.user_name || item.session_id || "用户")}</strong>
+        <span>${escapeHtml(item.session_id || "")}</span>
+      </div>
+      <div class="feedback-content">${escapeHtml(item.content || "（空）")}</div>
+    </article>
+  `).join("");
+}
+
+async function loadFeedbackBoard() {
+  const list = $("#feedback-list");
+  if (!list || !state.auth?.role) return;
+  try {
+    const data = await api(feedbackApiPath());
+    renderFeedback(data);
+  } catch (err) {
+    list.innerHTML = `<div class="empty-state">反馈加载失败：${escapeHtml(err.message)}</div>`;
+  }
+}
+
 function inputFor([key, label, type], values) {
   const fieldId = "field-" + key;
   const wrap = document.createElement("div");
@@ -374,6 +417,7 @@ function inputFor([key, label, type], values) {
   labelEl.textContent = label;
   wrap.appendChild(labelEl);
   let input;
+  const extraNodes = [];
   const value = values[key];
   if (type === "textarea" || type === "list") {
     input = document.createElement("textarea");
@@ -392,6 +436,22 @@ function inputFor([key, label, type], values) {
     const options = type.slice(7).split(",");
     input.innerHTML = options.map(opt => `<option value="${opt}">${opt || "默认"}</option>`).join("");
     input.value = value ?? "";
+  } else if (type === "style_combo") {
+    input = document.createElement("input");
+    input.type = "text";
+    input.value = value ?? "";
+    input.placeholder = "留空则不注入画风/画师";
+    const listId = `${fieldId}-options`;
+    input.setAttribute("list", listId);
+    const datalist = document.createElement("datalist");
+    datalist.id = listId;
+    const styles = state.characterData?.style_pool || [];
+    datalist.innerHTML = styles.map(style => `<option value="${escapeHtml(style)}"></option>`).join("");
+    extraNodes.push(datalist);
+    const hint = document.createElement("p");
+    hint.className = "field-hint";
+    hint.textContent = "可从画风池选择，也可手动输入；留空表示本角色不注入画风。";
+    extraNodes.push(hint);
   } else if (type === "model_select") {
     input = document.createElement("select");
     const profileIds = Object.keys(state.profiles || {});
@@ -412,6 +472,7 @@ function inputFor([key, label, type], values) {
   input.id = fieldId;
   input.name = key;
   wrap.appendChild(input);
+  extraNodes.forEach(node => wrap.appendChild(node));
   return wrap;
 }
 
@@ -923,10 +984,15 @@ async function loadModels() {
     </div>
     <form id="model-profile-form" class="inline-manager-form">
       ${adminScopeControl}
-      <input name="profile_id" placeholder="自定义 profile id">
-      <textarea name="json" placeholder='{"name":"Vision","base_url":"https://.../v1","api_key":"...","model":"gpt-4o-mini","disable_thinking":true}'></textarea>
+      <label>Profile ID<input name="profile_id" placeholder="deepseek-v4-pro" autocomplete="off"></label>
+      <label>显示名称<input name="name" placeholder="DeepSeek V4 Pro" autocomplete="off"></label>
+      <label>Base URL<input name="base_url" placeholder="https://api.example.com/v1" autocomplete="off"></label>
+      <label>API Key<input name="api_key" type="password" placeholder="留空保留旧密钥" autocomplete="new-password"></label>
+      <label>模型名<input name="model" placeholder="deepseek-chat" autocomplete="off"></label>
+      <label>最大 tokens<input name="max_tokens" type="number" min="1" step="1" placeholder="可选"></label>
+      <label>超时秒数<input name="timeout" type="number" min="1" step="1" placeholder="可选"></label>
       <button type="submit">保存模型 profile</button>
-      <p class="muted">api_key/api_key_no_think 返回时会显示为 ********；保存空值或 ******** 会保留原密钥。</p>
+      <p class="muted">仅填写常用模型字段；api_key 返回时会显示为 ********，保存空值或 ******** 会保留原密钥。Thinking 使用默认策略。</p>
     </form>
   `;
   box.querySelector("[name=chat_profile_id]").value = settings.chat_profile_id || "";
@@ -941,9 +1007,18 @@ async function loadModels() {
   $("#model-profile-form").onsubmit = async event => {
     event.preventDefault();
     const values = formValues(event.currentTarget);
-    const body = JSON.parse(values.json || "{}");
+    const profileId = (values.profile_id || "").trim();
+    if (!profileId) {
+      toast("请填写 profile id");
+      return;
+    }
+    const body = {};
+    ["name", "base_url", "api_key", "model", "max_tokens", "timeout"].forEach(key => {
+      const value = (values[key] || "").trim();
+      if (value) body[key] = value;
+    });
     if (values._scope) body._scope = values._scope;
-    await api(modelApiUrl(`/api/models/${encodeURIComponent(values.profile_id)}`), { method: "POST", body });
+    await api(modelApiUrl(`/api/models/${encodeURIComponent(profileId)}`), { method: "POST", body });
     await loadModels();
     toast("模型 profile 已保存");
   };
@@ -1506,6 +1581,31 @@ async function initEvents() {
     }
   };
   $("#reload-logs").onclick = () => loadLogs().then(() => toast("日志列表已刷新"));
+  $("#feedback-refresh").onclick = () => loadFeedbackBoard().then(() => toast("反馈已刷新"));
+  $("#feedback-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const btn = event.submitter;
+    const content = String(new FormData(form).get("content") || "").trim();
+    if (!content) {
+      toast("反馈内容不能为空", "error");
+      return;
+    }
+    setBusy(btn, true);
+    try {
+      await api("/api/feedback", {
+        method: "POST",
+        body: { session_id: state.selectedSession || "", content },
+      });
+      form.reset();
+      await loadFeedbackBoard();
+      toast("反馈已提交");
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+    }
+  };
   $("#log-refresh").onclick = () => { if (state.selectedLog) selectLog(state.selectedLog); };
   $("#usage-refresh").onclick = (event) => {
     const btn = event.currentTarget;

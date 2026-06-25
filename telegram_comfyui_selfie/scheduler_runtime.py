@@ -216,6 +216,11 @@ class SchedulerRuntimeMixin:
         from_id = int(meta.get("last_dream_message_id") or 0)
         to_id = self.app_store.latest_message_id(session_id, character_key)
         messages = self.app_store.list_messages(session_id, character_key, after_id=from_id, before_or_equal_id=to_id)
+        if hasattr(self, "_ensure_style_pool_entry"):
+            try:
+                self._ensure_style_pool_entry(self._get_current_style(session_id))
+            except Exception:
+                logger.warning("dream style pool sync failed", exc_info=True)
         source_limit = max(1000, int(self.config.get("dream_source_hard_limit_chars", "50000") or 50000))
         source_text = self._format_store_messages(messages, limit_chars=source_limit, roles={"user", "assistant"}) if hasattr(self, "_format_store_messages") else ""
         diary_date = self._dream_diary_date(local_dt, force_previous_day=(reason == "morning"))
@@ -241,7 +246,10 @@ class SchedulerRuntimeMixin:
         system = (
             "You write a private roleplay diary for the character. Consolidate the existing diary and "
             "new dialogue into a coherent diary entry for the given date. Preserve emotional continuity, "
-            "relationship progress, promises, unresolved events, and important facts. Output Chinese diary text only."
+            "relationship progress, promises, unresolved events, and important facts. "
+            "At the end, add a short section titled 「新一天演绎提示」 with 1-3 flexible roleplay directions "
+            "based on events and the character's emotional state. Keep it suggestive, not deterministic: "
+            "do not lock in exact dialogue, locations, schedules, or a fixed plot. Output Chinese diary text only."
         )
         user = f"Diary date: {diary_date}\nReason: {reason}\n\nExisting diary:\n{existing_diary or 'none'}\n\nNew dialogue since last dream:\n{source_text or 'none'}"
         return await self._call_llm(system, user, temp=0.2, tag="dream-diary", purpose="chat", disable_thinking=True, session_id=session_id)
@@ -354,6 +362,8 @@ class SchedulerRuntimeMixin:
             "你是角色历史提要生成器。根据上一次的历史提要和最近两天的日记，"
             "生成一份简洁的角色发展脉络摘要。涵盖关系进展、情感变化、重要承诺、未解事件和角色成长。"
             "这是给聊天模型的长期背景参考，不是日记复述。"
+            "可以在末尾附一小段「新一天演绎提示」，根据近期事件和角色情绪给出灵活的扮演方向；"
+            "不要写死具体台词、地点、日程或剧情分支。"
             "只基于日记原文内容，不要编造、推断或补充日记中没有明确提到的事件、规则、约定或承诺。"
             f"字数控制在 {limit} 字以内。只输出中文摘要文本。"
         )
