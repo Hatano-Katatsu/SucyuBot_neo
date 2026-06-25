@@ -3223,6 +3223,87 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_roleplay_image_planner_same_space_selfie_without_device_prefers_third(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "角色坐回餐厅卡座，抬眼朝你笑了一下，桌边放着她的手机",
+                "view": "selfie",
+                "new_appearance_tags": "",
+                "user_location": "with_user",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            }, ensure_ascii=False))
+
+            plan = await plan_roleplay_image(svc, sid, intent="她坐回座位，温柔地朝你看过来")
+
+            self.assertEqual(plan["view"], "third")
+            self.assertFalse(plan["device_in_frame"])
+
+        asyncio.run(run())
+
+    def test_roleplay_image_planner_same_space_help_take_photo_prefers_portrait(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "角色站在窗边整理衣领，想留一张今天的全身照",
+                "view": "selfie",
+                "new_appearance_tags": "",
+                "user_location": "with_user",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            }, ensure_ascii=False))
+
+            plan = await plan_roleplay_image(svc, sid, intent="她让你帮她拍一张今天的照片")
+
+            self.assertEqual(plan["view"], "portrait")
+            self.assertFalse(plan["device_in_frame"])
+
+        asyncio.run(run())
+
+    def test_roleplay_image_planner_same_space_close_interaction_prefers_pov(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "她俯身替你掖好肩头的薄毯，指尖轻轻碰到你的锁骨",
+                "view": "selfie",
+                "new_appearance_tags": "",
+                "user_location": "with_user",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            }, ensure_ascii=False))
+
+            plan = await plan_roleplay_image(svc, sid, intent="她俯身帮你掖好毯子")
+
+            self.assertEqual(plan["view"], "pov")
+            self.assertFalse(plan["device_in_frame"])
+
+        asyncio.run(run())
+
     def test_roleplay_image_planner_intimate_without_device_forces_pov(self):
         async def run():
             svc = self.make_service()

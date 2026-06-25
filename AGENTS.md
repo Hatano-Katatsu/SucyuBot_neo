@@ -211,6 +211,7 @@ telegram_comfyui_selfie/
 11. **DSML 工具调用兼容**：聊天模型如果把工具调用以 DSML 文本返回到 `content`（例如 `update_location`），会转换成正常工具执行流程并在最终回复中清理 DSML 残留，避免 Telegram 直接收到原始 `<...tool_calls>` 标记。
 12. **生图规划与 AnimaTool 适配层隔离**：`plan_roleplay_image()` 不再把 AnimaTool Turbo schema/knowledge 拼进业务图片规划 prompt，避免业务 schema 的 `scene` 被后端 schema 的 `tags` 污染；新增图片计划 scene 归一化，兼容旧 `tags` 返回并在 strong 地点锁定时给泛化 scene 补地点锚点，防止餐厅/家/商场等场景在最终生图 prompt 中丢失。
 13. **生图天气贯通**：`plan_roleplay_image()` 优先使用调用方传入的 `weather_data`，避免推送链路重复拉取后前后不一致；`_translate_to_tags()` 与 `plan_animatool_slots()` 都显式注入当前天气文本，要求雨、雪、雾、风、冷热等可见天气在最终英文 tags 中通过窗外、地面、伞、湿痕、空气质感和光线体现。
+14. **同空间视角终裁**：`image_planning.py` 新增 `_resolve_roleplay_view()`，对 LLM 给出的 `requested_view/planned_view` 做最终业务校正：同空间且无明确自拍/对镜/录像信号时，不再允许普通配图落到 `selfie/mirror`；普通同空间单人场景改压到 `third`，近距离互动改压到 `pov`，明确“帮忙拍一张”改为 `portrait`，并在 `user_location` 缺失时回退使用持久 `co_located` 状态。新增 3 条回归测试锁定这三种分支。
 
 ## 今日变更（2026-06-24）
 
@@ -234,7 +235,7 @@ telegram_comfyui_selfie/
 
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m compileall -q telegram_comfyui_selfie`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core -v`
-- 最新结果：`Ran 249 tests in 13.319s`，`OK (skipped=1)`
+- 最新结果：`Ran 252 tests in 15.242s`，`OK`
 - 真实 API 缓存探针：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。
 - 新增核心测试 `test_live_chat_context_cache_probe_uses_current_config_when_available`：使用当前配置文件中的模型连接信息，但运行态 state / SQLite / 用户日志均隔离在测试临时目录；通过真实 `handle_chat()` 链路连续回答三轮预设问题，assistant 回复采用真实 AI 返回，并在最终总结行输出三轮回复片段与缓存命中率。模型临时未返回可用回复时跳过；最近一次成功单测输出：`round1=0/2562 (0.00%)`、`round2=2560/2586 (98.99%)`、`round3=2560/2608 (98.16%)`。
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示

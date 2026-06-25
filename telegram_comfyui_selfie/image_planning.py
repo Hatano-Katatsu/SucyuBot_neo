@@ -142,6 +142,50 @@ def _detect_device_context(*sources: str) -> bool:
     return any(kw in combined for kw in DEVICE_CONTEXT_ZH)
 
 
+# 明确要求“自拍/对镜/录像/设备入画”的信号。这里故意比 DEVICE_CONTEXT_ZH 更窄，
+# 因为“拍一张照片”并不等于“画面里要保留自拍/镜子/手机”。
+SELF_CAMERA_CONTEXT_ZH = frozenset({
+    "自拍", "对镜", "对着镜子", "镜前", "镜中", "前摄", "前置",
+    "举着手机", "拿着手机", "手机自拍", "录像", "录视频", "拍视频",
+    "拍进画面", "拍进图里", "把手机拍进去", "把镜子拍进去", "边做边拍", "边做边录",
+})
+
+
+def _detect_self_camera_context(*sources: str) -> bool:
+    combined = " ".join(s for s in sources if s)
+    if not combined:
+        return False
+    return any(kw in combined for kw in SELF_CAMERA_CONTEXT_ZH)
+
+
+PORTRAIT_REQUEST_ZH = frozenset({
+    "帮我拍", "帮她拍", "帮忙拍", "替我拍", "替她拍", "给我拍", "给她拍",
+    "让我拍", "让你拍", "请你拍", "请人拍", "摆拍",
+    "拍一张照片", "拍张照片", "来一张照片", "再拍一张", "再来一张",
+})
+
+
+def _detect_portrait_request(*sources: str) -> bool:
+    combined = " ".join(s for s in sources if s)
+    if not combined:
+        return False
+    return any(kw in combined for kw in PORTRAIT_REQUEST_ZH)
+
+
+CLOSE_INTERACTION_CONTEXT_ZH = frozenset({
+    "靠过来", "靠近", "凑近", "贴近", "贴着", "依偎", "搂着", "抱着", "拥着",
+    "牵着", "挽着", "递给你", "递到你", "递向你", "喂你", "掖好", "掖住",
+    "俯身", "俯下身", "拍了拍", "戳了戳", "摸了摸", "扶住你", "靠在你身边",
+})
+
+
+def _detect_close_interaction_context(*sources: str) -> bool:
+    combined = " ".join(s for s in sources if s)
+    if not combined:
+        return False
+    return any(kw in combined for kw in CLOSE_INTERACTION_CONTEXT_ZH)
+
+
 # 明确的"角色此刻裸体/正在脱光"信号。clothing_off 是唯一没有确定性兜底的判定项——
 # 规划器一漏填，持久穿搭就原样画回来（"脱不掉衣服"bug）。强裸体词只覆盖明确性行为
 # 或明确脱光/裸体；半脱/滑落另由 _infer_clothing_off_fallback 返回 topless 等更窄提示。
@@ -210,6 +254,46 @@ def normalize_view(view: str | None) -> str:
 def scene_implies_mirror_selfie(text: str) -> bool:
     lowered = (text or "").lower()
     return "mirror selfie" in lowered or "mirror reflection" in lowered or "对镜" in lowered or "镜子" in lowered
+
+
+def _resolve_roleplay_view(
+    *,
+    requested_view: str,
+    planned_view: str,
+    default_view: str,
+    derived_co_located: bool,
+    two_person: bool,
+    free_composition: bool,
+    scene: str,
+    intent: str,
+    mood: str,
+    prompt: str,
+    dialog_context: str = "",
+) -> str:
+    """对 LLM 返回的 view 做最后一层业务裁决。"""
+    final_view = requested_view or planned_view or default_view
+    mirror_scene = scene_implies_mirror_selfie(scene)
+    explicit_self_camera = mirror_scene or _detect_self_camera_context(
+        intent, mood, prompt, scene, dialog_context
+    )
+    if mirror_scene and not two_person:
+        final_view = "mirror"
+    if free_composition:
+        return final_view
+    if (
+        derived_co_located
+        and not explicit_self_camera
+        and _detect_portrait_request(intent, mood, prompt, scene, dialog_context)
+    ):
+        return "portrait"
+    close_interaction = two_person or _detect_close_interaction_context(
+        intent, mood, prompt, scene, dialog_context
+    )
+    if derived_co_located and not explicit_self_camera and final_view in {"selfie", "mirror", ""}:
+        return "pov" if close_interaction else "third"
+    if two_person and not explicit_self_camera and final_view in {"selfie", "mirror"}:
+        return "pov"
+    return final_view
 
 
 USER_VISUAL_SUBJECT_RE = re.compile(
@@ -347,12 +431,25 @@ async def plan_roleplay_image(
     fallback_device_hint = _detect_device_context(intent, mood, prompt)
     fallback_clothing_off = _infer_clothing_off_fallback(intent, mood, prompt)
     needs_caption = mode not in ("chat", "illustration")
+    state = service._get_session_state(session_id)
+    persisted_co_located = session_schema.get_user_co_located(state)
     if now is None:
         now = service._session_now(session_id)
     if not service.has_llm_config("image"):
-        fallback_view = requested_view
-        if not free_composition and fallback_intimate_hint and not fallback_device_hint and fallback_view in {"selfie", "mirror"}:
-            fallback_view = "pov"
+        fallback_view = _resolve_roleplay_view(
+            requested_view=requested_view,
+            planned_view="",
+            default_view="pov" if (fallback_intimate_hint or persisted_co_located) else "selfie",
+            derived_co_located=persisted_co_located,
+            two_person=fallback_intimate_hint,
+            free_composition=free_composition,
+            scene=fallback_scene,
+            intent=intent,
+            mood=mood,
+            prompt=prompt,
+        )
+        if fallback_view == "portrait":
+            fallback_device_hint = False
         return {
             "scene": fallback_scene,
             "view": fallback_view,
@@ -364,7 +461,6 @@ async def plan_roleplay_image(
             "caption": "",
         }
 
-    state = service._get_session_state(session_id)
     if weather_data is None:
         weather_data = await service._fetch_weather(session_id=session_id)
     weather = f"{weather_data['desc']} {weather_data['temp']} C" if weather_data else "未知"
@@ -661,9 +757,21 @@ async def plan_roleplay_image(
         parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
     except Exception as exc:
         logger.error("roleplay image planning failed: %s", exc)
-        fallback_view = requested_view
-        if not free_composition and intimate_hint and not device_hint and fallback_view in {"selfie", "mirror"}:
-            fallback_view = "pov"
+        fallback_view = _resolve_roleplay_view(
+            requested_view=requested_view,
+            planned_view="",
+            default_view="pov" if (intimate_hint or persisted_co_located) else "selfie",
+            derived_co_located=persisted_co_located,
+            two_person=intimate_hint,
+            free_composition=free_composition,
+            scene=fallback_scene,
+            intent=intent,
+            mood=mood,
+            prompt=prompt,
+            dialog_context=dialog_context or "",
+        )
+        if fallback_view == "portrait":
+            device_hint = False
         return {
             "scene": fallback_scene,
             "view": fallback_view,
@@ -681,6 +789,8 @@ async def plan_roleplay_image(
     # co_located 从 user_location 推导，不靠 LLM 单独判断。
     raw_user_loc = (parsed.get("user_location") or "").strip().lower()
     derived_co_located = raw_user_loc in ("with_user", "with_character", "together")
+    if not derived_co_located and raw_user_loc in ("", "unknown") and persisted_co_located:
+        derived_co_located = True
     # user_location 匹配角色地点 → 也算同处（用 build_world_state 拿角色地点，有时钟动线兜底）
     if not derived_co_located and raw_user_loc and raw_user_loc != "unknown":
         try:
@@ -717,13 +827,21 @@ async def plan_roleplay_image(
     default_view = "selfie"
     if two_person or derived_co_located:
         default_view = "pov"
-    final_view = requested_view or planned_view or default_view
-    if scene_implies_mirror_selfie(scene) and (device_in_frame or not two_person):
-        final_view = "mirror"
-    # 亲密/伴侣同框画面里前摄自拍、对镜自拍物理上讲不通（自拍框 + 第二人会画出断臂/双人）：硬性改 POV。
-    # 例外：用户明确要拍照/录像/对镜（device_in_frame）时尊重其 selfie/mirror 视角。
-    if not free_composition and two_person and not device_in_frame and final_view in {"selfie", "mirror"}:
-        final_view = "pov"
+    final_view = _resolve_roleplay_view(
+        requested_view=requested_view,
+        planned_view=planned_view,
+        default_view=default_view,
+        derived_co_located=derived_co_located,
+        two_person=two_person,
+        free_composition=free_composition,
+        scene=scene,
+        intent=intent,
+        mood=mood,
+        prompt=prompt,
+        dialog_context=dialog_context or "",
+    )
+    if final_view == "portrait":
+        device_in_frame = False
     # clothing_off 兜底：规划器漏填、但对话/意图有明确裸体/性爱信号时，强制本图裸体——
     # 否则持久穿搭会原样画回来（"脱不掉衣服"bug）。只在留空时兜底，不覆盖规划器的显式判断。
     clothing_off = (parsed.get("clothing_off") or "").strip()
