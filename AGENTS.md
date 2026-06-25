@@ -127,6 +127,7 @@ telegram_comfyui_selfie/
 - 半稳定层变化时，如果未折叠历史达到 `context_window_message_limit / 2`，会异步强制 checkpoint 一次，近似恢复后续前缀稳定。
 - 天气、光线阶段、城市、角色身份和动线背景已从每轮 dynamic system 拆入 semistable；本轮用户位置仍保留在 dynamic tail，避免把用户当前位置缓存成旧状态。
 - `/新场景` / `/上下文重置` 会清空当前模型侧 `chat_history` 和 checkpoint 摘要，并把 checkpoint 边界推进到当前最新消息；SQLite `chat_messages` 不删除，后续 dream 仍会读取真实 `user/assistant` 对话。
+- 兼容部分 OpenAI 兼容端点把工具调用以 DSML 文本写进 `message.content` 的情况；聊天链路会提取 `<...DSML...invoke>` 为内部工具调用并清理残留标记，避免原始工具 XML/DSML 泄漏给用户。
 
 ### 记忆与角色历史
 
@@ -207,6 +208,7 @@ telegram_comfyui_selfie/
 8. **角色画风字段化**：`/画风 <画风名>` 可直接写入当前角色卡 `style`，不再要求命中画风池；`/画风 清空` 会把角色画风字段置空且生图不回退全局画风。dream 会把当前角色的非空画风补入全局画风池，WebUI 角色设定面板提供画风池下拉与手动输入。
 9. **WebUI 模型 profile 表单字段化**：模型 profile 编辑不再要求填写 JSON，改为 profile id、名称、base_url、api_key、model、max_tokens、timeout 等显式字段；thinking / fixed thinking 控制保持为内部兼容配置，不在 WebUI 中让用户填写。
 10. **WebUI 反馈板**：总览页底部新增反馈板，异步读取 `/api/feedback`，不阻塞页面主状态加载；提交内容写入项目根目录 `TODO.md`，按当前会话激活角色名分 `##` 段并带 session 标记防冲突。普通用户只读写自己的段落，管理员可查看全部反馈。
+11. **DSML 工具调用兼容**：聊天模型如果把工具调用以 DSML 文本返回到 `content`（例如 `update_location`），会转换成正常工具执行流程并在最终回复中清理 DSML 残留，避免 Telegram 直接收到原始 `<...tool_calls>` 标记。
 
 ## 今日变更（2026-06-24）
 
@@ -230,7 +232,7 @@ telegram_comfyui_selfie/
 
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m compileall -q telegram_comfyui_selfie`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core -v`
-- 最新结果：`Ran 241 tests in 10.222s`，`OK (skipped=1)`
+- 最新结果：`Ran 243 tests in 14.815s`，`OK (skipped=1)`
 - 真实 API 缓存探针：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。
 - 新增核心测试 `test_live_chat_context_cache_probe_uses_current_config_when_available`：使用当前配置文件中的模型连接信息，但运行态 state / SQLite / 用户日志均隔离在测试临时目录；通过真实 `handle_chat()` 链路连续回答三轮预设问题，assistant 回复采用真实 AI 返回，并在最终总结行输出三轮回复片段与缓存命中率。模型临时未返回可用回复时跳过；最近一次成功单测输出：`round1=0/2562 (0.00%)`、`round2=2560/2586 (98.99%)`、`round3=2560/2608 (98.16%)`。
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import re
@@ -31,6 +32,12 @@ IMAGE_REQUEST_RE = re.compile(
 SHORT_CONTEXT_RESET_RE = re.compile(
     r"(换个话题|换话题|换一?个场景|新场景|下一幕|下一段|另起|说点别的|聊点别的|不说这个|先不说|不聊这个|别提这个|跳过这个|结束这个|这个话题到此|算了|重新开始|从头来|回到正题)"
 )
+DSML_MARK = r"[|｜]{2}DSML[|｜]{2}"
+DSML_TOOL_BLOCK_RE = re.compile(rf"<{DSML_MARK}tool_calls\b[^>]*>.*?</{DSML_MARK}tool_calls>", re.IGNORECASE | re.DOTALL)
+DSML_INVOKE_RE = re.compile(rf"<{DSML_MARK}invoke\b(?P<attrs>[^>]*)>(?P<body>.*?)</{DSML_MARK}invoke>", re.IGNORECASE | re.DOTALL)
+DSML_PARAMETER_RE = re.compile(rf"<{DSML_MARK}parameter\b(?P<attrs>[^>]*)>(?P<body>.*?)</{DSML_MARK}parameter>", re.IGNORECASE | re.DOTALL)
+DSML_ATTR_RE = re.compile(r"""([A-Za-z_][\w.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
+DSML_ANY_TAG_RE = re.compile(rf"</?{DSML_MARK}[^>]*>", re.IGNORECASE | re.DOTALL)
 
 class ChatContextMixin:
     async def handle_chat(self, chat_id: int | str, session_id: str, text: str):
@@ -111,6 +118,14 @@ class ChatContextMixin:
         assistant = result.get("choices", [{}])[0].get("message", {})
         content = (assistant.get("content") or "").strip()
         tool_calls = assistant.get("tool_calls") or []
+        if not tool_calls:
+            dsml_tool_calls, cleaned_content = self._extract_dsml_tool_calls(content)
+            if dsml_tool_calls:
+                tool_calls = dsml_tool_calls
+                content = cleaned_content
+                assistant = dict(assistant)
+                assistant["content"] = content
+                assistant["tool_calls"] = tool_calls
 
         explicit_image_req = self._user_requested_image(user_text)
 
@@ -150,8 +165,11 @@ class ChatContextMixin:
                 )
                 final_msg = final.get("choices", [{}])[0].get("message", {})
                 content = (final_msg.get("content") or content or "").strip()
+                content = self._strip_dsml_tool_markup(content)
             except Exception as exc:
                 logger.warning("final chat completion after tool call failed: %s", exc)
+        else:
+            content = self._strip_dsml_tool_markup(content)
 
         scene = self._handle_leaked_image_text(content)
         if scene:
@@ -354,6 +372,51 @@ class ChatContextMixin:
         messages.append({"role": "system", "content": system_dynamic})
         messages.append({"role": "user", "content": user_text})
         return messages
+
+    @staticmethod
+    def _parse_dsml_attrs(raw: str) -> dict[str, str]:
+        attrs: dict[str, str] = {}
+        for match in DSML_ATTR_RE.finditer(raw or ""):
+            attrs[match.group(1)] = html.unescape(match.group(2) if match.group(2) is not None else match.group(3) or "")
+        return attrs
+
+    @classmethod
+    def _strip_dsml_tool_markup(cls, text: str) -> str:
+        if not text:
+            return ""
+        cleaned = DSML_TOOL_BLOCK_RE.sub("", text)
+        cleaned = DSML_INVOKE_RE.sub("", cleaned)
+        cleaned = DSML_ANY_TAG_RE.sub("", cleaned)
+        return cleaned.strip()
+
+    @classmethod
+    def _extract_dsml_tool_calls(cls, text: str) -> tuple[list[dict[str, Any]], str]:
+        """兼容部分 OpenAI 兼容端点把工具调用以 DSML 文本塞进 content 的情况。"""
+        if not text or "DSML" not in text or "invoke" not in text:
+            return [], text.strip() if text else ""
+        calls: list[dict[str, Any]] = []
+        for index, invoke in enumerate(DSML_INVOKE_RE.finditer(text), start=1):
+            attrs = cls._parse_dsml_attrs(invoke.group("attrs"))
+            name = (attrs.get("name") or "").strip()
+            if not name:
+                continue
+            args: dict[str, str] = {}
+            for param in DSML_PARAMETER_RE.finditer(invoke.group("body") or ""):
+                p_attrs = cls._parse_dsml_attrs(param.group("attrs"))
+                p_name = (p_attrs.get("name") or "").strip()
+                if not p_name:
+                    continue
+                value = DSML_ANY_TAG_RE.sub("", param.group("body") or "")
+                args[p_name] = html.unescape(value).strip()
+            calls.append({
+                "id": f"dsml_tool_{index}",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(args, ensure_ascii=False),
+                },
+            })
+        return calls, cls._strip_dsml_tool_markup(text)
 
     def _chat_tools_schema(self) -> list[dict[str, Any]]:
         return [

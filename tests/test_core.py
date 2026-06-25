@@ -4838,6 +4838,57 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_dsml_tool_call_content_is_executed_and_not_leaked(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "chat_llm_api_key": "k",
+                "chat_llm_model": "m",
+                "chat_llm_api_base": "http://x",
+                "selfie_frequency": "关闭",
+            })
+            sid = "telegram:1"
+            calls = {"n": 0}
+            dsml = (
+                "<｜｜DSML｜｜tool_calls>\n"
+                "<｜｜DSML｜｜invoke name=\"update_location\">\n"
+                "<｜｜DSML｜｜parameter name=\"place\" string=\"true\">餐厅</｜｜DSML｜｜parameter>\n"
+                "</｜｜DSML｜｜invoke>\n"
+                "</｜｜DSML｜｜tool_calls>"
+            )
+
+            async def fake_msgs(messages, tools=None, tool_choice=None, **kw):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return {"choices": [{"message": {"content": dsml}}], "usage": {"prompt_tokens": 10}}
+                self.assertEqual(tool_choice, "none")
+                tool_messages = [m for m in messages if m.get("role") == "tool"]
+                self.assertEqual(len(tool_messages), 1)
+                self.assertIn("已记录角色当前在 餐厅", tool_messages[0]["content"])
+                return {"choices": [{"message": {"content": "我还在餐厅，刚放下筷子看你消息。"}}]}
+
+            svc._call_llm_messages = fake_msgs
+            svc._ensure_life_profile = AsyncMock(return_value={})
+            svc._update_character_place_from_text = AsyncMock()
+            svc._extract_long_term_memories = AsyncMock()
+            svc._judge_image_moment = AsyncMock(return_value=None)
+            reply = await svc.run_roleplay_chat(1, sid, "你还在餐厅吗？")
+
+            self.assertEqual(reply, "我还在餐厅，刚放下筷子看你消息。")
+            self.assertNotIn("DSML", reply)
+            self.assertNotIn("tool_calls", reply)
+            self.assertEqual(calls["n"], 2)
+            history = session_schema.get_chat_history(svc._get_session_state(sid))
+            self.assertEqual(history[-1]["content"], reply)
+            self.assertNotIn("DSML", "\n".join(m["content"] for m in history))
+
+        asyncio.run(run())
+
+    def test_dsml_tool_markup_is_stripped_when_final_reply_leaks_again(self):
+        svc = self.make_service()
+        text = "嗯，我在这里。\n<||DSML||tool_calls><||DSML||invoke name=\"update_location\"><||DSML||parameter name=\"place\">餐厅</||DSML||parameter></||DSML||invoke></||DSML||tool_calls>"
+        self.assertEqual(svc._strip_dsml_tool_markup(text), "嗯，我在这里。")
+
     def test_judge_respects_min_gap_and_disabled(self):
         async def run():
             svc = self.make_service()
