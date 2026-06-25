@@ -1545,12 +1545,19 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         svc._apply_llm_user_location(sid, user_location="mall", co_located=False)
         messages = svc._build_chat_messages(sid, "晚上在哪见？")
         system = "\n".join(m["content"] for m in messages if m.get("role") == "system")
+        semistable = next(m["content"] for m in messages if "世界状态规则" in m.get("content", ""))
+        dynamic = next(m["content"] for m in messages if "本轮动线与位置动态" in m.get("content", ""))
 
-        self.assertIn("当前世界状态", system)
+        self.assertIn("世界状态规则", system)
+        self.assertIn("本轮动线与位置动态", system)
         self.assertIn("角色当前所在", system)
         self.assertIn("接下来动线", system)
         self.assertIn("商场", system)
         self.assertIn("基础场所目录", system)
+        self.assertNotIn("角色当前所在", semistable)
+        self.assertNotIn("接下来动线", semistable)
+        self.assertIn("角色当前所在", dynamic)
+        self.assertIn("接下来动线", dynamic)
 
     def test_world_context_unpins_clock_location_during_active_dialog(self):
         svc = self.make_service()
@@ -1565,7 +1572,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         ]
         state["short_context_start"] = 0
         system = "\n".join(m["content"] for m in svc._build_chat_messages(sid, "那我现在过去") if m.get("role") == "system")
-        self.assertIn("当前世界状态", system)
+        self.assertIn("世界状态规则", system)
+        self.assertIn("本轮动线与位置动态", system)
         self.assertNotIn("角色当前所在", system)
         self.assertNotIn("空间关系判断", system)
         self.assertIn("以对话为准", system)

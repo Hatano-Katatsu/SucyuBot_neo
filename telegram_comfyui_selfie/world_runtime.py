@@ -1102,7 +1102,7 @@ class WorldRuntimeMixin:
         now: datetime | None = None,
         pin_location: bool = True,
     ) -> str:
-        """聊天用低频世界模板：不包含精确分钟和本轮用户位置。"""
+        """聊天用低频世界模板：只保留低频规则，不包含动线预判。"""
         if weather is None:
             cached = getattr(self, "_weather_caches", {}).get(session_id or "__default__")
             if isinstance(cached, dict):
@@ -1111,19 +1111,9 @@ class WorldRuntimeMixin:
         if not world:
             return ""
         now = world["now"]
-        cp = world["character_place"]
-        activities = "、".join((cp.get("activities") or [])[:3])
-        current_line = f"{cp['label']}（{cp['name']}）"
-        if activities:
-            current_line += f"，此刻多半在{activities}"
-        np = world.get("next_place")
-        if np:
-            next_line = f"{world.get('next_time_period', '')}多半会去 {np['label']}（{np['name']}）"
-        else:
-            next_line = "暂不确定"
         identity = self._format_life_profile(world.get("life_profile"))
         lines = [
-            "当前世界状态（低频模板；精确时间和本轮用户位置见动态尾部。按以下优先级确定位置: 用户本轮声明 > 工具/系统记录 > 时钟动线推断；用户文字明确说的位置始终优先）:",
+            "世界状态规则（低频模板；精确时间、动线预判和本轮位置见动态尾部。按以下优先级确定位置: 用户本轮声明 > 工具/系统记录 > 时钟动线推断；用户文字明确说的位置始终优先）:",
             f"- 城市/日期: {world['city']}，{now.strftime('%Y-%m-%d')}，{world['day_type']}，{world['time_period']}",
             f"- 天气: {world['weather']}",
         ]
@@ -1131,34 +1121,15 @@ class WorldRuntimeMixin:
             lines.append(f"- 季节/自然光: {self._format_time_context(session_id, now=now, weather=weather)}")
         if identity:
             lines.append(f"- 角色身份: {identity}")
-        if pin_location:
-            lines += [
-                f"- 角色当前所在: {current_line}",
-                f"- 接下来动线: {next_line}",
-            ]
-        else:
-            lines.append(
-                f"- 日常此时多半在 {cp['label']} 一带（仅背景倾向，当前位置以对话为准，不要据此瞬移）"
-            )
-        lines += [
-            f"- 场景约束: {'；'.join(world['constraints'])}",
-            f"- 地点来源: {world['catalog_source']}",
-        ]
+        lines.append(f"- 地点来源: {world['catalog_source']}")
         if world.get("spatial_override"):
             lines.append(f"- 额外空间设定: {world['spatial_override']}（作为高级覆盖项，不替代自动动线）")
-        if pin_location:
-            lines.append(
-                "聊天时可参考这个世界状态自然提及所在与去向（例如“我现在在公司”、“等会儿要去逛商场”），但不要机械地报地点。"
-                "不要让角色无理由瞬移；如果用户和角色不在同一地点，优先用消息、自拍、电话或约定见面推进。"
-            )
-        else:
-            lines.append(
-                "以上是你的日常动线背景参考。当前正在进行的对话场景优先级最高："
-                "如果对话里你已经处在某个地点（在家、在车站、在仓库等），或刚说过自己在哪，就保持那个地点不变，"
-                "不要因为上面动线显示的时间点不同，就擅自把自己挪到别处。"
-                "只有在开启全新话题、对话出现明显时间跳跃、或需要交代你独自近况时，才依据动线更新所在地。"
-                "无论如何不要无理由瞬移；与用户不在同一地点时，用消息、自拍、电话或约定见面推进。"
-            )
+        lines.append(
+            "当前对话已建立的地点优先：如果对话里你已经处在某个地点（在家、在车站、在仓库等），或刚说过自己在哪，"
+            "就保持那个地点不变，不要因为尾部动线预判显示的时间点不同而擅自挪到别处。"
+            "只有开启全新话题、对话出现明显时间跳跃、或需要交代独自近况时，才依据动线更新所在地。"
+            "无论如何不要无理由瞬移；与用户不在同一地点时，用消息、自拍、电话或约定见面推进。"
+        )
         return "\n".join(lines)
 
     def _format_world_dynamic_context(
@@ -1170,7 +1141,7 @@ class WorldRuntimeMixin:
         now: datetime | None = None,
         pin_location: bool = True,
     ) -> str:
-        """聊天用高频世界动态：只保留本轮用户位置/空间关系。"""
+        """聊天用高频世界动态：动线预判、本轮用户位置和空间关系。"""
         if weather is None:
             cached = getattr(self, "_weather_caches", {}).get(session_id or "__default__")
             if isinstance(cached, dict):
@@ -1178,10 +1149,32 @@ class WorldRuntimeMixin:
         world = self.build_world_state(session_id, user_text=user_text, weather=weather, now=now, mode=mode)
         if not world:
             return ""
+        cp = world["character_place"]
+        activities = "、".join((cp.get("activities") or [])[:3])
+        current_line = f"{cp['label']}（{cp['name']}）"
+        if activities:
+            current_line += f"，此刻多半在{activities}"
+        np = world.get("next_place")
+        if np:
+            next_line = f"{world.get('next_time_period', '')}多半会去 {np['label']}（{np['name']}）"
+        else:
+            next_line = "暂不确定"
         user_text_line = self._format_world_user_place_line(world.get("user_place"))
         lines = [
-            "本轮位置动态（高频；用户本轮声明优先）:",
+            "本轮动线与位置动态（高频；用户本轮声明优先）:",
+        ]
+        if pin_location:
+            lines += [
+                f"- 角色当前所在: {current_line}",
+                f"- 接下来动线: {next_line}",
+            ]
+        else:
+            lines.append(
+                f"- 日常此时多半在 {cp['label']} 一带（仅背景倾向，当前位置以对话为准，不要据此瞬移）"
+            )
+        lines += [
             f"- 用户位置: {user_text_line}",
+            f"- 场景约束: {'；'.join(world['constraints'])}",
         ]
         if pin_location:
             lines.append(f"- 空间关系判断: {world['relation']}")
