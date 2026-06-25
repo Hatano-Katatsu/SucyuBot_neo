@@ -365,8 +365,8 @@ async def plan_roleplay_image(
         }
 
     state = service._get_session_state(session_id)
-    now = service._session_now(session_id)
-    weather_data = await service._fetch_weather(session_id=session_id)
+    if weather_data is None:
+        weather_data = await service._fetch_weather(session_id=session_id)
     weather = f"{weather_data['desc']} {weather_data['temp']} C" if weather_data else "未知"
     time_ctx = service._get_time_context(session_id, now=now, weather=weather_data)
     time_period = time_ctx.get("period") or service._get_time_period(now.hour)
@@ -838,11 +838,22 @@ async def plan_animatool_slots(
     else:
         safety_tag = "safe"
 
-    # 时间与光线：在最终写 tags 的这步重新注入。scene 经过多次 LLM 改写后时段/光线易丢，
+    # 时间、天气与光线：在最终写 tags 的这步重新注入。scene 经过多次 LLM 改写后时段/光线易丢，
     # 而这步是决定最终 tags 的唯一出口——必须让它确保画面光线与当前时段一致。
-    time_period = time_light = light_guard = ""
+    time_period = time_light = light_guard = weather_text = ""
     if session_id:
         try:
+            cached_weather = None
+            cached = getattr(service, "_weather_caches", {}).get(session_id or "__default__")
+            if isinstance(cached, dict):
+                cached_weather = cached.get("data")
+            if cached_weather is not None:
+                if hasattr(service, "_weather_text"):
+                    weather_text = service._weather_text(cached_weather)
+                elif isinstance(cached_weather, dict):
+                    weather_text = f"{cached_weather.get('desc', '未知')} {cached_weather.get('temp', '?')} C"
+                else:
+                    weather_text = str(cached_weather)
             time_period = service._get_time_context(session_id).get("period") or ""
             time_light = service._format_time_context(session_id) or ""
             light_guard = service._format_light_guard(session_id) or ""
@@ -873,8 +884,10 @@ async def plan_animatool_slots(
         "- mirror：允许镜子和镜中反射，但不得出现手机 UI。neg 包含 foreground person, second body, multiple reflections。\n"
         "- 空/其他：如 scene 中无手机/镜子相关描述，同样抑制手机 UI 元素。\n\n"
         "## 时间与光线（重要，必须体现）\n"
-        f"当前时段: {time_period or '未知'}；光线参考: {time_light or '未知'}\n"
+        f"当前天气: {weather_text or '未知'}；当前时段: {time_period or '未知'}；光线参考: {time_light or '未知'}\n"
         f"{light_guard}\n"
+        "tags 必须自然体现当前天气。晴/少云可体现为清晰天光或柔和云影；雨、雪、雾、雷雨、大风等可见天气必须写进环境、窗外、地面、伞、衣物湿痕或空气质感中。"
+        "不要把雨天写成晴朗阳光，也不要在室内完全抹掉窗外天气。\n"
         "tags 必须自然体现当前时段与光线（如黄昏金色斜光、夜晚人工灯光、正午自然光）；"
         "室内场景也要让窗外天光/室内灯光与当前时段一致。"
         "绝不要画出与当前时段矛盾的光线（如深夜出现正午阳光、白天出现夕阳）。\n\n"

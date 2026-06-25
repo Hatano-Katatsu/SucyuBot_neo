@@ -15,7 +15,8 @@ from telegram_comfyui_selfie import appearance as appearance_rules
 from telegram_comfyui_selfie import character_card
 from telegram_comfyui_selfie import session_schema
 from telegram_comfyui_selfie.config_store import flatten_config, load_simple_yaml
-from telegram_comfyui_selfie.image_planning import _detect_intimate_context, _detect_nudity_context, _infer_clothing_off_fallback, format_dialog_context, format_sent_photo_context, normalize_scene_visual_subject, plan_roleplay_image
+from telegram_comfyui_selfie.generation import PromptSlots
+from telegram_comfyui_selfie.image_planning import _detect_intimate_context, _detect_nudity_context, _infer_clothing_off_fallback, format_dialog_context, format_sent_photo_context, normalize_scene_visual_subject, plan_animatool_slots, plan_roleplay_image
 from telegram_comfyui_selfie.commands import (
     SESSION_GLOBAL_STATE_KEYS,
     _is_character_config_key,
@@ -2337,6 +2338,30 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_translate_to_tags_injects_current_weather(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._weather_caches[sid] = {
+                "data": {"desc": "小雨", "temp": "18", "sunrise": "05:00", "sunset": "19:00"},
+                "ts": time.time(),
+            }
+            svc._call_llm = AsyncMock(return_value="She waits by the rainy window. rainy window, wet street")
+
+            await svc._translate_to_tags("在窗边等你", session_id=sid, view="selfie")
+
+            system_prompt = svc._call_llm.await_args.args[0]
+            self.assertIn("Current weather: 小雨 18 C", system_prompt)
+            self.assertIn("Preserve visible weather", system_prompt)
+            self.assertIn("wet surfaces", system_prompt)
+
+        asyncio.run(run())
+
     def test_selfie_prompt_strips_phone_instead_of_forcing_mirror(self):
         svc = self.make_service()
         pos, neg = svc._build_prompt(
@@ -3331,6 +3356,88 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("inside Bistro.Bond", plan["scene"])
             self.assertIn("restaurant table", plan["scene"])
             self.assertEqual(session_schema.get_character_place(svc._get_session_state(sid)), "restaurant")
+
+        asyncio.run(run())
+
+    def test_roleplay_image_planner_prefers_passed_weather_data(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "雨天餐厅窗边",
+                "view": "selfie",
+                "character_location": "restaurant",
+            }, ensure_ascii=False))
+
+            await plan_roleplay_image(
+                svc,
+                sid,
+                intent="看看现在的样子",
+                weather_data={"desc": "小雨", "temp": "18", "sunrise": "05:00", "sunset": "19:00"},
+            )
+
+            svc._fetch_weather.assert_not_awaited()
+            system = svc._call_llm.await_args.args[0]
+            user = svc._call_llm.await_args.args[1]
+            self.assertIn("小雨 18 C", system)
+            self.assertIn("当前天气: 小雨 18 C", user)
+            self.assertNotIn("晴 22 C", system + user)
+
+        asyncio.run(run())
+
+    def test_animatool_slots_planner_injects_current_weather(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._weather_caches[sid] = {
+                "data": {"desc": "小雨", "temp": "18", "sunrise": "05:00", "sunset": "19:00"},
+                "ts": time.time(),
+            }
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "quality_meta_year_safe": "masterpiece, best quality, highres, newest, year 2025, safe",
+                "count": "1girl",
+                "tags": "A girl waits by a rainy restaurant window with wet pavement outside.",
+                "neg": "worst quality, low quality",
+            }, ensure_ascii=False))
+            slots = PromptSlots(
+                scene="A girl waits by the restaurant window.",
+                quality="masterpiece",
+                count="1girl",
+                effective_appearance="school uniform",
+                negative="bad hands",
+            )
+            schema = {
+                "parameters": {
+                    "properties": {
+                        "quality_meta_year_safe": {"description": "quality and safety"},
+                        "count": {"description": "count"},
+                        "tags": {"description": "natural language scene"},
+                        "neg": {"description": "negative prompt"},
+                    },
+                    "required": ["quality_meta_year_safe", "count", "tags"],
+                }
+            }
+
+            with patch("telegram_comfyui_selfie.image_planning._fetch_animatool_turbo_knowledge", new=AsyncMock(return_value={})), \
+                 patch("telegram_comfyui_selfie.image_planning._fetch_animatool_turbo_schema", new=AsyncMock(return_value=schema)):
+                payload = await plan_animatool_slots(svc, sid, slots)
+
+            self.assertIsNotNone(payload)
+            system_prompt = svc._call_llm.await_args.args[0]
+            self.assertIn("当前天气: 小雨 18 C", system_prompt)
+            self.assertIn("tags 必须自然体现当前天气", system_prompt)
+            self.assertIn("湿痕", system_prompt)
 
         asyncio.run(run())
 

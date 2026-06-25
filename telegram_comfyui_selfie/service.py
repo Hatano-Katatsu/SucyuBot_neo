@@ -1924,6 +1924,19 @@ class TelegramComfyUIService(
         gender = appearance_rules.infer_gender_from_count(persisted_count) if persisted_count else self._infer_gender_from_prefix(char_prefix)
         opener = self._view_opener(view, gender) if view and not free_composition else ""
         light_guard = self._format_light_guard(session_id)
+        weather_text = ""
+        cached = self._weather_caches.get(session_id or "__default__")
+        if isinstance(cached, dict):
+            data = cached.get("data")
+            if data:
+                weather_text = self._weather_text(data) if hasattr(self, "_weather_text") else str(data)
+        weather_guard = ""
+        if weather_text:
+            weather_guard = (
+                f" Current weather: {weather_text}. "
+                "Preserve visible weather in the English visual description. "
+                "For rain, snow, fog, thunderstorm, wind, heat or cold, show it through the window, ground, umbrella, wet surfaces, clothing, air, sky, or lighting. "
+            )
         if free_composition:
             system = (
                 "Visual subject rule: the image subject remains the roleplay scene, usually the character, "
@@ -1931,6 +1944,7 @@ class TelegramComfyUIService(
                 "For default or original characters, do not turn role names into English names or visual tags; describe appearance and action instead. "
                 "Only keep a character name when it is paired with its published series. "
                 "Stable appearance is injected later; do not invent or restate stable hair, eye, body, species, or accessory traits unless the source explicitly asks for a one-shot change. "
+                f"{weather_guard}"
                 f"{light_guard}"
                 "你是专业的 Anima3 提示词工程师。把中文场景重构为英文自然语言画面描述，后接少量 danbooru 补强标签。"
                 "直接输出英文提示词，不要 JSON、不要解释，不要压缩成纯标签列表。"
@@ -1959,6 +1973,7 @@ class TelegramComfyUIService(
                 "For default or original characters, do not turn role names into English names or visual tags; describe appearance and action instead. "
                 "Only keep a character name when it is paired with its published series. "
                 "Stable appearance is injected later; do not invent or restate stable hair, eye, body, species, or accessory traits unless the source explicitly asks for a one-shot change. "
+                f"{weather_guard}"
                 f"{light_guard}"
                 "自然语言句子尽量不要使用逗号；重点保留动作、表情、姿态、服装、环境光线、空间关系和氛围。"
                 "避免复杂手势和多手互动；除非原文强制要求，尽量不强调手部。"
@@ -1970,6 +1985,7 @@ class TelegramComfyUIService(
                 "For default or original characters, do not turn role names into English names or visual tags; describe appearance and action instead. "
                 "Only keep a character name when it is paired with its published series. "
                 "Stable appearance is injected later; do not invent or restate stable hair, eye, body, species, or accessory traits unless the source explicitly asks for a one-shot change. "
+                f"{weather_guard}"
                 f"{light_guard}"
                 "你是专业的 Anima3 提示词工程师。Anima3 支持英文自然语言与 danbooru 标签混编。"
                 "将中文场景描述重构为一句英文自然语言画面描述，后接少量 danbooru 补强标签。"
