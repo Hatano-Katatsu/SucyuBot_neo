@@ -252,17 +252,26 @@ class SchedulerRuntimeMixin:
             base = (existing_diary + "\n" if existing_diary else "") + (source_text or "No new dialogue.")
             return base[-4000:]
         weekday = self._dream_diary_weekday(diary_date)
+        overwrite_note = ""
+        if str(existing_diary or "").strip():
+            overwrite_note = (
+                "Existing diary is the previous saved entry for the same date. "
+                "Your output will replace that old entry, not append to it or continue after it. "
+                "Rewrite one complete diary for the date by merging the old entry with the new dialogue. "
+            )
         system = (
             "You write a private diary from the character's first-person perspective. Consolidate the existing diary and "
             "new dialogue into a coherent diary entry for the given date. Preserve emotional continuity, "
             "relationship progress, promises, unresolved events, and important facts. "
+            f"{overwrite_note}"
             "The first line must be a Markdown heading in this exact format: "
             f"# {diary_date} {weekday or '星期几'} 标题. Use a concise Chinese title after the weekday. "
             "Write the diary in the character's first-person private voice. "
             "Do not include roleplay advice, prompt notes, future acting directions, narrator comments, "
             "or sections such as 「新一天演绎提示」/「角色扮演建议」. Output Chinese diary text only."
         )
-        user = f"Diary date: {diary_date}\nWeekday: {weekday or 'unknown'}\nReason: {reason}\n\nExisting diary:\n{existing_diary or 'none'}\n\nNew dialogue since last dream:\n{source_text or 'none'}"
+        write_mode = "overwrite existing diary" if str(existing_diary or "").strip() else "new diary"
+        user = f"Diary date: {diary_date}\nWeekday: {weekday or 'unknown'}\nWrite mode: {write_mode}\nReason: {reason}\n\nExisting diary:\n{existing_diary or 'none'}\n\nNew dialogue since last dream:\n{source_text or 'none'}"
         return await self._call_llm(system, user, temp=0.2, tag="dream-diary", purpose="chat", disable_thinking=True, session_id=session_id)
 
     async def _organize_memories_after_dream(self, session_id: str, character_key: str):

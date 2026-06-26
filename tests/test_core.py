@@ -29,6 +29,8 @@ from telegram_comfyui_selfie.webui import build_world_route_preview, cast_config
 
 os.environ.setdefault("SUCYUBOT_TEST_FAST_SQLITE", "1")
 
+TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+
 TEST_TMP_ROOT = Path(__file__).resolve().parents[1] / ".tmp" / "tests"
 _TEST_TMP_READY = False
 _TEST_TMP_COUNTER = 0
@@ -2958,6 +2960,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         asyncio.run(run())
 
     def test_live_chat_context_cache_probe_uses_current_config_when_available(self):
+        if str(os.environ.get("SUCYUBOT_TEST_LIVE_CACHE_PROBE") or "").strip().lower() not in TRUE_ENV_VALUES:
+            self.skipTest("真实前缀缓存请求测试默认跳过；设置 SUCYUBOT_TEST_LIVE_CACHE_PROBE=1 才运行")
+
         async def run():
             svc = self.make_service_from_current_config()
             try:
@@ -5896,13 +5901,22 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             svc._call_llm = fake_call_llm
 
-            diary = await svc._write_dream_diary(sid, "2026-06-26", "User: 晚安\nAssistant: 我会等你。", reason="manual")
+            diary = await svc._write_dream_diary(
+                sid,
+                "2026-06-26",
+                "User: 晚安\nAssistant: 我会等你。",
+                "# 2026-06-26 星期五 旧日记\n之前写过的内容。",
+                reason="manual",
+            )
 
             self.assertEqual(diary, raw_diary)
             self.assertIn("first-person", captured["system"])
             self.assertIn("# 2026-06-26 星期五 标题", captured["system"])
+            self.assertIn("will replace that old entry", captured["system"])
+            self.assertIn("not append to it", captured["system"])
             self.assertIn("Do not include roleplay advice", captured["system"])
             self.assertIn("Weekday: 星期五", captured["user"])
+            self.assertIn("Write mode: overwrite existing diary", captured["user"])
 
         asyncio.run(run())
 

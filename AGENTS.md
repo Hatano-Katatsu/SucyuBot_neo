@@ -88,6 +88,7 @@ telegram_comfyui_selfie/
 - 添加新功能时必须写测试；核心路径已覆盖命令解析、提示词构建、记忆 CRUD、角色切换、外观合并、Web 序列化、上下文缓存、模型 profile、Telegram 图片/引用输入
 - 测试临时目录为 `.tmp/tests`，测试进程首次创建时会自动清理上次残留
 - 测试进程设置 `SUCYUBOT_TEST_FAST_SQLITE=1`，仅测试环境关闭 SQLite 同步/使用内存 journal，生产默认不受影响
+- 真实前缀缓存请求测试默认跳过；需要额外设置 `$env:SUCYUBOT_TEST_LIVE_CACHE_PROBE='1'` 后单独运行 `py -3 -m unittest tests.test_core.ServiceTestCase.test_live_chat_context_cache_probe_uses_current_config_when_available -v`
 
 ## 当前架构状态（2026-06-24）
 
@@ -207,7 +208,7 @@ telegram_comfyui_selfie/
 4. **本次日志验证结果**：对 `data/logs/llm_debug - 副本.json` 运行脚本，`chat:chat` 共 10 条、2 个会话、8 个相邻 pair；所有 pair 的 `tools` / `tool_choice` 和非 prompt 请求参数均稳定，变化集中在 `messages`；早期 provider cache 命中低，最后一个同会话 pair 达到 `7552/7658`（98.62%）。
 5. **工具 schema 与请求体缓存优化**：压缩 `_chat_tools_schema()` 文案但保留视角、换装分层、临时裸体禁用、位置持久化和用户位置推断等语义；`_call_llm_messages()` 构造请求体时把 `tools` / `tool_choice` 放到 `messages` 前，减少工具定义落在动态尾部后的重复 miss 风险。
 6. **用户当前输入标记清理**：Telegram 输入增强仍会在本轮 prompt 中保留 `【用户当前输入】` 方便模型理解，但写入 `chat_history` / SQLite `chat_messages` 前会移除该标题；读取旧历史、checkpoint 摘要和记忆提取格式化时也会兼容清理旧的 `【用户当前输入】` 标记，避免它继续污染历史前缀。
-7. **dream 日记提示词约束**：日记生成 prompt 改为角色第一人称私密总结，并在提示词里要求首行使用 `# 日期 星期几 标题`；日记不再生成“新一天演绎提示”，也不做保存前标题强改或元信息剔除。角色历史提要仍可生成“新一天演绎提示”。
+7. **dream 日记提示词约束**：日记生成 prompt 改为角色第一人称私密总结，并在提示词里要求首行使用 `# 日期 星期几 标题`；日记不再生成“新一天演绎提示”，也不做保存前标题强改或元信息剔除。若同一天已有日记，prompt 会明确本次输出将覆盖旧日记而不是追加续写。角色历史提要仍可生成“新一天演绎提示”。
 
 ## 今日变更（2026-06-25）
 
@@ -252,11 +253,11 @@ telegram_comfyui_selfie/
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core -v`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m py_compile scripts\compare_llm_chat_prompts.py`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 scripts\compare_llm_chat_prompts.py --log "D:\workspace\python\SucyuBot_neo\data\logs\llm_debug - 副本.json" --output .tmp\llm_chat_prompt_compare.md`
-- 最新结果：`Ran 264 tests in 16.696s`，`OK`；脚本报告生成 `entries=10 sessions=2 pairs=8`
+- 最新结果：`Ran 264 tests in 5.834s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试，脚本报告生成 `entries=10 sessions=2 pairs=8`
 - 工具 schema 当前紧凑 JSON 长度：`1898` 字符；chat 请求体 key 顺序为 `model, max_tokens, temperature, tools, tool_choice, messages`
 - 当前 `data/logs/llm_debug.json` 复跑 prompt 比对：报告生成 `.tmp\llm_chat_prompt_compare_current.md`，`entries=10 sessions=2 pairs=8`；两个会话所有 pair 的 `tools` / `tool_choice` / 非 prompt 请求参数均稳定，变化集中在 `messages`。
 - 真实 API 缓存探针：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。
-- 新增核心测试 `test_live_chat_context_cache_probe_uses_current_config_when_available`：使用当前配置文件中的模型连接信息，但运行态 state / SQLite / 用户日志均隔离在测试临时目录；通过真实 `handle_chat()` 链路连续回答三轮预设问题，assistant 回复采用真实 AI 返回，并在最终总结行输出三轮回复片段与缓存命中率。模型临时未返回可用回复时跳过；最近一次成功单测输出：`round1=0/2562 (0.00%)`、`round2=2560/2586 (98.99%)`、`round3=2560/2608 (98.16%)`。
+- 额外真实 API 缓存探针 `test_live_chat_context_cache_probe_uses_current_config_when_available`：默认跳过；设置 `SUCYUBOT_TEST_LIVE_CACHE_PROBE=1` 后才使用当前配置文件中的模型连接信息，通过真实 `handle_chat()` 链路连续回答三轮预设问题并输出缓存命中率。运行态 state / SQLite / 用户日志均隔离在测试临时目录；模型临时未返回可用回复时跳过。
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示
 
 ## 已知限制
