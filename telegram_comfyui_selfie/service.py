@@ -54,6 +54,26 @@ CHAT_VISUAL_NOISE_TAGS = {
     "clean lineart", "soft cel shading", "score_9", "score_8", "score_7", "safe", "sensitive",
     "1girl", "1boy", "girl", "boy", "woman", "man", "solo",
 }
+PERSISTENT_ACCESSORY_FAMILY_TERMS: dict[str, tuple[str, ...]] = {
+    "glasses": ("glasses", "sunglasses", "spectacles"),
+    "necklace": ("necklace",),
+    "earring": ("earring", "earrings"),
+    "bracelet": ("bracelet",),
+    "ring": ("ring",),
+    "hair_clip": ("hair clip", "hairclip", "hairpin", "clip"),
+    "ribbon": ("ribbon",),
+    "bow": ("bow",),
+    "scarf": ("scarf",),
+    "collar": ("collar",),
+    "choker": ("choker",),
+    "hat": ("hat", "cap"),
+    "crown": ("crown", "tiara"),
+    "watch": ("watch",),
+    "belt": ("belt",),
+    "glove": ("glove",),
+    "mask": ("mask",),
+    "veil": ("veil",),
+}
 
 VISUAL_IDENTITY_OVERRIDES = {
     ("天童爱丽丝", "碧蓝档案"): ("aris (blue archive)", "Blue Archive"),
@@ -1394,6 +1414,86 @@ class TelegramComfyUIService(
             tag.lower(),
         ))
 
+    @staticmethod
+    def _persistent_accessory_family(tag: str) -> str:
+        low = str(tag or "").lower()
+        for family, terms in PERSISTENT_ACCESSORY_FAMILY_TERMS.items():
+            if any(term in low for term in terms):
+                return family
+        return ""
+
+    def _resolve_persistent_accessory_removals(
+        self,
+        state: dict[str, Any],
+        clothing_off: str,
+        *sources: str,
+    ) -> list[str]:
+        raw = (clothing_off or "").strip()
+        if not raw:
+            return []
+        wardrobe = self._get_wardrobe(state)
+        current_accessories = [
+            appearance_rules.normalize_appearance_tag(tag)
+            for tag in (wardrobe.get("accessory") or "").split(",")
+            if tag.strip()
+        ]
+        if not current_accessories:
+            return []
+        requested = [
+            appearance_rules.normalize_appearance_tag(tag)
+            for tag in re.split(r"[,;]+", raw)
+            if tag.strip()
+        ]
+        requested = [tag for tag in requested if self._persistent_accessory_family(tag)]
+        if not requested:
+            return []
+        matched: list[str] = []
+        seen: set[str] = set()
+        for acc in current_accessories:
+            acc_low = acc.lower()
+            acc_family = self._persistent_accessory_family(acc_low)
+            if not acc_family:
+                continue
+            for token in requested:
+                tok_low = token.lower()
+                tok_family = self._persistent_accessory_family(tok_low)
+                if not tok_family:
+                    continue
+                if tok_low in acc_low or acc_low in tok_low or tok_family == acc_family:
+                    if acc_low not in seen:
+                        matched.append(acc)
+                        seen.add(acc_low)
+                    break
+        return matched
+
+    def _persist_removed_accessories_from_image(
+        self,
+        session_id: str,
+        clothing_off: str,
+        *sources: str,
+    ) -> str:
+        state = self._get_session_state(session_id)
+        remove_tags = self._resolve_persistent_accessory_removals(state, clothing_off, *sources)
+        if not remove_tags:
+            return ""
+        wardrobe_before = self._get_wardrobe(state)
+        wardrobe_after = appearance_rules.apply_wardrobe_change(
+            wardrobe_before,
+            {"accessory_remove": ", ".join(remove_tags)},
+        )
+        if wardrobe_after == wardrobe_before:
+            return ""
+        session_schema.set_wardrobe(state, wardrobe_after)
+        rendered = appearance_rules.render_wardrobe(wardrobe_after)
+        session_schema.set_outfit(state, rendered)
+        self._save_session_state(session_id, state)
+        self._ulog(
+            session_id,
+            "WARDROBE",
+            f'图像后持久化 accessory_remove={remove_tags} 来源=clothing_off="{clothing_off[:80]}" | 结果="{rendered[:140]}"',
+        )
+        return rendered
+
     def _chat_visible_appearance_context(self, session_id: str) -> str:
         effective = self._effective_visual_prompt_tags(session_id)
         if not effective:
@@ -2200,6 +2300,13 @@ class TelegramComfyUIService(
             return f"生图失败: {err}"
         # 聊天途中的配图不带配文：聊天模型已经在文字回复里说话了，再加配文会重复。
         await self.send_photo(chat_id, imgs[0], "")
+        self._persist_removed_accessories_from_image(
+            session_id,
+            clothing_off,
+            intent,
+            prompt,
+            scene,
+        )
         self._record_sent_photo(
             session_id,
             scene,

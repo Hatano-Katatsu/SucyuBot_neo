@@ -3046,6 +3046,88 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_tool_generate_image_persists_explicit_accessory_removal_from_clothing_off(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            wardrobe = {
+                "top": "oversized hoodie",
+                "accessory": "shell bracelet, light blue round glasses",
+            }
+            session_schema.set_wardrobe(state, wardrobe)
+            session_schema.set_outfit(state, appearance_rules.render_wardrobe(wardrobe))
+
+            svc._translate_to_tags = AsyncMock(return_value="english tags")
+            svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
+            svc.send_action = AsyncMock()
+            svc.send_photo = AsyncMock()
+
+            with patch("telegram_comfyui_selfie.service.plan_roleplay_image", AsyncMock(return_value={
+                "scene": "She sits on the sofa and removes her light blue round glasses before looking up at the viewer.",
+                "view": "pov",
+                "clothing_off": "glasses",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+                "aspect_ratio": "2:3",
+            })):
+                result = await svc.tool_generate_image(
+                    123,
+                    sid,
+                    intent="remove her glasses so the user can see her face",
+                )
+
+            self.assertIn("图片已生成并发送", result)
+            outfit = session_schema.get_outfit(state)
+            self.assertNotIn("light blue round glasses", outfit)
+            self.assertIn("shell bracelet", outfit)
+            self.assertNotIn("light blue round glasses", state["sent_photos_history"][-1]["appearance"])
+            self.assertIn("shell bracelet", state["sent_photos_history"][-1]["appearance"])
+
+        asyncio.run(run())
+
+    def test_tool_generate_image_does_not_persist_outerwear_clothing_off(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            wardrobe = {
+                "dress": "black silk slip dress",
+                "outerwear": "cotton knit cardigan",
+                "accessory": "light blue round glasses",
+            }
+            session_schema.set_wardrobe(state, wardrobe)
+            session_schema.set_outfit(state, appearance_rules.render_wardrobe(wardrobe))
+
+            svc._translate_to_tags = AsyncMock(return_value="english tags")
+            svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
+            svc.send_action = AsyncMock()
+            svc.send_photo = AsyncMock()
+
+            with patch("telegram_comfyui_selfie.service.plan_roleplay_image", AsyncMock(return_value={
+                "scene": "She slips off her cardigan and drapes it over the chair while leaning by the window in her slip dress.",
+                "view": "pov",
+                "clothing_off": "cardigan",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+                "aspect_ratio": "2:3",
+            })):
+                result = await svc.tool_generate_image(
+                    123,
+                    sid,
+                    intent="把开衫脱掉搭在椅背上",
+                )
+
+            self.assertIn("图片已生成并发送", result)
+            outfit = session_schema.get_outfit(state)
+            self.assertIn("cotton knit cardigan", outfit)
+            self.assertIn("black silk slip dress", outfit)
+            self.assertIn("light blue round glasses", outfit)
+
+        asyncio.run(run())
+
     def test_cmd_scene_image_uses_full_context_with_user_prompt_priority(self):
         async def run():
             svc = self.make_service()

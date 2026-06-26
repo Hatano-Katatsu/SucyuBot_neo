@@ -162,6 +162,7 @@ telegram_comfyui_selfie/
 - 核心槽位顺序：`quality -> count -> identity -> style_artist -> effective_appearance -> style_general -> scene -> one_shot_appearance`。
 - `scene` 只描述镜头、地点、动作、光线、道具和氛围，不重复稳定外貌。
 - `one_shot_appearance` 是本轮临时补充，不持久化。
+- `clothing_off` 对衣物/裸体默认仍是“仅本图生效”；但当它明确命中当前已穿戴的可持久配饰（如眼镜、项链、耳环、发夹）时，生图成功后会把该配饰从当前穿搭中移除，避免下一张图被稳定外貌重新加回去。
 - OC 不把中文名、昵称或作品名塞进视觉 identity；只有已知公开角色才注入角色/作品 tag。
 - 亲密场景默认走 POV，只允许用户/伴侣身体局部入画；除非用户明确要求拍照、录像或对镜，才允许设备入画。
 - `/配图`（同义词 `/画图`、`/绘图` 等）按当前聊天场景生成图片，不强制自拍或看镜头；命令后的参数作为最高优先级场景/视角/机位/远近/局部特写要求，但规划器仍会参考完整聊天上下文、照片历史、世界状态和记忆。
@@ -192,6 +193,7 @@ telegram_comfyui_selfie/
 - 非 mirror 场景负面提示词要压制 `holding phone`、`visible phone`、`phone in hand`、`mirror selfie` 等。
 - 用户性别由全局 `user_gender` 或会话 `custom_user_gender` 控制，影响亲密场景中用户身体局部的描述。
 - 自然语言角色/外观输入应交给 `prompt_intake.py` 分类，不要求用户手写 tag。
+- 明确摘掉并继续不戴的配饰（如眼镜、项链、耳环、发夹）属于当前可见外观变更，不应只停留在单张图的 scene 叙事里；聊天链路应调用 `change_appearance`，生图链路也会对明确的 `clothing_off` 配饰移除做持久化兜底。
 - 长期记忆不写临时服装、上一轮场景台词、一次性道具；这些属于短期上下文、衣柜或照片历史。
 - fire-and-forget `asyncio.create_task` 内异常可能被静默吞掉；排查生图/推送失败优先看 service log。
 - `_get_llm_value("chat", "temperature")` 的 legacy 回退会落到 `llm_temperature_scene`，除非 `chat_llm_temperature` 显式设置。
@@ -213,6 +215,7 @@ telegram_comfyui_selfie/
 13. **生图天气贯通**：`plan_roleplay_image()` 优先使用调用方传入的 `weather_data`，避免推送链路重复拉取后前后不一致；`_translate_to_tags()` 与 `plan_animatool_slots()` 都显式注入当前天气文本，要求雨、雪、雾、风、冷热等可见天气在最终英文 tags 中通过窗外、地面、伞、湿痕、空气质感和光线体现。
 14. **同空间视角终裁**：`image_planning.py` 新增 `_resolve_roleplay_view()`，对 LLM 给出的 `requested_view/planned_view` 做最终业务校正：同空间且无明确自拍/对镜/录像信号时，不再允许普通配图落到 `selfie/mirror`；普通同空间单人场景改压到 `third`，近距离互动改压到 `pov`，明确“帮忙拍一张”改为 `portrait`，并在 `user_location` 缺失时回退使用持久 `co_located` 状态。新增 3 条回归测试锁定这三种分支。
 15. **自动配图 judge 视角收敛**：定位到 `chat:image-judge` 仍会把“凑近镜头确认论文”这类同空间日常陪伴场景错误写成 `view=selfie`，而线上服务进程启动时间早于 `b4d75ac`，当天日志仍在跑旧代码。`chat_context.py` 新增 `_sanitize_judge_view_hint()`：自动配图判断器只有在文本里出现明确自拍/对镜/拿手机拍/帮忙拍照等硬相机约束时才保留 `view`，其余普通日常场景一律清空，交给后续 `plan_roleplay_image()` 再按同空间规则判成 `pov/third/portrait`。同时把 `JUDGE` 日志补充为可打印 `view=...` 方便排查，并新增 3 条测试覆盖“论文场景误自拍清空 / 明确自拍保留 / judge 误传 selfie 时 planner 仍强制改成 pov”。
+16. **摘配饰持久化兜底**：排查出“用户让角色摘掉眼镜，下一张图又戴回去”是因为首张图只通过 `clothing_off` 临时剥离了 `effective_appearance`，却没有改写当前衣柜。`service.py` 新增图片后处理：当 `tool_generate_image()` 的 `clothing_off` 明确命中当前已穿戴的可持久配饰（眼镜/项链/耳环/发夹等）时，生图成功后自动从 `wardrobe.accessory` / `dynamic_appearance` 移除，并记录 `WARDROBE` 日志；`chat_context.py` 同步强化 `change_appearance` 提示，明确“摘掉并继续不戴”的配饰也必须视作持久外观变更。新增 2 条回归测试覆盖“摘眼镜后下一张图不再戴回 / 临时脱开衫仍只影响单图”。
 
 ## 今日变更（2026-06-24）
 
@@ -236,7 +239,7 @@ telegram_comfyui_selfie/
 
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m compileall -q telegram_comfyui_selfie`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core -v`
-- 最新结果：`Ran 255 tests in 17.251s`，`OK`
+- 最新结果：`Ran 257 tests in 23.408s`，`OK`
 - 真实 API 缓存探针：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。
 - 新增核心测试 `test_live_chat_context_cache_probe_uses_current_config_when_available`：使用当前配置文件中的模型连接信息，但运行态 state / SQLite / 用户日志均隔离在测试临时目录；通过真实 `handle_chat()` 链路连续回答三轮预设问题，assistant 回复采用真实 AI 返回，并在最终总结行输出三轮回复片段与缓存命中率。模型临时未返回可用回复时跳过；最近一次成功单测输出：`round1=0/2562 (0.00%)`、`round2=2560/2586 (98.99%)`、`round3=2560/2608 (98.16%)`。
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示
