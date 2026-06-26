@@ -1852,7 +1852,6 @@ class TelegramComfyUIService(
             raise RuntimeError(f"{label} API Key is not configured")
         body = {
             "model": resolved["model"],
-            "messages": messages,
             "max_tokens": int(resolved.get("max_tokens") or "4096"),
             "temperature": float(self._get_llm_value(purpose, "temperature", "0.95")) if temp is None else temp,
         }
@@ -1860,6 +1859,7 @@ class TelegramComfyUIService(
             body["tools"] = tools
         if tool_choice is not None:
             body["tool_choice"] = tool_choice
+        body["messages"] = messages
         thinking = bool(resolved.get("thinking"))
         control = str(resolved.get("thinking_control") or "model_name")
         if control == "param_always":

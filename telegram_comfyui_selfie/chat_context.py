@@ -226,7 +226,8 @@ class ChatContextMixin:
             asyncio.create_task(_bg_extract())
 
         history = session_schema.get_chat_history(state)
-        new_messages = [{"role": "user", "content": user_text}]
+        history_user_text = self._sanitize_user_history_text(user_text)
+        new_messages = [{"role": "user", "content": history_user_text}]
         if content:
             new_messages.append({"role": "assistant", "content": content})
         if hasattr(self, "_take_pending_photo_history_messages"):
@@ -452,15 +453,15 @@ class ChatContextMixin:
                 "type": "function",
                 "function": {
                     "name": "generate_roleplay_image",
-                    "description": "当需要用图片回应当前角色扮演对话时调用。你负责给出生图意图，最终画面由生图辅助模型结合上下文整合。",
+                    "description": "用图片回应本轮角色扮演时调用；只给意图/情绪/必要元素，最终画面由生图辅助模型结合上下文整合。",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "intent": {"type": "string", "description": "这张图要回应的对话意图，例如用户想看角色下班后在家等他的样子。"},
-                            "mood": {"type": "string", "description": "图片应承载的情绪或关系推进，例如安抚、调情、撒娇、展示、挑逗。"},
+                            "intent": {"type": "string", "description": "本图回应的对话意图，如用户想看角色下班后在家等他的样子。"},
+                            "mood": {"type": "string", "description": "图中承载的情绪或关系推进，如安抚、调情、撒娇、展示、挑逗。"},
                             "must_include": {"type": "string", "description": "用户明确要求必须出现的服装、动作、地点或物件；没有则留空。"},
-                            "prompt": {"type": "string", "description": "可选的简短画面草案。不要写英文标签，生图辅助模型会重写。"},
-                            "view": {"type": "string", "enum": ["selfie", "mirror", "pov", "third", "portrait"], "description": "用户明确要求视角时填写；否则留空交给生图辅助模型判断。selfie 是前摄自拍（伸手举手机，但画面不出现手机和手机 UI）；portrait 是别人帮角色拍的照片（用户/他人在画面外拍摄、角色看向镜头），仅在同处一地且角色明说要别人帮拍、或 NTR 场景时用；只有 mirror 对镜自拍才允许镜子和手机同时出现。"},
+                            "prompt": {"type": "string", "description": "可选简短画面草案；不要写英文标签，生图辅助模型会重写。"},
+                            "view": {"type": "string", "enum": ["selfie", "mirror", "pov", "third", "portrait"], "description": "仅用户明确要求视角时填写；否则留空。selfie=前摄自拍，伸手举手机但画面无手机和手机UI；portrait=别人帮角色拍，拍摄者在画面外、角色看镜头，仅同处一地且角色明说要别人帮拍或NTR场景时用；只有mirror允许镜子和手机同框。"},
                         },
                         "required": ["intent"],
                     },
@@ -471,17 +472,17 @@ class ChatContextMixin:
                 "function": {
                     "name": "change_appearance",
                     "description": (
-                        "当剧情里角色换上新的服装、换了一套穿搭、脱下外套/鞋袜等外层衣物，或明确摘掉并继续不戴眼镜/项链/耳环/发夹等配饰时调用，持续生效。支持分层换装："
-                        "上衣、下装、连衣裙、外套、内衣(胸罩/内裤)、袜、鞋可分别更换；同类自动替换，连衣裙会覆盖上下装；"
-                        "也可脱掉某层或摘掉配饰。description 用自然语言描述这次变化即可（如「换上红色旗袍」「脱掉外套」「把浅蓝圆框眼镜摘掉先不戴」）。"
-                        "mode 一般用 merge；只有要整套从头换时才用 replace。"
-                        "注意：性爱、亲密行为、洗澡中的临时脱衣/裸体，不要调用此工具——配图系统会自动处理临时裸露，场景结束后角色会自动恢复原着装。"
-                        "只有确实换上了不同的衣服（且会继续穿着），或确实摘掉了会继续保持不戴的配饰时才调用。"
+                        "剧情中角色换上新的服装、换了一套穿搭、脱下外套/鞋袜等外层，或明确摘掉并继续不戴眼镜/项链/耳环/发夹等配饰时调用，持续生效。"
+                        "支持分层换装：上衣/下装/连衣裙/外套/内衣(胸罩/内裤)/袜/鞋可分别更换；同类自动替换，连衣裙覆盖上下装；也可脱某层或摘配饰。"
+                        "description 用自然语言写变化，如「换上红色旗袍」「脱掉外套」「把浅蓝圆框眼镜摘掉先不戴」。"
+                        "mode 默认 merge；整套从头换才用 replace。"
+                        "性爱/亲密/洗澡中的临时脱衣或裸体不要调用，配图系统会自动处理临时裸露，场景结束后角色会恢复原着装。"
+                        "仅确实换上会继续穿的不同衣服，或摘掉会继续不戴的配饰时调用。"
                     ),
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "description": {"type": "string", "description": "这次外观/换装变化的自然语言描述。"},
+                            "description": {"type": "string", "description": "本次外观/换装变化的自然语言描述。"},
                             "mode": {"type": "string", "enum": ["merge", "replace"]},
                         },
                         "required": ["description"],
@@ -493,8 +494,8 @@ class ChatContextMixin:
                 "function": {
                     "name": "update_location",
                     "description": (
-                        "当剧情里角色移动到新地点、或明确交代了自己此刻在哪时调用，持续生效，之后的配图和推送会据此保持一致。"
-                        "place 用自然语言写角色当前所在（如“家里”“公司”“楼下咖啡店”“商场”“在路上”）。只在位置确实变化或首次确立时调用，不要每句都报。"
+                        "角色移动到新地点或明确交代此刻在哪时调用，持续生效，之后配图/推送据此保持一致。"
+                        "place 写角色当前所在，如“家里”“公司”“楼下咖啡店”“商场”“在路上”。只在位置确实变化或首次确立时调用，不要每句都报。"
                     ),
                     "parameters": {
                         "type": "object",
@@ -510,9 +511,8 @@ class ChatContextMixin:
                 "function": {
                     "name": "update_user_location",
                     "description": (
-                        "当你能从用户的消息或上下文推断出用户当前可能在哪时调用，例如用户说「我刚到家」「在公司加班」「在路上」等。"
-                        "place 用自然语言写用户当前所在（如\"家里\"\"公司\"\"商场\"\"咖啡店\"\"与角色同处\"等）。"
-                        "只在能合理推断或用户明确交代时调用；完全无法判断则不要编造。"
+                        "能从用户消息/上下文合理推断用户当前在哪时调用，如「我刚到家」「在公司加班」「在路上」。"
+                        "place 写用户当前所在，如\"家里\"\"公司\"\"商场\"\"咖啡店\"\"与角色同处\"等；只有能推断或用户明确交代时调用，无法判断不要编造。"
                     ),
                     "parameters": {
                         "type": "object",
@@ -908,6 +908,22 @@ class ChatContextMixin:
             start = session_schema.get_short_context_start(state)
             session_schema.set_short_context_start(state, max(0, start - removed))
 
+    @staticmethod
+    def _sanitize_user_history_text(text: str) -> str:
+        """入历史前去掉 Telegram 输入增强里的当前输入标题，保留真实文本/引用/图片描述。"""
+        text = str(text or "").strip()
+        if not text:
+            return ""
+        return re.sub(r"(?m)^【用户当前输入】\s*\n?", "", text).strip()
+
+    @classmethod
+    def _sanitize_history_message(cls, msg: dict[str, Any]) -> dict[str, Any]:
+        if (msg.get("role") or "") != "user":
+            return dict(msg)
+        cleaned = dict(msg)
+        cleaned["content"] = cls._sanitize_user_history_text(str(cleaned.get("content") or ""))
+        return cleaned
+
     def _queue_checkpoint_if_needed(self, session_id: str, history_snapshot: list[dict[str, Any]] | None = None):
         if not session_id:
             return
@@ -1022,6 +1038,8 @@ class ChatContextMixin:
                 continue
             name = "User" if role == "user" else "Assistant" if role == "assistant" else role
             content = str(msg.get("content") or "").strip()
+            if role == "user":
+                content = ChatContextMixin._sanitize_user_history_text(content)
             if content:
                 lines.append(f"{name}: {content}")
         text = "\n".join(lines)
@@ -1082,7 +1100,7 @@ class ChatContextMixin:
             start = 0
         if start < 0 or start > len(history):
             start = 0
-        return history[start:][-limit:]
+        return [ChatContextMixin._sanitize_history_message(msg) for msg in history[start:][-limit:]]
 
     @staticmethod
     def _chat_prompt_history(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1099,7 +1117,7 @@ class ChatContextMixin:
             start = 0
         if start < 0 or start > len(history):
             start = 0
-        return history[start:]
+        return [ChatContextMixin._sanitize_history_message(msg) for msg in history[start:]]
 
     def _inject_photo_history_messages(self, messages: list[dict[str, Any]], state: dict[str, Any]):
         # 兼容旧调用点：照片视觉记录现在在 _record_sent_photo 时写入 chat_history

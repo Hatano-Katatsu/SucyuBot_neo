@@ -178,6 +178,14 @@ class SchedulerRuntimeMixin:
             return (local_dt - timedelta(days=1)).strftime("%Y-%m-%d")
         return local_dt.strftime("%Y-%m-%d")
 
+    @staticmethod
+    def _dream_diary_weekday(diary_date: str) -> str:
+        try:
+            day = datetime.strptime(str(diary_date), "%Y-%m-%d")
+            return WEEKDAY_NAMES[day.weekday()]
+        except Exception:
+            return ""
+
     def _should_run_dream_before_push(self, session_id: str, state: dict[str, Any]) -> bool:
         last = float(session_schema.get_last_interaction(state) or 0)
         if not last or time.time() - last < self._dream_idle_seconds():
@@ -243,15 +251,18 @@ class SchedulerRuntimeMixin:
         if not self.has_llm_config("chat", session_id):
             base = (existing_diary + "\n" if existing_diary else "") + (source_text or "No new dialogue.")
             return base[-4000:]
+        weekday = self._dream_diary_weekday(diary_date)
         system = (
-            "You write a private roleplay diary for the character. Consolidate the existing diary and "
+            "You write a private diary from the character's first-person perspective. Consolidate the existing diary and "
             "new dialogue into a coherent diary entry for the given date. Preserve emotional continuity, "
             "relationship progress, promises, unresolved events, and important facts. "
-            "At the end, add a short section titled 「新一天演绎提示」 with 1-3 flexible roleplay directions "
-            "based on events and the character's emotional state. Keep it suggestive, not deterministic: "
-            "do not lock in exact dialogue, locations, schedules, or a fixed plot. Output Chinese diary text only."
+            "The first line must be a Markdown heading in this exact format: "
+            f"# {diary_date} {weekday or '星期几'} 标题. Use a concise Chinese title after the weekday. "
+            "Write the diary in the character's first-person private voice. "
+            "Do not include roleplay advice, prompt notes, future acting directions, narrator comments, "
+            "or sections such as 「新一天演绎提示」/「角色扮演建议」. Output Chinese diary text only."
         )
-        user = f"Diary date: {diary_date}\nReason: {reason}\n\nExisting diary:\n{existing_diary or 'none'}\n\nNew dialogue since last dream:\n{source_text or 'none'}"
+        user = f"Diary date: {diary_date}\nWeekday: {weekday or 'unknown'}\nReason: {reason}\n\nExisting diary:\n{existing_diary or 'none'}\n\nNew dialogue since last dream:\n{source_text or 'none'}"
         return await self._call_llm(system, user, temp=0.2, tag="dream-diary", purpose="chat", disable_thinking=True, session_id=session_id)
 
     async def _organize_memories_after_dream(self, session_id: str, character_key: str):

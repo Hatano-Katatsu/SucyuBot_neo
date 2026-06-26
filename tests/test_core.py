@@ -1120,6 +1120,29 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("red dress", visual)
         self.assertNotIn("red dress", after_msgs[0]["content"])
 
+    def test_chat_tools_schema_is_compact_and_keeps_semantics(self):
+        svc = self.make_service()
+        tools = svc._chat_tools_schema()
+        text = json.dumps(tools, ensure_ascii=False, separators=(",", ":"))
+
+        self.assertLess(len(text), 1900)
+        self.assertIn("generate_roleplay_image", text)
+        self.assertIn("change_appearance", text)
+        self.assertIn("update_location", text)
+        self.assertIn("update_user_location", text)
+        for required in (
+            "无手机和手机UI",
+            "portrait=别人帮角色拍",
+            "NTR",
+            "只有mirror允许镜子和手机同框",
+            "连衣裙覆盖上下装",
+            "胸罩/内裤",
+            "临时脱衣或裸体不要调用",
+            "场景结束后角色会恢复原着装",
+            "无法判断不要编造",
+        ):
+            self.assertIn(required, text)
+
     def test_chat_prompt_history_is_checkpoint_anchored_not_sliding(self):
         """前缀缓存不变量：checkpoint 之间的 prompt 历史只追加，不按 keep 滑动。"""
         svc = self.make_service()
@@ -1145,6 +1168,35 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         for offset, item in enumerate(history):
             self.assertEqual(messages[history_start + offset]["role"], item["role"])
             self.assertEqual(messages[history_start + offset]["content"], item["content"])
+
+    def test_chat_prompt_history_strips_legacy_current_input_marker(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        session_schema.set_chat_history(state, [
+            {
+                "role": "user",
+                "content": "【引用内容】\n回复的机器人消息: 旧回复\n\n【用户当前输入】\n这句是什么意思？",
+            },
+            {"role": "assistant", "content": "解释一下。"},
+        ])
+
+        messages = svc._build_chat_messages(sid, "继续")
+        user_history = [m["content"] for m in messages if m.get("role") == "user"]
+
+        self.assertIn("【引用内容】\n回复的机器人消息: 旧回复\n\n这句是什么意思？", user_history)
+        self.assertNotIn("【用户当前输入】", "\n".join(user_history))
+
+    def test_format_store_messages_strips_current_input_marker_for_checkpoint(self):
+        svc = self.make_service()
+        text = svc._format_store_messages([
+            {"role": "user", "content": "【用户当前输入】\n看这个"},
+            {"role": "assistant", "content": "看到了。"},
+        ])
+
+        self.assertIn("User: 看这个", text)
+        self.assertIn("Assistant: 看到了。", text)
+        self.assertNotIn("【用户当前输入】", text)
 
     def test_low_frequency_chat_controls_stay_before_history_not_dynamic(self):
         """前缀缓存不变量：配置型控制放稳定层；发图/照片策略写进 static。"""
@@ -5137,6 +5189,85 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_call_llm_messages_places_tools_before_messages_in_request_body(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({"chat_llm_api_key": "k", "chat_llm_model": "m", "chat_llm_api_base": "http://x"})
+            captured = {}
+
+            class FakeResponse:
+                status = 200
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                async def json(self):
+                    return {"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": 1}}
+
+                async def text(self):
+                    return ""
+
+            class FakeSession:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                def post(self, *args, **kwargs):
+                    body = kwargs["json"]
+                    captured["keys"] = list(body.keys())
+                    return FakeResponse()
+
+            with patch("telegram_comfyui_selfie.service.aiohttp.ClientSession", FakeSession):
+                await svc._call_llm_messages(
+                    [{"role": "user", "content": "hi"}],
+                    tools=[{"type": "function", "function": {"name": "x"}}],
+                    tool_choice="auto",
+                    purpose="chat",
+                    session_id="telegram:1",
+                )
+
+            self.assertLess(captured["keys"].index("tools"), captured["keys"].index("messages"))
+            self.assertLess(captured["keys"].index("tool_choice"), captured["keys"].index("messages"))
+
+        asyncio.run(run())
+
+    def test_user_current_input_marker_is_not_persisted_to_chat_history(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({"chat_llm_api_key": "k", "chat_llm_model": "m", "chat_llm_api_base": "http://x"})
+            sid = "telegram:1"
+            user_text = (
+                "【引用内容】\n回复的机器人消息: 上一条\n\n"
+                "【图片描述】\n用户发送的图片: 桌上一杯咖啡。\n\n"
+                "【用户当前输入】\n看这个"
+            )
+            svc._call_llm_messages = AsyncMock(return_value={"choices": [{"message": {"content": "看到了，是咖啡。"}}]})
+            svc._ensure_life_profile = AsyncMock(return_value={})
+            svc._judge_image_moment = AsyncMock(return_value=None)
+            svc._update_character_place_from_text = AsyncMock()
+            svc._extract_long_term_memories = AsyncMock()
+
+            await svc.run_roleplay_chat(1, sid, user_text)
+
+            history = session_schema.get_chat_history(svc._get_session_state(sid))
+            self.assertEqual(history[-2]["role"], "user")
+            self.assertIn("【引用内容】", history[-2]["content"])
+            self.assertIn("【图片描述】", history[-2]["content"])
+            self.assertIn("看这个", history[-2]["content"])
+            self.assertNotIn("【用户当前输入】", history[-2]["content"])
+            rows = svc.app_store.list_messages(sid, svc._context_character_key(sid))
+            self.assertNotIn("【用户当前输入】", "\n".join(row["content"] for row in rows))
+
+        asyncio.run(run())
+
     def test_judge_triggers_image_when_content_fits(self):
         async def run():
             svc = self.make_service()
@@ -5750,6 +5881,31 @@ class CheckpointTrimTestCase(ServiceFixtureMixin, unittest.TestCase):
 class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
     """TODO #9.5: dream 记忆整理测试 — manual 记忆不被 update/delete。"""
 
+    def test_write_dream_diary_prompts_first_person_without_postprocessing(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            captured = {}
+            svc.has_llm_config = lambda purpose, session_id="": True
+            raw_diary = "# 雨后的约定\n今天我终于把心里的话说出来了。"
+
+            async def fake_call_llm(system, user, **kwargs):
+                captured["system"] = system
+                captured["user"] = user
+                return raw_diary
+
+            svc._call_llm = fake_call_llm
+
+            diary = await svc._write_dream_diary(sid, "2026-06-26", "User: 晚安\nAssistant: 我会等你。", reason="manual")
+
+            self.assertEqual(diary, raw_diary)
+            self.assertIn("first-person", captured["system"])
+            self.assertIn("# 2026-06-26 星期五 标题", captured["system"])
+            self.assertIn("Do not include roleplay advice", captured["system"])
+            self.assertIn("Weekday: 星期五", captured["user"])
+
+        asyncio.run(run())
+
     def test_dream_memory_organize_skips_manual(self):
         async def run():
             svc = self.make_service()
@@ -6129,6 +6285,56 @@ class LLMUsageTestCase(ServiceFixtureMixin, unittest.TestCase):
         data3 = json.loads(path.read_text(encoding="utf-8"))
         self.assertIn("chat:reply", data3["entries_by_type"])
         self.assertEqual(data3["entries_by_type"]["chat:scene"][-1]["request"]["body"]["messages"][0]["content"], "message-20")
+
+
+class LlmPromptCompareScriptTestCase(unittest.TestCase):
+    """LLM prompt 比对脚本测试。"""
+
+    def test_compare_entries_reports_prefix_and_non_prefix_same_messages(self):
+        from scripts.compare_llm_chat_prompts import build_entry_view, compare_entries
+
+        def entry(messages):
+            return {
+                "session_id": "telegram:1",
+                "time": "2026-06-26T10:00:00",
+                "ts": 1,
+                "request": {
+                    "body": {
+                        "model": "m",
+                        "temperature": 0.7,
+                        "tools": [{"type": "function", "function": {"name": "tool_a"}}],
+                        "tool_choice": "auto",
+                        "messages": messages,
+                    }
+                },
+                "usage": {"prompt_tokens": 1000, "cached_tokens": 500},
+            }
+
+        old = build_entry_view(0, entry([
+            {"role": "system", "content": "stable-a"},
+            {"role": "system", "content": "stable-b"},
+            {"role": "user", "content": "old-only"},
+            {"role": "assistant", "content": "same-after-diff"},
+        ]))
+        new = build_entry_view(1, entry([
+            {"role": "system", "content": "stable-a"},
+            {"role": "system", "content": "stable-b"},
+            {"role": "user", "content": "new-only"},
+            {"role": "assistant", "content": "same-after-diff"},
+            {"role": "user", "content": "append"},
+        ]))
+
+        comparison = compare_entries(old, new)
+
+        self.assertTrue(comparison.prompt_changed)
+        self.assertEqual(comparison.common_prefix_messages, 2)
+        self.assertGreater(comparison.common_prefix_chars, 0)
+        self.assertEqual(comparison.non_prefix_common_messages, 1)
+        self.assertEqual(comparison.non_prefix_lcs_messages, 1)
+        self.assertEqual(comparison.same_index_after_prefix, [3])
+        self.assertTrue(comparison.prompt_components_same["tools"])
+        self.assertFalse(comparison.prompt_components_same["messages"])
+        self.assertTrue(comparison.settings_same)
 
 
 class ModelProfileTestCase(ServiceFixtureMixin, unittest.TestCase):

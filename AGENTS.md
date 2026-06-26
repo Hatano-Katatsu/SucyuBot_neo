@@ -61,6 +61,7 @@ telegram_comfyui_selfie/
 根目录:
 ├── Start-SucyuBot.cmd / Start-SucyuBot.ps1
 ├── run.cmd
+├── scripts/compare_llm_chat_prompts.py
 ├── config.example.yml / config.example.json
 ├── requirements.txt
 ├── AGENTS.md
@@ -198,13 +199,23 @@ telegram_comfyui_selfie/
 - fire-and-forget `asyncio.create_task` 内异常可能被静默吞掉；排查生图/推送失败优先看 service log。
 - `_get_llm_value("chat", "temperature")` 的 legacy 回退会落到 `llm_temperature_scene`，除非 `chat_llm_temperature` 显式设置。
 
+## 今日变更（2026-06-26）
+
+1. **LLM prompt 比对脚本**：新增 `scripts/compare_llm_chat_prompts.py`，可读取 `llm_debug.json` / `llm_debug - 副本.json` 中指定 `entries_by_type`（默认 `chat:chat`），按 `session_id` 分组并对相邻请求做规范化 JSON prompt 比对。
+2. **prompt 缓存排查报告**：脚本同时输出 provider 记录的 `cached_tokens` / `prompt_tokens`、本地精确公共前缀字符数与消息段数、前缀之后仍相同的消息块、消息 diff opcode、tools/tool_choice 与非 prompt 请求参数是否稳定；默认只输出 hash/长度，不展开 prompt 原文，避免人工扫日志误判。
+3. **脚本回归测试**：新增 `LlmPromptCompareScriptTestCase`，覆盖“前缀相同、首个差异之后仍有相同消息段”的核心判断，防止后续修改脚本时把非前缀相同块漏报。
+4. **本次日志验证结果**：对 `data/logs/llm_debug - 副本.json` 运行脚本，`chat:chat` 共 10 条、2 个会话、8 个相邻 pair；所有 pair 的 `tools` / `tool_choice` 和非 prompt 请求参数均稳定，变化集中在 `messages`；早期 provider cache 命中低，最后一个同会话 pair 达到 `7552/7658`（98.62%）。
+5. **工具 schema 与请求体缓存优化**：压缩 `_chat_tools_schema()` 文案但保留视角、换装分层、临时裸体禁用、位置持久化和用户位置推断等语义；`_call_llm_messages()` 构造请求体时把 `tools` / `tool_choice` 放到 `messages` 前，减少工具定义落在动态尾部后的重复 miss 风险。
+6. **用户当前输入标记清理**：Telegram 输入增强仍会在本轮 prompt 中保留 `【用户当前输入】` 方便模型理解，但写入 `chat_history` / SQLite `chat_messages` 前会移除该标题；读取旧历史、checkpoint 摘要和记忆提取格式化时也会兼容清理旧的 `【用户当前输入】` 标记，避免它继续污染历史前缀。
+7. **dream 日记提示词约束**：日记生成 prompt 改为角色第一人称私密总结，并在提示词里要求首行使用 `# 日期 星期几 标题`；日记不再生成“新一天演绎提示”，也不做保存前标题强改或元信息剔除。角色历史提要仍可生成“新一天演绎提示”。
+
 ## 今日变更（2026-06-25）
 
 1. **聊天 dynamic system 拆分**：`_build_chat_messages()` 将低频世界模板和自然光硬规则并入 semistable；dynamic tail 只保留精确当前时间、本轮用户位置/空间关系、发图提醒和场景断档提醒。`world_runtime.py` 新增 `_format_world_semistable_context()` / `_format_world_dynamic_context()`，原 `_format_world_context()` 保持给生图/推送链路使用。
 2. **semistable checkpoint 收敛复用**：新增世界模板参与 semistable 签名；天气、光线阶段、城市、角色身份或动线模板变化时，继续复用 `_track_semistable_context_change()`，在 checkpoint 后 pending 达到 `context_window_message_limit / 2` 时 force checkpoint。
 3. **真实缓存复测**：使用 `deepseek-pro` / `deepseek-v4-pro` 和 `llm_debug - 副本.json` 的真实 entry 3/4/5 请求体，验证 tools 字段 JSON 位置不影响缓存；热缓存后原结构与拆分后结构连续请求均达到 99%+ 命中。拆分后模拟请求 dynamic tail 从约 642 字符降到 63 字符；新 semistable 首轮有冷缓存成本，第二轮恢复 99%+。
 4. **角色扮演 prompt 精简**：静态聊天提示去掉重复发图节奏描述，补强“优先回应用户本轮话题、避免连续类似回复、不要因重要记忆主动跳题”的规则；checkpoint 摘要进一步限定为短期连续性，不承载长期记忆/角色弧线职责。
-5. **dream 新一天指导**：dream 日记和角色历史提要可生成“新一天演绎提示”，只给基于事件与角色情绪的灵活方向，不写死台词、地点、日程或剧情。
+5. **dream 新一天指导**：角色历史提要可生成“新一天演绎提示”，只给基于事件与角色情绪的灵活方向，不写死台词、地点、日程或剧情；日记侧已在 2026-06-26 改为纯第一人称总结。
 6. **自由配图命令**：新增 `/配图`，并加入 `/画图`、`/绘图`、`/生图` 等同义词；该命令复用完整聊天上下文，但允许用户通过参数优先覆盖场景、视角、机位、远近和局部特写，不再套用 `/自拍` 的硬设定。
 7. **新场景上下文硬切换**：`/新场景` 不再只移动 `short_context_start`，而是清空模型侧未折叠对话历史和 checkpoint 摘要，同时在 `app_store.checkpoints` 中把边界推进到当前最新消息；旧聊天仍保留在 `chat_messages`，不影响后续 dream。
 8. **角色画风字段化**：`/画风 <画风名>` 可直接写入当前角色卡 `style`，不再要求命中画风池；`/画风 清空` 会把角色画风字段置空且生图不回退全局画风。dream 会把当前角色的非空画风补入全局画风池，WebUI 角色设定面板提供画风池下拉与手动输入。
@@ -239,7 +250,11 @@ telegram_comfyui_selfie/
 
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m compileall -q telegram_comfyui_selfie`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core -v`
-- 最新结果：`Ran 257 tests in 23.408s`，`OK`
+- `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m py_compile scripts\compare_llm_chat_prompts.py`
+- `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 scripts\compare_llm_chat_prompts.py --log "D:\workspace\python\SucyuBot_neo\data\logs\llm_debug - 副本.json" --output .tmp\llm_chat_prompt_compare.md`
+- 最新结果：`Ran 264 tests in 16.696s`，`OK`；脚本报告生成 `entries=10 sessions=2 pairs=8`
+- 工具 schema 当前紧凑 JSON 长度：`1898` 字符；chat 请求体 key 顺序为 `model, max_tokens, temperature, tools, tool_choice, messages`
+- 当前 `data/logs/llm_debug.json` 复跑 prompt 比对：报告生成 `.tmp\llm_chat_prompt_compare_current.md`，`entries=10 sessions=2 pairs=8`；两个会话所有 pair 的 `tools` / `tool_choice` / 非 prompt 请求参数均稳定，变化集中在 `messages`。
 - 真实 API 缓存探针：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。
 - 新增核心测试 `test_live_chat_context_cache_probe_uses_current_config_when_available`：使用当前配置文件中的模型连接信息，但运行态 state / SQLite / 用户日志均隔离在测试临时目录；通过真实 `handle_chat()` 链路连续回答三轮预设问题，assistant 回复采用真实 AI 返回，并在最终总结行输出三轮回复片段与缓存命中率。模型临时未返回可用回复时跳过；最近一次成功单测输出：`round1=0/2562 (0.00%)`、`round2=2560/2586 (98.99%)`、`round3=2560/2608 (98.16%)`。
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示
