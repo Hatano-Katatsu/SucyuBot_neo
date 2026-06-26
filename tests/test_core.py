@@ -2216,6 +2216,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertTrue(svc._short_context_reset_reason("换个话题，聊晚饭吧", time.time()))
         svc._reset_short_context(state, "用户显式切换或结束上一话题/场景")
         state["chat_history"].extend([
+            {"role": "system", "content": "照片历史（系统记录，不应混进对话上下文）"},
             {"role": "user", "content": "聊聊晚饭吃什么"},
             {"role": "assistant", "content": "今晚可以做点清淡的。"},
         ])
@@ -2298,6 +2299,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         svc._reset_short_context(state, "用户显式切换或结束上一话题/场景")
         reset_time = state["short_context_reset_time"]
         state["chat_history"].extend([
+            {"role": "system", "content": "照片历史（系统记录，不应混进对话上下文）"},
             {"role": "user", "content": "新场景在厨房准备晚饭"},
             {"role": "assistant", "content": "我把锅放到炉灶上。"},
         ])
@@ -2314,6 +2316,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         self.assertIn("厨房准备晚饭", dialog)
         self.assertNotIn("办公室加班", dialog)
+        self.assertNotIn("照片历史（系统记录", dialog)
         self.assertIn("厨房里准备晚饭", photos)
         self.assertNotIn("办公室灯下自拍", photos)
 
@@ -3250,7 +3253,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("图片已生成并发送", result)
             planner_system = svc._call_llm.await_args.args[0]
             planner_user = svc._call_llm.await_args.args[1]
-            self.assertIn("完整聊天上下文", planner_system)
+            self.assertIn("短期连续性", planner_system)
             self.assertIn("用户本次 /配图 后输入", planner_system)
             self.assertIn("slot/外观/偏好只作为参考", planner_system)
             self.assertIn("刚才我们在书店门口躲雨", planner_user)
@@ -3273,6 +3276,57 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 clothing_off="",
                 orientation="3:2",
             )
+
+        asyncio.run(run())
+
+    def test_roleplay_image_planner_uses_slim_continuity_and_photo_summary(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            long_user = "我们刚从餐厅坐回卡座，" + ("filler " * 40) + "END_USER_MARKER"
+            long_assistant = "我抬眼看了看你，指尖还停在倒计时界面上，" + ("detail " * 40) + "END_BOT_MARKER"
+            state["chat_history"] = [
+                {"role": "system", "content": "照片历史（系统记录，不应混进 roleplay-image-plan 连续性）"},
+                {"role": "user", "content": long_user},
+                {"role": "assistant", "content": long_assistant},
+            ]
+            state["sent_photos_history"] = [{
+                "timestamp": time.time(),
+                "scene": "restaurant booth smile " + ("scene " * 30) + "END_PHOTO_MARKER",
+                "caption": "",
+                "appearance": "light blue round glasses, shell bracelet",
+                "source_description": "原始描述不该出现在瘦身后的图片摘要里",
+                "view": "third",
+            }]
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "A close third-person shot across a restaurant booth.",
+                "view": "third",
+                "aspect_ratio": "2:3",
+                "character_location": "restaurant",
+                "user_location": "with_user",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            }, ensure_ascii=False))
+
+            await plan_roleplay_image(svc, sid, intent="坐回座位戳脸倒计时")
+
+            planner_user = svc._call_llm.await_args.args[1]
+            self.assertIn("短期连续性:", planner_user)
+            self.assertIn("最近已发图片摘要:", planner_user)
+            self.assertNotIn("照片历史（系统记录", planner_user)
+            self.assertNotIn("原始描述:", planner_user)
+            self.assertNotIn("外貌:", planner_user)
+            self.assertNotIn("END_USER_MARKER", planner_user)
+            self.assertNotIn("END_BOT_MARKER", planner_user)
+            self.assertNotIn("END_PHOTO_MARKER", planner_user)
 
         asyncio.run(run())
 

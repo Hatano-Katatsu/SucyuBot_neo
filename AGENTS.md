@@ -167,7 +167,7 @@ telegram_comfyui_selfie/
 - `clothing_off` 对衣物/裸体默认仍是“仅本图生效”；但当它明确命中当前已穿戴的可持久配饰（如眼镜、项链、耳环、发夹）时，生图成功后会把该配饰从当前穿搭中移除，避免下一张图被稳定外貌重新加回去。
 - OC 不把中文名、昵称或作品名塞进视觉 identity；只有已知公开角色才注入角色/作品 tag。
 - 亲密场景默认走 POV，只允许用户/伴侣身体局部入画；除非用户明确要求拍照、录像或对镜，才允许设备入画。
-- `/配图`（同义词 `/画图`、`/绘图` 等）按当前聊天场景生成图片，不强制自拍或看镜头；命令后的参数作为最高优先级场景/视角/机位/远近/局部特写要求，但规划器仍会参考完整聊天上下文、照片历史、世界状态和记忆。
+- `/配图`（同义词 `/画图`、`/绘图` 等）按当前聊天场景生成图片，不强制自拍或看镜头；命令后的参数作为最高优先级场景/视角/机位/远近/局部特写要求，但规划器只消费瘦身后的短期连续性、最近已发图片摘要、世界状态和记忆，不再直接吞完整聊天流水。
 - 画幅只允许 2:3（竖版）和 3:2（横版），模拟真实相机画幅；负向提示词包含 `split screen, grid, multiple panels, collage` 防止四宫格/分格出图。
 
 ### Telegram 输入增强
@@ -228,6 +228,7 @@ telegram_comfyui_selfie/
 14. **同空间视角终裁**：`image_planning.py` 新增 `_resolve_roleplay_view()`，对 LLM 给出的 `requested_view/planned_view` 做最终业务校正：同空间且无明确自拍/对镜/录像信号时，不再允许普通配图落到 `selfie/mirror`；普通同空间单人场景改压到 `third`，近距离互动改压到 `pov`，明确“帮忙拍一张”改为 `portrait`，并在 `user_location` 缺失时回退使用持久 `co_located` 状态。新增 3 条回归测试锁定这三种分支。
 15. **自动配图 judge 视角收敛**：定位到 `chat:image-judge` 仍会把“凑近镜头确认论文”这类同空间日常陪伴场景错误写成 `view=selfie`，而线上服务进程启动时间早于 `b4d75ac`，当天日志仍在跑旧代码。`chat_context.py` 新增 `_sanitize_judge_view_hint()`：自动配图判断器只有在文本里出现明确自拍/对镜/拿手机拍/帮忙拍照等硬相机约束时才保留 `view`，其余普通日常场景一律清空，交给后续 `plan_roleplay_image()` 再按同空间规则判成 `pov/third/portrait`。同时把 `JUDGE` 日志补充为可打印 `view=...` 方便排查，并新增 3 条测试覆盖“论文场景误自拍清空 / 明确自拍保留 / judge 误传 selfie 时 planner 仍强制改成 pov”。
 16. **摘配饰持久化兜底**：排查出“用户让角色摘掉眼镜，下一张图又戴回去”是因为首张图只通过 `clothing_off` 临时剥离了 `effective_appearance`，却没有改写当前衣柜。`service.py` 新增图片后处理：当 `tool_generate_image()` 的 `clothing_off` 明确命中当前已穿戴的可持久配饰（眼镜/项链/耳环/发夹等）时，生图成功后自动从 `wardrobe.accessory` / `dynamic_appearance` 移除，并记录 `WARDROBE` 日志；`chat_context.py` 同步强化 `change_appearance` 提示，明确“摘掉并继续不戴”的配饰也必须视作持久外观变更。新增 2 条回归测试覆盖“摘眼镜后下一张图不再戴回 / 临时脱开衫仍只影响单图”。
+17. **`roleplay-image-plan` 输入瘦身**：`image_planning.py` 将角色扮演生图规划器从“完整对话上下文 + 详细照片历史”收敛为“短期连续性 + 最近已发图片摘要”。新的 `format_planning_continuity_context()` 只读取最近 `user/assistant` 消息、过滤 `system` 照片历史并按条截断；新的 `format_recent_photo_dedup_context()` 只保留最近图片的时间/视角/scene 摘要，不再重复注入原始描述和整段外貌快照。这样避免照片历史先混进对话块、再在图片块重复一次，同时让长期记忆检索 query 也随之稳定下来。新增回归测试覆盖“照片历史 system 不混进连续性 / planner user prompt 不再携带原始描述与长尾文本”。
 
 ## 今日变更（2026-06-24）
 
@@ -252,10 +253,10 @@ telegram_comfyui_selfie/
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m compileall -q telegram_comfyui_selfie`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core -v`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m py_compile scripts\compare_llm_chat_prompts.py`
-- `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 scripts\compare_llm_chat_prompts.py --log "D:\workspace\python\SucyuBot_neo\data\logs\llm_debug - 副本.json" --output .tmp\llm_chat_prompt_compare.md`
-- 最新结果：`Ran 264 tests in 5.834s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试，脚本报告生成 `entries=10 sessions=2 pairs=8`
+- `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 scripts\compare_llm_chat_prompts.py --log "data\logs\llm_debug.json" --output .tmp\llm_chat_prompt_compare_current.md`
+- 最新结果：`Ran 265 tests in 6.336s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
 - 工具 schema 当前紧凑 JSON 长度：`1898` 字符；chat 请求体 key 顺序为 `model, max_tokens, temperature, tools, tool_choice, messages`
-- 当前 `data/logs/llm_debug.json` 复跑 prompt 比对：报告生成 `.tmp\llm_chat_prompt_compare_current.md`，`entries=10 sessions=2 pairs=8`；两个会话所有 pair 的 `tools` / `tool_choice` / 非 prompt 请求参数均稳定，变化集中在 `messages`。
+- 当前 `data/logs/llm_debug.json` 复跑 prompt 比对：报告生成 `.tmp\llm_chat_prompt_compare_current.md`，`entries=10 sessions=3 pairs=7`；三个会话所有 pair 的 `tools` / `tool_choice` / 非 prompt 请求参数均稳定，变化集中在 `messages`。
 - 真实 API 缓存探针：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。
 - 额外真实 API 缓存探针 `test_live_chat_context_cache_probe_uses_current_config_when_available`：默认跳过；设置 `SUCYUBOT_TEST_LIVE_CACHE_PROBE=1` 后才使用当前配置文件中的模型连接信息，通过真实 `handle_chat()` 链路连续回答三轮预设问题并输出缓存命中率。运行态 state / SQLite / 用户日志均隔离在测试临时目录；模型临时未返回可用回复时跳过。
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示

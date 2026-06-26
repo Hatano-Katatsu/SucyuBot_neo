@@ -373,15 +373,47 @@ def _normalize_image_plan_scene(parsed: dict[str, Any], fallback_scene: str, str
     return scene
 
 
+def _compact_context_text(text: Any, max_chars: int = 0) -> str:
+    compact = re.sub(r"\s+", " ", str(text or "")).strip()
+    if max_chars > 0 and len(compact) > max_chars:
+        compact = compact[: max_chars - 3].rstrip() + "..."
+    return compact
+
+
 def format_dialog_context(service: Any, state: dict[str, Any], session_id: str = "", limit: int = 12) -> str | None:
     lines = []
     for msg in service._active_chat_history(state, limit):
+        if msg.get("role") not in ("user", "assistant"):
+            continue
         content = (msg.get("content") or "").strip()
         if not content:
             continue
         role = "用户" if msg.get("role") == "user" else "角色"
         lines.append(f"{role}: {content}")
 
+    return "\n".join(lines) if lines else None
+
+
+def format_planning_continuity_context(
+    service: Any,
+    state: dict[str, Any],
+    session_id: str = "",
+    limit: int = 8,
+    max_lines: int = 4,
+    max_chars: int = 140,
+) -> str | None:
+    lines = []
+    for msg in service._active_chat_history(state, limit):
+        role = msg.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = _compact_context_text(msg.get("content"), max_chars=max_chars)
+        if not content:
+            continue
+        role_label = "用户" if role == "user" else "角色"
+        lines.append(f"{role_label}: {content}")
+    if max_lines > 0:
+        lines = lines[-max_lines:]
     return "\n".join(lines) if lines else None
 
 
@@ -408,6 +440,31 @@ def format_sent_photo_context(service: Any, state: dict[str, Any], session_id: s
         if appearance:
             parts.append(f"外貌: {appearance}")
         lines.append("；".join(parts))
+    return "\n".join(lines)
+
+
+def format_recent_photo_dedup_context(
+    service: Any,
+    state: dict[str, Any],
+    session_id: str = "",
+    limit: int = 3,
+    max_chars: int = 140,
+) -> str | None:
+    reset_time = session_schema.get_short_context_reset_time(state)
+    photos = [
+        photo for photo in session_schema.get_sent_photos_history(state)
+        if service._within(photo.get("timestamp", 0), since=reset_time)
+    ][-limit:]
+    if not photos:
+        return None
+    lines = []
+    tz = service._session_tz(session_id)
+    for photo in photos:
+        ts = photo.get("timestamp", 0)
+        stamp = datetime.fromtimestamp(ts, tz).strftime("%H:%M") if ts else "未知时间"
+        view = (photo.get("view") or "").strip() or "未知视角"
+        scene = _compact_context_text(photo.get("scene"), max_chars=max_chars) or "未记录"
+        lines.append(f"[{stamp}] {view}: {scene}")
     return "\n".join(lines)
 
 
@@ -481,9 +538,9 @@ async def plan_roleplay_image(
         bot_name = service._get_session_cfg(session_id, "bot_name", "蕾伊")
         bot_self_name = service._get_session_cfg(session_id, "bot_self_name", "我")
         role_name = service._get_session_cfg(session_id, "role_name", "魅魔")
-    dialog_context = format_dialog_context(service, state, session_id)
-    photo_context = format_sent_photo_context(service, state, session_id)
-    memory_query = "\n".join(part for part in (intent, mood, must_include, prompt, dialog_context or "") if part)
+    continuity_context = format_planning_continuity_context(service, state, session_id)
+    photo_context = format_recent_photo_dedup_context(service, state, session_id)
+    memory_query = "\n".join(part for part in (intent, mood, must_include, prompt, continuity_context or "") if part)
     memory_context = ""
     if hasattr(service, "_long_term_memory_context"):
         memory_context = service._long_term_memory_context(session_id, memory_query, limit=8)
@@ -515,9 +572,9 @@ async def plan_roleplay_image(
         recent = history[-3:]
         location_trail = "、".join(item.get("label", item.get("key", "?")) for item in recent if isinstance(item, dict))
 
-    intimate_hint = _detect_intimate_context(intent, mood, prompt, dialog_context or "")
-    device_hint = _detect_device_context(intent, mood, prompt, dialog_context or "")
-    clothing_off_hint = _infer_clothing_off_fallback(intent, mood, prompt, dialog_context or "")
+    intimate_hint = _detect_intimate_context(intent, mood, prompt, continuity_context or "")
+    device_hint = _detect_device_context(intent, mood, prompt, continuity_context or "")
+    clothing_off_hint = _infer_clothing_off_fallback(intent, mood, prompt, continuity_context or "")
     user_gender = service._get_user_gender(session_id) if hasattr(service, "_get_user_gender") else "male"
     user_g_zh = "女性" if user_gender == "female" else "男性"
 
@@ -545,10 +602,10 @@ async def plan_roleplay_image(
     else:
         if free_composition:
             system += (
-                f"你是角色扮演配图导演，负责把完整聊天上下文和用户在 /配图 后输入的画面要求整合成最终画面。\n"
+                f"你是角色扮演配图导演，负责把短期连续性、用户在 /配图 后输入的画面要求和世界/角色状态整合成最终画面。\n"
                 f"角色身份: 当前角色是「{bot_name}」（{role_name}），优先使用「{bot_self_name}」作为自称；不要写成其他默认角色。\n"
                 "优先级: 用户本次 /配图 后输入的场景、视角、机位、远近、焦段、构图、部位特写或道具要求最高；"
-                "最近聊天上下文、照片历史、世界状态和记忆用于补全人物、情绪、地点和连续性；"
+                "短期连续性、最近已发图片摘要、世界状态和记忆用于补全人物、情绪、地点和连续性；"
                 "slot/外观/偏好只作为参考，不能覆盖用户本次明确要求。\n"
                 "自由构图: 不强制自拍、不强制看镜头、不强制 portrait/pov；允许低机位、俯拍、远景、极近特写、部位特写、背影、环境承接、道具或手机/相机入画。"
                 "若用户没有指定构图，再根据当前聊天场景自然选择。"
@@ -567,7 +624,7 @@ async def plan_roleplay_image(
         f"季节与自然光: {time_light}。\n"
         f"{light_guard}\n"
         f"{spatial_line}"
-        "你要综合用户最近的话、聊天模型的意图、最近发过的照片、时间天气、外貌和安全约束，"
+        "你要综合用户最近的话、聊天模型的意图、最近已发图片摘要、时间天气、外貌和安全约束，"
         "输出适合发给用户的一张图。不要输出英文画图标签。\n"
         "公开场合必须穿着得体；私密场合可以更放松。避免和最近照片重复。"
     )
@@ -580,7 +637,7 @@ async def plan_roleplay_image(
             "自行判断【此刻用户是否和角色在同一空间】，并据此决定视角——"
             "判断同处则优先 pov 或近距离 third 同框互动；判断异地、独处或仅线上联系才用 selfie/mirror。"
         )
-        if dialog_context:
+        if continuity_context:
             system += (
                 f"\n{world_context}\n"
                 "以上“角色当前所在/接下来动线”只是日常背景参考。当前正在进行的对话场景优先级最高："
@@ -739,10 +796,10 @@ async def plan_roleplay_image(
             f"聊天模型画面草案: {prompt or '无'}\n"
             f"用户指定视角: {requested_view or '未指定'}"
         )
-    if dialog_context:
-        user += f"\n\n对话上下文:\n{dialog_context}"
+    if continuity_context:
+        user += f"\n\n短期连续性:\n{continuity_context}"
     if photo_context:
-        user += f"\n\n最近发过的照片:\n{photo_context}"
+        user += f"\n\n最近已发图片摘要:\n{photo_context}"
     if memory_context:
         user += f"\n\n长期记忆:\n{memory_context}"
 
@@ -768,7 +825,7 @@ async def plan_roleplay_image(
             intent=intent,
             mood=mood,
             prompt=prompt,
-            dialog_context=dialog_context or "",
+            dialog_context=continuity_context or "",
         )
         if fallback_view == "portrait":
             device_hint = False
@@ -838,7 +895,7 @@ async def plan_roleplay_image(
         intent=intent,
         mood=mood,
         prompt=prompt,
-        dialog_context=dialog_context or "",
+        dialog_context=continuity_context or "",
     )
     if final_view == "portrait":
         device_in_frame = False
