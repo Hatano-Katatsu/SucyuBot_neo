@@ -15,13 +15,35 @@
 
 ## 快速开始
 
-### 1. 安装依赖
+### 1. 安装 ComfyUI 插件
+
+本项目依赖 [ComfyUI-AnimaTool](https://github.com/Moeblack/ComfyUI-AnimaTool) 插件，需将其放到 ComfyUI 的 `custom_nodes` 目录下：
+
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/Moeblack/ComfyUI-AnimaTool.git
+pip install -r ComfyUI-AnimaTool/requirements.txt
+```
+
+或使用 ComfyUI Manager 搜索 "Anima Tool" 安装。
+
+本项目根目录下的 `ComfyUI-AnimaTool/` 即为该插件的副本，可直接复制到 `ComfyUI/custom_nodes/` 下使用。
+
+确保以下模型文件已放置到 ComfyUI 对应目录（[Hugging Face 下载](https://huggingface.co/circlestone-labs/Anima)）：
+
+| 文件 | 路径 | 说明 |
+|------|------|------|
+| `anima-preview.safetensors` | `models/diffusion_models/` | Anima UNET |
+| `qwen_3_06b_base.safetensors` | `models/text_encoders/` | Qwen3 CLIP |
+| `qwen_image_vae.safetensors` | `models/vae/` | VAE |
+
+### 2. 安装依赖
 
 ```bash
 pip install -r requirements.txt   # 只有 aiohttp
 ```
 
-### 2. 准备配置（每人各自一份，不进 git）
+### 3. 准备配置（每人各自一份，不进 git）
 
 ```bash
 cp config.example.json data/config.json        # Windows PowerShell: Copy-Item config.example.json data\config.json
@@ -37,7 +59,7 @@ cp config.example.json data/config.json        # Windows PowerShell: Copy-Item c
 - `unet_model` / `clip_model` / `vae_model`：需与你 ComfyUI 中实际存在的模型文件名一致
 - 需要限制使用者时，设置 `allowed_chat_ids`
 
-### 3. 启动
+### 4. 启动
 
 ```bash
 python -m telegram_comfyui_selfie --config data/config.json --state data/state.json --web-port 8787

@@ -1,0 +1,204 @@
+{
+  "name": "generate_anima_image",
+  "description": "使用 Anima（circlestone-labs/Anima）在本地 ComfyUI 生成二次元/插画向图片。调用方应先按 Anima 规范生成结构化字段（顺序：[质量/元数据/年份/安全] [人数] [角色] [作品] [画师] [风格] [外观] [标签] [环境] [自然语言]；自然语言(nltags)建议放最后），并保证安全标签明确（safe/sensitive/nsfw/explicit）。多角色时：所有角色外观统一写在 appearance 中（逗号分隔），角色名统一写在 character 中，角色与外观的对应关系在自然语言(nltags)中明确描述。支持并行调用：生成多张图时可同时发起多个请求，无需串行等待。",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "prompt_hint": {
+        "type": "string",
+        "description": "可选：人类可读的简短需求摘要，仅用于日志/回显；不会直接拼进提示词。"
+      },
+      "aspect_ratio": {
+        "type": "string",
+        "description": "可选：仅指定比例时自动推算 width/height（约 1MP）。格式如 '16:9'。支持 21:9 到 9:21 的常用比例。",
+        "enum": [
+          "21:9",
+          "2:1",
+          "16:9",
+          "16:10",
+          "5:3",
+          "3:2",
+          "4:3",
+          "1:1",
+          "3:4",
+          "2:3",
+          "3:5",
+          "10:16",
+          "9:16",
+          "1:2",
+          "9:21"
+        ]
+      },
+      "target_megapixels": {
+        "type": "number",
+        "description": "当只给 aspect_ratio 时，目标像素数（MP）。默认 1.0。",
+        "default": 1.0
+      },
+      "width": {
+        "type": "integer",
+        "description": "宽度（像素）。必须是 16 的倍数（如 512/768/1024/1152 等），否则会自动向上对齐。建议 width×height 约 1MP。若提供 width/height 则优先使用它们。",
+        "minimum": 64
+      },
+      "height": {
+        "type": "integer",
+        "description": "高度（像素）。必须是 16 的倍数（如 512/768/1024/1152 等），否则会自动向上对齐。建议 width×height 约 1MP。若提供 width/height 则优先使用它们。",
+        "minimum": 64
+      },
+      "round_to": {
+        "type": "integer",
+        "description": "宽高对齐倍数。Anima 基于 Cosmos 架构，VAE 缩放 8 倍后需被 spatial_patch_size=2 整除，所以默认 16。不建议改小。",
+        "default": 16,
+        "minimum": 16
+      },
+      "batch_size": {
+        "type": "integer",
+        "description": "批量大小。",
+        "default": 1,
+        "minimum": 1
+      },
+      "seed": {
+        "type": "integer",
+        "description": "随机种子。缺省则随机。",
+        "minimum": 0
+      },
+      "steps": {
+        "type": "integer",
+        "description": "采样步数，推荐 30-50，影响画面精细度。画面复杂时（多人物、精细背景、复杂构图）应取较高值。",
+        "default": 35,
+        "minimum": 20,
+        "maximum": 60
+      },
+      "cfg": {
+        "type": "number",
+        "description": "CFG 引导强度，推荐 4-5，影响提示词遵循度。画面复杂时（多人物、细节丰富）应取较高值。",
+        "default": 4,
+        "minimum": 3,
+        "maximum": 8
+      },
+      "sampler_name": {
+        "type": "string",
+        "description": "采样器。推荐 er_sde；也可 euler_a；想更发散可 dpmpp_2m_sde_gpu。",
+        "default": "er_sde"
+      },
+      "scheduler": {
+        "type": "string",
+        "description": "调度器。默认 simple。",
+        "default": "simple"
+      },
+      "denoise": {
+        "type": "number",
+        "description": "降噪强度。文生图通常 1.0。",
+        "default": 1.0,
+        "minimum": 0,
+        "maximum": 1
+      },
+      "filename_prefix": {
+        "type": "string",
+        "description": "输出文件名前缀（SaveImage）。",
+        "default": "AnimaTool_"
+      },
+      "quality_meta_year_safe": {
+        "type": "string",
+        "description": "质量/元数据/年份/安全标签。必须明确 safe/sensitive/nsfw/explicit 之一。示例：'masterpiece, best quality, highres, newest, year 2025, sensitive'"
+      },
+      "count": {
+        "type": "string",
+        "description": "人数标签，如 '1girl' / '2girls' / '1boy' / '1other'。"
+      },
+      "character": {
+        "type": "string",
+        "description": "角色名（可含括号作品信息），如 'hatsune miku' 或 'yunli (honkai star rail)'。",
+        "default": ""
+      },
+      "series": {
+        "type": "string",
+        "description": "作品/系列名，如 'vocaloid' / 'honkai star rail'。",
+        "default": ""
+      },
+      "appearance": {
+        "type": "string",
+        "description": "角色外观标签：发型发色、眼睛、服装、饰品等。多角色时所有角色外观写在一起，用逗号分隔。",
+        "default": ""
+      },
+      "artist": {
+        "type": "string",
+        "description": "画师标签，必须以 @ 开头。仅在用户明确提到画师或特定画风时才填写；无明确需求时留空，不默认追加画师。支持多画师混合（如 '@fkey, @jima'），但稳定性会下降。",
+        "default": ""
+      },
+      "style": {
+        "type": "string",
+        "description": "画风/渲染倾向（可选）。",
+        "default": ""
+      },
+      "tags": {
+        "type": "string",
+        "description": "核心 Danbooru 标签（逗号分隔）。建议把动作/构图/服装/表情/镜头等关键内容放这里。"
+      },
+      "nltags": {
+        "type": "string",
+        "description": "自然语言描述。多角色时在此写明每个角色的外观和服装归属。纯自然语言提示至少写 2 句话，过短可能产生意外结果。",
+        "default": ""
+      },
+      "environment": {
+        "type": "string",
+        "description": "环境与光影（可选）。",
+        "default": ""
+      },
+      "neg": {
+        "type": "string",
+        "description": "负面提示词。建议包含：worst quality/low quality/score_1..3/blurry/jpeg artifacts/手脚崩坏反咒/text/watermark/logo 等，并加入与安全标签相反约束。",
+        "default": "worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, bad anatomy, bad hands, bad feet, extra fingers, missing fingers, extra toes, text, watermark, logo"
+      },
+      "positive": {
+        "type": "string",
+        "description": "可选：直接提供最终正面提示词（将覆盖结构化拼接）。通常不建议，除非你非常清楚要写什么。",
+        "default": ""
+      },
+      "negative": {
+        "type": "string",
+        "description": "可选：负面提示词别名（等价于 neg）。",
+        "default": ""
+      },
+      "clip_name": {
+        "type": "string",
+        "description": "可选：覆盖 CLIP 文件名（默认 qwen_3_06b_base.safetensors）。"
+      },
+      "unet_name": {
+        "type": "string",
+        "description": "可选：覆盖 UNET 文件名（默认 anima-preview.safetensors）。"
+      },
+      "vae_name": {
+        "type": "string",
+        "description": "可选：覆盖 VAE 文件名（默认 qwen_image_vae.safetensors）。"
+      },
+      "loras": {
+        "type": "array",
+        "description": "可选：多 LoRA（仅 UNET，不修改 CLIP）。会在 UNETLoader 与 KSampler 之间按顺序链式注入 LoraLoaderModelOnly。重要：ComfyUI 会对 lora_name 做枚举校验，必须与 /models/loras 返回的字符串完全一致（含子目录分隔符）。",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "LoRA 文件名（位于 ComfyUI/models/loras/ 下，可包含子目录）。必须与 ComfyUI 接口 GET /models/loras 返回的条目逐字一致。Windows 下 /models/loras 通常返回反斜杠路径（例如 `_Anima\\cosmic_xxx.safetensors`）；如果你在 JSON 里手写，需要写成 `_Anima\\\\cosmic_xxx.safetensors`（`\\\\` 表示一个反斜杠）。建议直接从 /models/loras 复制，或使用本工具的 list_anima_models(model_type=\"loras\")（仅返回带同名 .json sidecar 元数据的 LoRA）。"
+            },
+            "weight": {
+              "type": "number",
+              "description": "LoRA UNET 权重。",
+              "default": 1.0
+            }
+          },
+          "required": [
+            "name"
+          ]
+        }
+      }
+    },
+    "required": [
+      "quality_meta_year_safe",
+      "count",
+      "tags",
+      "neg"
+    ],
+    "additionalProperties": false
+  }
+}
