@@ -15,7 +15,7 @@ from telegram_comfyui_selfie import appearance as appearance_rules
 from telegram_comfyui_selfie import character_card
 from telegram_comfyui_selfie import session_schema
 from telegram_comfyui_selfie.config_store import flatten_config, load_simple_yaml
-from telegram_comfyui_selfie.generation import PromptSlots
+from telegram_comfyui_selfie.generation import PromptSlots, _build_animatool_turbo_payload
 from telegram_comfyui_selfie.image_planning import _detect_intimate_context, _detect_nudity_context, _infer_clothing_off_fallback, format_dialog_context, format_sent_photo_context, normalize_scene_visual_subject, plan_animatool_slots, plan_roleplay_image
 from telegram_comfyui_selfie.commands import (
     SESSION_GLOBAL_STATE_KEYS,
@@ -2229,7 +2229,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("聊聊晚饭吃什么", packed)
         self.assertNotIn("卧室窗边", packed)
 
-    def test_new_scene_command_clears_prompt_history_and_checkpoint_but_keeps_dream_source(self):
+    def test_new_scene_command_checkpoints_then_clears_prompt_history_and_keeps_dream_source(self):
         async def run():
             svc = self.make_service()
             sid = "telegram:123"
@@ -2242,13 +2242,30 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             ids = svc.app_store.append_messages(sid, key, old_messages)
             state = svc._get_session_state(sid)
             session_schema.set_chat_history(state, old_messages)
-            svc.app_store.upsert_checkpoint(sid, key, "旧 checkpoint：卧室窗边未完成拥抱", ids[-1])
-            session_schema.set_checkpoint_summary(state, "旧 checkpoint：卧室窗边未完成拥抱")
-            session_schema.set_checkpoint_message_id(state, ids[-1])
+            svc.app_store.upsert_checkpoint(sid, key, "更早 checkpoint：刚进卧室", 0)
+            session_schema.set_checkpoint_summary(state, "更早 checkpoint：刚进卧室")
+            session_schema.set_checkpoint_message_id(state, 0)
+            captured_checkpoint = {}
+
+            async def fake_summarize(session_id_arg, previous, msgs):
+                captured_checkpoint["session_id"] = session_id_arg
+                captured_checkpoint["previous"] = previous
+                captured_checkpoint["messages"] = list(msgs)
+                return "切换前 checkpoint：卧室窗边未完成拥抱"
+
+            svc._summarize_checkpoint = fake_summarize
+            svc._extract_long_term_memories_from_messages = AsyncMock()
 
             await svc.cmd_new_scene(1, sid, "")
 
             state = svc._get_session_state(sid)
+            self.assertEqual(captured_checkpoint["session_id"], sid)
+            self.assertIn("更早 checkpoint", captured_checkpoint["previous"])
+            self.assertEqual([m.get("content") for m in captured_checkpoint["messages"]], [
+                "上一幕还在卧室窗边等我",
+                "我靠在卧室窗边看着你。",
+            ])
+            svc._extract_long_term_memories_from_messages.assert_awaited_once()
             self.assertEqual(session_schema.get_chat_history(state), [])
             self.assertEqual(session_schema.get_checkpoint_summary(state), "")
             self.assertEqual(session_schema.get_checkpoint_message_id(state), ids[-1])
@@ -2261,7 +2278,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("短期注意规则", packed)
             self.assertIn("新场景聊晚饭", packed)
             self.assertNotIn("卧室窗边", packed)
-            self.assertNotIn("旧 checkpoint", packed)
+            self.assertNotIn("切换前 checkpoint", packed)
 
             captured = {}
 
@@ -3681,7 +3698,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._call_llm = AsyncMock(return_value=json.dumps({
                 "quality_meta_year_safe": "masterpiece, best quality, highres, newest, year 2025, safe",
                 "count": "1girl",
-                "tags": "A girl waits by a rainy restaurant window with wet pavement outside.",
+                "nltag": "A girl waits by a rainy restaurant window with wet pavement outside.",
                 "neg": "worst quality, low quality",
             }, ensure_ascii=False))
             slots = PromptSlots(
@@ -3696,10 +3713,10 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                     "properties": {
                         "quality_meta_year_safe": {"description": "quality and safety"},
                         "count": {"description": "count"},
-                        "tags": {"description": "natural language scene"},
+                        "nltag": {"description": "natural language scene"},
                         "neg": {"description": "negative prompt"},
                     },
-                    "required": ["quality_meta_year_safe", "count", "tags"],
+                    "required": ["quality_meta_year_safe", "count", "nltag"],
                 }
             }
 
@@ -3711,9 +3728,41 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             system_prompt = svc._call_llm.await_args.args[0]
             self.assertIn("当前天气: 小雨 18 C", system_prompt)
             self.assertIn("tags 必须自然体现当前天气", system_prompt)
+            self.assertIn("不要输出 neg", system_prompt)
             self.assertIn("湿痕", system_prompt)
+            self.assertNotIn("neg", payload)
+            self.assertIn("nltag", payload)
+            self.assertTrue(payload["nltag"].endswith("no text, no logo, no ui, no mosaic, uncensored"))
 
         asyncio.run(run())
+
+    def test_animatool_payload_drops_neg_and_appends_nltag_suffix(self):
+        svc = self.make_service()
+        slots = PromptSlots(
+            scene="A girl reads by the window.",
+            quality="masterpiece",
+            count="1girl",
+            effective_appearance="school uniform",
+            negative="bad hands",
+        )
+        schema = {
+            "parameters": {
+                "properties": {
+                    "quality_meta_year_safe": {"description": "quality and safety"},
+                    "count": {"description": "count"},
+                    "nltag": {"description": "natural language scene"},
+                    "neg": {"description": "negative prompt"},
+                },
+                "required": ["quality_meta_year_safe", "count", "nltag"],
+            }
+        }
+
+        payload = _build_animatool_turbo_payload(svc, slots, "positive prompt", "bad hands", 123, schema)
+
+        self.assertNotIn("neg", payload)
+        self.assertNotIn("negative", payload)
+        self.assertIn("nltag", payload)
+        self.assertTrue(payload["nltag"].endswith("no text, no logo, no ui, no mosaic, uncensored"))
 
     def test_image_planner_writes_back_location_when_unpinned(self):
         async def run():
@@ -5809,6 +5858,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         src = inspect.getsource(svc._summarize_checkpoint)
         self.assertIn("Do not invent", src)
         self.assertIn("literally stated", src)
+        self.assertIn("time anchors", src)
+        self.assertIn("deadlines", src)
 
     def test_memory_extractor_prompt_has_strong_grounding(self):
         """记忆提取 prompt 应包含明确的反编造规则约束。"""
@@ -5817,6 +5868,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         src = inspect.getsource(svc._extract_long_term_memories)
         self.assertIn("只从对话原文提取", src)
         self.assertIn("不要推断", src)
+        self.assertIn("时间节点", src)
+        self.assertIn("作为 event 记忆保存", src)
 
     def test_history_summary_prompt_has_grounding(self):
         """角色历史提要 prompt 应包含反幻觉约束。"""
@@ -5825,6 +5878,16 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         src = inspect.getsource(svc._generate_character_history_summary)
         self.assertIn("不要编造", src)
         self.assertIn("只基于日记原文", src)
+
+    def test_dream_memory_prompt_keeps_time_nodes_until_faded(self):
+        """dream 记忆整理应软约束过时时间节点，不是一过期就删。"""
+        svc = self.make_service()
+        import inspect
+        incremental = inspect.getsource(svc._incremental_organize_memories)
+        summarize = inspect.getsource(svc._summarize_all_memories)
+        self.assertIn("time nodes", incremental)
+        self.assertIn("fully faded", incremental)
+        self.assertIn("do not drop them merely", summarize)
 
     def test_scene_stale_hint_when_gap_exceeds_threshold(self):
         """场景断档感知: 距离上次对话超过阈值时在 system_dynamic 注入提示。"""

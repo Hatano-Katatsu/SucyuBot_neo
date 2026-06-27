@@ -11,7 +11,12 @@ import aiohttp
 
 from . import session_schema
 from .defaults import DEFAULT_CONFIG, WEEKDAY_NAMES
-from .generation import _infer_prompt_view
+from .generation import (
+    ANIMATOOL_NLTAG_FIELDS,
+    ANIMATOOL_NLTAG_SUFFIX,
+    _append_animatool_nltag_suffix,
+    _infer_prompt_view,
+)
 from .world_runtime import PLACE_TYPES
 
 logger = logging.getLogger(__name__)
@@ -104,7 +109,7 @@ def _build_animatool_turbo_hint(knowledge: dict[str, Any], schema: dict[str, Any
         + (f"\n{knowledge_text}\n" if knowledge_text else "")
         + ("\n内容字段:\n" + field_hint + "\n" if field_hint else "")
         + ("必填: " + ", ".join(content_required) + "\n" if content_required else "")
-        + "你的 scene → tags（英文自然语言），new_appearance_tags → appearance（danbooru 标签）。"
+        + "你的 scene → tags/nltag（英文自然语言），new_appearance_tags → appearance（danbooru 标签）。"
         + " 角色身份 → character/series（仅已知公开角色；OC 留空）。"
     )
 
@@ -980,7 +985,7 @@ async def plan_animatool_slots(
         ensure_ascii=False, indent=2,
     ) if content_fields else "（无内容字段）"
 
-    # 槽位信息（negative 不传给 LLM，由 LLM 根据 view 规则和 Knowledge 独立生成，代码层 slots.negative 兜底）
+    # 槽位信息：AnimaTool 走自然语言 nltag/tags，不再使用 neg 字段。
     prompt_view = _infer_prompt_view(slots.scene or "")
     slot_info = {
         "quality": slots.quality or "",
@@ -1050,14 +1055,12 @@ async def plan_animatool_slots(
         "- effective_appearance + one_shot_appearance → appearance\n"
         "- style_artist → artist（@ 开头，为空留空）\n"
         "- style_general → style\n"
-        "- scene → tags（改写成 3-5 句完整英文，把末尾的逗号标签堆融进句子，不要保留 Danbooru 逗号串）\n"
-        "- negative → neg\n\n"
-        "## 视角与 neg 规则（重要）\n"
-        "根据 view 字段决定 neg 内容：\n"
-        "- selfie/portrait/pov：画面中不得出现手机、相机、UI 界面、取景框、快门按钮等任何拍摄设备元素。"
-        "neg 必须包含 holding phone, visible phone, smartphone, viewfinder, phone screen, shutter button。\n"
-        "- mirror：允许镜子和镜中反射，但不得出现手机 UI。neg 包含 foreground person, second body, multiple reflections。\n"
-        "- 空/其他：如 scene 中无手机/镜子相关描述，同样抑制手机 UI 元素。\n\n"
+        "- scene → tags/nltag（改写成 3-5 句完整英文，把末尾的逗号标签堆融进句子，不要保留 Danbooru 逗号串）\n\n"
+        "## nltag 尾部规则（重要）\n"
+        "不要输出 neg 或 negative 字段；它们对 AnimaTool 无意义。"
+        f"必须在自然语言 tags/nltag 的最后追加: {ANIMATOOL_NLTAG_SUFFIX}。\n"
+        "selfie/portrait/pov 场景中，仍要在自然语言描述里避免手机、相机、UI 界面、取景框、快门按钮等拍摄设备元素；"
+        "mirror 场景允许镜子和镜中反射，但不要写手机 UI。\n\n"
         "## 时间与光线（重要，必须体现）\n"
         f"当前天气: {weather_text or '未知'}；当前时段: {time_period or '未知'}；光线参考: {time_light or '未知'}\n"
         f"{light_guard}\n"
@@ -1107,28 +1110,29 @@ async def plan_animatool_slots(
     if "count" in properties and not parsed.get("count"):
         parsed["count"] = slots.count or "1girl"
 
-    # neg：executor 不兜底默认负向，必须给全。补 Anima 质量负向 + 按评级联动（见 turbo_expert）。
-    neg = str(parsed.get("neg") or slots.negative or "").strip()
-    neg_low = neg.lower()
+    nltag_field = ""
+    for field in ANIMATOOL_NLTAG_FIELDS:
+        if field in content_required and field in properties:
+            nltag_field = field
+            break
+    if not nltag_field:
+        for field in ANIMATOOL_NLTAG_FIELDS:
+            if field in properties:
+                nltag_field = field
+                break
+    raw_nltag = next((str(parsed.get(field) or "").strip() for field in ANIMATOOL_NLTAG_FIELDS if str(parsed.get(field) or "").strip()), "")
+    if nltag_field:
+        parsed[nltag_field] = _append_animatool_nltag_suffix(raw_nltag or slots.scene or "")
+        for field in ANIMATOOL_NLTAG_FIELDS:
+            if field != nltag_field:
+                parsed.pop(field, None)
 
-    def _add_neg(*tags: str):
-        nonlocal neg, neg_low
-        for t in tags:
-            if t.lower() not in neg_low:
-                neg = f"{neg}, {t}" if neg else t
-                neg_low = neg.lower()
-
-    _add_neg("worst quality", "low quality", "score_1", "score_2", "score_3")
-    _add_neg("split screen", "grid", "multiple panels", "collage")
-    if safety_tag in ("safe", "sensitive"):
-        _add_neg("nsfw", "explicit")
-    else:
-        # nsfw/explicit：先剔除 LLM 照搬 turbo_expert 误加的 "uncensored"
-        # （它进负向 = 排斥无码、反而促成打码，与露骨内容矛盾），再补齐"要无码"的负向。
-        neg = ", ".join(t for t in (p.strip() for p in neg.split(",")) if t and t.lower() != "uncensored")
-        neg_low = neg.lower()
-        _add_neg("safe", "sensitive", "censored", "mosaic censoring", "pixel censoring", "bar censoring")
-    parsed["neg"] = neg
+    parsed.pop("neg", None)
+    parsed.pop("negative", None)
+    for field in ANIMATOOL_NLTAG_FIELDS:
+        if str(parsed.get(field) or "").strip():
+            parsed[field] = _append_animatool_nltag_suffix(str(parsed[field]))
+            break
 
     # character/series 对 OC 必须为空
     if not slots.character:

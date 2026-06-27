@@ -128,7 +128,7 @@ telegram_comfyui_selfie/
 - 照片历史是真正的历史 `system` 消息，保留到被正常历史裁剪为止，并参与 checkpoint 摘要。
 - 半稳定层变化时，如果未折叠历史达到 `context_window_message_limit / 2`，会异步强制 checkpoint 一次，近似恢复后续前缀稳定。
 - 天气、光线阶段、城市、角色身份和动线背景已从每轮 dynamic system 拆入 semistable；本轮用户位置仍保留在 dynamic tail，避免把用户当前位置缓存成旧状态。
-- `/新场景` / `/上下文重置` 会清空当前模型侧 `chat_history` 和 checkpoint 摘要，并把 checkpoint 边界推进到当前最新消息；SQLite `chat_messages` 不删除，后续 dream 仍会读取真实 `user/assistant` 对话。
+- `/新场景` / `/上下文重置` 会先对切换前未折叠上下文跑一次 checkpoint 摘要和记忆提取，再清空当前模型侧 `chat_history` 和 checkpoint 摘要，并把 checkpoint 边界推进到当前最新消息；SQLite `chat_messages` 不删除，后续 dream 仍会读取真实 `user/assistant` 对话。
 - 兼容部分 OpenAI 兼容端点把工具调用以 DSML 文本写进 `message.content` 的情况；聊天链路会提取 `<...DSML...invoke>` 为内部工具调用并清理残留标记，避免原始工具 XML/DSML 泄漏给用户。
 
 ### 记忆与角色历史
@@ -138,6 +138,7 @@ telegram_comfyui_selfie/
 - checkpoint 只负责近期已折叠对话连续性。
 - 角色历史提要只负责宏观关系/剧情阶段。
 - 长期记忆只负责高重要度稳定事实、偏好、边界和纠正。
+- 用户明确提到的未来/待完成时间节点在 checkpoint 记忆提取阶段通过提示词软约束保存为 `event`；dream 整理过时时间节点时，只有事件已解决/取消/被替代，或已从近期日记、checkpoint 和当前窗口完全淡出，才删除或合并。
 - 手动记忆（`kind=manual`）不被自动整理删除。
 
 ### 角色系统
@@ -169,6 +170,7 @@ telegram_comfyui_selfie/
 - 亲密场景默认走 POV，只允许用户/伴侣身体局部入画；除非用户明确要求拍照、录像或对镜，才允许设备入画。
 - `/配图`（同义词 `/画图`、`/绘图` 等）按当前聊天场景生成图片，不强制自拍或看镜头；命令后的参数作为最高优先级场景/视角/机位/远近/局部特写要求，但规划器只消费瘦身后的短期连续性、最近已发图片摘要、世界状态和记忆，不再直接吞完整聊天流水。
 - 画幅只允许 2:3（竖版）和 3:2（横版），模拟真实相机画幅；负向提示词包含 `split screen, grid, multiple panels, collage` 防止四宫格/分格出图。
+- AnimaTool Turbo 路径不再提交 `neg` / `negative` 字段；自然语言 `nltag` / `tags` 尾部统一追加 `no text, no logo, no ui, no mosaic, uncensored`。
 
 ### Telegram 输入增强
 
@@ -199,6 +201,14 @@ telegram_comfyui_selfie/
 - 长期记忆不写临时服装、上一轮场景台词、一次性道具；这些属于短期上下文、衣柜或照片历史。
 - fire-and-forget `asyncio.create_task` 内异常可能被静默吞掉；排查生图/推送失败优先看 service log。
 - `_get_llm_value("chat", "temperature")` 的 legacy 回退会落到 `llm_temperature_scene`，除非 `chat_llm_temperature` 显式设置。
+
+## 今日变更（2026-06-27）
+
+1. **checkpoint 时间节点软约束**：`_summarize_checkpoint()` 追加提示词规则，要求保留用户明确提到的日期、几点、期限、倒计时、约定时间和相对时间节点；`_extract_long_term_memories()` 在 checkpoint 来源下允许把跨场景仍有影响的时间节点保存为 `event`，不新增独立管线。
+2. **dream 过时时间节点清理策略**：`_incremental_organize_memories()` 与 `_summarize_all_memories()` 的整理 prompt 约束为“过时不等于立刻删除”；只有事件已解决、取消、被替代，或从近期日记/checkpoint/当前窗口完全淡出时，才更新、合并或删除相关时间节点记忆。
+3. **新场景前置 checkpoint**：`/新场景` 调用 `_checkpoint_current_context_before_reset()`，先处理切换前未折叠上下文与记忆提取，再清空当前 `chat_history`、checkpoint 摘要和短期场景状态；原始 SQLite `chat_messages` 仍保留给 dream。
+4. **AnimaTool Turbo 去 neg**：`plan_animatool_slots()`、`_build_animatool_turbo_payload()` 和 `_post_animatool()` 均会剔除 `neg` / `negative` 字段，并把 `no text, no logo, no ui, no mosaic, uncensored` 追加到自然语言 `nltag` / `tags` 尾部；同时兼容 `nltag`、`nl_tag`、`nl_tags`、`tags` 字段名。
+5. **回归测试**：新增/更新测试覆盖新场景前置 checkpoint、checkpoint 时间节点提示词、dream 时间节点淡出清理提示词、AnimaTool nltag 尾部与去 neg 行为。
 
 ## 今日变更（2026-06-26）
 
@@ -254,9 +264,9 @@ telegram_comfyui_selfie/
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core -v`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m py_compile scripts\compare_llm_chat_prompts.py`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 scripts\compare_llm_chat_prompts.py --log "data\logs\llm_debug.json" --output .tmp\llm_chat_prompt_compare_current.md`
-- 最新结果：`Ran 265 tests in 6.336s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
+- 最新结果：`Ran 267 tests in 6.991s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
 - 工具 schema 当前紧凑 JSON 长度：`1898` 字符；chat 请求体 key 顺序为 `model, max_tokens, temperature, tools, tool_choice, messages`
-- 当前 `data/logs/llm_debug.json` 复跑 prompt 比对：报告生成 `.tmp\llm_chat_prompt_compare_current.md`，`entries=10 sessions=3 pairs=7`；三个会话所有 pair 的 `tools` / `tool_choice` / 非 prompt 请求参数均稳定，变化集中在 `messages`。
+- 当前 `data/logs/llm_debug.json` 复跑 prompt 比对：报告生成 `.tmp\llm_chat_prompt_compare_current.md`，`entries=10 sessions=2 pairs=8`；会话 pair 的 `tools` / `tool_choice` / 非 prompt 请求参数均稳定，变化集中在 `messages`。
 - 真实 API 缓存探针：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。
 - 额外真实 API 缓存探针 `test_live_chat_context_cache_probe_uses_current_config_when_available`：默认跳过；设置 `SUCYUBOT_TEST_LIVE_CACHE_PROBE=1` 后才使用当前配置文件中的模型连接信息，通过真实 `handle_chat()` 链路连续回答三轮预设问题并输出缓存命中率。运行态 state / SQLite / 用户日志均隔离在测试临时目录；模型临时未返回可用回复时跳过。
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示

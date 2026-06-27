@@ -948,6 +948,7 @@ class CommandHandlersMixin:
         await self.send_message(chat_id, "找到这些可能相关的记忆，请用 /忘记 ID 删除:\n\n" + format_memory_lines(memories))
 
     async def cmd_new_scene(self, chat_id, session_id, arg):
+        await self._checkpoint_current_context_before_reset(session_id)
         state = self._get_session_state(session_id)
         self._reset_short_context(state, "用户手动开启新短期场景", session_id=session_id)
         self._save_session_state(session_id, state)

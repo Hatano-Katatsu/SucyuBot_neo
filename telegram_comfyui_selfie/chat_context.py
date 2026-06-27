@@ -1005,6 +1005,8 @@ class ChatContextMixin:
                 "and the overflowed dialogue into one short-term continuity summary for the next few turns only. "
                 "Focus on the current or most recent scene, unfinished actions, immediate emotions, near-term promises, "
                 "current places, and the latest photo only when the dialogue is directly responding to it. "
+                "Actively preserve explicit time anchors mentioned by the user, such as dates, clock times, deadlines, "
+                "appointments, countdowns, and relative time nodes, with their related event and status when stated. "
                 "Do not duplicate character-history arcs, durable relationship progress, permanent profile facts, "
                 "stable preferences, boundaries, corrections, or memory-worthy facts. "
                 f"Soft limit: {soft} Chinese characters. Output only the summary text. "
@@ -1019,6 +1021,8 @@ class ChatContextMixin:
             "and the overflowed dialogue into one short-term continuity summary for the next few turns only. "
             "Focus on the current or most recent scene, unfinished actions, immediate emotions, near-term promises, "
             "current places, and the latest photo only when the dialogue is directly responding to it. "
+            "Actively preserve explicit time anchors mentioned by the user, such as dates, clock times, deadlines, "
+            "appointments, countdowns, and relative time nodes, with their related event and status when stated. "
             "Do not duplicate character-history arcs, durable relationship progress, permanent profile facts, "
             "stable preferences, boundaries, corrections, or memory-worthy facts. "
             f"Soft limit: {soft} Chinese characters. Output only the summary text. "
@@ -1050,6 +1054,48 @@ class ChatContextMixin:
             return
         dialog = self._format_store_messages(messages, limit_chars=20000)
         await self._extract_long_term_memories(session_id, f"[{source_type}]\n{dialog}", "")
+
+    async def _checkpoint_current_context_before_reset(self, session_id: str) -> int:
+        """新场景/短期硬切换前，先把当前未折叠上下文过一遍 checkpoint 侧的摘要与记忆提取。"""
+        if not session_id:
+            return 0
+        key = self._context_character_key(session_id)
+        scope = f"{session_id}\n{key}"
+        task = getattr(self, "_checkpoint_tasks", {}).get(scope)
+        if task and not task.done():
+            task.cancel()
+        latest_id = 0
+        try:
+            checkpoint = self.app_store.get_checkpoint(session_id, key)
+            source_until = int(checkpoint.get("source_until_id") or 0)
+            latest_id = self.app_store.latest_message_id(session_id, key)
+            pending = self.app_store.list_messages(session_id, key, after_id=source_until, before_or_equal_id=latest_id)
+            if not pending:
+                return latest_id
+            previous = checkpoint.get("summary") or ""
+            merged = await self._summarize_checkpoint(session_id, previous, pending)
+            hard = self._checkpoint_hard_limit_chars()
+            if len(merged) > hard:
+                merged = merged[-hard:]
+            until_id = int(pending[-1]["id"])
+            try:
+                await self._extract_long_term_memories_from_messages(session_id, pending, source_type="checkpoint")
+            except Exception:
+                logger.warning("pre-reset checkpoint memory extraction failed", exc_info=True)
+            self.app_store.upsert_checkpoint(session_id, key, merged, until_id)
+            state = self._get_session_state(session_id)
+            session_schema.set_checkpoint_summary(state, merged)
+            session_schema.set_checkpoint_message_id(state, until_id)
+            session_schema.set_last_checkpoint_at(state, time.time())
+            self._save_session_state(session_id, state)
+            self._ulog(session_id, "CHECKPOINT", f"pre-reset until=#{until_id} chars={len(merged)}")
+            return until_id
+        except Exception:
+            logger.warning("pre-reset context checkpoint failed", exc_info=True)
+            try:
+                return latest_id or self.app_store.latest_message_id(session_id, key)
+            except Exception:
+                return latest_id
 
     def _short_context_reset_reason(self, text: str, previous_interaction: float = 0) -> str:
         if SHORT_CONTEXT_RESET_RE.search(text or ""):

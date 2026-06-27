@@ -305,6 +305,9 @@ class SchedulerRuntimeMixin:
             "You maintain long-term memories for a roleplay bot. Based on recent diaries, current context, "
             "and checkpoint, decide how to update non-manual memories. Never modify manual memories. "
             f"Keep total non-manual memories under {threshold} items. Merge similar memories, remove outdated ones. "
+            "For memories that are time nodes, deadlines, appointments, schedules, or countdowns, do not delete them "
+            "only because the date or time has passed. Update or delete them only when the related event is clearly "
+            "resolved, canceled, superseded, or has fully faded from recent diaries, checkpoint, and current window. "
             "Return strict JSON: {\"ops\":[{\"op\":\"add|update|delete\",\"id\":123,\"kind\":\"profile|preference|relationship|setting|boundary|visual|event|correction\",\"summary\":\"...\",\"importance\":1-5,\"tags\":[\"...\"]}]}"
         )
         diary_text = "\n\n".join(f"[{d.get('diary_date')}]\n{d.get('content','')}" for d in (diaries or []))
@@ -340,6 +343,9 @@ class SchedulerRuntimeMixin:
             f"You are a memory consolidator for a roleplay bot. The character has {len(editable)} non-manual memories, "
             f"which exceeds the limit. Consolidate ALL of them into at most {target_n} compact, non-redundant memories. "
             "Merge similar items, drop outdated or trivial ones, keep the most important and durable information. "
+            "For time nodes, deadlines, appointments, schedules, or countdowns, do not drop them merely because the "
+            "date or time has passed; keep or merge them until the related event is resolved, canceled, superseded, "
+            "or has fully faded from recent diaries and checkpoint. "
             "Each memory should be self-contained and cover a broader theme rather than a single fact. "
             "Never include manual memories. "
             f"Return strict JSON: {{\"memories\":[{{\"kind\":\"profile|preference|relationship|setting|boundary|visual|event|correction\","

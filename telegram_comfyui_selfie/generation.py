@@ -28,6 +28,43 @@ VISIBLE_PHONE_NEGATIVES = (
     "holding phone", "visible phone", "smartphone",
     "viewfinder", "phone screen", "camera UI", "shutter button",
 )
+ANIMATOOL_NLTAG_SUFFIX_TERMS = ("no text", "no logo", "no ui", "no mosaic", "uncensored")
+ANIMATOOL_NLTAG_SUFFIX = ", ".join(ANIMATOOL_NLTAG_SUFFIX_TERMS)
+ANIMATOOL_NLTAG_FIELDS = ("nltag", "nl_tag", "nl_tags", "tags")
+
+
+def _append_animatool_nltag_suffix(text: str) -> str:
+    """AnimaTool 的自然语言 tag 尾部固定补充无文字/无码约束。"""
+    base = str(text or "").strip().rstrip(" ,")
+    lower = base.lower()
+    additions = [term for term in ANIMATOOL_NLTAG_SUFFIX_TERMS if term not in lower]
+    if not additions:
+        return base
+    suffix = ", ".join(additions)
+    return f"{base}, {suffix}" if base else suffix
+
+
+def _preferred_animatool_nltag_field(properties: dict[str, Any], required: set[str] | None = None) -> str:
+    required = required or set()
+    for field in ANIMATOOL_NLTAG_FIELDS:
+        if field in required and field in properties:
+            return field
+    for field in ANIMATOOL_NLTAG_FIELDS:
+        if field in properties:
+            return field
+    return ""
+
+
+def _normalize_animatool_payload_text_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    """去掉 AnimaTool neg 字段，并把固定约束追加到自然语言 nltag/tags 末尾。"""
+    payload.pop("neg", None)
+    payload.pop("negative", None)
+    for field in ANIMATOOL_NLTAG_FIELDS:
+        value = payload.get(field)
+        if str(value or "").strip():
+            payload[field] = _append_animatool_nltag_suffix(str(value))
+            break
+    return payload
 
 
 @dataclass
@@ -1119,10 +1156,9 @@ def _build_animatool_turbo_payload(
         "style_artist": ["artist"],
         "style_general": ["style"],
         "effective_appearance": ["appearance"],
-        "scene": ["tags"],
+        "scene": list(ANIMATOOL_NLTAG_FIELDS),
         "one_shot_appearance": ["appearance"],
         "positive": ["positive"],
-        "negative": ["neg", "negative"],
     }
 
     payload: dict[str, Any] = {
@@ -1136,9 +1172,6 @@ def _build_animatool_turbo_payload(
     if aspect:
         payload["aspect_ratio"] = aspect
 
-    if "neg" in properties or "negative" in properties:
-        neg_field = "neg" if "neg" in properties else "negative"
-        payload[neg_field] = negative
     if "width" in properties:
         try:
             payload["width"] = int(service.config.get("width", "1024") or 1024)
@@ -1168,9 +1201,11 @@ def _build_animatool_turbo_payload(
                 if field_name in ("character", "series") and not value:
                     continue
                 # character/series 为空串时跳过，避免污染 schema
-                if field_name == "tags" and not value:
-                    # tags 必填，后面兜底
+                if field_name in ANIMATOOL_NLTAG_FIELDS and not value:
+                    # 自然语言 tags/nltag 必填时，后面兜底
                     continue
+                if field_name in ANIMATOOL_NLTAG_FIELDS:
+                    value = _append_animatool_nltag_suffix(str(value))
                 payload[field_name] = _schema_type_convert(field_name, value, prop)
         # 一次性外观补充追加到 appearance（不覆盖有效外貌，只追加）
         one_shot = (getattr(slots, "one_shot_appearance", None) or "").strip()
@@ -1182,8 +1217,11 @@ def _build_animatool_turbo_payload(
                 combined = one_shot
             payload["appearance"] = _schema_type_convert("appearance", combined, properties["appearance"])
     else:
-        # 无槽位时，若 schema 支持 positive 就放正面提示词
-        if "positive" in properties:
+        # 无槽位时，优先把自然语言正面提示词放进 nltag/tags。
+        nltag_field = _preferred_animatool_nltag_field(properties, required)
+        if nltag_field:
+            payload[nltag_field] = _append_animatool_nltag_suffix(positive)
+        elif "positive" in properties:
             payload["positive"] = positive
 
     # 必填字段兜底
@@ -1195,18 +1233,19 @@ def _build_animatool_turbo_payload(
     if "count" in required:
         if "count" not in payload or not payload["count"]:
             payload["count"] = getattr(slots, "count", "") or "1girl"
-    if "tags" in required:
-        if "tags" not in payload or not payload["tags"]:
-            # tags 兜底：依次用场景、自然语言正面提示词
+    nltag_field = _preferred_animatool_nltag_field(properties, required)
+    if nltag_field in required:
+        if nltag_field not in payload or not payload[nltag_field]:
+            # tags/nltag 兜底：依次用场景、自然语言正面提示词
             tags_value = (
                 getattr(slots, "scene", "")
                 or positive
                 or ""
             )
-            payload["tags"] = tags_value
+            payload[nltag_field] = _append_animatool_nltag_suffix(tags_value)
 
-    # 如果 schema 支持 tags 且我们已经提供了结构化 tags，就不要再发送 positive（positive 会覆盖结构化字段）
-    if "tags" in properties and "tags" in payload and payload["tags"]:
+    # 如果 schema 支持自然语言 tags/nltag 且已提供，就不要再发送 positive（positive 会覆盖结构化字段）
+    if nltag_field and nltag_field in payload and payload[nltag_field]:
         payload.pop("positive", None)
 
     # 最终按 schema 类型转换并过滤掉 None/空串
@@ -1218,7 +1257,7 @@ def _build_animatool_turbo_payload(
             cleaned[k] = _schema_type_convert(k, v, properties[k])
         else:
             cleaned[k] = v
-    return cleaned
+    return _normalize_animatool_payload_text_fields(cleaned)
 
 
 async def _do_generate_animatool(
@@ -1274,6 +1313,7 @@ async def _post_animatool(
     payload: dict[str, Any],
 ) -> tuple[bool, list[bytes], str]:
     """POST /anima/generate_turbo 并下载图片。"""
+    payload = _normalize_animatool_payload_text_fields(dict(payload or {}))
     try:
         if hasattr(service, "_ulog") and isinstance(slots, PromptSlots):
             service._ulog(
@@ -1315,7 +1355,6 @@ async def submit_animatool_turbo(service: Any, positive: str, negative: str, see
             "seed": seed,
             "steps": int(float(service.config.get("animatool_turbo_steps", "10") or 10)),
             "cfg": float(service.config.get("animatool_turbo_cfg", "1.0") or 1.0),
-            "neg": negative,
         }
         aspect = _aspect_ratio_from_dimensions(service)
         if aspect:
@@ -1337,10 +1376,11 @@ async def submit_animatool_turbo(service: Any, positive: str, negative: str, see
                 "tags": slots.scene or "",
             })
         else:
-            payload["positive"] = positive
-        cleaned = {k: v for k, v in payload.items() if v not in (None, "")}
+            payload["tags"] = positive
+        cleaned = _normalize_animatool_payload_text_fields({k: v for k, v in payload.items() if v not in (None, "")})
     else:
         cleaned = _build_animatool_turbo_payload(service, slots, positive, negative, seed, schema)
+    cleaned = _normalize_animatool_payload_text_fields(cleaned)
     try:
         if hasattr(service, "_ulog") and isinstance(slots, PromptSlots):
             service._ulog(
