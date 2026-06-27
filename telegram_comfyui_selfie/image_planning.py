@@ -13,8 +13,6 @@ from . import session_schema
 from .defaults import DEFAULT_CONFIG, WEEKDAY_NAMES
 from .generation import (
     ANIMATOOL_NLTAG_FIELDS,
-    ANIMATOOL_NLTAG_SUFFIX,
-    _append_animatool_nltag_suffix,
     _infer_prompt_view,
 )
 from .world_runtime import PLACE_TYPES
@@ -1186,9 +1184,8 @@ async def plan_animatool_slots(
         "- style_artist → artist（@ 开头，为空留空）\n"
         "- style_general → style\n"
         "- scene → tags/nltag（改写成 3-5 句完整英文，把末尾的逗号标签堆融进句子，不要保留 Danbooru 逗号串）\n\n"
-        "## nltag 尾部规则（重要）\n"
-        "不要输出 neg 或 negative 字段；它们对 AnimaTool 无意义。"
-        f"必须在自然语言 tags/nltag 的最后追加: {ANIMATOOL_NLTAG_SUFFIX}。\n"
+        "## nltag 规则（重要）\n"
+        "不要输出 neg 或 negative 字段；它们对 AnimaTool 无意义。\n"
         "selfie/portrait/pov 场景中，仍要在自然语言描述里避免手机、相机、UI 界面、取景框、快门按钮等拍摄设备元素；"
         "mirror 场景允许镜子和镜中反射，但不要写手机 UI。\n\n"
         "## 时间与光线（重要，必须体现）\n"
@@ -1252,16 +1249,13 @@ async def plan_animatool_slots(
                 break
     raw_nltag = next((str(parsed.get(field) or "").strip() for field in ANIMATOOL_NLTAG_FIELDS if str(parsed.get(field) or "").strip()), "")
     if nltag_field:
-        parsed[nltag_field] = _append_animatool_nltag_suffix(raw_nltag or slots.scene or "")
+        parsed[nltag_field] = raw_nltag or slots.scene or ""
         for field in ANIMATOOL_NLTAG_FIELDS:
             if field != nltag_field:
                 parsed.pop(field, None)
 
-    parsed.pop("neg", None)
-    parsed.pop("negative", None)
     for field in ANIMATOOL_NLTAG_FIELDS:
         if str(parsed.get(field) or "").strip():
-            parsed[field] = _append_animatool_nltag_suffix(str(parsed[field]))
             break
 
     # character/series 对 OC 必须为空

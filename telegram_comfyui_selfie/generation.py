@@ -28,20 +28,7 @@ VISIBLE_PHONE_NEGATIVES = (
     "holding phone", "visible phone", "smartphone",
     "viewfinder", "phone screen", "camera UI", "shutter button",
 )
-ANIMATOOL_NLTAG_SUFFIX_TERMS = ("no text", "no logo", "no ui", "no mosaic", "uncensored")
-ANIMATOOL_NLTAG_SUFFIX = ", ".join(ANIMATOOL_NLTAG_SUFFIX_TERMS)
 ANIMATOOL_NLTAG_FIELDS = ("nltag", "nl_tag", "nl_tags", "tags")
-
-
-def _append_animatool_nltag_suffix(text: str) -> str:
-    """AnimaTool 的自然语言 tag 尾部固定补充无文字/无码约束。"""
-    base = str(text or "").strip().rstrip(" ,")
-    lower = base.lower()
-    additions = [term for term in ANIMATOOL_NLTAG_SUFFIX_TERMS if term not in lower]
-    if not additions:
-        return base
-    suffix = ", ".join(additions)
-    return f"{base}, {suffix}" if base else suffix
 
 
 def _preferred_animatool_nltag_field(properties: dict[str, Any], required: set[str] | None = None) -> str:
@@ -53,18 +40,6 @@ def _preferred_animatool_nltag_field(properties: dict[str, Any], required: set[s
         if field in properties:
             return field
     return ""
-
-
-def _normalize_animatool_payload_text_fields(payload: dict[str, Any]) -> dict[str, Any]:
-    """去掉 AnimaTool neg 字段，并把固定约束追加到自然语言 nltag/tags 末尾。"""
-    payload.pop("neg", None)
-    payload.pop("negative", None)
-    for field in ANIMATOOL_NLTAG_FIELDS:
-        value = payload.get(field)
-        if str(value or "").strip():
-            payload[field] = _append_animatool_nltag_suffix(str(value))
-            break
-    return payload
 
 
 @dataclass
@@ -1219,8 +1194,6 @@ def _build_animatool_turbo_payload(
                 if field_name in ANIMATOOL_NLTAG_FIELDS and not value:
                     # 自然语言 tags/nltag 必填时，后面兜底
                     continue
-                if field_name in ANIMATOOL_NLTAG_FIELDS:
-                    value = _append_animatool_nltag_suffix(str(value))
                 payload[field_name] = _schema_type_convert(field_name, value, prop)
         # 一次性外观补充追加到 appearance（不覆盖有效外貌，只追加）
         one_shot = (getattr(slots, "one_shot_appearance", None) or "").strip()
@@ -1235,7 +1208,7 @@ def _build_animatool_turbo_payload(
         # 无槽位时，优先把自然语言正面提示词放进 nltag/tags。
         nltag_field = _preferred_animatool_nltag_field(properties, required)
         if nltag_field:
-            payload[nltag_field] = _append_animatool_nltag_suffix(positive)
+            payload[nltag_field] = positive
         elif "positive" in properties:
             payload["positive"] = positive
 
@@ -1257,7 +1230,7 @@ def _build_animatool_turbo_payload(
                 or positive
                 or ""
             )
-            payload[nltag_field] = _append_animatool_nltag_suffix(tags_value)
+            payload[nltag_field] = tags_value
 
     # 如果 schema 支持自然语言 tags/nltag 且已提供，就不要再发送 positive（positive 会覆盖结构化字段）
     if nltag_field and nltag_field in payload and payload[nltag_field]:
@@ -1272,7 +1245,7 @@ def _build_animatool_turbo_payload(
             cleaned[k] = _schema_type_convert(k, v, properties[k])
         else:
             cleaned[k] = v
-    return _normalize_animatool_payload_text_fields(cleaned)
+    return cleaned
 
 
 async def _do_generate_animatool(
@@ -1328,7 +1301,7 @@ async def _post_animatool(
     payload: dict[str, Any],
 ) -> tuple[bool, list[bytes], str]:
     """POST /anima/generate_turbo 并下载图片。"""
-    payload = _normalize_animatool_payload_text_fields(dict(payload or {}))
+    payload = dict(payload or {})
     try:
         if hasattr(service, "_ulog") and isinstance(slots, PromptSlots):
             service._ulog(
@@ -1392,10 +1365,9 @@ async def submit_animatool_turbo(service: Any, positive: str, negative: str, see
             })
         else:
             payload["tags"] = positive
-        cleaned = _normalize_animatool_payload_text_fields({k: v for k, v in payload.items() if v not in (None, "")})
+        cleaned = {k: v for k, v in payload.items() if v not in (None, "")}
     else:
         cleaned = _build_animatool_turbo_payload(service, slots, positive, negative, seed, schema)
-    cleaned = _normalize_animatool_payload_text_fields(cleaned)
     try:
         if hasattr(service, "_ulog") and isinstance(slots, PromptSlots):
             service._ulog(

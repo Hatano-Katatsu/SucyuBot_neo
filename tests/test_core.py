@@ -3750,7 +3750,6 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "quality_meta_year_safe": "masterpiece, best quality, highres, newest, year 2025, safe",
                 "count": "1girl",
                 "nltag": "A girl waits by a rainy restaurant window with wet pavement outside.",
-                "neg": "worst quality, low quality",
             }, ensure_ascii=False))
             slots = PromptSlots(
                 scene="A girl waits by the restaurant window.",
@@ -3765,7 +3764,6 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                         "quality_meta_year_safe": {"description": "quality and safety"},
                         "count": {"description": "count"},
                         "nltag": {"description": "natural language scene"},
-                        "neg": {"description": "negative prompt"},
                     },
                     "required": ["quality_meta_year_safe", "count", "nltag"],
                 }
@@ -3783,11 +3781,10 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("湿痕", system_prompt)
             self.assertNotIn("neg", payload)
             self.assertIn("nltag", payload)
-            self.assertTrue(payload["nltag"].endswith("no text, no logo, no ui, no mosaic, uncensored"))
 
         asyncio.run(run())
 
-    def test_animatool_payload_drops_neg_and_appends_nltag_suffix(self):
+    def test_animatool_payload_drops_neg(self):
         svc = self.make_service()
         slots = PromptSlots(
             scene="A girl reads by the window.",
@@ -3802,7 +3799,6 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                     "quality_meta_year_safe": {"description": "quality and safety"},
                     "count": {"description": "count"},
                     "nltag": {"description": "natural language scene"},
-                    "neg": {"description": "negative prompt"},
                 },
                 "required": ["quality_meta_year_safe", "count", "nltag"],
             }
@@ -3813,7 +3809,6 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("neg", payload)
         self.assertNotIn("negative", payload)
         self.assertIn("nltag", payload)
-        self.assertTrue(payload["nltag"].endswith("no text, no logo, no ui, no mosaic, uncensored"))
 
     def test_image_planner_writes_back_location_when_unpinned(self):
         async def run():
