@@ -16,7 +16,7 @@ from telegram_comfyui_selfie import character_card
 from telegram_comfyui_selfie import session_schema
 from telegram_comfyui_selfie.config_store import flatten_config, load_simple_yaml
 from telegram_comfyui_selfie.generation import PromptSlots, _build_animatool_turbo_payload
-from telegram_comfyui_selfie.image_planning import _detect_intimate_context, _detect_nudity_context, _infer_clothing_off_fallback, format_dialog_context, format_sent_photo_context, normalize_scene_visual_subject, plan_animatool_slots, plan_roleplay_image
+from telegram_comfyui_selfie.image_planning import _detect_intimate_context, _detect_nudity_context, _infer_clothing_off_fallback, format_dialog_context, format_planning_spatial_context, format_sent_photo_context, normalize_scene_visual_subject, plan_animatool_slots, plan_roleplay_image
 from telegram_comfyui_selfie.commands import (
     SESSION_GLOBAL_STATE_KEYS,
     _is_character_config_key,
@@ -2406,7 +2406,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("英文自然语言画面描述", system_prompt)
             self.assertIn("少量 danbooru 补强标签", system_prompt)
             self.assertIn("不要压缩成纯标签列表", system_prompt)
-            self.assertTrue(result.startswith("First-person POV, looking at a woman"))
+            self.assertIn("可以保留 she/the character", system_prompt)
+            self.assertNotIn("不要输出自拍/POV/镜子/手机/主语", system_prompt)
+            self.assertTrue(result.startswith("First-person POV from the user's viewpoint"))
             self.assertIn("She sits close on the edge of the bed", result)
             self.assertIn("black camisole dress", result)
 
@@ -3344,6 +3346,55 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertNotIn("END_USER_MARKER", planner_user)
             self.assertNotIn("END_BOT_MARKER", planner_user)
             self.assertNotIn("END_PHOTO_MARKER", planner_user)
+
+        asyncio.run(run())
+
+    def test_roleplay_image_planner_keeps_spatial_constraints_outside_slim_context(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            state["chat_history"] = [
+                {"role": "user", "content": "过来，我来给你吹干"},
+                {"role": "assistant", "content": (
+                    "（眼睛一亮，抱着小鲸鱼玩偶从沙发上跳下来）来啦来啦~ "
+                    + ("铺垫 " * 35)
+                    + "乖乖坐在主人脚边，把后背朝向主人，湿漉漉的长发垂下来"
+                )},
+            ]
+            svc._fetch_weather = AsyncMock(return_value={"desc": "小雨", "temp": "18"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "客厅里，角色抱着小鲸鱼玩偶，期待地看向主人。",
+                "view": "pov",
+                "aspect_ratio": "2:3",
+                "character_location": "home",
+                "user_location": "with_user",
+                "is_intimate": False,
+                "partner_in_frame": True,
+                "device_in_frame": False,
+            }, ensure_ascii=False))
+
+            spatial = format_planning_spatial_context(
+                svc,
+                state,
+                sid,
+                intent="展示汐汐乖乖坐在主人脚边期待吹头发",
+            )
+            self.assertIn("脚边", spatial or "")
+            plan = await plan_roleplay_image(svc, sid, intent="展示汐汐乖乖坐在主人脚边期待吹头发")
+
+            planner_user = svc._call_llm.await_args.args[1]
+            slim_block = planner_user.split("短期连续性:", 1)[1].split("空间/身体关系硬约束", 1)[0]
+            self.assertNotIn("脚边", slim_block)
+            self.assertIn("空间/身体关系硬约束", planner_user)
+            self.assertIn("脚边", planner_user)
+            self.assertIn("空间/身体关系硬约束", plan["scene"])
+            self.assertIn("脚边", plan["scene"])
 
         asyncio.run(run())
 
@@ -5703,21 +5754,24 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("pov", neg_lower)
         self.assertNotIn("male", neg_lower)
 
-    def test_build_prompt_partner_flag_routes_to_partner_path(self):
-        # 规划器 partner_in_frame=True：即便场景没有 him/he 代词，也按伴侣路径处理（去 solo、画男伴局部）。
+    def test_build_prompt_partner_flag_routes_to_everyday_partner_path(self):
+        # 日常 partner_in_frame=True：去掉 solo 冲突，但不要误走性爱/亲密特写路径。
         svc = self.make_service()
         sid = "telegram:1"
         state = svc._get_session_state(sid)
         state["custom_positive_prefix"] = "1girl, black long hair, purple eyes"
         state["custom_count"] = "1girl"
         pos, neg = svc._build_prompt(
-            "First-person POV, looking at a woman, lying together in bed at night",
+            "First-person POV from the user's viewpoint, Xixi sits at her owner's feet while waiting for him to dry her hair",
             session_id=sid,
             partner_in_frame=True,
         )
         pos_lower = pos.lower()
         self.assertNotIn("solo", pos_lower)
-        self.assertIn("partial male body visible", pos_lower)
+        self.assertIn("partial male feet visible", pos_lower)
+        self.assertIn("everyday close interaction", pos_lower)
+        self.assertNotIn("male torso", pos_lower)
+        self.assertNotIn("intimate close-up", pos_lower)
         self.assertNotIn("male", neg.lower())
 
     def test_build_prompt_device_in_frame_keeps_selfie_and_phone(self):

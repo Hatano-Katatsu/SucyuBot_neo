@@ -791,7 +791,7 @@ def view_opener(view: str, gender: str = "girl") -> str:
     return {
         "selfie": f"A selfie of a {subj}, solo, upper body framing, looking at viewer, one arm extended toward the viewer",
         "mirror": f"A mirror reflection of a {subj}, solo, single reflected body, only mirror reflection is visible, no foreground person, holding one smartphone with one hand, looking at viewer through the mirror",
-        "pov": f"First-person POV, looking at a {subj}, solo, eye contact with the viewer",
+        "pov": "First-person POV from the user's viewpoint, looking toward the character",
         "third": f"{count}, solo",
         # 别人（用户/他人）帮角色拍的照片：角色看向镜头为镜头摆姿势，拍摄者在画面外，画面里只有角色，不出现手机/相机。
         "portrait": f"A photo of a {subj}, solo, upper body framing, looking at viewer, posing for the camera, taken by someone else just out of frame",
@@ -852,17 +852,15 @@ def build_prompt(
     partner_re = FEMALE_PARTNER_RE if male else MALE_PARTNER_RE
     scene_has_partner = partner_in_frame or bool(partner_re.search(scene_desc))
     device_present = device_in_frame or bool(DEVICE_SCENE_RE.search(scene_desc))
-    is_sex_scene = (
-        is_intimate
-        or any(k in scene_lower for k in sex_keywords)
-        or (scene_has_partner and not is_ntr_scene)
-    )
+    scene_has_sex_keyword = any(k in scene_lower for k in sex_keywords)
+    is_partner_scene = scene_has_partner and not is_ntr_scene
+    is_sex_scene = is_intimate or scene_has_sex_keyword
 
     quality = "masterpiece, best quality, highres, absurdres, newest, year 2025, anime coloring, clean lineart, soft cel shading, detailed illustration"
     if safety.get("tag"):
         quality += f", {safety['tag']}"
     count = "1boy, solo" if male else "1girl, solo"
-    if is_ntr or is_sex_scene:
+    if is_ntr or is_sex_scene or is_partner_scene:
         count = re.sub(r"\bsolo\b,?\s*", "", count).strip(", ")
     character, series = _visual_character_identity(state)
     artist = current_style if current_style.startswith("@") else ""
@@ -895,9 +893,9 @@ def build_prompt(
         neg += ", male, boy, man"
 
     prompt_view = _infer_prompt_view(scene_desc)
-    if is_sex_scene and not is_ntr_scene:
+    if (is_sex_scene or is_partner_scene) and not is_ntr_scene:
         if not device_present:
-            # 伴侣/性爱/事后贴身画面不能是单人自拍取景：先清掉自拍/对镜的相机取景措辞，
+            # 伴侣/性爱/日常同框画面不能是单人自拍取景：先清掉自拍/对镜的相机取景措辞，
             # 否则会出现“自拍框 + 画面里有第二人”的矛盾（断臂/双人的主因）。
             # 用户明确要拍照/录像（device_present）时跳过：保留其自拍/对镜取景与设备。
             scene_desc = SELF_CAMERA_FRAMING_RE.sub("", scene_desc)
@@ -916,11 +914,28 @@ def build_prompt(
         user_gender = service._get_user_gender(session_id) if session_id and hasattr(service, "_get_user_gender") else "male"
         if user_gender == "female":
             # 用户是女性（百合/女用户）：伴侣画成女性局部，放开“双女”负向，但仍保留 male 负向。
-            scene_desc += ", partner's hands, partner's arms, intimate close-up"
+            if is_sex_scene:
+                scene_desc += ", partner's hands, partner's arms, intimate close-up"
+            else:
+                scene_desc += ", partial female hands or feet visible only as required by the pose, everyday close interaction"
             neg = _remove_negatives(neg, "2girls", "multiple girls", "extra girls", "multiple characters", "second body", "duplicate body")
         else:
-            scene_desc += ", partial male body visible, male hands, male torso, intimate close-up"
-            neg = _remove_negatives(neg, "male")
+            if is_sex_scene:
+                scene_desc += ", partial male body visible, male hands, male torso, intimate close-up"
+            else:
+                partner_part = "partial male hands visible"
+                if re.search(r"\b(?:feet|foot)\b|脚", scene_lower):
+                    partner_part = "partial male feet visible at the edge of frame"
+                elif re.search(r"\b(?:lap|thighs?)\b|腿上|膝上", scene_lower):
+                    partner_part = "partial male thighs visible at the edge of frame"
+                elif re.search(r"\bshoulder\b|肩", scene_lower):
+                    partner_part = "partial male shoulder visible at the edge of frame"
+                elif re.search(r"\b(?:chest|collarbone)\b|胸口|锁骨", scene_lower):
+                    partner_part = "partial male chest edge visible"
+                scene_desc += f", {partner_part}, everyday close interaction"
+            neg = _remove_negatives(neg, "male", "boy", "man", "1boy")
+        if not is_sex_scene:
+            neg = _append_negatives(neg, "full second person", "extra face", "unrelated extra person")
         if device_present:
             # 用户要把手机/相机/镜子拍进画面：放开手机与对镜负向，让设备能渲染出来。
             neg = _remove_negatives(

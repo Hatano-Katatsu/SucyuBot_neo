@@ -385,6 +385,48 @@ def _compact_context_text(text: Any, max_chars: int = 0) -> str:
     return compact
 
 
+_SPATIAL_HINT_RE = re.compile(
+    r"坐|站|躺|跪|趴|蹲|靠|倚|抱|搂|贴|牵|握|脚边|腿上|膝上|怀里|身后|背后|面前|旁边|身边|"
+    r"肩膀|肩头|胸口|锁骨|腰|后背|背部|背向|背对|腿|脚|手臂|手指|手心|手掌|双手|一只手|手里|手边|手腕|"
+    r"仰头|抬头|低头|俯身|转身|侧身|吹头发|"
+    r"\b(?:sit|sitting|stand|standing|lie|lying|kneel|kneeling|crouch|lean|leaning|hug|embrace|hold|"
+    r"beside|behind|in front of|at .* feet|on .* lap|lap|shoulder|chest|back|feet|hands?)\b",
+    re.IGNORECASE,
+)
+
+_SPATIAL_CONCEPT_ALIASES: dict[str, tuple[str, ...]] = {
+    "feet": ("脚边", "脚下", "feet", "foot"),
+    "lap": ("腿上", "膝上", "lap"),
+    "behind": ("身后", "背后", "behind"),
+    "in_front": ("面前", "跟前", "in front"),
+    "beside": ("旁边", "身边", "beside", "next to"),
+    "arms": ("怀里", "抱", "搂", "arms", "embrace", "hug"),
+    "shoulder": ("肩膀", "肩头", "shoulder"),
+    "chest": ("胸口", "锁骨", "chest", "collarbone"),
+    "back": ("后背", "背向", "back toward", "back to"),
+    "sit": ("坐", "sit", "sitting", "seated"),
+    "stand": ("站", "stand", "standing"),
+    "lie": ("躺", "lie", "lying"),
+    "kneel": ("跪", "kneel", "kneeling"),
+    "lean": ("靠", "倚", "lean", "leaning"),
+    "look_up": ("仰头", "抬头", "look up", "looking up"),
+    "bend": ("俯身", "bend", "bending", "lean over"),
+}
+
+
+def _spatial_concepts(text: str) -> set[str]:
+    lowered = (text or "").lower()
+    concepts = set()
+    for concept, aliases in _SPATIAL_CONCEPT_ALIASES.items():
+        if any(alias.lower() in lowered for alias in aliases):
+            concepts.add(concept)
+    return concepts
+
+
+def _looks_like_spatial_context(text: Any) -> bool:
+    return bool(_SPATIAL_HINT_RE.search(str(text or "")))
+
+
 def format_dialog_context(service: Any, state: dict[str, Any], session_id: str = "", limit: int = 12) -> str | None:
     lines = []
     for msg in service._active_chat_history(state, limit):
@@ -420,6 +462,80 @@ def format_planning_continuity_context(
     if max_lines > 0:
         lines = lines[-max_lines:]
     return "\n".join(lines) if lines else None
+
+
+def format_planning_spatial_context(
+    service: Any,
+    state: dict[str, Any],
+    session_id: str = "",
+    *,
+    intent: str = "",
+    must_include: str = "",
+    prompt: str = "",
+    limit: int = 8,
+    max_lines: int = 5,
+    max_chars: int = 260,
+) -> str | None:
+    """保留生图最容易被瘦身截掉的身体站位与相对位置线索。"""
+    lines: list[str] = []
+    seen: set[str] = set()
+
+    def add(label: str, text: Any):
+        compact = _compact_context_text(text, max_chars=max_chars)
+        if not compact or not _looks_like_spatial_context(compact):
+            return
+        key = compact.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        lines.append(f"{label}: {compact}")
+
+    add("图片意图", intent)
+    add("必须包含", must_include)
+    add("画面草案", prompt)
+    history_lines: list[str] = []
+    for msg in service._active_chat_history(state, limit):
+        role = msg.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        compact = _compact_context_text(msg.get("content"), max_chars=max_chars)
+        if not compact or not _looks_like_spatial_context(compact):
+            continue
+        role_label = "用户" if role == "user" else "角色"
+        key = compact.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        history_lines.append(f"{role_label}: {compact}")
+    if max_lines > 0:
+        history_lines = history_lines[-max_lines:]
+    lines.extend(history_lines)
+    return "\n".join(lines) if lines else None
+
+
+def _primary_spatial_constraint(spatial_context: str | None) -> str:
+    if not spatial_context:
+        return ""
+    for line in (spatial_context or "").splitlines():
+        text = re.sub(r"^\s*[^:：]{1,12}[:：]\s*", "", line).strip()
+        if text and _looks_like_spatial_context(text):
+            return text
+    return ""
+
+
+def _merge_spatial_constraint_into_scene(scene: str, spatial_context: str | None) -> str:
+    constraint = _primary_spatial_constraint(spatial_context)
+    if not constraint:
+        return scene
+    needed = _spatial_concepts(constraint)
+    if not needed:
+        return scene
+    present = _spatial_concepts(scene)
+    # 坐/站/躺这类泛动作可能自然变体很多；只要所有已识别概念都在 scene 中出现，就不重复追加。
+    if needed and needed.issubset(present):
+        return scene
+    guard = f"空间/身体关系硬约束: {constraint}"
+    return f"{scene}。{guard}" if scene else guard
 
 
 def format_sent_photo_context(service: Any, state: dict[str, Any], session_id: str = "", limit: int = 5) -> str | None:
@@ -544,6 +660,14 @@ async def plan_roleplay_image(
         bot_self_name = service._get_session_cfg(session_id, "bot_self_name", "我")
         role_name = service._get_session_cfg(session_id, "role_name", "魅魔")
     continuity_context = format_planning_continuity_context(service, state, session_id)
+    spatial_context = format_planning_spatial_context(
+        service,
+        state,
+        session_id,
+        intent=intent,
+        must_include=must_include,
+        prompt=prompt,
+    )
     photo_context = format_recent_photo_dedup_context(service, state, session_id)
     memory_query = "\n".join(part for part in (intent, mood, must_include, prompt, continuity_context or "") if part)
     memory_context = ""
@@ -632,6 +756,8 @@ async def plan_roleplay_image(
         "你要综合用户最近的话、聊天模型的意图、最近已发图片摘要、时间天气、外貌和安全约束，"
         "输出适合发给用户的一张图。不要输出英文画图标签。\n"
         "公开场合必须穿着得体；私密场合可以更放松。避免和最近照片重复。"
+        "空间/身体关系规则: 如果用户本轮意图、聊天草案或短期连续性里出现坐/站/躺/跪/脚边/腿上/身后/怀里/肩膀/背向/俯身等身体站位，"
+        "这些属于硬约束；scene 的主句必须明确角色相对用户、镜头和道具的位置，不要只写表情或氛围，也不要改成相反站位。"
     )
     if world_context:
         # 与聊天侧同构：进行中的对话已经确立了地点时，动线只作背景，避免配图把角色按现实时段“传送”
@@ -803,6 +929,8 @@ async def plan_roleplay_image(
         )
     if continuity_context:
         user += f"\n\n短期连续性:\n{continuity_context}"
+    if spatial_context:
+        user += f"\n\n空间/身体关系硬约束（scene 主句必须保留，不要改成相反站位）:\n{spatial_context}"
     if photo_context:
         user += f"\n\n最近已发图片摘要:\n{photo_context}"
     if memory_context:
@@ -847,6 +975,8 @@ async def plan_roleplay_image(
         }
 
     scene = _normalize_image_plan_scene(parsed, fallback_scene, strong_pin)
+    if not free_composition:
+        scene = _merge_spatial_constraint_into_scene(scene, spatial_context)
     planned_view = normalize_view(parsed.get("view"))
     # co_located 从 user_location 推导，不靠 LLM 单独判断。
     raw_user_loc = (parsed.get("user_location") or "").strip().lower()

@@ -170,6 +170,9 @@ telegram_comfyui_selfie/
 - OC 不把中文名、昵称或作品名塞进视觉 identity；只有已知公开角色才注入角色/作品 tag。
 - 亲密场景默认走 POV，只允许用户/伴侣身体局部入画；除非用户明确要求拍照、录像或对镜，才允许设备入画。
 - `/配图`（同义词 `/画图`、`/绘图` 等）按当前聊天场景生成图片，不强制自拍或看镜头；命令后的参数作为最高优先级场景/视角/机位/远近/局部特写要求，但规划器只消费瘦身后的短期连续性、最近已发图片摘要、世界状态和记忆，不再直接吞完整聊天流水。
+- `roleplay-image-plan` 在瘦身连续性之外保留“空间/身体关系硬约束”旁路：坐/站/躺/跪、脚边、腿上、身后、怀里、肩膀、背向、俯身等站位线索会单独进入 planner，并在 planner 漏写时追回到最终 `scene`，避免关键身体关系被每条 140 字截断吃掉。
+- `partner_in_frame` 区分日常局部同框和真正亲密/性爱场景；日常帮吹头发、坐脚边、靠肩等只去掉 `solo` 冲突并允许必要的手/脚/肩局部，不再自动追加 `male torso` / `intimate close-up`。
+- POV 正向开场只声明“用户视角看向角色”，不再默认强塞 `eye contact` / `solo`；翻译层允许保留 `she/the character` 动作主语，确保姿态和身体关系归属清楚。
 - 画幅只允许 2:3（竖版）和 3:2（横版），模拟真实相机画幅；负向提示词包含 `split screen, grid, multiple panels, collage` 防止四宫格/分格出图。
 - AnimaTool Turbo 路径不再提交 `neg` / `negative` 字段；自然语言 `nltag` / `tags` 尾部统一追加 `no text, no logo, no ui, no mosaic, uncensored`。
 
@@ -211,6 +214,9 @@ telegram_comfyui_selfie/
 4. **AnimaTool Turbo 去 neg**：`plan_animatool_slots()`、`_build_animatool_turbo_payload()` 和 `_post_animatool()` 均会剔除 `neg` / `negative` 字段，并把 `no text, no logo, no ui, no mosaic, uncensored` 追加到自然语言 `nltag` / `tags` 尾部；同时兼容 `nltag`、`nl_tag`、`nl_tags`、`tags` 字段名。
 5. **回归测试**：新增/更新测试覆盖新场景前置 checkpoint、checkpoint 时间节点提示词、dream 时间节点淡出清理提示词、AnimaTool nltag 尾部与去 neg 行为。
 6. **聊天采样参数**：新增 `chat_llm_top_p`、`chat_llm_frequency_penalty`、`chat_llm_presence_penalty` 默认配置、WebUI 字段与示例配置；代码层用显式 `sampling=True` 限定只在真实聊天回复请求中下发，避免污染 checkpoint/dream/memory 等结构化任务。
+7. **生图站位精度修复**：`format_planning_spatial_context()` 从本轮意图/画面草案和最近真实 `user/assistant` 对话中单独抽取身体站位线索，作为“空间/身体关系硬约束”注入 `roleplay-image-plan`；`_merge_spatial_constraint_into_scene()` 在 planner 漏写时把关键站位追回到 `scene`。
+8. **POV 与翻译层去冲突**：`view_opener("pov")` 改为中性的用户视角，不再固定 `eye contact` / `solo`；`_translate_to_tags()` 不再禁止动作主语，允许保留 `she/the character` 来锁定坐、站、躺、跪、脚边、腿上、身后等动作归属。
+9. **日常同框与亲密同框拆分**：`build_prompt()` 不再把所有 `partner_in_frame=True` 都当作性爱/亲密路径；日常同框只移除 `solo` 并加入必要的手/脚/肩局部提示，真正 `is_intimate` 或性关键词场景才追加 `partial male body visible` / `intimate close-up` 等亲密兜底。
 
 ## 今日变更（2026-06-26）
 
@@ -266,7 +272,7 @@ telegram_comfyui_selfie/
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core -v`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m py_compile scripts\compare_llm_chat_prompts.py`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 scripts\compare_llm_chat_prompts.py --log "data\logs\llm_debug.json" --output .tmp\llm_chat_prompt_compare_current.md`
-- 最新结果：`Ran 268 tests in 5.971s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
+- 最新结果：`Ran 269 tests in 6.571s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
 - 工具 schema 当前紧凑 JSON 长度：`1898` 字符；chat 回复请求体 key 顺序为 `model, max_tokens, temperature, top_p, frequency_penalty, tools, tool_choice, messages`（`presence_penalty` 留空时不下发；checkpoint/dream/memory 等内部任务不下发采样参数）
 - 当前 `data/logs/llm_debug.json` 复跑 prompt 比对：报告生成 `.tmp\llm_chat_prompt_compare_current.md`，`entries=10 sessions=2 pairs=8`；会话 pair 的 `tools` / `tool_choice` / 非 prompt 请求参数均稳定，变化集中在 `messages`。
 - 真实 API 缓存探针：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。
@@ -275,7 +281,7 @@ telegram_comfyui_selfie/
 
 ## 已知限制
 
-- `selfie` 取景与互动动作有时存在轻度矛盾；当前依靠视角和负面提示词约束，尚未拆出完整 `pose/action/forbidden` 结构化字段。
+- `selfie` 取景与互动动作仍可能存在轻度矛盾；当前已通过空间/身体关系硬约束与日常/亲密同框拆分降低站位错配，但尚未拆出完整 `pose/action/forbidden` 结构化字段。
 - 会话状态处于"盒子 + 部分旧扁平键双写"的兼容期；后续彻底删除扁平键前必须先清点所有访问点和迁移测试。
 
 ## 下一阶段目标
