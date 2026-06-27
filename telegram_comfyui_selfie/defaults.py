@@ -302,6 +302,11 @@ DEFAULT_CONFIG = {
     "llm_temperature_translate": "0.3",
     "llm_temperature_classify": "0.1",
     "chat_llm_temperature": "0.9",
+    # 聊天采样：top_p 核采样砍掉低概率胡话尾巴，frequency_penalty 抗复读/车轱辘话。
+    # 留空表示不下发该参数。presence_penalty 默认关（它会推模型岔开话题，可能反伤连贯）。
+    "chat_llm_top_p": "0.92",
+    "chat_llm_frequency_penalty": "0.4",
+    "chat_llm_presence_penalty": "",
     "image_llm_temperature_scene": "",
     "image_llm_temperature_translate": "",
     "image_llm_temperature_classify": "",

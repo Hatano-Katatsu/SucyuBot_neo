@@ -1855,6 +1855,17 @@ class TelegramComfyUIService(
             "max_tokens": int(resolved.get("max_tokens") or "4096"),
             "temperature": float(self._get_llm_value(purpose, "temperature", "0.95")) if temp is None else temp,
         }
+        # 采样参数（top_p / 重复惩罚）：仅在配置了非空值时下发。
+        # 聊天默认带 top_p（核采样砍掉低概率胡话尾巴）+ frequency_penalty（抗车轱辘复读），
+        # 摆脱「温度调高说胡话 / 调低复读」的两难；图片/快速任务默认留空即不下发，保持既有行为。
+        for _sample_key in ("top_p", "frequency_penalty", "presence_penalty"):
+            _sample_raw = self._get_llm_value(purpose, _sample_key, "")
+            if _sample_raw in ("", None):
+                continue
+            try:
+                body[_sample_key] = float(_sample_raw)
+            except (TypeError, ValueError):
+                logger.warning("忽略非法采样参数 %s=%r", _sample_key, _sample_raw)
         if tools is not None:
             body["tools"] = tools
         if tool_choice is not None:
