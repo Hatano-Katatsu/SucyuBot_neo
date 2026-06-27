@@ -17,17 +17,15 @@
 
 ### 1. 安装 ComfyUI 插件
 
-本项目依赖 [ComfyUI-AnimaTool](https://github.com/Moeblack/ComfyUI-AnimaTool) 插件，需将其放到 ComfyUI 的 `custom_nodes` 目录下：
+本项目依赖 ComfyUI-AnimaTool 插件。**请使用本项目根目录下的 `ComfyUI-AnimaTool/`，这是为 SucyuBot 修改过的版本，与官方版本不兼容。**
 
 ```bash
-cd ComfyUI/custom_nodes
-git clone https://github.com/Moeblack/ComfyUI-AnimaTool.git
-pip install -r ComfyUI-AnimaTool/requirements.txt
+# 将本项目自带的插件复制到 ComfyUI custom_nodes
+cp -r ComfyUI-AnimaTool /path/to/ComfyUI/custom_nodes/
+pip install -r /path/to/ComfyUI/custom_nodes/ComfyUI-AnimaTool/requirements.txt
 ```
 
-或使用 ComfyUI Manager 搜索 "Anima Tool" 安装。
-
-本项目根目录下的 `ComfyUI-AnimaTool/` 即为该插件的副本，可直接复制到 `ComfyUI/custom_nodes/` 下使用。
+> ⚠️ 不要使用 ComfyUI Manager 安装的官方版本，也不要从 GitHub 克隆官方仓库，功能和接口有差异。
 
 确保以下模型文件已放置到 ComfyUI 对应目录（[Hugging Face 下载](https://huggingface.co/circlestone-labs/Anima)）：
 
