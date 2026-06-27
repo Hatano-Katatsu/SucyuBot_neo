@@ -5347,6 +5347,66 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_chat_sampling_params_only_apply_to_reply_requests(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({"chat_llm_api_key": "k", "chat_llm_model": "m", "chat_llm_api_base": "http://x"})
+            captured = []
+
+            class FakeResponse:
+                status = 200
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                async def json(self):
+                    return {"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": 1}}
+
+                async def text(self):
+                    return ""
+
+            class FakeSession:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                def post(self, *args, **kwargs):
+                    captured.append(dict(kwargs["json"]))
+                    return FakeResponse()
+
+            with patch("telegram_comfyui_selfie.service.aiohttp.ClientSession", FakeSession):
+                await svc._call_llm_messages(
+                    [{"role": "user", "content": "hi"}],
+                    purpose="chat",
+                    tag="chat",
+                    session_id="telegram:1",
+                    sampling=True,
+                )
+                await svc._call_llm_messages(
+                    [{"role": "user", "content": "summarize"}],
+                    purpose="chat",
+                    tag="checkpoint",
+                    temp=0.1,
+                    session_id="telegram:1",
+                )
+
+            reply_body, internal_body = captured
+            self.assertEqual(reply_body["top_p"], 0.92)
+            self.assertEqual(reply_body["frequency_penalty"], 0.4)
+            self.assertNotIn("presence_penalty", reply_body)
+            for key in ("top_p", "frequency_penalty", "presence_penalty"):
+                self.assertNotIn(key, internal_body)
+
+        asyncio.run(run())
+
     def test_user_current_input_marker_is_not_persisted_to_chat_history(self):
         async def run():
             svc = self.make_service()

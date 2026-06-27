@@ -121,6 +121,7 @@ class ChatContextMixin:
                 purpose="chat",
                 temp=float(self._get_llm_value("chat", "temperature", "0.9")),
                 session_id=session_id,
+                sampling=True,
             )
         except Exception as exc:
             logger.warning("LLM request failed: %s", exc)
@@ -185,6 +186,7 @@ class ChatContextMixin:
                     purpose="chat",
                     temp=float(self._get_llm_value("chat", "temperature", "0.9")),
                     session_id=session_id,
+                    sampling=True,
                 )
                 final_msg = final.get("choices", [{}])[0].get("message", {})
                 content = (final_msg.get("content") or content or "").strip()
