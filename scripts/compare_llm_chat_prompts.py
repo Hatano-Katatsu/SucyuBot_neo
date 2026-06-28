@@ -138,6 +138,18 @@ def settings_payload_from_body(body: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in body.items() if key not in PROMPT_COMPONENT_KEYS}
 
 
+def usage_from_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    usage = entry.get("usage") if isinstance(entry.get("usage"), dict) else {}
+    raw_usage = usage.get("raw") if isinstance(usage, dict) else None
+    if isinstance(raw_usage, dict):
+        return raw_usage
+    response = entry.get("response") if isinstance(entry.get("response"), dict) else {}
+    response_usage = response.get("usage") if isinstance(response.get("usage"), dict) else None
+    if isinstance(response_usage, dict):
+        return response_usage
+    return usage
+
+
 def build_entry_view(source_index: int, entry: dict[str, Any]) -> EntryView:
     request = entry.get("request") if isinstance(entry.get("request"), dict) else {}
     body = request.get("body") if isinstance(request.get("body"), dict) else {}
@@ -147,7 +159,7 @@ def build_entry_view(source_index: int, entry: dict[str, Any]) -> EntryView:
     prompt_payload = prompt_payload_from_body(body)
     prompt_text = stable_json(prompt_payload)
     settings_text = stable_json(settings_payload_from_body(body))
-    usage = entry.get("usage") if isinstance(entry.get("usage"), dict) else {}
+    usage = usage_from_entry(entry)
     return EntryView(
         source_index=source_index,
         session_id=str(entry.get("session_id") or ""),
@@ -163,12 +175,36 @@ def build_entry_view(source_index: int, entry: dict[str, Any]) -> EntryView:
     )
 
 
+def usage_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def provider_cache_tokens(usage: dict[str, Any]) -> int:
-    return int(usage.get("cached_tokens") or 0)
+    if not isinstance(usage, dict):
+        return 0
+    details = usage.get("prompt_tokens_details")
+    if not isinstance(details, dict):
+        details = {}
+    cached = usage_int(
+        usage.get("prompt_cache_hit_tokens")
+        or usage.get("prompt_cached_tokens")
+        or usage.get("cached_tokens")
+        or details.get("cached_tokens")
+    )
+    miss_tokens = usage_int(usage.get("prompt_cache_miss_tokens") or usage.get("cache_miss_tokens"))
+    tokens = prompt_tokens(usage)
+    if not cached and miss_tokens and tokens:
+        cached = max(0, tokens - miss_tokens)
+    return max(0, cached)
 
 
 def prompt_tokens(usage: dict[str, Any]) -> int:
-    return int(usage.get("prompt_tokens") or 0)
+    if not isinstance(usage, dict):
+        return 0
+    return usage_int(usage.get("prompt_tokens"))
 
 
 def cache_rate(usage: dict[str, Any]) -> float:
@@ -302,7 +338,7 @@ def build_report(
     lines.append(f"- Entries: {len(entries)}")
     lines.append(f"- Sessions: {len(grouped)}")
     lines.append(
-        "- Prefix tokens are provider-reported `usage.cached_tokens`; "
+        "- Prefix tokens are provider-reported cache-hit tokens parsed from raw/provider usage aliases; "
         "local prefix counts are exact comparisons of normalized JSON prompt payloads."
     )
     lines.append("")

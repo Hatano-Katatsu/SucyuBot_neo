@@ -327,10 +327,10 @@ class ChatContextMixin:
         state = self._get_session_state(session_id)
         now = self._session_now(session_id)
         weekday = WEEKDAY_NAMES[now.weekday()]
-        include_world_context = self._should_include_chat_world_context(user_text)
+        include_world_dynamic = self._should_include_chat_world_context(user_text)
         time_ctx = self._get_time_context(session_id, now=now)
         time_period = time_ctx.get("period") or self._get_time_period(now.hour)
-        light_guard = self._format_light_guard(session_id, now=now) if include_world_context else ""
+        light_guard = self._format_light_guard(session_id, now=now)
         # 静态前缀不含穿搭（中频变化），避免换装作废整条历史前缀缓存；穿搭见下方动态层 visual_context。
         persona = self._get_effective_persona(session_id, include_appearance=False)
         role_name, bot_name, bot_self_name = self._session_role_identity(session_id)
@@ -391,9 +391,7 @@ class ChatContextMixin:
                 f"{closet_context}\n"
                 "用户点名某件、或剧情/场合自然需要时（出门、睡前、洗澡后、约会等），可以让角色换上其中一件；不要无缘无故频繁换装。"
             )
-        base_semistable_context = "\n\n".join(semistable_parts)
-        self._track_semistable_context_change(session_id, base_semistable_context)
-        if include_world_context and hasattr(self, "_format_world_semistable_context"):
+        if hasattr(self, "_format_world_semistable_context"):
             world_semistable = self._format_world_semistable_context(
                 session_id, mode="chat", now=now, pin_location=not active_dialog
             )
@@ -402,6 +400,7 @@ class ChatContextMixin:
         if light_guard:
             semistable_parts.append(light_guard)
         semistable_context = "\n\n".join(semistable_parts)
+        self._track_semistable_context_change(session_id, semistable_context)
 
         # ── 动态后缀（每请求变化：精确时间/本轮位置判断/发图 overdue）──
         freq = self.config.get("selfie_frequency", "频繁")
@@ -421,7 +420,7 @@ class ChatContextMixin:
             )
         # 对话进行中：对话已建立的场景优先，动线只作背景。低频世界模板在 semistable，
         # 这里只保留本轮用户位置/空间关系等高频尾部。
-        if include_world_context and hasattr(self, "_format_world_dynamic_context"):
+        if include_world_dynamic and hasattr(self, "_format_world_dynamic_context"):
             world_dynamic = self._format_world_dynamic_context(
                 session_id, user_text, mode="chat", now=now, pin_location=not active_dialog
             )

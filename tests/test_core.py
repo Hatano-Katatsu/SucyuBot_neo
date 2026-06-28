@@ -1632,18 +1632,42 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("角色当前所在", system)
         self.assertNotIn("空间关系判断", system)
         self.assertIn("以对话为准", system)
-        # 冷启动普通寒暄不再注入天气/光线/动线，避免普通轮次破坏缓存前缀
+        # 冷启动普通寒暄也保留固定世界槽位；只不展开本轮动线动态。
         state["chat_history"] = []
         cold = "\n".join(m["content"] for m in svc._build_chat_messages(sid, "你好") if m.get("role") == "system")
-        self.assertNotIn("世界状态规则", cold)
+        self.assertIn("世界状态规则", cold)
         self.assertNotIn("本轮动线与位置动态", cold)
         self.assertNotIn("角色当前所在", cold)
         greeting = "\n".join(m["content"] for m in svc._build_chat_messages(sid, "晚上好") if m.get("role") == "system")
-        self.assertNotIn("世界状态规则", greeting)
+        self.assertIn("世界状态规则", greeting)
         # 但用户本轮确实问地点/见面时仍然展开世界上下文
         relevant = "\n".join(m["content"] for m in svc._build_chat_messages(sid, "晚上在哪见？") if m.get("role") == "system")
         self.assertIn("世界状态规则", relevant)
         self.assertIn("角色当前所在", relevant)
+
+    def test_world_semistable_keeps_fixed_prefix_slot_when_dynamic_triggers(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        fixed_now = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)
+        svc._session_now = lambda session_id="": fixed_now
+        svc._apply_llm_user_location(sid, user_location="mall", co_located=False)
+
+        ordinary = svc._build_chat_messages(sid, "\u4f60\u597d")
+        relevant = svc._build_chat_messages(sid, "\u665a\u4e0a\u5728\u54ea\u89c1\uff1f")
+        world_marker = "\u4e16\u754c\u72b6\u6001\u89c4\u5219"
+        dynamic_marker = "\u672c\u8f6e\u52a8\u7ebf\u4e0e\u4f4d\u7f6e\u52a8\u6001"
+
+        def marker_index(messages, marker):
+            return next(index for index, message in enumerate(messages) if marker in message.get("content", ""))
+
+        ordinary_world_index = marker_index(ordinary, world_marker)
+        relevant_world_index = marker_index(relevant, world_marker)
+
+        self.assertEqual(ordinary_world_index, relevant_world_index)
+        self.assertEqual(ordinary[ordinary_world_index]["role"], "system")
+        self.assertEqual(ordinary[ordinary_world_index]["content"], relevant[relevant_world_index]["content"])
+        self.assertNotIn(dynamic_marker, ordinary[-2]["content"])
+        self.assertIn(dynamic_marker, relevant[-2]["content"])
 
     def test_character_place_autoextract_overrides_clock(self):
         async def run():
@@ -6834,6 +6858,32 @@ class LlmPromptCompareScriptTestCase(unittest.TestCase):
         self.assertTrue(comparison.prompt_components_same["tools"])
         self.assertFalse(comparison.prompt_components_same["messages"])
         self.assertTrue(comparison.settings_same)
+
+    def test_provider_cache_tokens_reads_nested_usage_fields(self):
+        from scripts.compare_llm_chat_prompts import build_entry_view, cache_rate, provider_cache_tokens
+
+        usage = {
+            "prompt_tokens": 5000,
+            "prompt_tokens_details": {
+                "cached_tokens": 4096,
+            },
+        }
+
+        self.assertEqual(provider_cache_tokens(usage), 4096)
+        self.assertAlmostEqual(cache_rate(usage), 4096 / 5000)
+
+        view = build_entry_view(0, {
+            "session_id": "telegram:1",
+            "time": "2026-06-28T20:00:00",
+            "ts": 1,
+            "request": {"body": {"messages": []}},
+            "usage": {
+                "prompt_tokens": 5000,
+                "cached_tokens": 0,
+                "raw": usage,
+            },
+        })
+        self.assertEqual(provider_cache_tokens(view.usage), 4096)
 
 
 class ModelProfileTestCase(ServiceFixtureMixin, unittest.TestCase):
