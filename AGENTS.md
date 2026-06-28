@@ -229,6 +229,9 @@ telegram_comfyui_selfie/
 
 17. **常驻前缀槽计测（Tier 3）**：`_build_chat_messages()` 末尾新增 `_log_prefix_slot_signatures()`，每轮把 `static / durable / semistable / checkpoint` 各常驻 system 槽的稳定短哈希与未折叠历史条数写入用户日志 `CACHE prefix …`。前缀缓存在第一个变化的槽处断开，这条日志可直接和 `USAGE` 的 `cached` 命中对照，定位某轮命中率下降是哪个槽变了，而不再靠体感。
 18. **世界揮发字段移出常驻槽（Tier 1）**：排查发现 semistable 虽已位置常驻，但 `_format_world_semistable_context()` 内仍嵌着 `城市/日期`（含 `time_period`）、`天气`、`季节/自然光`，且 `_format_light_guard()` 随 `light_phase`（日间/黄昏/暮色/入夜）日内漂移——这些每滚动一次就把后面的 checkpoint+历史踢出前缀缓存，还会经 `_track_semistable_context_change()` 触发多余的强制 checkpoint（摘要 LLM）。现在 `_format_world_semistable_context()` 只保留 session 内不变的世界规则（角色身份、地点来源、空间覆盖、位置优先级/不瞬移段落），新增 `_format_world_conditions_context()` 把城市/日期/天气/季节自然光与自然光硬规则一并放到非缓存动态尾部 `system_dynamic`，模型每轮仍能看到当前天气/光线（展示内容不变，只换位置）。实测同一 session 在 12:00/19:00/23:00 三个 time_period 下常驻世界槽哈希恒为 `822a3662`，尾部哈希各不相同。新增 `test_world_conditions_move_to_tail_keep_resident_slot_stable` 回归锁定「time_period 滚动时常驻槽字节不变、揮发条件落尾部」；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 282 tests in 7.099s`，`OK (skipped=1)`。
+19. **主动推送场景转场判定**：新增 `_push_scene_transition_decision()` / `_format_push_scene_transition_context()`，主动推送会识别“结束、离开、改约、晚上等着、不和…扯了”等信号，以及超过 `scene_stale_minutes` 的断档；旧对话/照片此时只作为情绪、约定和避免重复参考，不再默认把上一幕地点、姿势和话题续写为此刻仍在发生。
+20. **推送旧地点强锁降级**：`plan_roleplay_image(mode=normal/morning/ntr)` 在判定应转场时，临时忽略本轮旧 `character_place` 的 strong pin，并让 `_format_world_context(..., apply_persisted_place=False)` 按当前时间/天气/动线给出转场后的落点；旧地点仍以 weak 参考出现，不清空状态，规划器若输出新的 `character_location` 会回写刷新。
+21. **回归测试**：新增 `test_scheduled_push_transition_does_not_lock_stale_previous_scene_place`，覆盖咖啡店告别/晚上约定后 45 分钟推送不再出现 `地点锁定（最高优先）`，并允许角色地点从 `cafe` 刷新为 `transit`；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 283 tests in 6.097s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-06-27）
 

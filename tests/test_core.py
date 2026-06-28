@@ -3752,6 +3752,60 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_scheduled_push_transition_does_not_lock_stale_previous_scene_place(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+                "scene_stale_minutes": "30",
+                "push_continuity_hours": "2",
+            })
+            sid = "telegram:123"
+            now = datetime.fromtimestamp(time.time(), timezone.utc)
+            ts = now.timestamp()
+            state = svc._get_session_state(sid)
+            session_schema.set_last_interaction(state, ts - 45 * 60)
+            session_schema.set_last_message_time(state, ts - 45 * 60)
+            session_schema.set_recent_message_history(state, [
+                {"text": "切，不和姐姐扯了，晚上等着！", "time": ts - 45 * 60},
+            ])
+            session_schema.set_chat_history(state, [
+                {"role": "user", "content": "切，不和姐姐扯了，晚上等着！"},
+                {"role": "assistant", "content": "晚上七点，老地方见。"},
+            ])
+            session_schema.set_sent_photos_history(state, [{
+                "timestamp": ts - 46 * 60,
+                "scene": "咖啡店窗边收拾杯子",
+                "caption": "",
+                "appearance": "",
+                "view": "selfie",
+                "source_description": "意图: 咖啡店告别，约定晚上见面",
+            }])
+            svc._set_character_place(sid, "cafe", "还在咖啡店窗边", 0.95, source="tool")
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "A vertical selfie while walking toward the station after leaving the cafe.",
+                "view": "selfie",
+                "character_location": "transit",
+                "user_location": "unknown",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            }, ensure_ascii=False))
+
+            await plan_roleplay_image(svc, sid, mode="normal", weather_data={"desc": "晴", "temp": "22"}, now=now)
+
+            system = svc._call_llm.await_args.args[0]
+            self.assertIn("推送场景转换判定", system)
+            self.assertIn("不要把上一场景的地点", system)
+            self.assertNotIn("地点锁定（最高优先", system)
+            self.assertIn("地点参考（较弱", system)
+            self.assertEqual(session_schema.get_character_place(svc._get_session_state(sid)), "transit")
+
+        asyncio.run(run())
+
     def test_roleplay_image_planner_does_not_embed_animatool_schema(self):
         async def run():
             svc = self.make_service()

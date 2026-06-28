@@ -26,6 +26,109 @@ logger = logging.getLogger(__name__)
 
 
 class SchedulerRuntimeMixin:
+    _PUSH_SCENE_END_RE = re.compile(
+        r"(不聊|不说|别扯|先这样|先不|到此|结束|散了|撤了|走了|离开|出发|回家|回去|下班|"
+        r"去车站|去地铁|上车|到站|晚安|睡觉|睡了|明天见|下次见|改天|回头聊|晚上见|老地方见|"
+        r"待会见|等会见|一会见|晚上.*等|待会.*等|等会.*等|不.*扯|告别|准备去|准备走|收拾.*去)"
+    )
+    _PUSH_SCENE_HOLD_RE = re.compile(
+        r"(等你|等着你|等我|别走|别离开|留下来|继续|还没结束|正在|刚开始|马上回来|马上到|"
+        r"一会回来|待会回来)"
+    )
+
+    def _push_scene_transition_decision(
+        self,
+        state: dict[str, Any],
+        session_id: str = "",
+        now: datetime | None = None,
+        mode: str = "normal",
+    ) -> dict[str, Any]:
+        """判断主动推送是否应把短期连续性当成旧场景，而不是继续强锁。"""
+        now_ts = now.timestamp() if isinstance(now, datetime) else time.time()
+        reset_time = session_schema.get_short_context_reset_time(state)
+        latest = float(session_schema.get_last_interaction(state) or 0)
+        latest = max(latest, session_schema.get_last_message_time(state))
+        texts: list[str] = []
+
+        for msg in session_schema.get_recent_message_history(state):
+            msg_ts = float(msg.get("time", 0) or 0)
+            if reset_time and msg_ts < reset_time:
+                continue
+            latest = max(latest, msg_ts)
+            text = (msg.get("text") or "").strip()
+            if text:
+                texts.append(text)
+        for msg in self._active_chat_history(state, 8):
+            if msg.get("role") not in ("user", "assistant"):
+                continue
+            text = (msg.get("content") or "").strip()
+            if text:
+                texts.append(text)
+        for photo in session_schema.get_sent_photos_history(state)[-3:]:
+            photo_ts = float(photo.get("timestamp", 0) or 0)
+            if reset_time and photo_ts < reset_time:
+                continue
+            latest = max(latest, photo_ts)
+            for key in ("scene", "caption", "source_description"):
+                text = (photo.get(key) or "").strip()
+                if text:
+                    texts.append(text)
+
+        joined = "\n".join(texts[-12:])
+        try:
+            stale_minutes = max(0.0, float(self.config.get("scene_stale_minutes", "30") or 0))
+        except Exception:
+            stale_minutes = 30.0
+        try:
+            continuity_hours = max(0.25, float(self.config.get("push_continuity_hours", "2") or "2"))
+        except Exception:
+            continuity_hours = 2.0
+        gap_minutes = (now_ts - latest) / 60.0 if latest else 0.0
+        has_end_signal = bool(self._PUSH_SCENE_END_RE.search(joined))
+        has_hold_signal = bool(self._PUSH_SCENE_HOLD_RE.search(joined))
+        stale = bool(latest and stale_minutes > 0 and gap_minutes > stale_minutes)
+        too_old = bool(latest and gap_minutes > continuity_hours * 60.0)
+        morning = (mode or "").strip().lower() == "morning"
+        should_transition = morning or has_end_signal or (stale and not has_hold_signal) or too_old
+        return {
+            "should_transition": should_transition,
+            "drop_continuity": too_old and not has_hold_signal,
+            "gap_minutes": gap_minutes,
+            "stale_minutes": stale_minutes,
+            "has_end_signal": has_end_signal,
+            "has_hold_signal": has_hold_signal,
+            "too_old": too_old,
+            "morning": morning,
+        }
+
+    def _format_push_scene_transition_context(
+        self,
+        state: dict[str, Any],
+        session_id: str = "",
+        now: datetime | None = None,
+        mode: str = "normal",
+    ) -> str:
+        decision = self._push_scene_transition_decision(state, session_id, now=now, mode=mode)
+        if not decision.get("should_transition"):
+            return ""
+        reasons = []
+        if decision.get("morning"):
+            reasons.append("早安推送开启新一天")
+        if decision.get("has_end_signal"):
+            reasons.append("最近上下文含结束/离开/改约信号")
+        if decision.get("too_old"):
+            reasons.append("已超过主动推送连续性时效")
+        elif decision.get("gap_minutes", 0) > decision.get("stale_minutes", 0) > 0:
+            reasons.append(f"距离上次互动约 {decision['gap_minutes']:.0f} 分钟，超过场景断档阈值")
+        if not reasons:
+            reasons.append("短期场景可能已经自然结束")
+        return (
+            "推送场景转换判定: " + "；".join(reasons) + "。\n"
+            "处理规则: 最近对话/照片只能作为情绪、约定和避免重复的参考，不要把上一场景的地点、姿势或话题强行续写成此刻仍在发生。"
+            "如果有未完成约定，只保留约定本身，并根据当前时间、天气和角色动线写出自然过渡后的单一瞬间。"
+            "除非最近文本明确表示角色仍在原地等待或动作尚未结束，否则应允许角色离开旧地点、到路上、回家、去下一个目的地或进入新的日常片段。"
+        )
+
     def _format_scene_continuity_context(
         self,
         state: dict[str, Any],
@@ -55,12 +158,15 @@ class SchedulerRuntimeMixin:
             parts.append("最近发过的图片:\n" + photos)
         if not parts:
             return ""
+        transition = self._format_push_scene_transition_context(state, session_id, now=now)
+        transition = ("\n" + transition) if transition else ""
         return (
             "短期连续性上下文（优先级高于自动动线；用于承接刚才停住的场景）:\n"
             + "\n\n".join(parts)
             + "\n连续性要求: 主动推送应优先承接最近已建立的地点、未完成约定、情绪和可见状态。"
             "如果现实动线与这里冲突，短时间内以连续性为主；确实需要换地点时必须写出自然过渡，"
             "例如离开咖啡店、去车站、回家路上，而不要突然跳到无关场景。"
+            + transition
         )
 
     async def _llm_write_scene(self, mode, weather, weekday, time_period, recent_chat=None, session_id="", now=None, weather_data=None):

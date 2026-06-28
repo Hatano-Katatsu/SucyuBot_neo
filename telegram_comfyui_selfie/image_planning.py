@@ -657,7 +657,29 @@ async def plan_roleplay_image(
         bot_name = service._get_session_cfg(session_id, "bot_name", "蕾伊")
         bot_self_name = service._get_session_cfg(session_id, "bot_self_name", "我")
         role_name = service._get_session_cfg(session_id, "role_name", "魅魔")
+    is_push = mode in ("normal", "morning", "ntr")
+    push_transition_decision: dict[str, Any] = {}
+    push_transition_context = ""
+    if is_push and hasattr(service, "_push_scene_transition_decision"):
+        try:
+            push_transition_decision = service._push_scene_transition_decision(
+                state,
+                session_id,
+                now=now,
+                mode=mode,
+            )
+            if push_transition_decision.get("should_transition") and hasattr(service, "_format_push_scene_transition_context"):
+                push_transition_context = service._format_push_scene_transition_context(
+                    state,
+                    session_id,
+                    now=now,
+                    mode=mode,
+                )
+        except Exception:
+            logger.debug("push scene transition decision failed", exc_info=True)
     continuity_context = format_planning_continuity_context(service, state, session_id)
+    if push_transition_decision.get("drop_continuity"):
+        continuity_context = None
     spatial_context = format_planning_spatial_context(
         service,
         state,
@@ -665,7 +687,7 @@ async def plan_roleplay_image(
         intent=intent,
         must_include=must_include,
         prompt=prompt,
-    )
+    ) if not push_transition_decision.get("should_transition") else None
     photo_context = format_recent_photo_dedup_context(service, state, session_id)
     memory_query = "\n".join(part for part in (intent, mood, must_include, prompt, continuity_context or "") if part)
     memory_context = ""
@@ -680,6 +702,8 @@ async def plan_roleplay_image(
                 world_query,
                 weather=weather_data,
                 mode="image",
+                now=now,
+                apply_persisted_place=not push_transition_decision.get("should_transition"),
             )
         except Exception:
             logger.debug("world context build failed for image planning", exc_info=True)
@@ -690,8 +714,12 @@ async def plan_roleplay_image(
     #   允许规划器结合对话重新判断并回写刷新，避免陈旧 pin 把角色卡死在某地。
     # - None（超硬 TTL）：完全交规划器自行判断。
     pinned_place = service._active_character_place(state) if hasattr(service, "_active_character_place") else None
-    strong_pin = pinned_place if (pinned_place and pinned_place.get("authority") == "strong") else None
-    weak_pin = pinned_place if (pinned_place and pinned_place.get("authority") == "weak") else None
+    if push_transition_decision.get("should_transition"):
+        strong_pin = None
+        weak_pin = pinned_place
+    else:
+        strong_pin = pinned_place if (pinned_place and pinned_place.get("authority") == "strong") else None
+        weak_pin = pinned_place if (pinned_place and pinned_place.get("authority") == "weak") else None
     # 最近位置轨迹（用于 weak / 冷启动时给规划器一条动线连续性线索）。
     location_trail = ""
     history = session_schema.get_character_place_history(state) if isinstance(state, dict) else []
@@ -705,7 +733,6 @@ async def plan_roleplay_image(
     user_gender = service._get_user_gender(session_id) if hasattr(service, "_get_user_gender") else "male"
     user_g_zh = "女性" if user_gender == "female" else "男性"
 
-    is_push = mode in ("normal", "morning", "ntr")
     spatial_hint = service._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])
     spatial_label = f"默认物理空间设定（{spatial_hint}）" if str(spatial_hint).strip() else "默认无固定空间设定"
 
@@ -718,13 +745,15 @@ async def plan_roleplay_image(
     if is_push:
         system += (
             f"你是角色扮演推送图片导演。当前推送模式: {mode}。\n"
-            "主动推送时把画面写成角色日常动线里的自然片段，不要无理由瞬移到用户身边；短期连续性上下文优先于自动动线。\n"
+            "主动推送时把画面写成角色日常动线里的自然片段，不要无理由瞬移到用户身边；短期连续性上下文可用于承接，但必须先服从场景转换判定。\n"
             f"角色身份: 当前角色是「{bot_name}」（{role_name}），优先使用「{bot_self_name}」作为自称；不要写成其他默认角色。\n"
             f"模式要求:\n"
             "morning: 必须使用 pov，刚睡醒、厨房或卧室早安场景。\n"
             f"normal: 根据{spatial_label}和近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror。\n"
             f"ntr: 用户长时间未互动的冷落惩罚推送，强烈 NTR 危机感，通常 portrait（他人帮角色拍）、selfie 或分屏。\n"
         )
+        if push_transition_context:
+            system += push_transition_context + "\n"
         temporal = time_period
     else:
         if free_composition:
@@ -766,12 +795,19 @@ async def plan_roleplay_image(
             "自行判断【此刻用户是否和角色在同一空间】，并据此决定视角——"
             "判断同处则优先 pov 或近距离 third 同框互动；判断异地、独处或仅线上联系才用 selfie/mirror。"
         )
-        if continuity_context:
+        if continuity_context and not push_transition_decision.get("should_transition"):
             system += (
                 f"\n{world_context}\n"
                 "以上“角色当前所在/接下来动线”只是日常背景参考。当前正在进行的对话场景优先级最高："
                 "如果对话里角色已经处在某个地点（在家、商场、车站等），或刚说过自己在哪，就保持那个地点不变，"
                 "不要因为动线显示的时间点不同，就擅自把角色挪到别处（严禁无理由瞬移）。\n"
+                + space_judgement
+            )
+        elif push_transition_decision.get("should_transition"):
+            system += (
+                f"\n{world_context}\n"
+                "以上世界状态用于确定转场后的当前落点；旧短期连续性若只是在描述上一幕地点或动作，不得覆盖当前动线。"
+                "可以保留情绪、关系张力和未完成约定，但画面应落在自然推进后的此刻。\n"
                 + space_judgement
             )
         else:

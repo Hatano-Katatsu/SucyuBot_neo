@@ -1233,12 +1233,20 @@ class WorldRuntimeMixin:
         mode: str = "chat",
         now: datetime | None = None,
         pin_location: bool = True,
+        apply_persisted_place: bool = True,
     ) -> str:
         if weather is None:
             cached = getattr(self, "_weather_caches", {}).get(session_id or "__default__")
             if isinstance(cached, dict):
                 weather = cached.get("data")
-        world = self.build_world_state(session_id, user_text=user_text, weather=weather, now=now, mode=mode)
+        world = self.build_world_state(
+            session_id,
+            user_text=user_text,
+            weather=weather,
+            now=now,
+            mode=mode,
+            apply_persisted_place=apply_persisted_place,
+        )
         if not world:
             return ""
         now = world["now"]
