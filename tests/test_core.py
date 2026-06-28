@@ -1632,10 +1632,18 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("角色当前所在", system)
         self.assertNotIn("空间关系判断", system)
         self.assertIn("以对话为准", system)
-        # 冷启动（无活跃历史）仍然钉时钟地点，供模型自然提及
+        # 冷启动普通寒暄不再注入天气/光线/动线，避免普通轮次破坏缓存前缀
         state["chat_history"] = []
         cold = "\n".join(m["content"] for m in svc._build_chat_messages(sid, "你好") if m.get("role") == "system")
-        self.assertIn("角色当前所在", cold)
+        self.assertNotIn("世界状态规则", cold)
+        self.assertNotIn("本轮动线与位置动态", cold)
+        self.assertNotIn("角色当前所在", cold)
+        greeting = "\n".join(m["content"] for m in svc._build_chat_messages(sid, "晚上好") if m.get("role") == "system")
+        self.assertNotIn("世界状态规则", greeting)
+        # 但用户本轮确实问地点/见面时仍然展开世界上下文
+        relevant = "\n".join(m["content"] for m in svc._build_chat_messages(sid, "晚上在哪见？") if m.get("role") == "system")
+        self.assertIn("世界状态规则", relevant)
+        self.assertIn("角色当前所在", relevant)
 
     def test_character_place_autoextract_overrides_clock(self):
         async def run():
@@ -1654,6 +1662,18 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertTrue(await svc._update_character_place_from_text(sid, "我在家呢，刚到客厅"))
             self.assertEqual(session_schema.get_character_place(state), "home")
             self.assertEqual(svc.build_world_state(sid, weather=None)["character_place"]["key"], "home")
+        asyncio.run(run())
+
+    def test_character_place_autoextract_skips_plain_reply(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({"image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "https://x"})
+            sid = "telegram:123"
+            svc._call_llm = AsyncMock(return_value=json.dumps({"place": "home", "place_name": ""}, ensure_ascii=False))
+
+            self.assertFalse(await svc._update_character_place_from_text(sid, "嗯嗯，听着呢。"))
+            svc._call_llm.assert_not_awaited()
+
         asyncio.run(run())
 
     def test_tool_update_location_sets_and_pins_character_place(self):
@@ -5811,6 +5831,19 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc.config["selfie_frequency"] = "关闭"
             svc._get_session_state(sid)["rounds_since_image"] = 9
             self.assertIsNone(await svc._judge_image_moment(sid, "你好", "回复"))
+            svc._call_llm.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_judge_skips_plain_dialog_without_visual_trigger(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({"chat_llm_api_key": "k", "chat_llm_model": "m", "chat_llm_api_base": "http://x", "selfie_frequency": "适度"})
+            sid = "telegram:1"
+            svc._get_session_state(sid)["rounds_since_image"] = 9
+            svc._call_llm = AsyncMock(return_value=json.dumps({"send": True, "intent": "x"}))
+
+            self.assertIsNone(await svc._judge_image_moment(sid, "你好", "嗯嗯，听着呢。"))
             svc._call_llm.assert_not_awaited()
 
         asyncio.run(run())

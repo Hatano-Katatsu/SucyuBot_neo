@@ -29,6 +29,23 @@ IMAGE_REQUEST_RE = re.compile(
     r"你的(?:样子|穿搭|打扮|照片)|镜子里|对镜|你那(?:边|儿)(?:啥|什么|怎))",
     re.IGNORECASE,
 )
+CHAT_WORLD_TRIGGER_RE = re.compile(
+    r"(在哪|哪里|位置|地点|见面|过来|过去|出门|回家|到家|在家|路上|街上|"
+    r"(?:要|想|准备|现在|马上|一会儿|今晚|明天|今天)?(?:去|回到|来到|抵达|离开)(?:家|公司|学校|餐厅|咖啡|商场|车站|地铁|机场|公园|医院|酒店|图书馆|电影院|影院|便利店|超市|海边|你那|我这|那里|这里)|"
+    r"公司|学校|餐厅|咖啡|商场|车站|地铁|机场|"
+    r"公园|医院|酒店|图书馆|电影院|影院|便利店|超市|天气|下雨|下雪|雨天|雪天|"
+    r"冷吗|热吗|温度|刮风|有风|大风|起雾|天黑|天亮|日落|夕阳|光线|几点|"
+    r"拍照|自拍|照片|图片|配图|画图|绘图|生图|发图|镜头|photo|pic|selfie|"
+    r"weather|rain|snow|cold|hot|where|location|arrive|home|office|school|restaurant|cafe|mall|station|airport|hotel)",
+    re.IGNORECASE,
+)
+IMAGE_JUDGE_TRIGGER_RE = re.compile(
+    r"(照片|图片|自拍|配图|画图|绘图|生图|发图|镜头|拍照|看看|看你|样子|"
+    r"穿|换|脱|戴|摘|裙|衣|外套|眼镜|头发|发色|妆|表情|脸红|坐|躺|站|跪|"
+    r"抱|靠|贴|凑|牵|亲|吻|摸|腿|脚|肩|怀里|身后|床|被子|枕头|晚安|睡|沙发|浴室|镜子|窗|"
+    r"雨|雪|阳光|夜景|photo|pic|selfie|look|wear|dress|pose|camera)",
+    re.IGNORECASE,
+)
 SHORT_CONTEXT_RESET_RE = re.compile(
     r"(换个话题|换话题|换一?个场景|新场景|下一幕|下一段|另起|说点别的|聊点别的|不说这个|先不说|不聊这个|别提这个|跳过这个|结束这个|这个话题到此|算了|重新开始|从头来|回到正题)"
 )
@@ -68,7 +85,8 @@ class ChatContextMixin:
         previous_interaction = session_schema.get_last_interaction(state)
         reset_reason = self._short_context_reset_reason(text, previous_interaction)
         self._touch(session_id)
-        self._schedule_weather_refresh(session_id)  # 天气缓存过期则后台刷新，避免聊天天气停在早安推送那次
+        if self._should_include_chat_world_context(text):
+            self._schedule_weather_refresh(session_id)  # 只在本轮可能用到天气/动线时后台刷新
         if reset_reason:
             self._reset_short_context(state, reset_reason, session_id=session_id)
         session_schema.set_last_message_text(state, text)
@@ -265,7 +283,10 @@ class ChatContextMixin:
 
         # 自动抽取角色自述位置并持久化（工具 update_location 是显式高置信路径，这里是 LLM 判定兜底）。
         # fire-and-forget：不阻塞回复返回，抽取结果下一轮生效。
-        if content:
+        should_extract_location = True
+        if hasattr(self, "_should_run_location_extract"):
+            should_extract_location = self._should_run_location_extract(user_text, content)
+        if content and should_extract_location:
             async def _bg_extract():
                 try:
                     await self._update_character_place_from_text(session_id, content)
@@ -310,10 +331,10 @@ class ChatContextMixin:
         state = self._get_session_state(session_id)
         now = self._session_now(session_id)
         weekday = WEEKDAY_NAMES[now.weekday()]
+        include_world_context = self._should_include_chat_world_context(user_text)
         time_ctx = self._get_time_context(session_id, now=now)
         time_period = time_ctx.get("period") or self._get_time_period(now.hour)
-        time_light = self._format_time_context(session_id, now=now)
-        light_guard = self._format_light_guard(session_id, now=now)
+        light_guard = self._format_light_guard(session_id, now=now) if include_world_context else ""
         # 静态前缀不含穿搭（中频变化），避免换装作废整条历史前缀缓存；穿搭见下方动态层 visual_context。
         persona = self._get_effective_persona(session_id, include_appearance=False)
         role_name, bot_name, bot_self_name = self._session_role_identity(session_id)
@@ -374,7 +395,9 @@ class ChatContextMixin:
                 f"{closet_context}\n"
                 "用户点名某件、或剧情/场合自然需要时（出门、睡前、洗澡后、约会等），可以让角色换上其中一件；不要无缘无故频繁换装。"
             )
-        if hasattr(self, "_format_world_semistable_context"):
+        base_semistable_context = "\n\n".join(semistable_parts)
+        self._track_semistable_context_change(session_id, base_semistable_context)
+        if include_world_context and hasattr(self, "_format_world_semistable_context"):
             world_semistable = self._format_world_semistable_context(
                 session_id, mode="chat", now=now, pin_location=not active_dialog
             )
@@ -383,7 +406,6 @@ class ChatContextMixin:
         if light_guard:
             semistable_parts.append(light_guard)
         semistable_context = "\n\n".join(semistable_parts)
-        self._track_semistable_context_change(session_id, semistable_context)
 
         # ── 动态后缀（每请求变化：精确时间/本轮位置判断/发图 overdue）──
         freq = self.config.get("selfie_frequency", "频繁")
@@ -403,7 +425,7 @@ class ChatContextMixin:
             )
         # 对话进行中：对话已建立的场景优先，动线只作背景。低频世界模板在 semistable，
         # 这里只保留本轮用户位置/空间关系等高频尾部。
-        if hasattr(self, "_format_world_dynamic_context"):
+        if include_world_context and hasattr(self, "_format_world_dynamic_context"):
             world_dynamic = self._format_world_dynamic_context(
                 session_id, user_text, mode="chat", now=now, pin_location=not active_dialog
             )
@@ -714,6 +736,21 @@ class ChatContextMixin:
         """用户是否明确开口要看图/自拍/照片：命中则配图不受冷却期约束。"""
         return bool(IMAGE_REQUEST_RE.search(text or ""))
 
+    def _should_include_chat_world_context(self, text: str, *, explicit_image: bool | None = None) -> bool:
+        """普通聊天默认不注入天气/光线/动线；只有本轮真的碰到世界状态才展开。"""
+        if explicit_image is None:
+            explicit_image = self._user_requested_image(text)
+        if explicit_image:
+            return True
+        return bool(CHAT_WORLD_TRIGGER_RE.search(text or ""))
+
+    def _should_run_image_judge(self, user_text: str, draft_reply: str, *, explicit: bool = False) -> bool:
+        """自动配图 judge 的便宜意图门控，避免寒暄/纯问答每轮再跑一次小模型。"""
+        if explicit:
+            return True
+        combined = "\n".join(part for part in (user_text, draft_reply) if part)
+        return bool(IMAGE_JUDGE_TRIGGER_RE.search(combined))
+
     def _should_block_chat_image(self, session_id: str, user_text: str, *, explicit: bool | None = None) -> bool:
         """聊天触发的配图（模型主动调工具或泄漏图片描述）是否应被冷却拦截。
 
@@ -755,6 +792,8 @@ class ChatContextMixin:
         rounds = session_schema.get_rounds_since_image(state)
         if not explicit and rounds < self._image_min_gap(freq):
             return None  # 刚发过图，留白（用户明确要图时不受冷却约束）
+        if not self._should_run_image_judge(user_text, draft_reply, explicit=explicit):
+            return None
         overdue = self._image_nudge_due(freq, rounds)
         tendency = {
             "极频繁": "门槛很低：稍微有点画面感、场景或情绪就发。",

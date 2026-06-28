@@ -116,10 +116,10 @@ telegram_comfyui_selfie/
 
 1. 静态 system：身份、人设、关系、工具规则、照片历史规则、固定发图节奏规则。
 2. 天级/低频稳定层：低频对话控制、角色历史提要、按重要性选取的长期记忆。
-3. 半稳定状态快照：当前可见外型、衣橱、当前附加外貌、低频世界模板（天气/光线阶段/角色身份/日常动线背景/场景约束）。
+3. 半稳定状态快照：当前可见外型、衣橱、当前附加外貌；低频世界模板（天气/光线阶段/角色身份/日常动线背景/场景约束）只在本轮出现地点、天气、发图等世界状态信号时展开。
 4. checkpoint 会话连续性：近期已折叠对话摘要。
 5. 未折叠历史：checkpoint 之后的真实 `user/assistant/system` 历史。
-6. 动态尾部：精确当前时间、本轮用户位置/空间关系判断、overdue 发图提醒、场景断档提醒、当前用户输入。
+6. 动态尾部：精确当前时间、按需本轮用户位置/空间关系判断、overdue 发图提醒、场景断档提醒、当前用户输入。
 
 关键约束：
 
@@ -127,8 +127,8 @@ telegram_comfyui_selfie/
 - checkpoint 裁剪后第一条必须是 `user`；多余的孤立 `assistant` / `system` 会进入 checkpoint 摘要。
 - dream 和 dream 记忆整理只读取实际 `user/assistant` 对话，不消费照片历史 system。
 - 照片历史是真正的历史 `system` 消息，保留到被正常历史裁剪为止，并参与 checkpoint 摘要。
-- 半稳定层变化时，如果未折叠历史达到 `context_window_message_limit / 2`，会异步强制 checkpoint 一次，近似恢复后续前缀稳定。
-- 天气、光线阶段、城市、角色身份和动线背景已从每轮 dynamic system 拆入 semistable；本轮用户位置仍保留在 dynamic tail，避免把用户当前位置缓存成旧状态。
+- 外观/衣柜等持久半稳定层变化时，如果未折叠历史达到 `context_window_message_limit / 2`，会异步强制 checkpoint 一次，近似恢复后续前缀稳定；按需展开的世界块不参与该签名，避免一次天气/地点问题触发无意义 checkpoint。
+- 普通聊天默认不注入天气、光线阶段、城市、角色身份和动线背景；只有本轮出现地点/天气/时间/发图等信号时，才展开世界 semistable 与本轮动态位置尾部，避免把高变动世界状态塞进每轮缓存前缀。
 - `/新场景` / `/上下文重置` 会先对切换前未折叠上下文跑一次 checkpoint 摘要和记忆提取，再清空当前模型侧 `chat_history` 和 checkpoint 摘要，并把 checkpoint 边界推进到当前最新消息；SQLite `chat_messages` 不删除，后续 dream 仍会读取真实 `user/assistant` 对话。
 - 兼容部分 OpenAI 兼容端点把工具调用以 DSML 文本写进 `message.content` 的情况；聊天链路会提取 `<...DSML...invoke>` 为内部工具调用并清理残留标记，避免原始工具 XML/DSML 泄漏给用户。
 
@@ -219,6 +219,11 @@ telegram_comfyui_selfie/
 8. **17:08 空回复排查修复**：确认 `telegram:6430033168` 在 `chat-final` 阶段收到供应商返回的 `finish_reason=tool_calls` 且 `message.content=null`，原链路因此得到空正文并触发“回复生成失败，请稍后重试。”；现在工具执行后的最终文本请求不再继续携带 `tools` / `tool_choice=none`，避免 OpenAI 兼容端忽略 `none` 后再次返回工具调用。
 9. **LLM 错误完整日志**：新增 `_record_llm_error_log()`，LLM 非 200、初始/最终请求异常、最终 200 但正文为空或继续返回 tool_calls 时，会向用户日志写入 `ERROR LLM_FULL_LOG`，包含不带 Authorization/API key 的完整请求体与响应体；新增 `test_chat_final_omits_tools_and_logs_empty_tool_call_response`，验证 `py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 274 tests in 5.955s`，`OK (skipped=1)`。
 10. **角色切换衣柜串味修复**：定位到 `character_contexts` 冻结/解冻短期态时未深拷贝，`state["clothing"]` 与已冻结角色上下文共享同一个 dict，导致切到新角色后修改衣柜会同步污染离开角色；现在冻结与恢复都 `deepcopy`，WebUI 保存并激活角色也统一走切换流程，目标角色无冻结衣柜时只用自己的角色卡 `outfit` 初始化，绝不继承上一角色衣柜。新增测试覆盖 `/角色 load` 与 WebUI `activate=true`，验证 `py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 276 tests in 5.794s`，`OK (skipped=1)`。
+
+11. **普通 chat 世界上下文按需展开**：`_build_chat_messages()` 不再给每轮普通聊天注入天气、光线、城市、动线和本轮位置动态；只有用户本轮出现地点、天气、光线、明确发图/拍照等信号时才展开 `_format_world_semistable_context()` / `_format_world_dynamic_context()`。普通“你好”“晚上好”只保留精确当前时间、发图提醒和场景断档提醒。
+12. **semistable checkpoint 签名收窄**：`_track_semistable_context_change()` 现在只跟踪外观/衣柜等真正半稳定状态；按需世界块不参与签名，避免一次天气/地点问题造成半稳定签名来回变化并误触发 checkpoint。
+13. **LLM 小任务门控**：`image-judge` 新增轻量视觉/动作触发词，纯寒暄和普通问答不再调用小模型；`location-extract` 在聊天后台任务和 `world_runtime.py` 请求入口都增加地点/移动信号门控，避免“嗯嗯”“我在想”等无地点回复每轮消耗 token。
+14. **回归测试**：新增/更新测试覆盖普通寒暄不注入世界块、地点相关输入仍注入世界块、无地点回复不调用 `location-extract`、无画面信号不调用 `image-judge`，并保留原有同空间 judge 视角清理与明确自拍视角测试；验证 `py -3 -m unittest tests.test_core -v`，结果 `Ran 278 tests in 6.529s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-06-27）
 
