@@ -251,7 +251,7 @@ class ChatContextMixin:
                 self._ulog(session_id, "JUDGE", f"配图时机=发 view={judge_view} intent={judge_decision.get('intent','')[:60]}")
             else:
                 self._ulog(session_id, "JUDGE", f"配图时机=发 intent={judge_decision.get('intent','')[:60]}")
-            asyncio.create_task(self.tool_generate_image(
+            asyncio.create_task(self._run_background_roleplay_image(
                 chat_id, session_id,
                 intent=judge_decision.get("intent", ""),
                 mood=judge_decision.get("mood", ""),
@@ -552,6 +552,14 @@ class ChatContextMixin:
         if fn == "update_user_location":
             return await self.tool_update_user_location(session_id, args.get("place", ""))
         return f"未知工具: {fn}"
+
+    async def _run_background_roleplay_image(self, chat_id: int | str, session_id: str, **kwargs):
+        """运行后台自动配图任务，并把异常写入用户日志。"""
+        try:
+            await self.tool_generate_image(chat_id, session_id, **kwargs)
+        except Exception as exc:
+            self._ulog(session_id, "ERROR", f"后台自动配图异常: {exc}")
+            logger.error("background roleplay image failed: %s", exc, exc_info=True)
 
     @staticmethod
     def _image_nudge_due(freq: str, rounds_since: int) -> bool:

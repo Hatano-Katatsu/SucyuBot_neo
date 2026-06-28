@@ -206,6 +206,14 @@ telegram_comfyui_selfie/
 - fire-and-forget `asyncio.create_task` 内异常可能被静默吞掉；排查生图/推送失败优先看 service log。
 - `_get_llm_value("chat", "temperature")` 的 legacy 回退会落到 `llm_temperature_scene`，除非 `chat_llm_temperature` 显式设置。
 
+## 今日变更（2026-06-28）
+
+1. **自动推送完成标记修复**：随机推送点不再在进入触发窗口时提前写入 `daily_triggered_times`；现在只有 `_sched_fire()` 实际成功发送照片后才标记完成。错过 5 分钟窗口或晚安抑制仍会显式写入处理原因，避免“无声吃掉当天推送点”。
+2. **推送任务异常兜底**：`_sched_fire()` 改为返回 `bool`，并捕获规划、翻译、生图、Telegram `send_photo` 等环节异常，写入用户日志 `PUSH` 与 service log；后台推送任务使用统一包装器，失败时窗口内可继续重试。
+3. **测试推送链路统一**：`/测试推送` 改走同一个安全后台包装器；`morning` 测试不再先额外跑一次 dream，避免与 `_sched_fire(mode=morning)` 重复整理。
+4. **自动配图后台异常记录**：聊天 judge 自动补图改为调用 `_run_background_roleplay_image()`，后台任务异常会写入 `ERROR` 用户日志和 service log，便于排查“文字回复正常但图片没出来”的情况。
+5. **回归测试**：新增测试覆盖 Telegram 发图异常不穿透后台任务、推送点只在成功后标记、后台自动配图异常入日志；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 272 tests in 6.596s`，`OK (skipped=1)`。
+
 ## 今日变更（2026-06-27）
 
 1. **checkpoint 时间节点软约束**：`_summarize_checkpoint()` 追加提示词规则，要求保留用户明确提到的日期、几点、期限、倒计时、约定时间和相对时间节点；`_extract_long_term_memories()` 在 checkpoint 来源下允许把跨场景仍有影响的时间节点保存为 `event`，不新增独立管线。

@@ -1133,12 +1133,15 @@ class CommandHandlersMixin:
         mode = (arg or "normal").strip() or "normal"
         await self.send_message(chat_id, f"正在强制触发 {mode} 模式推送。")
         now = self._session_now(session_id)
-        if mode == "morning":
-            try:
-                await self._run_dream(session_id, now, reason="test-morning", force=True)
-            except Exception:
-                logger.warning("test-push dream failed", exc_info=True)
-        asyncio.create_task(self._sched_fire(session_id, now, mode_override=mode, skip_active_check=True))
+        if hasattr(self, "_create_scheduled_push_task"):
+            self._create_scheduled_push_task(
+                session_id,
+                now,
+                mode_override=mode,
+                skip_active_check=True,
+            )
+        else:
+            asyncio.create_task(self._sched_fire(session_id, now, mode_override=mode, skip_active_check=True))
 
     async def cmd_style(self, chat_id, session_id, arg):
         sub = arg.strip()

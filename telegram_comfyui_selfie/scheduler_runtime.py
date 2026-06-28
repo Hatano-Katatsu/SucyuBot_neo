@@ -413,6 +413,67 @@ class SchedulerRuntimeMixin:
         except Exception:
             logger.warning("character history summary generation failed", exc_info=True)
 
+    def _mark_daily_triggered_time(self, session_id: str, trigger_time: str, *, reason: str = "sent"):
+        """标记一个随机推送点已经处理完成。"""
+        trigger_time = (trigger_time or "").strip()
+        if not session_id or not trigger_time:
+            return
+        state = self._get_session_state(session_id)
+        triggered = session_schema.get_daily_triggered_times(state)
+        if trigger_time not in triggered:
+            triggered.append(trigger_time)
+            session_schema.set_daily_triggered_times(state, sorted(triggered))
+            self._save_session_state(session_id, state)
+        self._ulog(session_id, "PUSH", f"随机推送点 {trigger_time} 已处理 reason={reason}")
+
+    def _mark_morning_greet_sent(self, session_id: str, local_dt: datetime, *, reason: str = "sent"):
+        """标记今日早安推送已经处理完成。"""
+        if not session_id:
+            return
+        state = self._get_session_state(session_id)
+        today = local_dt.strftime("%Y-%m-%d")
+        if session_schema.get_last_morning_greet_date(state) != today:
+            session_schema.set_last_morning_greet_date(state, today)
+            self._save_session_state(session_id, state)
+        self._ulog(session_id, "PUSH", f"早安推送已处理 reason={reason}")
+
+    def _create_scheduled_push_task(
+        self,
+        session_id: str,
+        local_dt: datetime,
+        *,
+        mode_override: str,
+        trigger_time: str = "",
+        mark_morning: bool = False,
+        skip_active_check: bool = False,
+    ):
+        """启动后台推送任务，并只在实际成功后写完成标记。"""
+
+        async def runner():
+            try:
+                ok = await self._sched_fire(
+                    session_id,
+                    local_dt,
+                    mode_override=mode_override,
+                    skip_active_check=skip_active_check,
+                )
+            except Exception as exc:
+                ok = False
+                self._ulog(session_id, "PUSH", f"后台推送任务异常 mode={mode_override}: {exc}")
+                logger.error("scheduled push task failed: %s", exc, exc_info=True)
+            if ok:
+                if trigger_time:
+                    self._mark_daily_triggered_time(session_id, trigger_time, reason="sent")
+                if mark_morning:
+                    self._mark_morning_greet_sent(session_id, local_dt, reason="sent")
+            elif trigger_time:
+                self._ulog(session_id, "PUSH", f"随机推送点 {trigger_time} 本次未完成，窗口内等待重试")
+            elif mark_morning:
+                self._ulog(session_id, "PUSH", "早安推送本次未完成，窗口内等待重试")
+            return ok
+
+        return asyncio.create_task(runner())
+
     async def scheduler_loop(self):
         await asyncio.sleep(10)
         while True:
@@ -445,21 +506,36 @@ class SchedulerRuntimeMixin:
 
                     # 推送关闭(每日次数=0)时，早安推送也不发——否则“关闭推送”每天早上又冒出来（用户报的“只持续一天”）。
                     if daily_limit > 0 and now.hour == 8 and now.minute < 5 and session_schema.get_last_morning_greet_date(state) != today:
-                        session_schema.set_last_morning_greet_date(state, today)
-                        self._mark_dirty(session_id)
-                        if not self._check_goodnight_inhibition(state) and session_id not in self._active_pushes:
-                            asyncio.create_task(self._sched_fire(session_id, now, mode_override="morning"))
+                        if self._check_goodnight_inhibition(state):
+                            self._mark_morning_greet_sent(session_id, now, reason="inhibited-goodnight")
+                        elif session_id not in self._active_pushes:
+                            self._create_scheduled_push_task(
+                                session_id,
+                                now,
+                                mode_override="morning",
+                                mark_morning=True,
+                            )
 
                     triggered = session_schema.get_daily_triggered_times(state)
                     for t in session_schema.get_daily_trigger_times(state):
-                        if t <= time_str and t not in triggered:
-                            triggered.append(t)
-                            session_schema.set_daily_triggered_times(state, triggered)
-                            self._mark_dirty(session_id)
-                            t_min = int(t.split(":")[0]) * 60 + int(t.split(":")[1])
-                            now_min = now.hour * 60 + now.minute
-                            if now_min - t_min <= 5 and not self._check_goodnight_inhibition(state) and session_id not in self._active_pushes:
-                                asyncio.create_task(self._sched_fire(session_id, now, mode_override="normal"))
+                        if t > time_str or t in triggered:
+                            continue
+                        t_min = int(t.split(":")[0]) * 60 + int(t.split(":")[1])
+                        now_min = now.hour * 60 + now.minute
+                        if now_min - t_min > 5:
+                            self._mark_daily_triggered_time(session_id, t, reason="missed-window")
+                            continue
+                        if self._check_goodnight_inhibition(state):
+                            self._mark_daily_triggered_time(session_id, t, reason="inhibited-goodnight")
+                            continue
+                        if session_id not in self._active_pushes:
+                            self._create_scheduled_push_task(
+                                session_id,
+                                now,
+                                mode_override="normal",
+                                trigger_time=t,
+                            )
+                            break
 
                     await self._check_ntr_stage(session_id, state)
                 self._flush_sessions(force=True)
@@ -490,17 +566,19 @@ class SchedulerRuntimeMixin:
         session_schema.set_ntr_stage_reached(state, current)
         self._mark_dirty(session_id)
 
-    async def _sched_fire(self, session_id: str, local_dt: datetime, mode_override=None, skip_active_check=False):
+    async def _sched_fire(self, session_id: str, local_dt: datetime, mode_override=None, skip_active_check=False) -> bool:
         if not session_id or (not skip_active_check and session_id in self._active_pushes):
-            return
+            return False
         self._active_pushes.add(session_id)
         chat_id = self.chat_id_from_session(session_id)
         try:
             state = self._get_session_state(session_id)
             if self._check_goodnight_inhibition(state):
-                return
+                self._ulog(session_id, "PUSH", "跳过推送: goodnight inhibition")
+                return False
             if not skip_active_check and self._is_recently_active(state):
-                return
+                self._ulog(session_id, "PUSH", "跳过推送: session recently active")
+                return False
             last = session_schema.get_last_interaction(state)
             purity = self._get_purity(session_id)
             mode = mode_override or "normal"
@@ -550,7 +628,8 @@ class SchedulerRuntimeMixin:
                 weather_data=w,
             )
             if not scene:
-                return
+                self._ulog(session_id, "PUSH", f"推送规划为空 mode={mode}")
+                return False
             english = await self._translate_to_tags(scene, session_id=session_id, view=view)
             ok, imgs, err = await self._do_generate(
                 english,
@@ -566,9 +645,15 @@ class SchedulerRuntimeMixin:
                     prompt=caption or "",
                 )
                 self._record_sent_photo(session_id, scene, caption or "", appearance=new_app or None, view=view, source_description=source)
+                return True
             else:
                 self._ulog(session_id, "PUSH", f"生图失败 mode={mode}: {err}")
                 logger.error("scheduled generate failed: %s", err)
+                return False
+        except Exception as exc:
+            self._ulog(session_id, "PUSH", f"推送异常 mode={mode_override or 'normal'}: {exc}")
+            logger.error("scheduled push failed: %s", exc, exc_info=True)
+            return False
         finally:
             self._active_pushes.discard(session_id)
 

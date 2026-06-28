@@ -2169,6 +2169,61 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_scheduled_push_returns_false_when_send_photo_fails(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 6, 18, 10, 30, tzinfo=timezone.utc)
+            logs = []
+            svc._ulog = lambda session_id, kind, text: logs.append((kind, text))
+            svc._fetch_weather = AsyncMock(return_value={"desc": "sunny", "temp": "22", "code": "113"})
+            svc._llm_write_scene = AsyncMock(return_value=("window selfie", "caption", "", "selfie", "2:3"))
+            svc._translate_to_tags = AsyncMock(return_value="english prompt")
+            svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
+            svc.send_photo = AsyncMock(side_effect=RuntimeError("telegram down"))
+
+            ok = await svc._sched_fire(sid, fixed_now, mode_override="normal", skip_active_check=True)
+
+            self.assertFalse(ok)
+            self.assertTrue(any(kind == "PUSH" and "telegram down" in text for kind, text in logs))
+            self.assertEqual(session_schema.get_sent_photos_history(svc._get_session_state(sid)), [])
+
+        asyncio.run(run())
+
+    def test_scheduled_push_task_marks_trigger_only_after_success(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            fixed_now = datetime(2026, 6, 18, 10, 30, tzinfo=timezone.utc)
+            svc._ulog = lambda session_id, kind, text: None
+
+            svc._sched_fire = AsyncMock(return_value=False)
+            task = svc._create_scheduled_push_task(sid, fixed_now, mode_override="normal", trigger_time="10:30")
+            await task
+            self.assertNotIn("10:30", session_schema.get_daily_triggered_times(state))
+
+            svc._sched_fire = AsyncMock(return_value=True)
+            task = svc._create_scheduled_push_task(sid, fixed_now, mode_override="normal", trigger_time="10:30")
+            await task
+            self.assertIn("10:30", session_schema.get_daily_triggered_times(state))
+
+        asyncio.run(run())
+
+    def test_background_roleplay_image_logs_exception(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            logs = []
+            svc._ulog = lambda session_id, kind, text: logs.append((kind, text))
+            svc.tool_generate_image = AsyncMock(side_effect=RuntimeError("image task failed"))
+
+            await svc._run_background_roleplay_image(123, sid, intent="auto image")
+
+            self.assertTrue(any(kind == "ERROR" and "image task failed" in text for kind, text in logs))
+
+        asyncio.run(run())
+
     def test_long_memory_is_isolated_per_character(self):
         svc = self.make_service()
         sid = "telegram:1"
