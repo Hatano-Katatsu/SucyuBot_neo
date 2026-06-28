@@ -227,6 +227,9 @@ telegram_comfyui_selfie/
 15. **缓存命中统计字段兼容**：排查发现切到 mimo/Xiaomi 兼容层后，provider 原始响应把缓存命中放在 `usage.prompt_tokens_details.cached_tokens`，而 SQLite 记录层只读取 DeepSeek 的 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` 与部分旧别名，导致 WebUI 显示 0。新增 `_cached_tokens_from_usage()` 统一解析 `prompt_cache_hit_tokens`、`prompt_cached_tokens`、`cached_tokens`、`prompt_tokens_details.cached_tokens` 和 miss 推算，确保后续切回 DeepSeek 也继续正常显示。
 16. **本地用量回填**：基于 `data/logs/llm_debug.json` 原始响应精确匹配 `llm_usage` 行，备份 `data/memory.sqlite3` 后回填 55 行错写的 `cached_tokens`；最近 30 分钟 SQLite 看板口径恢复为 `27392/42041`（65.16%），今日口径恢复为 26.71%。
 
+17. **常驻前缀槽计测（Tier 3）**：`_build_chat_messages()` 末尾新增 `_log_prefix_slot_signatures()`，每轮把 `static / durable / semistable / checkpoint` 各常驻 system 槽的稳定短哈希与未折叠历史条数写入用户日志 `CACHE prefix …`。前缀缓存在第一个变化的槽处断开，这条日志可直接和 `USAGE` 的 `cached` 命中对照，定位某轮命中率下降是哪个槽变了，而不再靠体感。
+18. **世界揮发字段移出常驻槽（Tier 1）**：排查发现 semistable 虽已位置常驻，但 `_format_world_semistable_context()` 内仍嵌着 `城市/日期`（含 `time_period`）、`天气`、`季节/自然光`，且 `_format_light_guard()` 随 `light_phase`（日间/黄昏/暮色/入夜）日内漂移——这些每滚动一次就把后面的 checkpoint+历史踢出前缀缓存，还会经 `_track_semistable_context_change()` 触发多余的强制 checkpoint（摘要 LLM）。现在 `_format_world_semistable_context()` 只保留 session 内不变的世界规则（角色身份、地点来源、空间覆盖、位置优先级/不瞬移段落），新增 `_format_world_conditions_context()` 把城市/日期/天气/季节自然光与自然光硬规则一并放到非缓存动态尾部 `system_dynamic`，模型每轮仍能看到当前天气/光线（展示内容不变，只换位置）。实测同一 session 在 12:00/19:00/23:00 三个 time_period 下常驻世界槽哈希恒为 `822a3662`，尾部哈希各不相同。新增 `test_world_conditions_move_to_tail_keep_resident_slot_stable` 回归锁定「time_period 滚动时常驻槽字节不变、揮发条件落尾部」；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 282 tests in 7.099s`，`OK (skipped=1)`。
+
 ## 今日变更（2026-06-27）
 
 1. **checkpoint 时间节点软约束**：`_summarize_checkpoint()` 追加提示词规则，要求保留用户明确提到的日期、几点、期限、倒计时、约定时间和相对时间节点；`_extract_long_term_memories()` 在 checkpoint 来源下允许把跨场景仍有影响的时间节点保存为 `event`，不新增独立管线。

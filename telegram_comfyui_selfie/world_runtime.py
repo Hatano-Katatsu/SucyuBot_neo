@@ -1117,7 +1117,12 @@ class WorldRuntimeMixin:
         now: datetime | None = None,
         pin_location: bool = True,
     ) -> str:
-        """聊天用低频世界模板：只保留低频规则，不包含动线预判。"""
+        """聊天用低频世界模板：只保留 session 内不变的世界规则。
+
+        城市/日期/天气/季节自然光等会日内随时钟漂移的字段已移到动态尾部
+        （见 _format_world_conditions_context），避免常驻槽内容随时间滚动
+        而作废后面的 checkpoint+历史前缀缓存，并避免触发多余的强制 checkpoint。
+        """
         if weather is None:
             cached = getattr(self, "_weather_caches", {}).get(session_id or "__default__")
             if isinstance(cached, dict):
@@ -1125,15 +1130,11 @@ class WorldRuntimeMixin:
         world = self.build_world_state(session_id, user_text="", weather=weather, now=now, mode=mode)
         if not world:
             return ""
-        now = world["now"]
         identity = self._format_life_profile(world.get("life_profile"))
         lines = [
-            "世界状态规则（低频模板；精确时间、动线预判和本轮位置见动态尾部。按以下优先级确定位置: 用户本轮声明 > 工具/系统记录 > 时钟动线推断；用户文字明确说的位置始终优先）:",
-            f"- 城市/日期: {world['city']}，{now.strftime('%Y-%m-%d')}，{world['day_type']}，{world['time_period']}",
-            f"- 天气: {world['weather']}",
+            "世界状态规则（低频模板；城市/天气/季节自然光/精确时间/动线预判见动态尾部。"
+            "按以下优先级确定位置: 用户本轮声明 > 工具/系统记录 > 时钟动线推断；用户文字明确说的位置始终优先）:",
         ]
-        if hasattr(self, "_format_time_context"):
-            lines.append(f"- 季节/自然光: {self._format_time_context(session_id, now=now, weather=weather)}")
         if identity:
             lines.append(f"- 角色身份: {identity}")
         lines.append(f"- 地点来源: {world['catalog_source']}")
@@ -1145,6 +1146,35 @@ class WorldRuntimeMixin:
             "只有开启全新话题、对话出现明显时间跳跃、或需要交代独自近况时，才依据动线更新所在地。"
             "无论如何不要无理由瞬移；与用户不在同一地点时，用消息、自拍、电话或约定见面推进。"
         )
+        return "\n".join(lines)
+
+    def _format_world_conditions_context(
+        self,
+        session_id: str,
+        weather: Any = None,
+        mode: str = "chat",
+        now: datetime | None = None,
+    ) -> str:
+        """动态尾部世界条件：城市/日期/天气/季节自然光等日内随时钟漂移的字段。
+
+        这些放在非缓存尾部（system_dynamic），让它们的变化不再作废常驻前缀，
+        模型每轮仍能看到当前真实的天气/光线（与移动前展示内容一致，只换了位置）。
+        """
+        if weather is None:
+            cached = getattr(self, "_weather_caches", {}).get(session_id or "__default__")
+            if isinstance(cached, dict):
+                weather = cached.get("data")
+        world = self.build_world_state(session_id, user_text="", weather=weather, now=now, mode=mode)
+        if not world:
+            return ""
+        now = world["now"]
+        lines = [
+            "世界当前条件（动态；随时间/天气变化，不影响前缀缓存）:",
+            f"- 城市/日期: {world['city']}，{now.strftime('%Y-%m-%d')}，{world['day_type']}",
+            f"- 天气: {world['weather']}",
+        ]
+        if hasattr(self, "_format_time_context"):
+            lines.append(f"- 季节/自然光: {self._format_time_context(session_id, now=now, weather=weather)}")
         return "\n".join(lines)
 
     def _format_world_dynamic_context(

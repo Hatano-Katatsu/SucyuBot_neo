@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import json
 import logging
@@ -397,14 +398,21 @@ class ChatContextMixin:
             )
             if world_semistable:
                 semistable_parts.append(world_semistable)
-        if light_guard:
-            semistable_parts.append(light_guard)
+        # 自然光硬规则随 light_phase（日间/黄昏/暮色/入夜）日内漂移，挪到动态尾部，
+        # 不再常驻 semistable，避免光相滚动作废 checkpoint+历史前缀。
         semistable_context = "\n\n".join(semistable_parts)
         self._track_semistable_context_change(session_id, semistable_context)
 
-        # ── 动态后缀（每请求变化：精确时间/本轮位置判断/发图 overdue）──
+        # ── 动态后缀（每请求变化：精确时间/世界条件/本轮位置判断/发图 overdue）──
+        # 城市/天气/季节自然光与自然光硬规则随时钟漂移，放在非缓存尾部，不作废常驻前缀。
         freq = self.config.get("selfie_frequency", "频繁")
         system_dynamic = f"当前时间: {now.strftime('%H:%M')} ({weekday}) {time_period}。\n"
+        if hasattr(self, "_format_world_conditions_context"):
+            world_conditions = self._format_world_conditions_context(session_id, now=now, mode="chat")
+            if world_conditions:
+                system_dynamic += f"{world_conditions}\n"
+        if light_guard:
+            system_dynamic += f"{light_guard}\n"
         if self._image_nudge_due(freq, session_schema.get_rounds_since_image(state)):
             system_dynamic += "发图提醒: 已有多轮未配图，本轮请优先调用 generate_roleplay_image。\n"
         # 场景断档感知：距离上次对话超过阈值时提醒 LLM 旧场景可能已自然结束
@@ -456,16 +464,59 @@ class ChatContextMixin:
         #   [静态 system] + [天级/低频稳定层] + [半稳定状态/世界模板] + [checkpoint 会话连续性] + [历史(checkpoint 锚定，含照片 system 记录)] + [动态 system] + [本轮 user]
         # 静态 + 低频稳定 + 半稳定 + checkpoint + 未折叠历史构成只追加不左移的前缀；checkpoint 落地时才整体归位。
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_static}]
-        if durable_parts:
-            messages.append({"role": "system", "content": "\n\n".join(durable_parts)})
+        durable_context = "\n\n".join(durable_parts) if durable_parts else ""
+        if durable_context:
+            messages.append({"role": "system", "content": durable_context})
         if semistable_context:
             messages.append({"role": "system", "content": semistable_context})
         if checkpoint_part:
             messages.append({"role": "system", "content": checkpoint_part})
-        messages.extend(self._chat_prompt_history(state))
+        history = self._chat_prompt_history(state)
+        messages.extend(history)
         messages.append({"role": "system", "content": system_dynamic})
         messages.append({"role": "user", "content": user_text})
+        self._log_prefix_slot_signatures(
+            session_id,
+            static=system_static,
+            durable=durable_context,
+            semistable=semistable_context,
+            checkpoint=checkpoint_part,
+            history_count=len(history),
+        )
         return messages
+
+    @staticmethod
+    def _slot_hash(text: str) -> str:
+        """常驻前缀槽的稳定短哈希；只用于缓存作废点定位（Tier 3 计测）。"""
+        if not text:
+            return "----"
+        return hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+
+    def _log_prefix_slot_signatures(
+        self,
+        session_id: str,
+        *,
+        static: str,
+        durable: str,
+        semistable: str,
+        checkpoint: str,
+        history_count: int,
+    ) -> None:
+        """把各常驻前缀槽的哈希写进用户日志，便于和 USAGE 的 cached 命中对照，
+        定位某轮命中率下降到底是哪个槽（static/durable/semistable/checkpoint）变了。
+        前缀缓存在第一个变化的槽处断开，故越靠前的槽变化代价越大。"""
+        if not session_id:
+            return
+        self._ulog(
+            session_id,
+            "CACHE",
+            "prefix "
+            f"static={self._slot_hash(static)} "
+            f"durable={self._slot_hash(durable)} "
+            f"semistable={self._slot_hash(semistable)} "
+            f"ckpt={self._slot_hash(checkpoint)} "
+            f"hist={history_count}",
+        )
 
     @staticmethod
     def _parse_dsml_attrs(raw: str) -> dict[str, str]:

@@ -1669,6 +1669,41 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn(dynamic_marker, ordinary[-2]["content"])
         self.assertIn(dynamic_marker, relevant[-2]["content"])
 
+    def test_world_conditions_move_to_tail_keep_resident_slot_stable(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+
+        def build_at(hour):
+            svc._session_now = lambda session_id="", _h=hour: datetime(2026, 6, 18, _h, 0, tzinfo=timezone.utc)
+            return svc._build_chat_messages(sid, "你好")
+
+        noon = build_at(12)
+        night = build_at(23)
+        world_marker = "世界状态规则"  # 世界状态规则
+        conditions_marker = "世界当前条件"  # 世界当前条件
+        light_marker = "季节/自然光"  # 季节/自然光
+        weather_marker = "- 天气:"  # - 天气:
+
+        def resident_world(messages):
+            return next(m["content"] for m in messages if world_marker in m.get("content", ""))
+
+        noon_resident = resident_world(noon)
+        night_resident = resident_world(night)
+
+        # 常驻世界规则槽随 time_period 滚动（中午→深夜）保持字节一致，不再作废前缀缓存。
+        self.assertEqual(noon_resident, night_resident)
+        # 揮发字段（天气/季节自然光）已从常驻槽剥离。
+        self.assertNotIn(light_marker, noon_resident)
+        self.assertNotIn(weather_marker, noon_resident)
+
+        # 揮发条件落到非缓存尾部（system_dynamic），且随时间变化。
+        noon_tail = noon[-2]["content"]
+        night_tail = night[-2]["content"]
+        self.assertEqual(noon[-2]["role"], "system")
+        self.assertIn(conditions_marker, noon_tail)
+        self.assertIn(light_marker, noon_tail)
+        self.assertNotEqual(noon_tail, night_tail)
+
     def test_character_place_autoextract_overrides_clock(self):
         async def run():
             svc = self.make_service()
