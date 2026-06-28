@@ -5448,6 +5448,37 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_call_llm_adds_cache_anchor_for_hot_simple_tasks(self):
+        async def run():
+            svc = self.make_service()
+            captured = []
+
+            async def fake_msgs(messages, **kwargs):
+                captured.append((messages, kwargs))
+                return {"choices": [{"message": {"content": "ok"}}]}
+
+            svc._call_llm_messages = fake_msgs
+
+            await svc._call_llm("dynamic plan system", "plan user", tag="roleplay-image-plan", purpose="image")
+            await svc._call_llm("dynamic translate system", "translate user", tag="translate", purpose="image")
+            await svc._call_llm("ordinary system", "ordinary user", tag="memory-extract", purpose="chat")
+
+            plan_messages = captured[0][0]
+            self.assertEqual([m["role"] for m in plan_messages], ["system", "system", "user"])
+            self.assertIn("Stable prefix for roleplay-image-plan", plan_messages[0]["content"])
+            self.assertEqual(plan_messages[1]["content"], "dynamic plan system")
+            self.assertEqual(plan_messages[2]["content"], "plan user")
+
+            translate_messages = captured[1][0]
+            self.assertEqual([m["role"] for m in translate_messages], ["system", "system", "user"])
+            self.assertIn("Stable prefix for image tag translation", translate_messages[0]["content"])
+
+            ordinary_messages = captured[2][0]
+            self.assertEqual([m["role"] for m in ordinary_messages], ["system", "user"])
+            self.assertEqual(ordinary_messages[0]["content"], "ordinary system")
+
+        asyncio.run(run())
+
     def test_chat_sampling_params_only_apply_to_reply_requests(self):
         async def run():
             svc = self.make_service()

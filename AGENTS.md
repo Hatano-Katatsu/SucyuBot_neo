@@ -213,6 +213,8 @@ telegram_comfyui_selfie/
 3. **测试推送链路统一**：`/测试推送` 改走同一个安全后台包装器；`morning` 测试不再先额外跑一次 dream，避免与 `_sched_fire(mode=morning)` 重复整理。
 4. **自动配图后台异常记录**：聊天 judge 自动补图改为调用 `_run_background_roleplay_image()`，后台任务异常会写入 `ERROR` 用户日志和 service log，便于排查“文字回复正常但图片没出来”的情况。
 5. **回归测试**：新增测试覆盖 Telegram 发图异常不穿透后台任务、推送点只在成功后标记、后台自动配图异常入日志；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 272 tests in 6.596s`，`OK (skipped=1)`。
+6. **高频 LLM 规划缓存止血**：排查 `data/logs/llm_debug.json` 与 SQLite `llm_usage` 后确认低命中主要集中在 `image:roleplay-image-plan` 和 `image:translate`；`_call_llm()` 为这两个简单两段式高频任务追加稳定的首条 system cache anchor，原动态 system/user 原文保留在后续消息，避免角色人格、穿搭、天气、地点和推送模式在请求开头把 provider prefix cache 直接打断。
+7. **缓存结构回归测试**：新增 `test_call_llm_adds_cache_anchor_for_hot_simple_tasks`，验证 `roleplay-image-plan` / `translate` 会生成 `system + system + user` 三段请求，普通 `_call_llm()` 仍保持原来的 `system + user` 两段结构；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 273 tests in 6.635s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-06-27）
 

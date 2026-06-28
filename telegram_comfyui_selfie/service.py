@@ -34,6 +34,29 @@ from .world_runtime import WorldRuntimeMixin
 
 logger = logging.getLogger(__name__)
 
+_SIMPLE_LLM_CACHE_ANCHORS: dict[str, str] = {
+    "roleplay-image-plan": (
+        "Stable prefix for roleplay-image-plan v1.\n"
+        "Task: convert roleplay context into one image plan and return strict JSON only.\n"
+        "Output contract: scene, view, aspect_ratio, caption, new_appearance_tags, clothing_off, "
+        "character_location, user_location, is_intimate, partner_in_frame, device_in_frame.\n"
+        "Stable rules: plan exactly one frozen moment, never a collage or sequence; keep stable "
+        "appearance out of scene; use new_appearance_tags only for one-shot clothing/accessory/hair "
+        "changes; use clothing_off for removed garments/accessories or explicit nudity; preserve hard "
+        "spatial/body constraints; obey the user's explicit camera/composition request for free image "
+        "commands; avoid phones, camera UI, chat UI, mirrors, and devices unless the requested view "
+        "explicitly requires mirror/device visibility; choose only 2:3 or 3:2 aspect ratio.\n"
+        "Dynamic persona, weather, world state, memories, continuity, and the current request appear "
+        "after this stable prefix and override only where they provide concrete facts."
+    ),
+    "translate": (
+        "Stable prefix for image tag translation v1.\n"
+        "Task: translate the provided scene into concise English image-generation tags while preserving "
+        "subject ownership, action direction, camera/view constraints, visible weather/light, and safety "
+        "guards. Return prompt text only, not explanations."
+    ),
+}
+
 _CJK_RE = re.compile(r"[一-鿿]")
 
 
@@ -1935,7 +1958,11 @@ class TelegramComfyUIService(
         return data
 
     async def _call_llm(self, system: str, user: str, temp: float = 0.3, tag: str = "", purpose: str = "image", disable_thinking: bool | None = None, session_id: str = "") -> str:
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        anchor = _SIMPLE_LLM_CACHE_ANCHORS.get(tag or "")
+        messages = []
+        if anchor:
+            messages.append({"role": "system", "content": anchor})
+        messages.extend([{"role": "system", "content": system}, {"role": "user", "content": user}])
         data = await self._call_llm_messages(messages, tag=tag, temp=temp, purpose=purpose, disable_thinking=disable_thinking, session_id=session_id)
         msg = data.get("choices", [{}])[0].get("message", {})
         text = (msg.get("content") or "").strip()
