@@ -166,11 +166,7 @@ class ChatContextMixin:
         if usage:
             prompt_tokens = int(usage.get("prompt_tokens") or 0)
             completion_tokens = int(usage.get("completion_tokens") or 0)
-            cached_tokens = int(
-                usage.get("prompt_cache_hit_tokens")
-                or usage.get("prompt_cached_tokens")
-                or 0
-            )
+            cached_tokens = self._cached_tokens_from_usage(usage, prompt_tokens=prompt_tokens)
             self._ulog(session_id, "USAGE", f"prompt={prompt_tokens} completion={completion_tokens} cached={cached_tokens}")
 
         assistant = result.get("choices", [{}])[0].get("message", {})

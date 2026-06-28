@@ -1687,14 +1687,7 @@ class TelegramComfyUIService(
         prompt_tokens = int(usage.get("prompt_tokens") or 0)
         completion_tokens = int(usage.get("completion_tokens") or 0)
         total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
-        # 缓存命中：DeepSeek 用 prompt_cache_hit_tokens，其他厂商可能用 prompt_cached_tokens
-        cached_tokens = int(
-            usage.get("prompt_cache_hit_tokens")
-            or usage.get("prompt_cached_tokens")
-            or 0
-        )
-        if not cached_tokens and "prompt_cache_miss_tokens" in usage and prompt_tokens:
-            cached_tokens = max(0, prompt_tokens - int(usage.get("prompt_cache_miss_tokens") or 0))
+        cached_tokens = self._cached_tokens_from_usage(usage, prompt_tokens=prompt_tokens)
         self.app_store.record_llm_usage(
             profile_id=str(resolved.get("profile_id") or ""),
             model=str(resolved.get("model") or ""),
@@ -1706,6 +1699,24 @@ class TelegramComfyUIService(
             cached_tokens=cached_tokens,
             total_tokens=total_tokens or prompt_tokens + completion_tokens,
         )
+
+    @staticmethod
+    def _cached_tokens_from_usage(usage: dict[str, Any] | None, *, prompt_tokens: int = 0) -> int:
+        """兼容不同 OpenAI-compatible provider 的缓存命中字段。"""
+        usage = usage if isinstance(usage, dict) else {}
+        details = usage.get("prompt_tokens_details")
+        details = details if isinstance(details, dict) else {}
+        cached_tokens = int(
+            usage.get("prompt_cache_hit_tokens")
+            or usage.get("prompt_cached_tokens")
+            or usage.get("cached_tokens")
+            or details.get("cached_tokens")
+            or 0
+        )
+        miss_tokens = int(usage.get("prompt_cache_miss_tokens") or usage.get("cache_miss_tokens") or 0)
+        if not cached_tokens and miss_tokens and prompt_tokens:
+            cached_tokens = max(0, int(prompt_tokens or 0) - miss_tokens)
+        return max(0, cached_tokens)
 
     @staticmethod
     def _json_safe(value: Any) -> Any:
@@ -1722,14 +1733,8 @@ class TelegramComfyUIService(
         prompt_tokens = int(usage.get("prompt_tokens") or 0)
         completion_tokens = int(usage.get("completion_tokens") or 0)
         total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
-        cached_tokens = int(
-            usage.get("prompt_cache_hit_tokens")
-            or usage.get("prompt_cached_tokens")
-            or 0
-        )
-        miss_tokens = int(usage.get("prompt_cache_miss_tokens") or 0)
-        if not cached_tokens and miss_tokens and prompt_tokens:
-            cached_tokens = max(0, prompt_tokens - miss_tokens)
+        cached_tokens = TelegramComfyUIService._cached_tokens_from_usage(usage, prompt_tokens=prompt_tokens)
+        miss_tokens = int(usage.get("prompt_cache_miss_tokens") or usage.get("cache_miss_tokens") or 0)
         return {
             "raw": dict(usage),
             "prompt_tokens": prompt_tokens,

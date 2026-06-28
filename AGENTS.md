@@ -224,6 +224,8 @@ telegram_comfyui_selfie/
 12. **semistable checkpoint 签名收窄**：`_track_semistable_context_change()` 现在只跟踪外观/衣柜等真正半稳定状态；按需世界块不参与签名，避免一次天气/地点问题造成半稳定签名来回变化并误触发 checkpoint。
 13. **LLM 小任务门控**：`image-judge` 新增轻量视觉/动作触发词，纯寒暄和普通问答不再调用小模型；`location-extract` 在聊天后台任务和 `world_runtime.py` 请求入口都增加地点/移动信号门控，避免“嗯嗯”“我在想”等无地点回复每轮消耗 token。
 14. **回归测试**：新增/更新测试覆盖普通寒暄不注入世界块、地点相关输入仍注入世界块、无地点回复不调用 `location-extract`、无画面信号不调用 `image-judge`，并保留原有同空间 judge 视角清理与明确自拍视角测试；验证 `py -3 -m unittest tests.test_core -v`，结果 `Ran 278 tests in 6.529s`，`OK (skipped=1)`。
+15. **缓存命中统计字段兼容**：排查发现切到 mimo/Xiaomi 兼容层后，provider 原始响应把缓存命中放在 `usage.prompt_tokens_details.cached_tokens`，而 SQLite 记录层只读取 DeepSeek 的 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` 与部分旧别名，导致 WebUI 显示 0。新增 `_cached_tokens_from_usage()` 统一解析 `prompt_cache_hit_tokens`、`prompt_cached_tokens`、`cached_tokens`、`prompt_tokens_details.cached_tokens` 和 miss 推算，确保后续切回 DeepSeek 也继续正常显示。
+16. **本地用量回填**：基于 `data/logs/llm_debug.json` 原始响应精确匹配 `llm_usage` 行，备份 `data/memory.sqlite3` 后回填 55 行错写的 `cached_tokens`；最近 30 分钟 SQLite 看板口径恢复为 `27392/42041`（65.16%），今日口径恢复为 26.71%。
 
 ## 今日变更（2026-06-27）
 

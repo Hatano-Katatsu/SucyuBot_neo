@@ -6621,6 +6621,30 @@ class LLMUsageTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(row["cached_tokens"], 600)
         self.assertEqual(row["total_tokens"], 1000)
 
+    def test_record_usage_from_response_with_prompt_tokens_details_cached(self):
+        svc = self.make_service()
+        resolved = {"profile_id": "mimo", "model": "mimo-v2.5-pro", "api_key": "k"}
+        data = {
+            "usage": {
+                "prompt_tokens": 5293,
+                "completion_tokens": 291,
+                "total_tokens": 5584,
+                "prompt_tokens_details": {
+                    "cached_tokens": 4096,
+                    "cache_write_tokens": 0,
+                },
+            }
+        }
+        svc._record_llm_usage_from_response(data, resolved, tag="chat", purpose="chat", session_id="telegram:1")
+        rows = svc.app_store.aggregate_llm_usage(after=0, group_by=("profile_id", "model", "purpose", "tag"))
+        row = rows[0]
+        self.assertEqual(row["cached_tokens"], 4096)
+        self.assertEqual(row["prompt_tokens"], 5293)
+
+        summary = svc._llm_usage_debug_summary(data)
+        self.assertEqual(summary["cached_tokens"], 4096)
+        self.assertEqual(summary["cache_hit_rate"], round(4096 / 5293, 4))
+
     def test_record_usage_from_response_cache_miss_inference(self):
         svc = self.make_service()
         resolved = {"profile_id": "ds", "model": "deepseek-chat", "api_key": "k"}
