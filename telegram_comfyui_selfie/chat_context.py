@@ -112,6 +112,14 @@ class ChatContextMixin:
                 logger.debug("ensure life profile failed", exc_info=True)
         messages = self._build_chat_messages(session_id, user_text)
         tools = self._chat_tools_schema()
+        chat_request_body = {
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+        }
+        final = None
+        final_request_body = None
+        empty_error_logged = False
         try:
             result = await self._call_llm_messages(
                 messages,
@@ -125,6 +133,14 @@ class ChatContextMixin:
             )
         except Exception as exc:
             logger.warning("LLM request failed: %s", exc)
+            self._record_llm_error_log(
+                session_id=session_id,
+                purpose="chat",
+                tag="chat",
+                request_body=chat_request_body,
+                response=None,
+                error=f"initial chat exception: {exc}",
+            )
             return ""
 
         # 记录 chat 请求的 usage 到会话日志
@@ -177,11 +193,10 @@ class ChatContextMixin:
                     "tool_call_id": call.get("id", "tool"),
                     "content": tool_result,
                 })
+            final_request_body = {"messages": messages}
             try:
                 final = await self._call_llm_messages(
                     messages,
-                    tools=tools,
-                    tool_choice="none",
                     tag="chat-final",
                     purpose="chat",
                     temp=float(self._get_llm_value("chat", "temperature", "0.9")),
@@ -189,10 +204,31 @@ class ChatContextMixin:
                     sampling=True,
                 )
                 final_msg = final.get("choices", [{}])[0].get("message", {})
+                final_tool_calls = final_msg.get("tool_calls") or []
+                final_text = (final_msg.get("content") or "").strip()
+                if final_tool_calls and not final_text:
+                    self._record_llm_error_log(
+                        session_id=session_id,
+                        purpose="chat",
+                        tag="chat-final",
+                        request_body=final_request_body,
+                        response=final,
+                        status=200,
+                        error="chat-final returned tool_calls without content",
+                    )
+                    empty_error_logged = True
                 content = (final_msg.get("content") or content or "").strip()
                 content = self._strip_dsml_tool_markup(content)
             except Exception as exc:
                 logger.warning("final chat completion after tool call failed: %s", exc)
+                self._record_llm_error_log(
+                    session_id=session_id,
+                    purpose="chat",
+                    tag="chat-final",
+                    request_body=final_request_body or {"messages": messages},
+                    response=None,
+                    error=f"final chat exception: {exc}",
+                )
         else:
             content = self._strip_dsml_tool_markup(content)
 
@@ -212,7 +248,17 @@ class ChatContextMixin:
         # 模型没主动配图时，用独立的"配图时机判断器"按对话内容决定是否补一张。
         # 只先做判断；真正发图放到本轮对话入库之后，避免图片规划看不到刚才的用户/角色文本。
         judge_decision = None
-        if not image_emitted:
+        if not content and not empty_error_logged:
+            self._record_llm_error_log(
+                session_id=session_id,
+                purpose="chat",
+                tag="chat-final" if final is not None else "chat",
+                request_body=final_request_body if final is not None else chat_request_body,
+                response=final if final is not None else result,
+                status=200,
+                error="LLM returned empty chat content",
+            )
+        if content and not image_emitted:
             judge_decision = await self._judge_image_moment(
                 session_id, user_text, content, explicit=explicit_image_req
             )

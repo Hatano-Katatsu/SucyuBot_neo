@@ -5630,6 +5630,52 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_chat_final_omits_tools_and_logs_empty_tool_call_response(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({"chat_llm_api_key": "k", "chat_llm_model": "m", "chat_llm_api_base": "http://x"})
+            sid = "telegram:1"
+            calls = []
+            logs = []
+
+            async def fake_msgs(messages, tools=None, tool_choice=None, **kw):
+                calls.append({
+                    "messages": list(messages),
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                    "tag": kw.get("tag"),
+                })
+                if len(calls) == 1:
+                    return {"choices": [{"message": {"content": "", "tool_calls": [
+                        {"id": "t1", "function": {"name": "update_location", "arguments": json.dumps({"place": "office"})}}
+                    ]}}]}
+                return {"choices": [{"message": {"content": None, "tool_calls": [
+                    {"id": "t2", "function": {"name": "generate_roleplay_image", "arguments": json.dumps({"intent": "again"})}}
+                ]}}]}
+
+            svc._call_llm_messages = fake_msgs
+            svc._execute_tool_call = AsyncMock(return_value="tool ok")
+            svc._ensure_life_profile = AsyncMock(return_value={})
+            svc._update_character_place_from_text = AsyncMock()
+            svc._extract_long_term_memories = AsyncMock()
+            svc._judge_image_moment = AsyncMock(return_value={"intent": "should not run"})
+            svc._ulog = lambda session_id, kind, text="": logs.append((session_id, kind, text))
+
+            reply = await svc.run_roleplay_chat(1, sid, "hello")
+
+            self.assertEqual(reply, "")
+            self.assertEqual(calls[0]["tool_choice"], "auto")
+            self.assertIsNotNone(calls[0]["tools"])
+            self.assertEqual(calls[1]["tag"], "chat-final")
+            self.assertIsNone(calls[1]["tools"])
+            self.assertIsNone(calls[1]["tool_choice"])
+            svc._judge_image_moment.assert_not_awaited()
+            error_logs = [text for _sid, kind, text in logs if kind == "ERROR"]
+            self.assertTrue(any("LLM_FULL_LOG" in text for text in error_logs))
+            self.assertTrue(any("chat-final returned tool_calls without content" in text for text in error_logs))
+
+        asyncio.run(run())
+
     def test_dsml_tool_call_content_is_executed_and_not_leaked(self):
         async def run():
             svc = self.make_service()
@@ -5653,7 +5699,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 calls["n"] += 1
                 if calls["n"] == 1:
                     return {"choices": [{"message": {"content": dsml}}], "usage": {"prompt_tokens": 10}}
-                self.assertEqual(tool_choice, "none")
+                self.assertIsNone(tools)
+                self.assertIsNone(tool_choice)
                 tool_messages = [m for m in messages if m.get("role") == "tool"]
                 self.assertEqual(len(tool_messages), 1)
                 self.assertIn("已记录角色当前在 餐厅", tool_messages[0]["content"])

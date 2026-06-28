@@ -1827,6 +1827,38 @@ class TelegramComfyUIService(
         self._llm_debug_buffer.append(entry)
         self._flush_llm_debug(force=False)
 
+    def _record_llm_error_log(
+        self,
+        *,
+        session_id: str,
+        purpose: str,
+        tag: str,
+        request_url: str = "",
+        request_body: dict[str, Any] | None = None,
+        response: Any = None,
+        status: int | None = None,
+        error: str = "",
+    ) -> None:
+        """把失败时的完整 LLM 请求/返回写入用户 ERROR 日志，避免只看到兜底文案。"""
+        if not session_id:
+            return
+        payload = {
+            "purpose": purpose or "",
+            "tag": tag or "",
+            "status": status,
+            "error": error or "",
+            "request": {
+                "url": request_url or "",
+                "body": self._json_safe(request_body or {}),
+            },
+            "response": self._json_safe(response),
+        }
+        try:
+            text = json.dumps(payload, ensure_ascii=False, default=str)
+        except Exception:
+            text = str(payload)
+        self._ulog(session_id, "ERROR", f"LLM_FULL_LOG {text}")
+
     def _get_llm_value(self, purpose: str, name: str, default=None):
         prefix = "chat_llm" if purpose == "chat" else "image_llm"
         value = self.config.get(f"{prefix}_{name}")
@@ -1924,6 +1956,16 @@ class TelegramComfyUIService(
                             tag=tag,
                             session_id=session_id,
                             resolved=resolved,
+                            request_url=request_url,
+                            request_body=body,
+                            response={"status": resp.status, "text": text},
+                            status=resp.status,
+                            error=f"LLM request failed: {resp.status}",
+                        )
+                        self._record_llm_error_log(
+                            session_id=session_id,
+                            purpose=purpose,
+                            tag=tag,
                             request_url=request_url,
                             request_body=body,
                             response={"status": resp.status, "text": text},

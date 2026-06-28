@@ -216,6 +216,9 @@ telegram_comfyui_selfie/
 6. **高频 LLM 规划缓存止血**：排查 `data/logs/llm_debug.json` 与 SQLite `llm_usage` 后确认低命中主要集中在 `image:roleplay-image-plan` 和 `image:translate`；`_call_llm()` 为这两个简单两段式高频任务追加稳定的首条 system cache anchor，原动态 system/user 原文保留在后续消息，避免角色人格、穿搭、天气、地点和推送模式在请求开头把 provider prefix cache 直接打断。
 7. **缓存结构回归测试**：新增 `test_call_llm_adds_cache_anchor_for_hot_simple_tasks`，验证 `roleplay-image-plan` / `translate` 会生成 `system + system + user` 三段请求，普通 `_call_llm()` 仍保持原来的 `system + user` 两段结构；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 273 tests in 6.635s`，`OK (skipped=1)`。
 
+8. **17:08 空回复排查修复**：确认 `telegram:6430033168` 在 `chat-final` 阶段收到供应商返回的 `finish_reason=tool_calls` 且 `message.content=null`，原链路因此得到空正文并触发“回复生成失败，请稍后重试。”；现在工具执行后的最终文本请求不再继续携带 `tools` / `tool_choice=none`，避免 OpenAI 兼容端忽略 `none` 后再次返回工具调用。
+9. **LLM 错误完整日志**：新增 `_record_llm_error_log()`，LLM 非 200、初始/最终请求异常、最终 200 但正文为空或继续返回 tool_calls 时，会向用户日志写入 `ERROR LLM_FULL_LOG`，包含不带 Authorization/API key 的完整请求体与响应体；新增 `test_chat_final_omits_tools_and_logs_empty_tool_call_response`，验证 `py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 274 tests in 5.955s`，`OK (skipped=1)`。
+
 ## 今日变更（2026-06-27）
 
 1. **checkpoint 时间节点软约束**：`_summarize_checkpoint()` 追加提示词规则，要求保留用户明确提到的日期、几点、期限、倒计时、约定时间和相对时间节点；`_extract_long_term_memories()` 在 checkpoint 来源下允许把跨场景仍有影响的时间节点保存为 `event`，不新增独立管线。
