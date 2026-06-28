@@ -218,6 +218,7 @@ telegram_comfyui_selfie/
 
 8. **17:08 空回复排查修复**：确认 `telegram:6430033168` 在 `chat-final` 阶段收到供应商返回的 `finish_reason=tool_calls` 且 `message.content=null`，原链路因此得到空正文并触发“回复生成失败，请稍后重试。”；现在工具执行后的最终文本请求不再继续携带 `tools` / `tool_choice=none`，避免 OpenAI 兼容端忽略 `none` 后再次返回工具调用。
 9. **LLM 错误完整日志**：新增 `_record_llm_error_log()`，LLM 非 200、初始/最终请求异常、最终 200 但正文为空或继续返回 tool_calls 时，会向用户日志写入 `ERROR LLM_FULL_LOG`，包含不带 Authorization/API key 的完整请求体与响应体；新增 `test_chat_final_omits_tools_and_logs_empty_tool_call_response`，验证 `py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 274 tests in 5.955s`，`OK (skipped=1)`。
+10. **角色切换衣柜串味修复**：定位到 `character_contexts` 冻结/解冻短期态时未深拷贝，`state["clothing"]` 与已冻结角色上下文共享同一个 dict，导致切到新角色后修改衣柜会同步污染离开角色；现在冻结与恢复都 `deepcopy`，WebUI 保存并激活角色也统一走切换流程，目标角色无冻结衣柜时只用自己的角色卡 `outfit` 初始化，绝不继承上一角色衣柜。新增测试覆盖 `/角色 load` 与 WebUI `activate=true`，验证 `py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 276 tests in 5.794s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-06-27）
 

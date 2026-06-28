@@ -1086,7 +1086,21 @@ async def api_save_character(request: web.Request):
     active_id = active_character_id(state)
     force_activate = parse_bool(payload.get("activate")) if "activate" in payload else False
     if hasattr(service, "_apply_character_payload"):
-        if force_activate or not active_id or active_id == key:
+        switching = force_activate and active_id != key
+        if switching:
+            if hasattr(service, "_save_current_character_context"):
+                service._save_current_character_context(state)
+            if hasattr(service, "_snapshot_character"):
+                service._snapshot_character(state)
+            service._apply_character_payload(state, payload)
+            if not character_value(state, "custom_character", ""):
+                session_schema.set_character_value(state, "custom_character", key)
+            has_clothing_context = False
+            if hasattr(service, "_restore_character_context"):
+                has_clothing_context = service._restore_character_context(sid, state)
+            if hasattr(service, "_apply_card_outfit_after_switch"):
+                service._apply_card_outfit_after_switch(state, payload, has_clothing_context=has_clothing_context)
+        elif force_activate or not active_id or active_id == key:
             service._apply_character_payload(state, payload)
             if not character_value(state, "custom_character", ""):
                 session_schema.set_character_value(state, "custom_character", key)
@@ -1152,7 +1166,9 @@ async def api_activate_character(request: web.Request):
     if hasattr(service, "_apply_character_payload"):
         service._apply_character_payload(state, payload)
     if switching and hasattr(service, "_restore_character_context"):
-        service._restore_character_context(sid, state)
+        has_clothing_context = service._restore_character_context(sid, state)
+        if hasattr(service, "_apply_card_outfit_after_switch"):
+            service._apply_card_outfit_after_switch(state, payload, has_clothing_context=has_clothing_context)
     state.pop("life_profile", None)
     service._save_session_state(sid, state)
     return json_ok({"active_id": character_value(state, "custom_character", "") or "", "current": service._character_export_payload(state), "characters": session_schema.get_saved_characters(state)})

@@ -1392,20 +1392,24 @@ class CommandHandlersMixin:
     @staticmethod
     def _conversation_context_payload(state: dict[str, Any]) -> dict[str, Any]:
         """冻结当前角色的全部短期态：黑名单之外即冻，与清空同源，杜绝“冻的和清的不一致”。"""
-        return {key: state.get(key) for key in state.keys() if _is_transient_state_key(key)}
+        return {key: copy.deepcopy(state.get(key)) for key in state.keys() if _is_transient_state_key(key)}
 
     def _save_current_character_context(self, state: dict[str, Any]):
         key = self._character_context_key_from_state(state)
         session_schema.get_character_contexts(state)[key] = self._conversation_context_payload(state)
 
-    def _restore_character_context(self, session_id: str, state: dict[str, Any]):
+    def _restore_character_context(self, session_id: str, state: dict[str, Any]) -> bool:
         key = self._character_context_key_from_state(state)
         payload = session_schema.get_character_contexts(state).get(key)
+        has_clothing_context = isinstance(payload, dict) and any(
+            ctx_key in payload
+            for ctx_key in ("clothing", "dynamic_appearance", "wardrobe", "wardrobe_closet")
+        )
         # 切角色：整体清空全部短期态（含外型/穿搭），再用目标角色存档覆盖——保证不串味，且切回拿回自己穿搭。
         self._clear_transient_state(state, keep_appearance=False)
         if isinstance(payload, dict):
             for ctx_key, value in payload.items():
-                state[ctx_key] = value
+                state[ctx_key] = copy.deepcopy(value)
         try:
             checkpoint = self.app_store.get_checkpoint(session_id, self._context_character_key(session_id))
             if checkpoint.get("summary"):
@@ -1413,6 +1417,19 @@ class CommandHandlersMixin:
                 session_schema.set_checkpoint_message_id(state, int(checkpoint.get("source_until_id") or 0))
         except Exception:
             pass
+        return has_clothing_context
+
+    def _apply_card_outfit_after_switch(self, state: dict[str, Any], data: dict[str, Any], *, has_clothing_context: bool):
+        """目标角色没有冻结衣柜时，才用角色卡 outfit 初始化 clothing，避免继承上一角色衣柜。"""
+        if has_clothing_context or "outfit" not in data:
+            return
+        outfit = session_schema.normalize_outfit_string("" if data.get("outfit") is None else str(data.get("outfit") or ""))
+        session_schema.set_outfit(state, outfit)
+        session_schema.set_wardrobe(
+            state,
+            appearance_rules.seed_wardrobe_from_text(outfit, self._outfit_kw, self._accessory_kw) if outfit else {},
+        )
+        session_schema.clear_nudity(state)
 
     @staticmethod
     def _character_export_payload(state: dict[str, Any]) -> dict[str, Any]:
@@ -1575,7 +1592,8 @@ class CommandHandlersMixin:
             if not session_schema.get_character_value(state, "custom_character", ""):
                 session_schema.set_character_value(state, "custom_character", key)
             saved[key] = {k: v for k, v in payload.items() if k != "id"}
-            self._restore_character_context(session_id, state)
+            has_clothing_context = self._restore_character_context(session_id, state)
+            self._apply_card_outfit_after_switch(state, payload, has_clothing_context=has_clothing_context)
             self._save_session_state(session_id, state)
             await self.send_message(chat_id, f"已导入并切换到角色：{key}")
             return
@@ -1614,7 +1632,8 @@ class CommandHandlersMixin:
             if switching:
                 # 短期态（含 dynamic_appearance/wardrobe）现已随 character_contexts 冻结/解冻：
                 # 切回的角色拿回自己存档的穿搭，新角色则被清空——不再需要在此硬抹（那会覆盖存档）。
-                self._restore_character_context(session_id, state)
+                has_clothing_context = self._restore_character_context(session_id, state)
+                self._apply_card_outfit_after_switch(state, payload, has_clothing_context=has_clothing_context)
             state.pop("life_profile", None)
             self._save_session_state(session_id, state)
             self._ulog(session_id, "SWITCH", f"载入角色 {sub_arg}" + ("（已清空对话上下文）" if switching else ""))
@@ -1685,7 +1704,8 @@ class CommandHandlersMixin:
                 payload.pop("purity", None)
             self._apply_character_payload(state, payload)
             if switching:
-                self._restore_character_context(session_id, state)
+                has_clothing_context = self._restore_character_context(session_id, state)
+                self._apply_card_outfit_after_switch(state, payload, has_clothing_context=has_clothing_context)
             state.pop("life_profile", None)
             self._save_session_state(session_id, state)
             self._ulog(session_id, "SWITCH", f"载入角色 {match_key}" + ("（已清空对话上下文）" if switching else ""))

@@ -4875,6 +4875,75 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_character_switch_uses_target_card_outfit_not_previous_wardrobe(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.send_message = AsyncMock()
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "角色A")
+            session_schema.get_saved_characters(state).update({
+                "角色A": {"character": "角色A", "persona": "我是A", "outfit": "A red dress"},
+                "角色B": {"character": "角色B", "persona": "我是B", "outfit": "blue dress"},
+            })
+            session_schema.set_outfit(state, "A red dress")
+            session_schema.set_wardrobe(state, {"dress": "A red dress"})
+            svc._save_session_state(sid, state)
+
+            await svc.cmd_character(1, sid, "load 角色B")
+
+            after_b = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_outfit(after_b), "blue dress")
+            self.assertEqual(session_schema.get_wardrobe(after_b), {"dress": "blue dress"})
+            self.assertNotIn("A red dress", str(session_schema.get_wardrobe(after_b)))
+
+            await svc.cmd_character(1, sid, "load 角色A")
+
+            after_a = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_outfit(after_a), "A red dress")
+            self.assertEqual(session_schema.get_wardrobe(after_a), {"dress": "A red dress"})
+
+        asyncio.run(run())
+
+    def test_webui_save_activate_does_not_inherit_current_wardrobe(self):
+        from aiohttp import web
+        from telegram_comfyui_selfie.webui import api_save_character
+
+        class FakeJsonRequest(dict):
+            def __init__(self, app, sid, payload):
+                super().__init__()
+                self.app = app
+                self.match_info = {"session_id": sid}
+                self["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+                self._payload = payload
+
+            async def json(self):
+                return self._payload
+
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "角色A")
+            session_schema.get_saved_characters(state)["角色A"] = {"character": "角色A", "persona": "我是A"}
+            session_schema.set_outfit(state, "A red dress")
+            session_schema.set_wardrobe(state, {"dress": "A red dress"})
+            svc._save_session_state(sid, state)
+
+            app = web.Application()
+            app["service"] = svc
+            req = FakeJsonRequest(app, sid, {"id": "角色B", "character": "角色B", "persona": "我是B", "activate": True})
+            resp = await api_save_character(req)
+
+            self.assertEqual(resp.status, 200)
+            after = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_character_value(after, "custom_character"), "角色B")
+            self.assertEqual(session_schema.get_outfit(after), "")
+            self.assertEqual(session_schema.get_wardrobe(after), {})
+            self.assertEqual(session_schema.get_character_contexts(after)["角色A"]["clothing"]["dynamic_appearance"], "A red dress")
+
+        asyncio.run(run())
+
     def test_delete_current_character_clears_state_and_does_not_revive(self):
         # 删除当前角色：必须清空当前角色态，且后续 _snapshot_character 不能把它复活。
         async def run():
