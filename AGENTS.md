@@ -163,7 +163,8 @@ telegram_comfyui_selfie/
 ### 生图与 PromptSlots
 
 - `PromptSlots` 是最终正向提示词来源；日志中会记录 `PROMPT_SLOTS`，实际 ComfyUI prompt 也保留旧版 `PROMPT` 日志方便对比。
-- 核心槽位顺序：`quality -> count -> identity -> style_artist -> effective_appearance -> style_general -> scene -> one_shot_appearance`。
+- 核心槽位顺序：`quality -> count -> identity -> style_artist -> effective_appearance -> style_general -> safety -> scene -> one_shot_appearance`。
+- `safety` 槽承载 `safe/nsfw` 等随纯良度和时段变化的评级词；不要再塞进最前面的 `quality` 槽，避免把高变动 token 放在提示词开头。AnimaTool Turbo 的 `quality_meta_year_safe` 字段仍在提交前临时组合 `quality + safety`，以兼容其 schema。
 - `scene` 只描述镜头、地点、动作、光线、道具和氛围，不重复稳定外貌。
 - `one_shot_appearance` 是本轮临时补充，不持久化。
 - `clothing_off` 对衣物/裸体默认仍是“仅本图生效”；但当它明确命中当前已穿戴的可持久配饰（如眼镜、项链、耳环、发夹）时，生图成功后会把该配饰从当前穿搭中移除，避免下一张图被稳定外貌重新加回去。
@@ -235,6 +236,8 @@ telegram_comfyui_selfie/
 22. **内裤/细服装标签误分类修复**：排查用户反馈“角色不穿内裤”时发现两类根因：`black g-string` 因 `ring` 子串被粗分到配饰/随身物，且只换上 `dress/nightgown` 时若衣柜没有 `panties` 槽，最终 prompt 没有内裤护栏。`appearance.py` 现在先按细服装词识别 bra/panties/g-string/stockings/shoes 等，再走配饰关键词；默认与示例 `outfit_keywords` 同步补齐内衣、袜鞋关键词。
 23. **普通穿着出图防误裸护栏**：`build_prompt()` 默认在 negative 追加 `no panties / no underwear / bottomless / crotchless`，防止短裙、睡裙或低纯良度场景被模型自由发挥成未穿内裤；当 `clothing_off` 明确是全裸、bottomless、panties/g-string/thong/underwear 等下身脱衣意图时，`_apply_clothing_off()` 会移除这些护栏，不阻断用户明确要求的单图脱衣。
 24. **回归测试**：新增测试覆盖 `g-string` 归入穿搭而非配饰、聊天可见外型显示不再把 `black g-string` 放进配饰、普通短裙 prompt 压制误判未穿内裤、明确 `clothing_off="panties"` 时放开对应 negative；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 287 tests in 6.792s`，`OK (skipped=1)`。
+25. **生图 safety 槽后移**：`PromptSlots` 新增独立 `safety` 槽，标准正向提示词不再把 `safe/nsfw` 追加到最前面的 `quality`；渲染顺序改为稳定画质/人数/身份/外观/画风在前，随纯良度和时段变化的 `safe/nsfw` 放到 scene 前，减少高变动评级词破坏前缀稳定。`PROMPT_SLOTS` 与 `/查看提示词` 会单独显示 `safety`，便于排查。
+26. **AnimaTool 兼容**：因 Turbo schema 字段名是 `quality_meta_year_safe`，提交 payload 时用 `PromptSlots.quality_for_schema()` 临时组合 `quality + safety`，内部槽位和标准 ComfyUI prompt 仍保持拆分；新增测试锁定标准 prompt 中 `nsfw` 不在 `quality`，且 Turbo payload 仍输出 `quality_meta_year_safe="masterpiece, nsfw"`。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 288 tests in 6.335s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-06-27）
 

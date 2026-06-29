@@ -56,6 +56,7 @@ class PromptSlots:
     effective_appearance: str = ""
     style_artist: str = ""
     style_general: str = ""
+    safety: str = ""
     one_shot_appearance: str = ""
     negative: str = ""
     positive: str = ""
@@ -88,6 +89,7 @@ class PromptSlots:
             ("base_appearance", self.base_appearance),
             ("effective_appearance", self.effective_appearance),
             ("style", ", ".join(x for x in (self.style_artist, self.style_general) if x)),
+            ("safety", self.safety),
             ("scene", self.scene),
             ("one_shot_appearance", self.one_shot_appearance),
             ("negative", self.negative),
@@ -102,6 +104,7 @@ class PromptSlots:
             ("effective_appearance", self.effective_appearance),
             ("style_artist", self.style_artist),
             ("style_general", self.style_general),
+            ("safety", self.safety),
             ("scene", self.scene),
             ("one_shot_appearance", self.one_shot_appearance),
             ("negative", self.negative),
@@ -118,10 +121,15 @@ class PromptSlots:
             self.style_artist,
             appearance,
             self.style_general,
+            self.safety,
             self.scene,
             self.one_shot_appearance,
         ]
         return _dedupe_prompt_modules(modules)
+
+    def quality_for_schema(self) -> str:
+        """AnimaTool schema 把质量词与安全评级放在同一字段时使用。"""
+        return _dedupe_prompt_modules([self.quality, self.safety])
 
 HAIR_COLOR_WORDS = (
     "blonde", "blond", "golden", "silver", "white", "black", "brown", "red",
@@ -840,8 +848,7 @@ def build_prompt(
     is_sex_scene = is_intimate or scene_has_sex_keyword
 
     quality = "masterpiece, best quality, highres, absurdres, newest, year 2025, anime coloring, clean lineart, soft cel shading, detailed illustration"
-    if safety.get("tag"):
-        quality += f", {safety['tag']}"
+    safety_tag = str(safety.get("tag") or "").strip()
     count = "1boy, solo" if male else "1girl, solo"
     if is_ntr or is_sex_scene or is_partner_scene:
         count = re.sub(r"\bsolo\b,?\s*", "", count).strip(", ")
@@ -986,6 +993,7 @@ def build_prompt(
         effective_appearance=effective_appearance,
         style_artist=", ".join(part for part in (artist, legacy_style) if part),
         style_general=style_general,
+        safety=safety_tag,
         one_shot_appearance=(one_shot_appearance or "").strip(),
         negative=neg,
     )
@@ -1193,7 +1201,10 @@ def _build_animatool_turbo_payload(
             for field_name in schema_names:
                 if field_name not in properties or field_name in payload:
                     continue
-                value = getattr(slots, slot_name, None)
+                if field_name == "quality_meta_year_safe":
+                    value = slots.quality_for_schema()
+                else:
+                    value = getattr(slots, slot_name, None)
                 if value in (None, ""):
                     continue
                 prop = properties[field_name]
@@ -1225,7 +1236,8 @@ def _build_animatool_turbo_payload(
     if "quality_meta_year_safe" in required:
         if "quality_meta_year_safe" not in payload or not payload["quality_meta_year_safe"]:
             payload["quality_meta_year_safe"] = (
-                getattr(slots, "quality", "") or "masterpiece, best quality, highres, newest, year 2025, safe"
+                (slots.quality_for_schema() if isinstance(slots, PromptSlots) else "")
+                or "masterpiece, best quality, highres, newest, year 2025, safe"
             )
     if "count" in required:
         if "count" not in payload or not payload["count"]:
@@ -1364,7 +1376,7 @@ async def submit_animatool_turbo(service: Any, positive: str, negative: str, see
             elif one_shot:
                 appearance = one_shot
             payload.update({
-                "quality_meta_year_safe": slots.quality,
+                "quality_meta_year_safe": slots.quality_for_schema(),
                 "count": slots.count,
                 "character": slots.character or slots.identity,
                 "series": slots.series,

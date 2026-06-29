@@ -3977,6 +3977,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         slots = PromptSlots(
             scene="A girl reads by the window.",
             quality="masterpiece",
+            safety="nsfw",
             count="1girl",
             effective_appearance="school uniform",
             negative="bad hands",
@@ -3997,6 +3998,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("neg", payload)
         self.assertNotIn("negative", payload)
         self.assertIn("nltag", payload)
+        self.assertEqual(payload["quality_meta_year_safe"], "masterpiece, nsfw")
 
     def test_image_planner_writes_back_location_when_unpinned(self):
         async def run():
@@ -4229,6 +4231,38 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(indexes, sorted(indexes))
         self.assertNotIn("clothes", neg.lower())
         self.assertNotIn("clothing", neg.lower())
+
+    def test_prompt_safety_tag_is_late_slot_not_quality(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state.update({
+            "custom_character": "Yukikaze",
+            "custom_series": "Azur Lane",
+            "custom_positive_prefix": "1girl, blonde hair, red eyes",
+            "custom_current_style": "soft watercolor",
+        })
+        session_schema.set_outfit(state, "white dress")
+        session_schema.set_character_value(state, "purity", 1)
+
+        pos, _ = svc._build_prompt("standing by window", session_id=sid)
+        slots = svc._last_prompt_slots_by_session[sid]
+
+        self.assertNotIn("nsfw", slots.quality.lower())
+        self.assertEqual(slots.safety, "nsfw")
+        self.assertIn("nsfw", pos.lower())
+        sequence = [
+            "masterpiece",
+            "1girl",
+            "Yukikaze",
+            "blonde hair",
+            "white dress",
+            "soft watercolor",
+            "nsfw",
+            "standing by window",
+        ]
+        indexes = [pos.index(term) for term in sequence]
+        self.assertEqual(indexes, sorted(indexes))
 
     def test_negative_drops_clothes_when_positive_has_outfit_even_without_custom_character(self):
         svc = self.make_service()
