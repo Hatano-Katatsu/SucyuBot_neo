@@ -28,6 +28,7 @@ VISIBLE_PHONE_NEGATIVES = (
     "holding phone", "visible phone", "smartphone",
     "viewfinder", "phone screen", "camera UI", "shutter button",
 )
+BOTTOM_EXPOSURE_NEGATIVES = ("no panties", "no underwear", "bottomless", "crotchless")
 ANIMATOOL_NLTAG_FIELDS = ("nltag", "nl_tag", "nl_tags", "tags")
 
 
@@ -361,8 +362,12 @@ _FULL_NUDE_RE = re.compile(
     re.IGNORECASE,
 )
 _NUDE_STATE_WORDS = (
-    "topless", "bottomless", "barefoot", "no panties", "no bra",
+    "topless", "bottomless", "barefoot", "no panties", "no underwear", "no bra",
     "exposed breasts", "exposed nipples", "bare shoulders",
+)
+_BOTTOM_CLOTHING_OFF_WORDS = (
+    "bottomless", "no panties", "no underwear", "panties", "panty",
+    "g-string", "thong", "knickers", "briefs", "underwear",
 )
 
 
@@ -379,6 +384,7 @@ def _apply_clothing_off(service: Any, clothing_off: str, effective_appearance: s
     raw = (clothing_off or "").strip()
     if not raw:
         return effective_appearance, neg
+    raw_lower = raw.lower()
     appearance = effective_appearance
     worn = [w for w in (worn_tags or []) if w and w.strip()]
     if _FULL_NUDE_RE.search(raw):
@@ -407,6 +413,8 @@ def _apply_clothing_off(service: Any, clothing_off: str, effective_appearance: s
     appearance = normalize_appearance_text(appearance)
     # 这张图既然要露，负向别再压制裸体（仅去裸体相关词，不动评级词，避免和评级系统打架）
     neg = _remove_negatives(neg, "nude", "naked", "nudity", "topless", "bottomless", "completely nude", "revealing clothes")
+    if _FULL_NUDE_RE.search(raw) or any(word in raw_lower for word in _BOTTOM_CLOTHING_OFF_WORDS):
+        neg = _remove_negatives(neg, *BOTTOM_EXPOSURE_NEGATIVES)
     return appearance, neg
 
 
@@ -844,7 +852,8 @@ def build_prompt(
 
     neg = service.config.get("negative_prompt", DEFAULT_CONFIG["negative_prompt"])
     neg = _append_negatives(neg, "extra hands", "poorly drawn hands", "extra digits",
-                            "split screen", "grid", "multiple panels", "collage")
+                            "split screen", "grid", "multiple panels", "collage",
+                            *BOTTOM_EXPOSURE_NEGATIVES)
     if state.get("custom_positive_prefix"):
         strip = {"clothes", "clothing"}
         if male:

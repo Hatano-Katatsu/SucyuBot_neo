@@ -5248,6 +5248,42 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("slip dress", pos.lower())
         self.assertIn("cardigan", pos.lower())
 
+    def test_underwear_tags_are_outfit_not_ring_accessory(self):
+        svc = self.make_service()
+        slots = svc._parse_appearance(
+            "black g-string, white thighhighs, mechanical high heels, large black bow"
+        )
+        self.assertIn("black g-string", slots["outfit"])
+        self.assertIn("white thighhighs", slots["outfit"])
+        self.assertIn("mechanical high heels", slots["outfit"])
+        self.assertNotIn("black g-string", slots["accessory"])
+        self.assertIn("large black bow", slots["accessory"])
+
+    def test_chat_visible_context_keeps_g_string_in_outfit(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["custom_character"] = "岛风"
+        state["custom_positive_prefix"] = (
+            "long hair, light blonde hair, black hairband, white sleeveless crop top, "
+            "dark blue micro pleated skirt, black g-string, large black bow"
+        )
+        context = svc._chat_visible_appearance_context(sid)
+        self.assertIn("穿搭: white sleeveless crop top, dark blue micro pleated skirt, black g-string", context)
+        self.assertIn("配饰/随身物: large black bow", context)
+        self.assertNotIn("配饰/随身物: black g-string", context)
+
+    def test_build_prompt_suppresses_accidental_no_panties_by_default(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        session_schema.set_outfit(state, "white blouse, dark blue micro pleated skirt")
+        _, neg = svc._build_prompt("standing by the kitchen counter", session_id=sid)
+        neg_lower = neg.lower()
+        self.assertIn("no panties", neg_lower)
+        self.assertIn("no underwear", neg_lower)
+        self.assertIn("bottomless", neg_lower)
+
     def test_clothing_off_strips_named_garment_for_this_image_only(self):
         svc = self.make_service()
         sid = "telegram:1"
@@ -5273,6 +5309,20 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("cardigan", neg.lower())
         self.assertIn("slip dress", neg.lower())
         self.assertEqual(session_schema.get_outfit(state), "cotton knit cardigan, black silk slip dress")
+
+    def test_clothing_off_panties_frees_underwear_negative(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        session_schema.set_outfit(state, "white blouse, dark skirt, black panties")
+        pos, neg = svc._build_prompt("on the bed", session_id=sid, clothing_off="panties")
+        pos_lower = pos.lower()
+        neg_lower = neg.lower()
+        self.assertNotIn("black panties", pos_lower)
+        self.assertNotIn("no panties", neg_lower)
+        self.assertNotIn("no underwear", neg_lower)
+        self.assertNotIn("bottomless", neg_lower)
+        self.assertEqual(session_schema.get_outfit(state), "white blouse, dark skirt, black panties")
 
     def test_outfit_normalized_so_nude_strips_deterministically(self):
         """脏穿搭(双空格/重复标签)经归一后，全裸能确定性剥掉——回归"脱不掉衣服"。

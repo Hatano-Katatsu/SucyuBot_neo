@@ -232,6 +232,9 @@ telegram_comfyui_selfie/
 19. **主动推送场景转场判定**：新增 `_push_scene_transition_decision()` / `_format_push_scene_transition_context()`，主动推送会识别“结束、离开、改约、晚上等着、不和…扯了”等信号，以及超过 `scene_stale_minutes` 的断档；旧对话/照片此时只作为情绪、约定和避免重复参考，不再默认把上一幕地点、姿势和话题续写为此刻仍在发生。
 20. **推送旧地点强锁降级**：`plan_roleplay_image(mode=normal/morning/ntr)` 在判定应转场时，临时忽略本轮旧 `character_place` 的 strong pin，并让 `_format_world_context(..., apply_persisted_place=False)` 按当前时间/天气/动线给出转场后的落点；旧地点仍以 weak 参考出现，不清空状态，规划器若输出新的 `character_location` 会回写刷新。
 21. **回归测试**：新增 `test_scheduled_push_transition_does_not_lock_stale_previous_scene_place`，覆盖咖啡店告别/晚上约定后 45 分钟推送不再出现 `地点锁定（最高优先）`，并允许角色地点从 `cafe` 刷新为 `transit`；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 283 tests in 6.097s`，`OK (skipped=1)`。
+22. **内裤/细服装标签误分类修复**：排查用户反馈“角色不穿内裤”时发现两类根因：`black g-string` 因 `ring` 子串被粗分到配饰/随身物，且只换上 `dress/nightgown` 时若衣柜没有 `panties` 槽，最终 prompt 没有内裤护栏。`appearance.py` 现在先按细服装词识别 bra/panties/g-string/stockings/shoes 等，再走配饰关键词；默认与示例 `outfit_keywords` 同步补齐内衣、袜鞋关键词。
+23. **普通穿着出图防误裸护栏**：`build_prompt()` 默认在 negative 追加 `no panties / no underwear / bottomless / crotchless`，防止短裙、睡裙或低纯良度场景被模型自由发挥成未穿内裤；当 `clothing_off` 明确是全裸、bottomless、panties/g-string/thong/underwear 等下身脱衣意图时，`_apply_clothing_off()` 会移除这些护栏，不阻断用户明确要求的单图脱衣。
+24. **回归测试**：新增测试覆盖 `g-string` 归入穿搭而非配饰、聊天可见外型显示不再把 `black g-string` 放进配饰、普通短裙 prompt 压制误判未穿内裤、明确 `clothing_off="panties"` 时放开对应 negative；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 287 tests in 6.792s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-06-27）
 

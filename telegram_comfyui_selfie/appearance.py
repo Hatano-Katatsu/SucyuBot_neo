@@ -27,6 +27,32 @@ HAIRSTYLE_WORDS = (
     "drill", "sidetail", "side tail", "hime cut", "updo", "bob cut", "马尾", "辫",
 )
 
+FINE_OUTFIT_WORDS = (
+    "sports bra", "bralette", "brassiere", "bra",
+    "g-string", "thong", "panties", "panty", "knickers", "briefs", "underwear",
+    "pantyhose", "thigh-highs", "thighhighs", "thigh highs", "stockings", "tights",
+    "knee socks", "socks", "leg warmers", "garter belt", "garter",
+    "high heels", "heels", "boots", "sneakers", "sandals", "slippers", "loafers",
+    "flats", "pumps", "mary janes", "shoes",
+    "windbreaker", "trench coat", "trenchcoat", "overcoat", "parka", "cardigan",
+    "hoodie", "blazer", "jacket", "coat", "cloak", "cape", "robe",
+    "sundress", "nightgown", "nightdress", "negligee", "cheongsam", "qipao",
+    "kimono", "yukata", "hanfu", "jumpsuit", "romper", "bodysuit", "leotard",
+    "swimsuit", "one-piece", "dress", "gown",
+    "bikini top", "tube top", "crop top", "tank top", "camisole", "turtleneck",
+    "sweatshirt", "sweater", "t-shirt", "blouse", "shirt", "jersey", "halter",
+    "vest", "top",
+    "bikini bottom", "miniskirt", "skirt", "jeans", "trousers", "slacks",
+    "sweatpants", "joggers", "leggings", "hotpants", "shorts", "pants", "culottes",
+)
+
+
+def _contains_fine_outfit_word(text: str) -> bool:
+    for word in FINE_OUTFIT_WORDS:
+        if re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", text):
+            return True
+    return False
+
 
 def normalize_appearance_tag(tag: str) -> str:
     text = str(tag or "").strip()
@@ -55,6 +81,8 @@ def parse_appearance(appearance: str, outfit_kw: list[str], accessory_kw: list[s
             slots["hair"].append(tag)
         elif "eye" in tl or "pupil" in tl or "瞳" in tl or "眼" in tl:
             slots["eyes"].append(tag)
+        elif _contains_fine_outfit_word(tl):
+            slots["outfit"].append(tag)
         elif any(k in tl for k in outfit_kw):
             slots["outfit"].append(tag)
         elif any(k in tl for k in accessory_kw):
@@ -114,7 +142,7 @@ WARDROBE_RENDER_ORDER = (
 # 主分类由大模型完成，所以这里不求穷尽。
 FINE_SLOT_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("bra", ("sports bra", "bralette", "brassiere", "bra")),
-    ("panties", ("g-string", "thong", "panties", "panty", "knickers", "briefs")),
+    ("panties", ("g-string", "thong", "panties", "panty", "knickers", "briefs", "underwear")),
     ("legwear", ("pantyhose", "thigh-highs", "thighhighs", "thigh highs", "stockings", "tights", "knee socks", "socks", "leg warmers", "garter belt", "garter")),
     ("footwear", ("high heels", "heels", "boots", "sneakers", "sandals", "slippers", "loafers", "flats", "pumps", "mary janes", "shoes")),
     ("outerwear", ("windbreaker", "trench coat", "trenchcoat", "overcoat", "parka", "cardigan", "hoodie", "blazer", "jacket", "coat", "cloak", "cape", "robe")),
