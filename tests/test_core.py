@@ -7639,6 +7639,11 @@ class ModelProfileTestCase(ServiceFixtureMixin, unittest.TestCase):
         for pid, profile in profiles.items():
             self.assertTrue(profile.get("thinking_fixed"), f"{pid} 应声明 thinking_fixed")
 
+    def test_default_chat_max_tokens_is_high_enough_for_thinking(self):
+        svc = self.make_service()
+        resolved = svc._resolved_llm_config("chat", "telegram:1")
+        self.assertEqual(str(resolved.get("max_tokens")), "12000")
+
     def test_thinking_fixed_ignores_user_settings(self):
         async def run():
             svc = self.make_service()

@@ -230,6 +230,8 @@ telegram_comfyui_selfie/
 
 17. **dream 记忆压缩输出预算与截断观测**：`dream-memory-summarize` 不再继承聊天 profile 的低 `max_tokens`，而是通过 `dream_memory_summarize_max_tokens` 单独覆盖输出预算，默认 `8192`，可在配置中调到 `12000`；chat 失败回落 fast/flash 时同样沿用该预算。`llm_debug.json` 每条记录顶层新增 `finish_reason`、`completion_tokens` 和请求 `max_tokens`，`ERROR LLM_FULL_LOG` 也补同样摘要，后续看到 `finish_reason="length"` 即可直接确认是否输出截断。新增测试覆盖请求体预算覆盖、debug/error 日志截断字段、默认 8192 和配置 12000。
 
+18. **chat 思考模型输出预算上调**：排查当前 `data/config.json`、SQLite `user_model_settings` / `model_profiles` 与 `llm_debug.json` 后确认所有 chat profile 当前都没有 profile 级 `max_tokens`，实际请求统一继承 `chat_llm_max_tokens=8192`；为避免思考内容被输出预算截断，默认 `chat_llm_max_tokens` 上调为 `12000`，示例配置、WebUI 管理页字段和本机运行配置同步更新。新增 `test_default_chat_max_tokens_is_high_enough_for_thinking` 锁定默认 chat 解析预算为 `12000`。
+
 ## 今日变更（2026-06-28）
 
 1. **自动推送完成标记修复**：随机推送点不再在进入触发窗口时提前写入 `daily_triggered_times`；现在只有 `_sched_fire()` 实际成功发送照片后才标记完成。错过 5 分钟窗口或晚安抑制仍会显式写入处理原因，避免“无声吃掉当天推送点”。
@@ -324,13 +326,13 @@ telegram_comfyui_selfie/
 
 ## 最新验证
 
-- `py -3 -m unittest tests.test_core.ServiceTestCase.test_call_llm_messages_records_finish_reason_and_completion_tokens tests.test_core.DreamManualMemoryTestCase.test_dream_memory_summarize_falls_back_to_fast_model tests.test_core.DreamManualMemoryTestCase.test_dream_memory_summarize_max_tokens_can_be_configured -v`
+- `py -3 -m unittest tests.test_core.ModelProfileTestCase.test_default_chat_max_tokens_is_high_enough_for_thinking tests.test_core.ServiceTestCase.test_call_llm_messages_records_finish_reason_and_completion_tokens tests.test_core.ConfigStoreTestCase.test_load_nested_model_profiles -v`
 - `$env:PYTHONPYCACHEPREFIX='.tmp\pycache_compile'; py -3 -m compileall -q telegram_comfyui_selfie tests`
 - `py -3 -m py_compile scripts\compare_llm_chat_prompts.py`
 - `py -3 scripts\compare_llm_chat_prompts.py --log "data\logs\llm_debug.json" --output .tmp\llm_chat_prompt_compare_current.md`
 - `node --check telegram_comfyui_selfie\static\app.js`
 - `py -3 -m unittest tests.test_core -v`
-- 最新结果：`Ran 305 tests in 7.350s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
+- 最新结果：`Ran 306 tests in 7.555s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
 - 工具 schema 当前紧凑 JSON 长度：`1898` 字符；chat 回复请求体 key 顺序为 `model, max_tokens, temperature, top_p, frequency_penalty, tools, tool_choice, messages`（`presence_penalty` 留空时不下发；checkpoint/dream/memory 等内部任务不下发采样参数）
 - 当前已复跑 prompt 比对脚本；`data/logs/llm_debug.json` 报告写入 `.tmp\llm_chat_prompt_compare_current.md`，`entries=10 sessions=1 pairs=9`。
 - 真实 API 缓存探针沿用上一轮结论：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。

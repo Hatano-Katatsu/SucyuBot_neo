@@ -40,6 +40,7 @@ const configSections = [
     ["default_vision_model_profile", "默认视觉模型 profile", "model_select"],
     ["chat_reply_length", "回复长度", "select:,简短,适中,详细"],
     ["chat_llm_temperature", "回复温度", "text"],
+    ["chat_llm_max_tokens", "回复 max_tokens（含思考输出上限）", "text"],
     ["chat_llm_top_p", "回复 top_p（核采样，砍胡话尾巴，留空不下发）", "text"],
     ["chat_llm_frequency_penalty", "回复频率惩罚（抗复读/车轱辘话，留空不下发）", "text"],
     ["chat_llm_presence_penalty", "回复存在惩罚（推话题发散，默认空=关）", "text"],
