@@ -736,28 +736,134 @@ async def plan_roleplay_image(
     spatial_hint = service._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])
     spatial_label = f"默认物理空间设定（{spatial_hint}）" if str(spatial_hint).strip() else "默认无固定空间设定"
 
-    system = (
-        f"{service._get_effective_persona(session_id)}\n\n"
+    scene_boundary_rules = (
         "Scene boundary: write scene as environment, camera framing, action, lighting, mood, and spatial context. "
         "Do not restate stable character appearance that is already in persona/current appearance/photo memory, such as hair color, eye color, body traits, species traits, or permanent accessories. "
         "Only mention clothing/accessories in scene when they are a deliberate one-shot visual change for this image; put one-shot visual tags in new_appearance_tags.\n"
     )
+    stable_mode_rules = (
+        "通用模式要求:\n"
+        "morning: 必须使用 pov，刚睡醒、厨房或卧室早安场景。\n"
+        f"normal: 根据{spatial_label}和近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror。\n"
+        "ntr: 用户长时间未互动的冷落惩罚推送，强烈 NTR 危机感，通常 portrait（他人帮角色拍）、selfie 或分屏。\n"
+        "推送转场通用规则: 最近对话/照片只能作为情绪、约定和避免重复的参考；判定应转场时，不要把上一幕地点、姿势或话题强行续写成此刻仍在发生。\n"
+    )
+    stable_world_rules = (
+        "通用世界/地点判断规则: 位置优先级为用户本轮声明 > 工具/系统记录 > 时钟动线推断；用户文字明确说的位置始终优先。"
+        "地点参考是 weak，不要强锁；不要无理由瞬移，也不要把角色死钉在已陈旧地点。"
+        "用户位置状态可继承，但最近对话明确离开或抵达时必须覆盖旧记录。\n"
+        "通用自然光规则: 当前不是黄昏/落日/暮色时，不要把“晚上见”“稍后”“接下来傍晚”提前画成当前画面；"
+        "不得写夕阳、落日、晚霞、黄昏、暮色、路灯刚亮、twilight、sunset、dusk、evening sky、streetlights turning on。"
+        "如需表达等待晚上，只写动作、表情、手机消息或约定感，当前环境仍按现在的自然光。\n"
+    )
+    stable_spatial_rules = (
+        "空间/身体关系规则: 如果用户本轮意图、聊天草案或短期连续性里出现坐/站/躺/跪/脚边/腿上/身后/怀里/肩膀/背向/俯身等身体站位，"
+        "这些属于硬约束；scene 的主句必须明确角色相对用户、镜头和道具的位置，不要只写表情或氛围，也不要改成相反站位。\n"
+    )
+    stable_intimacy_rules = (
+        "场景类型自判: 只要角色与用户有贴身性接触（性交、骑乘、交合、爱抚、拥抱贴身、亲吻、前戏，"
+        "或任何用户身体会与角色贴合入画的性暗示情形），都判为亲密场景 is_intimate=true；纯日常、无身体接触才是 false。"
+        "性事刚结束的事后温存、同床共枕、相拥而眠、躺在对方身边、爱抚余韵等画面，只要用户的身体仍与角色同框贴近，"
+        "同样判为 is_intimate=true（不要因为‘性行为已结束’就当成日常）。请在 JSON 里输出 is_intimate 布尔值。"
+        + ("系统初步判断本次可能属于亲密场景，请重点确认。" if intimate_hint else "")
+    )
+    if free_composition:
+        interaction_rules = (
+            "\n【自由配图模式的亲密构图】若 is_intimate=true，仍要避免把用户误画成抢主体的完整第二人；"
+            f"用户身体默认只作为{user_g_zh}局部、手臂、胸腹、背或腿入画。"
+            "但用户本次明确指定的视角、机位、远近、局部特写、手机/相机/镜子入画优先，不要硬改成 POV。"
+            "new_appearance_tags 仍只填临时外观变化，不要把情绪或动作写进去。"
+        )
+    else:
+        interaction_rules = (
+            "\n【以下亲密交互规则仅当你判定 is_intimate=true 时适用；若判定为日常/非性场景，请完全忽略本段，按通用规则写】:\n"
+            "- 视角固定为 pov（用户第一人称视角），严禁 selfie 或 mirror，不需要第三人称全景。\n"
+            f"- 用户身体归属（关键，针对双人误画）: 画面焦点永远是角色（一名女性）。用户作为亲密伴侣入画时，只画用户的【{user_g_zh}】身体局部（手、手臂、胸膛或胸部、腹、背、腿），"
+            "绝不能把用户写成有完整面部、发型、表情、迷离眼神的第二个主角，更不能让用户喧宾夺主。\n"
+            f"凡“你的手/你的胸/你的背/你的腿”等用户身体部位，scene 要写成可见的{user_g_zh}身体局部，不要写成“另一个角色/她/第二个人”。"
+            "除非用户明确要求双人同框，画面里被完整刻画的人物只有角色一名。\n"
+            f"- 只画用户身体局部（手/臂/胸/腹/背/腿），不要画完整的{user_g_zh}全身或面部。\n"
+            "- 人物优先: 重点在角色的表情（迷离、红晕、咬唇）、身体反应（汗水、潮红、轻颤）和互动姿态，弱化环境背景。\n"
+            "- 场景精简: 环境灯光压到最短；构图近距离特写或半身近景。\n"
+            "- 自拍物理规则不变: 默认不得出现手机、相机、镜子或拿手机的手；"
+            "但若用户明确要求在亲密时拍照/录像/对镜（device_in_frame=true），则按其要求放行对应的 selfie/mirror 视角与手机/镜子入画。\n"
+            "- new_appearance_tags 仍只填临时外观变化，不要把情绪或动作写进去。"
+        )
+    subject_rules = (
+        "\n画面主体规则: 图片主体默认必须是角色，不要把“你/用户”写成画面中被观看的主角。"
+        "用户只能作为视角来源、互动对象或少量局部元素出现；只有用户明确要求双人同框时，才允许用户作为第二主体。"
+        "如果草案写成“你坐着/你躺着/你穿着”，必须改写为“角色坐着/她躺着/角色穿着”。"
+        "角色名只用于台词称呼；默认或原创角色不要把名字当作画面标签，画面描述应依靠角色类型和外貌特征。既有作品角色可以保留角色名和作品名。"
+    )
+    if not free_composition:
+        subject_rules += (
+            "\n单人构图硬规则: 当视角是 selfie 前摄自拍或 mirror 对镜自拍时，画面里【只能有角色一个人】，"
+            "scene 绝不能写入第二个人（用户、伴侣、他、她、对方、男人、女人）或对方的完整身体、面部。"
+            "如果此刻用户/伴侣的身体会和角色同框入画（如躺在身边、被搂着、贴身依偎），默认不要用 selfie/mirror，"
+            "改用 pov，并且只把对方写成画面边缘的身体局部（手、手臂、胸膛、腿等），不要写成完整的第二个人。"
+            "唯一例外是用户明确要求拍照/录像/对镜（device_in_frame=true）：此时可保留其要求的 selfie/mirror 视角，"
+            "但对方依然只画身体局部，不得写成完整的第二个主角。\n"
+        )
+    field_rules = (
+        "partner_in_frame: 当画面里会出现用户/伴侣的身体（哪怕只是局部）时置 true；纯角色单人时 false。\n"
+        "device_in_frame: 仅当用户明确要求把手机/相机/镜子作为拍照、录像、对镜的道具拍进画面时置 true；否则 false。"
+    )
+    single_frame_rules = (
+        "\n单帧构图硬规则: scene 必须是【单一冻结瞬间】——只描写一个时间点的一个场景动作，"
+        "严禁分格、分镜、四宫格、漫画分格、拼贴画、多面板。"
+        "如果角色有连续动作（如转身→走开→回头），只选取其中最具表现力的一帧，不要把多帧塞进同一张图。"
+        "不要在 scene 里写叙事推进或时间线（先…然后…最后…），只写此刻定格的画面。"
+    )
+    if free_composition:
+        view_rules = (
+            "\n视角规则: 优先服从用户本次给出的视角、机位、远近和构图；未指定时才根据上下文选择 pov/third/selfie/mirror/portrait。"
+            "允许部位特写、超近景、远景、低机位、俯拍、侧后方、环境或道具承接；不要为了自拍偏好强行改写。"
+            "手部规则: 用户明确要求手部或局部特写时保留；否则仍避免复杂手势和多余手臂。"
+        )
+    else:
+        view_rules = (
+            "\n视角规则: 身处同一空间或用户明确要靠近互动时优先 pov；"
+            "异地、展示穿搭或回复照片请求时优先 selfie/mirror；需要叙事全景时用 third。"
+            "取景物理规则: view=selfie 是前摄自拍（角色伸手举着手机自拍），但画面中【不得出现手机本体、手机屏幕 UI、相机、镜子或拿手机的手】，只靠伸手取景和看向镜头表现自拍；"
+            "view=portrait 是别人（用户或他人）帮角色拍的照片：角色看向镜头、为镜头摆姿势，拍摄者在画面外，画面里只有角色一个人，同样不得出现手机、相机、镜子。"
+            "portrait 只在两种情况下用：①用户与角色【同处一地】且角色明确说想让用户/他人帮忙拍一张照片；②NTR 场景（他人给角色拍照）。其余展示穿搭/异地/回复照片仍用 selfie。"
+            "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。"
+            "selfie/portrait/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。"
+            "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。"
+        )
+    json_contract_rules = (
+        "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third|portrait\",\"aspect_ratio\":\"2:3|3:2\",\"caption\":\"...\",\"new_appearance_tags\":\"...\",\"clothing_off\":\"...\",\"character_location\":\"...\",\"user_location\":\"...\",\"is_intimate\":false,\"partner_in_frame\":false,\"device_in_frame\":false}。"
+        "aspect_ratio 选画幅（重要）：只允许 2:3（竖版，832x1216）或 3:2（横版，1216x832）。"
+        "默认用 2:3 竖版；当场景以横向元素为主（如地平线、宽阔街景、双人并排、横向躺卧、风景全景）时用 3:2。"
+        "近景人像、自拍、特写、站姿、行走、坐姿等纵向构图一律用 2:3。"
+        "character_location 填角色此刻所在场所的英文枚举（取值同 user_location，但不含 with_user/unknown）：若上面给出了角色地点约束，必须填那个枚举值；没有约束时按动线与对话自行判断。"
+        "is_intimate 是布尔值，按上面的场景类型自判规则给出。"
+        "partner_in_frame、device_in_frame 都是布尔值，按上面单人构图硬规则里的定义给出。"
+        "user_location 填你判断的用户此刻所在场所（关键）：与角色同处填 with_user，完全无法判断填 unknown，"
+        "否则取其一: home/company/school/park/mall/street/cafe/restaurant/transit/convenience/cinema/hotel/hospital/gym/factory/farm/construction/"
+        "museum/landmark/temple/library/zoo/amusement/bar/ktv/stadium/supermarket/bookstore/beach/salon。"
+        "系统会从 user_location 自动推导用户是否与角色同处（co_located），你不需要单独输出 co_located。"
+        "new_appearance_tags 只填这张图需要额外强调的一次性服装、配饰、临时发型或发色瞳色变化，英文标签逗号分隔；"
+        "这些标签只用于本次生图，不会写入长期外型。不要把姿势、表情、动作、场景、灯光写进去。没有一次性外观补充时留空。"
+        "clothing_off 填这张图里【应当从角色当前着装中去掉/已脱下/未穿】的服装或配饰（英文标签逗号分隔，如 'cardigan, jacket'），"
+        "或填裸露状态词 'nude'/'topless'/'bottomless'/'completely nude' 表示相应程度的裸体；"
+        "只要叙事表明此刻角色脱了某件、在试穿前脱下原装、正在裸体或性爱中褪去衣物，就据对话如实填写。"
+        "性爱/裸体场景必须按程度填裸露词（如 'completely nude'），不能留空——留空会让角色被原来的衣服画回去。"
+        "填了裸露/脱衣后，scene 里不要再把已脱下的衣服写成穿着或贴身（如『湿裙子贴着胸口』），改写裸露肌肤或仅用床单/泡沫等遮挡。"
+        "这是一次性的、只影响本图，绝不写入长期衣柜（事后会自动恢复原着装）。没有脱衣/裸露时留空。"
+    )
     if is_push:
-        system += (
+        role_context = (
             f"你是角色扮演推送图片导演。当前推送模式: {mode}。\n"
             "主动推送时把画面写成角色日常动线里的自然片段，不要无理由瞬移到用户身边；短期连续性上下文可用于承接，但必须先服从场景转换判定。\n"
             f"角色身份: 当前角色是「{bot_name}」（{role_name}），优先使用「{bot_self_name}」作为自称；不要写成其他默认角色。\n"
-            f"模式要求:\n"
-            "morning: 必须使用 pov，刚睡醒、厨房或卧室早安场景。\n"
-            f"normal: 根据{spatial_label}和近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror。\n"
-            f"ntr: 用户长时间未互动的冷落惩罚推送，强烈 NTR 危机感，通常 portrait（他人帮角色拍）、selfie 或分屏。\n"
         )
         if push_transition_context:
-            system += push_transition_context + "\n"
+            role_context += push_transition_context + "\n"
         temporal = time_period
     else:
         if free_composition:
-            system += (
+            role_context = (
                 f"你是角色扮演配图导演，负责把短期连续性、用户在 /配图 后输入的画面要求和世界/角色状态整合成最终画面。\n"
                 f"角色身份: 当前角色是「{bot_name}」（{role_name}），优先使用「{bot_self_name}」作为自称；不要写成其他默认角色。\n"
                 "优先级: 用户本次 /配图 后输入的场景、视角、机位、远近、焦段、构图、部位特写或道具要求最高；"
@@ -767,11 +873,34 @@ async def plan_roleplay_image(
                 "若用户没有指定构图，再根据当前聊天场景自然选择。"
             )
         else:
-            system += (
+            role_context = (
                 f"你是角色扮演图片导演，负责把聊天模型给出的图片意图整合成最终画面。\n"
                 f"角色身份: 当前角色是「{bot_name}」（{role_name}），优先使用「{bot_self_name}」作为自称；不要写成其他默认角色。\n"
             )
         temporal = f"{time_period}, {weekday}"
+    stable_front = (
+        scene_boundary_rules
+        + stable_mode_rules
+        + stable_world_rules
+        + stable_spatial_rules
+        + stable_intimacy_rules
+        + interaction_rules
+        + subject_rules
+        + field_rules
+        + single_frame_rules
+        + view_rules
+        + json_contract_rules
+    )
+    if needs_caption:
+        stable_front += (
+            "\ncaption 填一句简短的中文台词（纯文本，角色口吻），本图的配文。"
+            "scene 描述本次画面的英文自然语言场景（不要中文）。"
+        )
+    else:
+        stable_front += (
+            "\n聊天模型已经给出文字回复，这张图只配画面、不需要任何台词或配文，不要输出 caption 字段。"
+        )
+    system = stable_front + "\n\n" + role_context + "\n" + service._get_effective_persona(session_id) + "\n\n"
     system += (
         f"当前附加外貌: {dynamic or '无'}\n"
         f"用户画面偏好: 场景偏好={prompt_prefs.get('scene_preference') or '无'}；自拍偏好={prompt_prefs.get('selfie_preference') or '无'}。\n"
@@ -783,8 +912,6 @@ async def plan_roleplay_image(
         "你要综合用户最近的话、聊天模型的意图、最近已发图片摘要、时间天气、外貌和安全约束，"
         "输出适合发给用户的一张图。不要输出英文画图标签。\n"
         "公开场合必须穿着得体；私密场合可以更放松。避免和最近照片重复。"
-        "空间/身体关系规则: 如果用户本轮意图、聊天草案或短期连续性里出现坐/站/躺/跪/脚边/腿上/身后/怀里/肩膀/背向/俯身等身体站位，"
-        "这些属于硬约束；scene 的主句必须明确角色相对用户、镜头和道具的位置，不要只写表情或氛围，也不要改成相反站位。"
     )
     if world_context:
         # 与聊天侧同构：进行中的对话已经确立了地点时，动线只作背景，避免配图把角色按现实时段“传送”
@@ -844,110 +971,6 @@ async def plan_roleplay_image(
                 f'\n用户位置状态（系统记录，基于此前对话/生图判断）: 用户此刻在「{up_label}」，与角色异地。'
                 '除非最近对话明确表明用户已来到角色身边（如「我到了」「开门」「我来找你」），否则 user_location 应填对应地点枚举。'
             )
-    system += (
-        "\n场景类型自判: 只要角色与用户有贴身性接触（性交、骑乘、交合、爱抚、拥抱贴身、亲吻、前戏，"
-        "或任何用户身体会与角色贴合入画的性暗示情形），都判为亲密场景 is_intimate=true；纯日常、无身体接触才是 false。"
-        "性事刚结束的事后温存、同床共枕、相拥而眠、躺在对方身边、爱抚余韵等画面，只要用户的身体仍与角色同框贴近，"
-        "同样判为 is_intimate=true（不要因为‘性行为已结束’就当成日常）。"
-        "请在 JSON 里输出 is_intimate 布尔值。"
-        + ("系统初步判断本次可能属于亲密场景，请重点确认。" if intimate_hint else "")
-    )
-    if free_composition:
-        system += (
-            "\n【自由配图模式的亲密构图】若 is_intimate=true，仍要避免把用户误画成抢主体的完整第二人；"
-            f"用户身体默认只作为{user_g_zh}局部、手臂、胸腹、背或腿入画。"
-            "但用户本次明确指定的视角、机位、远近、局部特写、手机/相机/镜子入画优先，不要硬改成 POV。"
-            "new_appearance_tags 仍只填临时外观变化，不要把情绪或动作写进去。"
-        )
-    else:
-        system += (
-            "\n【以下亲密交互规则仅当你判定 is_intimate=true 时适用；若判定为日常/非性场景，请完全忽略本段，按通用规则写】:\n"
-            "- 视角固定为 pov（用户第一人称视角），严禁 selfie 或 mirror，不需要第三人称全景。\n"
-            f"- 用户身体归属（关键，针对双人误画）: 画面焦点永远是角色（一名女性）。用户作为亲密伴侣入画时，只画用户的【{user_g_zh}】身体局部（手、手臂、胸膛或胸部、腹、背、腿），"
-            "绝不能把用户写成有完整面部、发型、表情、迷离眼神的第二个主角，更不能让用户喧宾夺主。\n"
-            f"凡“你的手/你的胸/你的背/你的腿”等用户身体部位，scene 要写成可见的{user_g_zh}身体局部，不要写成“另一个角色/她/第二个人”。"
-            "除非用户明确要求双人同框，画面里被完整刻画的人物只有角色一名。\n"
-            f"- 只画用户身体局部（手/臂/胸/腹/背/腿），不要画完整的{user_g_zh}全身或面部。\n"
-            "- 人物优先: 重点在角色的表情（迷离、红晕、咬唇）、身体反应（汗水、潮红、轻颤）和互动姿态，弱化环境背景。\n"
-            "- 场景精简: 环境灯光压到最短；构图近距离特写或半身近景。\n"
-            "- 自拍物理规则不变: 默认不得出现手机、相机、镜子或拿手机的手；"
-            "但若用户明确要求在亲密时拍照/录像/对镜（device_in_frame=true），则按其要求放行对应的 selfie/mirror 视角与手机/镜子入画。\n"
-            "- new_appearance_tags 仍只填临时外观变化，不要把情绪或动作写进去。"
-        )
-    system += (
-        "\n画面主体规则: 图片主体默认必须是角色，不要把“你/用户”写成画面中被观看的主角。"
-        "用户只能作为视角来源、互动对象或少量局部元素出现；只有用户明确要求双人同框时，才允许用户作为第二主体。"
-        "如果草案写成“你坐着/你躺着/你穿着”，必须改写为“角色坐着/她躺着/角色穿着”。"
-        "角色名只用于台词称呼；默认或原创角色不要把名字当作画面标签，画面描述应依靠角色类型和外貌特征。既有作品角色可以保留角色名和作品名。"
-    )
-    if not free_composition:
-        system += (
-            "\n单人构图硬规则: 当视角是 selfie 前摄自拍或 mirror 对镜自拍时，画面里【只能有角色一个人】，"
-            "scene 绝不能写入第二个人（用户、伴侣、他、她、对方、男人、女人）或对方的完整身体、面部。"
-            "如果此刻用户/伴侣的身体会和角色同框入画（如躺在身边、被搂着、贴身依偎），默认不要用 selfie/mirror，"
-            "改用 pov，并且只把对方写成画面边缘的身体局部（手、手臂、胸膛、腿等），不要写成完整的第二个人。"
-            "唯一例外是用户明确要求拍照/录像/对镜（device_in_frame=true）：此时可保留其要求的 selfie/mirror 视角，"
-            "但对方依然只画身体局部，不得写成完整的第二个主角。\n"
-        )
-    system += (
-        "partner_in_frame: 当画面里会出现用户/伴侣的身体（哪怕只是局部）时置 true；纯角色单人时 false。\n"
-        "device_in_frame: 仅当用户明确要求把手机/相机/镜子作为拍照、录像、对镜的道具拍进画面时置 true；否则 false。"
-    )
-    system += (
-        "\n单帧构图硬规则: scene 必须是【单一冻结瞬间】——只描写一个时间点的一个场景动作，"
-        "严禁分格、分镜、四宫格、漫画分格、拼贴画、多面板。"
-        "如果角色有连续动作（如转身→走开→回头），只选取其中最具表现力的一帧，不要把多帧塞进同一张图。"
-        "不要在 scene 里写叙事推进或时间线（先…然后…最后…），只写此刻定格的画面。"
-    )
-    if free_composition:
-        system += (
-            "\n视角规则: 优先服从用户本次给出的视角、机位、远近和构图；未指定时才根据上下文选择 pov/third/selfie/mirror/portrait。"
-            "允许部位特写、超近景、远景、低机位、俯拍、侧后方、环境或道具承接；不要为了自拍偏好强行改写。"
-            "手部规则: 用户明确要求手部或局部特写时保留；否则仍避免复杂手势和多余手臂。"
-        )
-    else:
-        system += (
-            "\n视角规则: 身处同一空间或用户明确要靠近互动时优先 pov；"
-            "异地、展示穿搭或回复照片请求时优先 selfie/mirror；需要叙事全景时用 third。"
-            "取景物理规则: view=selfie 是前摄自拍（角色伸手举着手机自拍），但画面中【不得出现手机本体、手机屏幕 UI、相机、镜子或拿手机的手】，只靠伸手取景和看向镜头表现自拍；"
-            "view=portrait 是别人（用户或他人）帮角色拍的照片：角色看向镜头、为镜头摆姿势，拍摄者在画面外，画面里只有角色一个人，同样不得出现手机、相机、镜子。"
-            "portrait 只在两种情况下用：①用户与角色【同处一地】且角色明确说想让用户/他人帮忙拍一张照片；②NTR 场景（他人给角色拍照）。其余展示穿搭/异地/回复照片仍用 selfie。"
-            "只有 view=mirror 的对镜自拍才允许镜子和手机同时可见，并且只画镜中反射，不要画镜外前景人物。"
-            "selfie/portrait/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。"
-            "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。"
-        )
-    system += (
-        "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third|portrait\",\"aspect_ratio\":\"2:3|3:2\",\"caption\":\"...\",\"new_appearance_tags\":\"...\",\"clothing_off\":\"...\",\"character_location\":\"...\",\"user_location\":\"...\",\"is_intimate\":false,\"partner_in_frame\":false,\"device_in_frame\":false}。"
-        "aspect_ratio 选画幅（重要）：只允许 2:3（竖版，832x1216）或 3:2（横版，1216x832）。"
-        "默认用 2:3 竖版；当场景以横向元素为主（如地平线、宽阔街景、双人并排、横向躺卧、风景全景）时用 3:2。"
-        "近景人像、自拍、特写、站姿、行走、坐姿等纵向构图一律用 2:3。"
-        "character_location 填角色此刻所在场所的英文枚举（取值同 user_location，但不含 with_user/unknown）：若上面给出了角色地点约束，必须填那个枚举值；没有约束时按动线与对话自行判断。"
-        "is_intimate 是布尔值，按上面的场景类型自判规则给出。"
-        "partner_in_frame、device_in_frame 都是布尔值，按上面单人构图硬规则里的定义给出。"
-        "user_location 填你判断的用户此刻所在场所（关键）：与角色同处填 with_user，完全无法判断填 unknown，"
-        "否则取其一: home/company/school/park/mall/street/cafe/restaurant/transit/convenience/cinema/hotel/hospital/gym/factory/farm/construction/"
-        "museum/landmark/temple/library/zoo/amusement/bar/ktv/stadium/supermarket/bookstore/beach/salon。"
-        "系统会从 user_location 自动推导用户是否与角色同处（co_located），你不需要单独输出 co_located。"
-        "new_appearance_tags 只填这张图需要额外强调的一次性服装、配饰、临时发型或发色瞳色变化，英文标签逗号分隔；"
-        "这些标签只用于本次生图，不会写入长期外型。不要把姿势、表情、动作、场景、灯光写进去。没有一次性外观补充时留空。"
-        "clothing_off 填这张图里【应当从角色当前着装中去掉/已脱下/未穿】的服装或配饰（英文标签逗号分隔，如 'cardigan, jacket'），"
-        "或填裸露状态词 'nude'/'topless'/'bottomless'/'completely nude' 表示相应程度的裸体；"
-        "只要叙事表明此刻角色脱了某件、在试穿前脱下原装、正在裸体或性爱中褪去衣物，就据对话如实填写。"
-        "性爱/裸体场景必须按程度填裸露词（如 'completely nude'），不能留空——留空会让角色被原来的衣服画回去。"
-        "填了裸露/脱衣后，scene 里不要再把已脱下的衣服写成穿着或贴身（如『湿裙子贴着胸口』），改写裸露肌肤或仅用床单/泡沫等遮挡。"
-        "这是一次性的、只影响本图，绝不写入长期衣柜（事后会自动恢复原着装）。没有脱衣/裸露时留空。"
-    )
-
-    if needs_caption:
-        system += (
-            "\ncaption 填一句简短的中文台词（纯文本，角色口吻），本图的配文。"
-            "scene 描述本次画面的英文自然语言场景（不要中文）。"
-        )
-    else:
-        system += (
-            "\n聊天模型已经给出文字回复，这张图只配画面、不需要任何台词或配文，不要输出 caption 字段。"
-        )
-
     if is_push:
         user = (
             f"当前时段: {time_period}，星期: {weekday}，天气: {weather}，推送模式: {mode}。"

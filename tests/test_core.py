@@ -3598,6 +3598,41 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_roleplay_image_planner_orders_stable_rules_before_dynamic_context(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "A quiet room scene.",
+                "view": "pov",
+                "aspect_ratio": "2:3",
+                "character_location": "home",
+                "user_location": "with_user",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            }, ensure_ascii=False))
+
+            await plan_roleplay_image(svc, sid, intent="看看你在干嘛")
+
+            system = svc._call_llm.await_args.args[0]
+            dynamic_index = system.index("当前附加外貌:")
+            self.assertLess(system.index("Scene boundary:"), dynamic_index)
+            self.assertLess(system.index("通用模式要求:"), dynamic_index)
+            self.assertLess(system.index("通用世界/地点判断规则:"), dynamic_index)
+            self.assertLess(system.index("场景类型自判:"), dynamic_index)
+            self.assertLess(system.index("必须输出严格 JSON:"), dynamic_index)
+            self.assertEqual(system.count("场景类型自判:"), 1)
+            self.assertEqual(system.count("必须输出严格 JSON:"), 1)
+
+        asyncio.run(run())
+
     def test_roleplay_image_planner_keeps_spatial_constraints_outside_slim_context(self):
         async def run():
             svc = self.make_service()
