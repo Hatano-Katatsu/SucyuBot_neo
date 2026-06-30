@@ -225,6 +225,18 @@ function escapeHtml(value) {
   }[ch]));
 }
 
+function downloadJson(filename, data) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename || "checkpoint.json";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function delay(ms) {
   return new Promise(resolve => window.setTimeout(resolve, ms));
 }
@@ -640,6 +652,27 @@ function renderCharacterForm() {
 
   loadHistorySummary();
 
+  const checkpointRows = state.characterData.checkpoints?.[state.selectedCharacter] || [];
+  const checkpointOptions = checkpointRows.length
+    ? checkpointRows.map(item => `<option value="${escapeHtml(item.date)}">${escapeHtml(item.date)}</option>`).join("")
+    : `<option value="">暂无检查点</option>`;
+  const checkpointSection = document.createElement("section");
+  checkpointSection.className = "form-section character-section";
+  checkpointSection.innerHTML = `
+    <h3 class="section-toggle" type="button">角色检查点</h3>
+    <div class="field-grid">
+      <div class="field-wrap full-width">
+        <label for="character-checkpoint-select">JSON 检查点 <span class="muted">（dream 前自动生成，保留最近 7 天）</span></label>
+        <div class="field-actions">
+          <select id="character-checkpoint-select">${checkpointOptions}</select>
+          <button type="button" id="export-character-checkpoint" ${checkpointRows.length ? "" : "disabled"}>导出检查点</button>
+          <button type="button" id="export-current-checkpoint">导出当前状态</button>
+        </div>
+      </div>
+    </div>
+  `;
+  form.appendChild(checkpointSection);
+
   const actions = document.createElement("div");
   actions.className = "form-actions";
   actions.innerHTML = `<button type="button" class="danger" id="delete-character" ${isDefault ? "disabled" : ""}>删除角色</button><button class="primary" type="submit">保存角色</button>`;
@@ -663,6 +696,15 @@ function renderCharacterForm() {
       await loadAll();
       toast("角色已删除");
     };
+  }
+
+  const exportCheckpointBtn = $("#export-character-checkpoint");
+  if (exportCheckpointBtn) {
+    exportCheckpointBtn.onclick = () => exportSelectedCharacterCheckpoint(exportCheckpointBtn);
+  }
+  const exportCurrentBtn = $("#export-current-checkpoint");
+  if (exportCurrentBtn) {
+    exportCurrentBtn.onclick = () => exportCurrentCharacterCheckpoint(exportCurrentBtn);
   }
 
   form.onsubmit = async (event) => {
@@ -900,6 +942,44 @@ function switchMemoryDiaryTab(tab) {
   $all("#view-characters .tab-panel").forEach(p => p.classList.toggle("active", p.id === `${tab}-tab`));
 }
 
+async function exportSelectedCharacterCheckpoint(button) {
+  if (!state.selectedSession || !state.selectedCharacter) return;
+  const select = $("#character-checkpoint-select");
+  const checkpointDate = select?.value || "";
+  if (!checkpointDate) {
+    toast("暂无可导出的检查点", "error");
+    return;
+  }
+  setBusy(button, true);
+  try {
+    const sid = encodeURIComponent(state.selectedSession);
+    const cid = encodeURIComponent(state.selectedCharacter);
+    const data = await api(`/api/sessions/${sid}/characters/${cid}/checkpoints/${encodeURIComponent(checkpointDate)}`);
+    downloadJson(data.filename, data.checkpoint);
+    toast("检查点已导出");
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+async function exportCurrentCharacterCheckpoint(button) {
+  if (!state.selectedSession || !state.selectedCharacter) return;
+  setBusy(button, true);
+  try {
+    const sid = encodeURIComponent(state.selectedSession);
+    const cid = encodeURIComponent(state.selectedCharacter);
+    const data = await api(`/api/sessions/${sid}/characters/${cid}/checkpoint-current`);
+    downloadJson(data.filename, data.checkpoint);
+    toast("当前状态已导出");
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    setBusy(button, false);
+  }
+}
+
 async function activateSelectedCharacter() {
   if (!state.selectedCharacter || !state.selectedSession) return;
   const sid = encodeURIComponent(state.selectedSession);
@@ -927,22 +1007,68 @@ function addNewCharacter() {
   }).catch(err => toast(err.message, "error"));
 }
 
-function importCharacter() {
+async function importCharacter() {
   if (!state.selectedSession) return;
-  const raw = window.prompt("粘贴角色 JSON：");
+  const raw = window.prompt("粘贴角色 JSON 或角色检查点 JSON：");
   if (!raw) return;
+  let payload;
   try {
-    const payload = JSON.parse(raw);
-    const sid = encodeURIComponent(state.selectedSession);
-    api(`/api/sessions/${sid}/characters`, { method: "POST", body: payload }).then(() => {
-      loadCharacters().then(() => {
-        const id = payload.id || payload.character || payload.bot_name;
-        if (id) selectCharacter(id);
-        toast("角色已导入");
-      });
-    }).catch(err => toast(err.message, "error"));
+    payload = JSON.parse(raw);
   } catch (err) {
     toast("JSON 无效：" + err.message, "error");
+    return;
+  }
+  try {
+    await importCharacterPayload(payload);
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+function selectedCharacterImportMode() {
+  return $("#character-import-mode")?.value || "basic";
+}
+
+async function importCharacterPayload(payload) {
+  if (!state.selectedSession) return;
+  const sid = encodeURIComponent(state.selectedSession);
+  const mode = selectedCharacterImportMode();
+  const result = await api(`/api/sessions/${sid}/characters?import_mode=${encodeURIComponent(mode)}`, {
+    method: "POST",
+    body: payload,
+  });
+  await loadCharacters();
+  const card = payload.character_card || {};
+  const id = result.import_result?.character_id || payload.id || payload.character || payload.bot_name || card.id || card.character || card.bot_name;
+  if (id && state.characterData?.characters?.[id]) selectCharacter(id);
+  await loadMemories();
+  await loadDiaries();
+  const label = mode === "full" ? "完全覆盖" : mode === "memory" ? "长期记忆" : "基本字段";
+  toast(payload.schema ? `检查点已导入（${label}）` : "角色已导入");
+}
+
+function importCharacterFile() {
+  const input = $("#character-import-file-input");
+  if (!input) return;
+  input.value = "";
+  input.click();
+}
+
+async function handleCharacterImportFile(event) {
+  const file = event.currentTarget.files?.[0];
+  if (!file) return;
+  let payload;
+  try {
+    const text = await file.text();
+    payload = JSON.parse(text);
+  } catch (err) {
+    toast("JSON 文件无效：" + err.message, "error");
+    return;
+  }
+  try {
+    await importCharacterPayload(payload);
+  } catch (err) {
+    toast(err.message, "error");
   }
 }
 
@@ -1752,6 +1878,8 @@ async function initEvents() {
   };
   $("#character-add").onclick = () => addNewCharacter();
   $("#character-import").onclick = () => importCharacter();
+  $("#character-import-file").onclick = () => importCharacterFile();
+  $("#character-import-file-input").onchange = handleCharacterImportFile;
   $("#character-activate").onclick = async (event) => {
     const btn = event.currentTarget;
     setBusy(btn, true);

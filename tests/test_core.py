@@ -4612,6 +4612,95 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         sid = "telegram:1"
         self.assertEqual(svc._get_session_state(sid).get("saved_characters") or {}, {})
 
+    def test_character_checkpoint_write_includes_today_chat_and_retains_seven_days(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        session_schema.set_character_value(state, "custom_character", "小雨")
+        session_schema.set_character_value(state, "custom_scheduled_persona", "认真但嘴硬")
+        session_schema.set_outfit(state, "blue dress")
+        svc._save_session_state(sid, state)
+        key = svc._context_character_key(sid)
+        ids = svc.app_store.append_messages(sid, key, [
+            {"role": "user", "content": "今天的用户消息"},
+            {"role": "assistant", "content": "今天的角色回复"},
+            {"role": "user", "content": "昨天的消息"},
+        ])
+        tz = svc._session_tz(sid)
+        today_ts = datetime(2026, 6, 24, 9, tzinfo=tz).timestamp()
+        yesterday_ts = datetime(2026, 6, 23, 23, tzinfo=tz).timestamp()
+        with closing(svc.app_store._connect()) as conn:
+            conn.execute("UPDATE chat_messages SET created_at = ? WHERE id IN (?, ?)", (today_ts, ids[0], ids[1]))
+            conn.execute("UPDATE chat_messages SET created_at = ? WHERE id = ?", (yesterday_ts, ids[2]))
+            conn.commit()
+
+        path = svc.write_character_checkpoint(sid, key, "2026-06-24", reason="dream:test", to_message_id=max(ids))
+        payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["schema"], "sucyubot.character_checkpoint.v1")
+        self.assertEqual(payload["character_card"]["character"], "小雨")
+        self.assertEqual(payload["character_card"]["outfit"], "blue dress")
+        self.assertEqual([m["content"] for m in payload["chat_messages"]], ["今天的用户消息", "今天的角色回复"])
+
+        for day in range(23, 31):
+            svc.write_character_checkpoint(sid, key, f"2026-06-{day:02d}", reason="retention", to_message_id=max(ids))
+        dates = [item["date"] for item in svc.list_character_checkpoints(sid, key)]
+        self.assertEqual(dates, [
+            "2026-06-30", "2026-06-29", "2026-06-28", "2026-06-27",
+            "2026-06-26", "2026-06-25", "2026-06-24",
+        ])
+        self.assertFalse(svc._character_checkpoint_path(sid, key, "2026-06-23").exists())
+
+    def test_character_checkpoint_import_modes_control_memory_context_and_checkpoint(self):
+        src = self.make_service()
+        sid = "telegram:1"
+        state = src._get_session_state(sid)
+        session_schema.set_character_value(state, "custom_character", "小雨")
+        session_schema.set_character_value(state, "custom_scheduled_persona", "认真但嘴硬")
+        session_schema.set_outfit(state, "blue dress")
+        src._save_session_state(sid, state)
+        key = src._context_character_key(sid)
+        src.memory.add_memory(sid, "event", "小雨答应周末一起看星星", character=key, importance=5, tags=["约定"], source="test")
+        src.app_store.upsert_checkpoint(sid, key, "导出的 checkpoint", 12)
+        src.app_store.upsert_character_history_summary(sid, key, "导出的历史提要")
+        src.app_store.upsert_diary(sid, key, "2026-06-24", "导出的日记", from_message_id=1, to_message_id=2)
+        payload = src.export_current_character_checkpoint(sid, key)
+
+        basic = self.make_service()
+        basic.app_store.upsert_checkpoint(sid, "小雨", "原有 checkpoint", 99)
+        basic_result = basic.import_character_checkpoint(sid, payload, mode="basic")
+        basic_state = basic._get_session_state(sid)
+        self.assertEqual(basic_result["mode"], "basic")
+        self.assertEqual(session_schema.get_character_value(basic_state, "custom_character"), "小雨")
+        self.assertEqual(session_schema.get_character_value(basic_state, "custom_scheduled_persona"), "认真但嘴硬")
+        self.assertEqual(session_schema.get_outfit(basic_state), "blue dress")
+        self.assertEqual(basic.memory.list_memories(sid, character="小雨", limit=10), [])
+        self.assertEqual(basic.app_store.get_checkpoint(sid, "小雨")["summary"], "原有 checkpoint")
+        self.assertIsNone(basic.app_store.get_diary(sid, "小雨", "2026-06-24"))
+
+        memory = self.make_service()
+        memory.app_store.upsert_checkpoint(sid, "小雨", "原有 checkpoint", 99)
+        memory_result = memory.import_character_checkpoint(sid, payload, mode="memory")
+        self.assertEqual(memory_result["mode"], "memory")
+        memories = memory.memory.list_memories(sid, character="小雨", limit=10)
+        self.assertTrue(any(m["summary"] == "小雨答应周末一起看星星" for m in memories))
+        self.assertEqual(memory.app_store.get_checkpoint(sid, "小雨")["summary"], "原有 checkpoint")
+        self.assertFalse(memory_result["checkpoint_replaced"])
+        self.assertFalse(memory_result["context_restored"])
+        self.assertEqual(memory.app_store.get_diary(sid, "小雨", "2026-06-24")["content"], "导出的日记")
+
+        full = self.make_service()
+        full.app_store.upsert_checkpoint(sid, "小雨", "原有 checkpoint", 99)
+        full_result = full.import_character_checkpoint(sid, payload, mode="full")
+        full_state = full._get_session_state(sid)
+        self.assertEqual(full_result["mode"], "full")
+        self.assertTrue(full_result["checkpoint_replaced"])
+        self.assertTrue(full_result["context_restored"])
+        self.assertEqual(session_schema.get_outfit(full_state), "blue dress")
+        self.assertEqual(full.app_store.get_checkpoint(sid, "小雨")["summary"], "导出的 checkpoint")
+        self.assertEqual(int(full.app_store.get_checkpoint(sid, "小雨")["source_until_id"]), 12)
+        self.assertEqual(full.app_store.get_context_meta(sid, "小雨")["character_history_summary"], "导出的历史提要")
+
     def test_default_character_is_a_loadable_card(self):
         """内置默认角色（蕾伊）以正常角色卡形态存在：list 可见、可 load 回到隐式默认、不可删除。"""
         async def run():
@@ -6839,6 +6928,67 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_dream_memory_summarize_falls_back_to_fast_model(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = "test-character"
+            for i in range(10):
+                svc.memory.add_memory(
+                    sid, "event", f"自动记忆 {i}", character=key, importance=3, tags=[f"m{i}"], source="chat")
+            editable = svc.memory.list_memories(sid, character=key, limit=20)
+            svc.has_llm_config = lambda purpose, session_id="": purpose in {"chat", "image"}
+            calls = []
+
+            async def fake_call_llm(system, user, **kw):
+                calls.append(kw)
+                if kw.get("purpose") == "chat":
+                    return "```"
+                return json.dumps({"memories": [
+                    {"kind": "event", "summary": "压缩后的记忆", "importance": 4, "tags": ["压缩"]},
+                ]})
+
+            svc._call_llm = fake_call_llm
+
+            result = await svc._summarize_all_memories(sid, key, editable, target_n=4)
+
+            self.assertEqual(result.get("status"), "ok")
+            self.assertEqual(result.get("llm_purpose"), "image")
+            self.assertEqual([call.get("purpose") for call in calls], ["chat", "image"])
+            self.assertTrue(calls[0].get("disable_thinking"))
+            self.assertIsNone(calls[1].get("disable_thinking"))
+            self.assertEqual(calls[1].get("tag"), "dream-memory-summarize-fast-fallback")
+            active = svc.memory.list_memories(sid, character=key, limit=20)
+            self.assertTrue(any(m.get("summary") == "压缩后的记忆" for m in active))
+
+        asyncio.run(run())
+
+    def test_dream_memory_summarize_empty_json_does_not_deactivate(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = "test-character"
+            for i in range(3):
+                svc.memory.add_memory(sid, "event", f"自动记忆 {i}", character=key, source="chat")
+            editable = svc.memory.list_memories(sid, character=key, limit=10)
+            before_ids = {int(m["id"]) for m in editable}
+            svc.has_llm_config = lambda purpose, session_id="": purpose in {"chat", "image"}
+
+            async def fake_call_llm(system, user, **kw):
+                return "```json\n```"
+
+            svc._call_llm = fake_call_llm
+
+            result = await svc._summarize_all_memories(sid, key, editable, target_n=2)
+
+            self.assertEqual(result.get("status"), "failed")
+            self.assertEqual(result.get("mode"), "summarize")
+            self.assertIn("空 JSON", result.get("error", ""))
+            after_ids = {int(m["id"]) for m in svc.memory.list_memories(sid, character=key, limit=10)}
+            self.assertEqual(before_ids, after_ids)
+
+        asyncio.run(run())
+
     def test_dream_source_ignores_system_history_messages(self):
         async def run():
             svc = self.make_service()
@@ -6866,6 +7016,48 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("User: 用户真实对话", source_text)
             self.assertIn("Assistant: 角色真实回复", source_text)
             self.assertNotIn("照片历史 system 不应进入 dream", source_text)
+
+        asyncio.run(run())
+
+    def test_dream_writes_character_checkpoint_before_diary(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "小雨")
+            svc._save_session_state(sid, state)
+            key = svc._context_character_key(sid)
+            ids = svc.app_store.append_messages(sid, key, [
+                {"role": "user", "content": "当天对话"},
+                {"role": "assistant", "content": "当天回复"},
+            ])
+            tz = svc._session_tz(sid)
+            created_at = datetime(2026, 6, 24, 10, tzinfo=tz).timestamp()
+            with closing(svc.app_store._connect()) as conn:
+                conn.execute("UPDATE chat_messages SET created_at = ? WHERE id IN (?, ?)", (created_at, ids[0], ids[1]))
+                conn.commit()
+            order = []
+
+            def fake_write_checkpoint(session_id, character_key, checkpoint_date, *, reason="", to_message_id=None):
+                order.append(("checkpoint", checkpoint_date, reason, to_message_id))
+                return Path("fake-checkpoint.json")
+
+            async def fake_write_dream_diary(session_id, diary_date, source_text, existing_diary="", *, reason=""):
+                order.append(("diary", diary_date, reason))
+                return "梦境日记"
+
+            svc.write_character_checkpoint = fake_write_checkpoint
+            svc._write_dream_diary = fake_write_dream_diary
+            svc._organize_memories_after_dream = AsyncMock()
+            svc._generate_character_history_summary = AsyncMock()
+
+            await svc._dream_once(sid, key, datetime(2026, 6, 24, 12, tzinfo=timezone.utc), reason="manual")
+
+            self.assertEqual(order[0][0], "checkpoint")
+            self.assertEqual(order[1][0], "diary")
+            self.assertEqual(order[0][1], "2026-06-24")
+            self.assertEqual(order[0][2], "dream:manual")
+            self.assertEqual(order[0][3], max(ids))
 
         asyncio.run(run())
 

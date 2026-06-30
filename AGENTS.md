@@ -56,6 +56,7 @@ telegram_comfyui_selfie/
 ├── app_store.py         # SQLite 应用状态库
 ├── session_schema.py    # 会话状态 schema 与分盒访问器
 ├── character_card.py    # 角色卡字段单一来源
+├── character_checkpoint.py # 角色 JSON 检查点导出/导入/清理
 └── static/              # Web 前端
 
 根目录:
@@ -71,7 +72,7 @@ telegram_comfyui_selfie/
 ## 代码风格
 
 - 使用 `from __future__ import annotations`
-- 类通过 mixin 多重继承组织：`TelegramComfyUIService(ProcessRestartMixin, TelegramIOMixin, CommandHandlersMixin, ChatContextMixin, MemoryPolicyMixin, SchedulerRuntimeMixin, WorldRuntimeMixin, GitUpdateMixin)`
+- 类通过 mixin 多重继承组织：`TelegramComfyUIService(ProcessRestartMixin, TelegramIOMixin, CharacterCheckpointMixin, CommandHandlersMixin, ChatContextMixin, MemoryPolicyMixin, SchedulerRuntimeMixin, WorldRuntimeMixin, GitUpdateMixin)`
 - Mixin 不定义 `__init__`；初始化集中在 `TelegramComfyUIService.__init__`
 - 所有 I/O 方法使用 `async def`
 - 配置通过 `self.config.get(key, default)` 访问；会话级覆盖通过 `self._get_session_cfg(session_id, key, default)`
@@ -191,6 +192,7 @@ telegram_comfyui_selfie/
 - 管理员可以查看用量、维护全局模型 profile、执行 Git 更新、重启服务、从当前配置文件热载运行态配置、冻结不活跃用户。
 - 基础设施/运维配置如 Web host/port、日志路径、数据库路径仍只允许 YAML 修改，不通过通用 Web 配置表单写入。
 - WebUI 角色面板不展示场景偏好/自拍偏好栏；这些字段保留为内部数据和兼容字段。
+- WebUI 角色面板支持导出 dream 前自动生成的角色 JSON 检查点、导出当前状态，以及粘贴/上传 JSON 导入；导入模式分为“只导入基本字段”“导入长期记忆（不替换 checkpoint/上下文）”“完全覆盖”。
 - WebUI 总览页包含反馈板：反馈运行时读写项目根目录 `TODO.md`，按 `## 角色名` + `<!-- session_id: ... -->` 分段；普通用户只看到自己的反馈，管理员可见全部。`TODO.md` 是运行时文件，已加入 `.gitignore`，不要提交。
 
 ## 关键行为规则
@@ -221,6 +223,9 @@ telegram_comfyui_selfie/
 10. **dream/历史提要防幻觉结构化**：保留 dream 日记、记忆整理、角色历史提要全量流程；日记 prompt 把旧日记视为存档、新对话视为证据，压缩重复动作但保留事实、承诺、未解张力和情绪转折；dream 记忆整理只允许基于日记/checkpoint/current window/已有记忆证据更新；角色历史提要建议输出「关系/剧情惯性」「角色心理与心情界定」「未解事件」「新一天演绎提示」，新一天提示必须尊重剧情逻辑惯性，聚焦心理和心情边界，不写死台词、地点、日程或剧情分支。
 11. **本轮回归验证**：新增/更新测试覆盖普通聊天不触发即时记忆提取、checkpoint 后台异步不阻塞聊天、`roleplay-image-plan` 会话归因、聊天事实来源优先级、dream/历史提要 grounding 与新一天心理提示；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`py -3 -m unittest tests.test_core -v`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 prompt 比对脚本，结果 `Ran 296 tests in 8.729s`，`OK (skipped=1)`，prompt 比对 `entries=10 sessions=2 pairs=8`。
 12. **WebUI 配置热载入口**：操作页“Git 更新与重启”区域新增“重新载入配置文件”按钮，调用 `POST /api/service/reload-config` 从当前 `config_path` 重新读取 YAML/JSON 并替换运行态 `service.config`，同时清理依赖配置的穿搭/配饰关键词缓存；该接口不调用 `save_config()`、不重启服务。重启入口保持原行为，仍会先保存当前运行态配置再准备进程重启。新增测试覆盖热载不写回配置文件、重启仍保存配置。
+13. **记忆压缩模型回落与空 JSON 保护**：dream/手动记忆整理的 JSON LLM 调用抽出 `_call_memory_json_llm()`，先用 chat profile，请求失败或 JSON 解析失败时回落到 fast/flash profile（内部 `purpose="image"`）；fast 回落不强制 `disable_thinking=True`，沿用模型 profile。全量压缩输入改为有字符预算的紧凑记忆列表，超预算未传入的低优先级记忆保持不动；空代码块/空 JSON 会返回明确错误并写入 `MEMORY_OP_FAILED`，不会删除旧记忆。新增测试覆盖 chat→fast 回落成功、chat/fast 都返回空 JSON 时不改库。
+14. **角色 JSON 检查点**：新增 `character_checkpoint.py`，每次 `_dream_once()` 写 dream 日记前按角色和日期生成本地 JSON 检查点（默认 `data/character_checkpoints/<session>/<character>/<YYYY-MM-DD>.json`），内容包含角色卡、当前/冻结短期状态、SQLite checkpoint、角色历史提要、近 7 条日记、长期记忆和当天聊天记录；每个角色只保留最近 7 天，过期文件自动清理。
+15. **检查点 Web 导入导出**：角色页新增“角色检查点”区，可导出某日检查点或当前状态；角色池导入支持粘贴 JSON 和上传 `.json` 文件，导入模式包括 basic（只保存/写入角色基础字段）、memory（合并长期记忆和日记但不替换 checkpoint/上下文）、full（覆盖当前上下文、角色历史提要和 SQLite checkpoint）。新增测试覆盖当天聊天过滤、7 天保留、dream 前写检查点、三种导入模式边界；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 302 tests in 5.811s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-06-28）
 
@@ -320,7 +325,7 @@ telegram_comfyui_selfie/
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core -v`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m py_compile scripts\compare_llm_chat_prompts.py`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 scripts\compare_llm_chat_prompts.py --log "data\logs\llm_debug.json" --output .tmp\llm_chat_prompt_compare_current.md`
-- 最新结果：`Ran 297 tests in 6.807s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
+- 最新结果：`Ran 299 tests in 6.284s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
 - 工具 schema 当前紧凑 JSON 长度：`1898` 字符；chat 回复请求体 key 顺序为 `model, max_tokens, temperature, top_p, frequency_penalty, tools, tool_choice, messages`（`presence_penalty` 留空时不下发；checkpoint/dream/memory 等内部任务不下发采样参数）
 - 当前 `data/logs/llm_debug.json` 复跑 prompt 比对：报告生成 `.tmp\llm_chat_prompt_compare_current.md`，`entries=10 sessions=2 pairs=8`；会话 pair 的 `tools` / `tool_choice` / 非 prompt 请求参数均稳定，变化集中在 `messages`。
 - 真实 API 缓存探针：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。

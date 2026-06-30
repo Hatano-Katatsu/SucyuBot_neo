@@ -1604,7 +1604,14 @@ button:disabled .spinner {
 
 .character-pool-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
+}
+
+.character-pool-actions select {
+  flex: 1 0 100%;
+  min-height: 34px;
+  font-size: 12px;
 }
 
 .character-pool-actions button {

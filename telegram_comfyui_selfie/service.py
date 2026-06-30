@@ -18,6 +18,7 @@ from . import generation as image_generation
 from . import prompt_intake
 from . import session_schema
 from .app_store import AppStateStore
+from .character_checkpoint import CharacterCheckpointMixin
 from .config_store import dump_simple_yaml, flatten_config, load_simple_yaml
 from .defaults import DEFAULT_CONFIG
 from .image_planning import VALID_VIEWS, plan_roleplay_image
@@ -133,6 +134,7 @@ SERIES_CANONICAL_NAMES = {
 class TelegramComfyUIService(
     ProcessRestartMixin,
     TelegramIOMixin,
+    CharacterCheckpointMixin,
     CommandHandlersMixin,
     ChatContextMixin,
     MemoryPolicyMixin,

@@ -172,8 +172,15 @@
               <div class="empty-state">请从右上角选择会话。</div>
             </div>
             <div class="character-pool-actions">
+              <select id="character-import-mode" title="导入模式">
+                <option value="basic">只导入基本字段</option>
+                <option value="memory">导入长期记忆</option>
+                <option value="full">完全覆盖</option>
+              </select>
               <button id="character-add" type="button">新建角色</button>
-              <button id="character-import" type="button">导入 JSON</button>
+              <button id="character-import" type="button">粘贴 JSON</button>
+              <button id="character-import-file" type="button">上传 JSON</button>
+              <input id="character-import-file-input" type="file" accept="application/json,.json" hidden>
             </div>
           </section>
           <section class="panel character-editor-panel">

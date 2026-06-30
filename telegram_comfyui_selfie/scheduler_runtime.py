@@ -331,6 +331,104 @@ class SchedulerRuntimeMixin:
         text = str(text or "").replace("\r", "").replace("\n", " ⏎ ").strip()
         return text[:limit] + ("..." if len(text) > limit else "")
 
+    @staticmethod
+    def _parse_llm_json(raw: Any) -> Any:
+        text = str(raw or "").strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].strip().startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+        text = re.sub(r"^```json\s*", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"```\s*$", "", text).strip()
+        if not text:
+            raise ValueError("LLM 返回空 JSON 内容")
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            start = text.find("{")
+            end = text.rfind("}")
+            if 0 <= start < end:
+                return json.loads(text[start:end + 1])
+            raise
+
+    def _format_memory_summarize_input(self, editable: list[dict[str, Any]], *, max_chars: int = 24000) -> tuple[str, set[int], int]:
+        lines: list[str] = []
+        included: set[int] = set()
+        omitted = 0
+        used = 0
+        for memory in editable:
+            try:
+                mid = int(memory.get("id"))
+            except Exception:
+                omitted += 1
+                continue
+            tags = ",".join(str(tag) for tag in (memory.get("tags") or [])[:4])
+            tag_text = f" tags={tags}" if tags else ""
+            summary = self._log_excerpt(memory.get("summary", ""), 220)
+            line = f"{mid}. [{memory.get('kind', 'event')}/重要度{memory.get('importance', 3)}] {summary}{tag_text}"
+            line_len = len(line) + 1
+            if lines and used + line_len > max_chars:
+                omitted += 1
+                continue
+            lines.append(line)
+            included.add(mid)
+            used += line_len
+        if omitted:
+            lines.append(f"... omitted {omitted} lower-priority memories in this pass due to prompt budget; omitted memories remain unchanged.")
+        return "\n".join(lines), included, omitted
+
+    async def _call_memory_json_llm(
+        self,
+        session_id: str,
+        system: str,
+        user: str,
+        *,
+        tag: str,
+        temp: float = 0.1,
+        allow_fast_fallback: bool = True,
+    ) -> tuple[str, Any, str, list[dict[str, str]]]:
+        attempts: list[dict[str, str]] = []
+        purposes: list[str] = []
+        if self.has_llm_config("chat", session_id):
+            purposes.append("chat")
+        if allow_fast_fallback and self.has_llm_config("image", session_id):
+            purposes.append("image")
+        if not purposes:
+            raise RuntimeError("chat/fast model API Key is not configured")
+
+        last_exc: Exception | None = None
+        for purpose in purposes:
+            raw = ""
+            try:
+                raw = await self._call_llm(
+                    system,
+                    user,
+                    temp=temp,
+                    tag=tag if purpose == "chat" else f"{tag}-fast-fallback",
+                    purpose=purpose,
+                    disable_thinking=True if purpose == "chat" else None,
+                    session_id=session_id,
+                )
+                parsed = self._parse_llm_json(raw)
+                attempts.append({"purpose": purpose, "status": "ok"})
+                return raw, parsed, purpose, attempts
+            except Exception as exc:
+                last_exc = exc
+                attempts.append({
+                    "purpose": purpose,
+                    "status": "failed",
+                    "error": str(exc),
+                    "raw_excerpt": self._log_excerpt(raw, 240),
+                })
+                if purpose == "chat" and allow_fast_fallback and "image" in purposes:
+                    self._ulog(session_id, "MEMORY", f"chat 记忆 JSON 失败，回落 fast 模型 attempts={json.dumps(attempts, ensure_ascii=False)}")
+                    continue
+                break
+        raise RuntimeError(json.dumps({"attempts": attempts, "error": str(last_exc or '')}, ensure_ascii=False))
+
     async def _dream_once(self, session_id: str, character_key: str, local_dt: datetime, *, reason: str):
         meta = self.app_store.get_context_meta(session_id, character_key)
         from_id = int(meta.get("last_dream_message_id") or 0)
@@ -344,6 +442,19 @@ class SchedulerRuntimeMixin:
         source_limit = max(1000, int(self.config.get("dream_source_hard_limit_chars", "50000") or 50000))
         source_text = self._format_store_messages(messages, limit_chars=source_limit, roles={"user", "assistant"}) if hasattr(self, "_format_store_messages") else ""
         diary_date = self._dream_diary_date(local_dt, force_previous_day=(reason == "morning"))
+        if hasattr(self, "write_character_checkpoint"):
+            try:
+                checkpoint_path = self.write_character_checkpoint(
+                    session_id,
+                    character_key,
+                    diary_date,
+                    reason=f"dream:{reason}",
+                    to_message_id=to_id,
+                )
+                self._ulog(session_id, "CHECKPOINT", f"角色检查点已写入 date={diary_date} path={checkpoint_path}")
+            except Exception as exc:
+                logger.warning("character checkpoint before dream failed", exc_info=True)
+                self._ulog(session_id, "ERROR", f"CHARACTER_CHECKPOINT_FAILED date={diary_date} error={exc}")
         existing = self.app_store.get_diary(session_id, character_key, diary_date) or {}
         diary = await self._write_dream_diary(session_id, diary_date, source_text, existing.get("content", ""), reason=reason)
         self.app_store.upsert_diary(session_id, character_key, diary_date, diary, from_message_id=from_id + 1, to_message_id=to_id)
@@ -472,8 +583,8 @@ class SchedulerRuntimeMixin:
 
     async def _organize_memories_after_dream(self, session_id: str, character_key: str) -> dict[str, Any]:
         diaries = self.app_store.recent_diaries(session_id, character_key, limit=2)
-        if not self.has_llm_config("chat", session_id):
-            result = {"status": "skipped", "reason": "no_chat_llm", "character": character_key}
+        if not self.has_llm_config("chat", session_id) and not self.has_llm_config("image", session_id):
+            result = {"status": "skipped", "reason": "no_chat_or_fast_llm", "character": character_key}
             self._ulog(session_id, "MEMORY", f"整理跳过 {json.dumps(result, ensure_ascii=False)}")
             return result
         try:
@@ -525,11 +636,11 @@ class SchedulerRuntimeMixin:
         mem_text = "\n".join(f"{m['id']}. [{m.get('kind')}] {m.get('summary')}" for m in editable)
         user = f"Recent diaries:\n{diary_text}\n\nCheckpoint:\n{checkpoint or 'none'}\n\nCurrent window:\n{current or 'none'}\n\nEditable memories:\n{mem_text or 'none'}"
         try:
-            raw = await self._call_llm(system, user, temp=0.1, tag="dream-memory", purpose="chat", disable_thinking=True, session_id=session_id)
-            parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", raw).strip())
+            raw, parsed, llm_purpose, attempts = await self._call_memory_json_llm(
+                session_id, system, user, tag="dream-memory", temp=0.1)
         except Exception as exc:
             logger.warning("dream memory organize failed", exc_info=True)
-            result = {"status": "failed", "mode": "incremental", "error": str(exc)}
+            result = {"status": "failed", "mode": "incremental", "error": str(exc), "raw_excerpt": self._log_excerpt(locals().get("raw", ""), 500)}
             self._record_memory_operation_failure(
                 session_id,
                 "dream-memory-parse",
@@ -587,6 +698,8 @@ class SchedulerRuntimeMixin:
         result = {
             "status": status,
             "mode": "incremental",
+            "llm_purpose": llm_purpose,
+            "llm_attempts": attempts,
             "editable": len(editable),
             "ops": len(ops[:30]),
             "applied": applied,
@@ -602,9 +715,12 @@ class SchedulerRuntimeMixin:
         diaries: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         checkpoint = self.app_store.get_checkpoint(session_id, character_key).get("summary", "")
+        mem_text, included_ids, omitted = self._format_memory_summarize_input(editable)
         system = (
-            f"You are a memory consolidator for a roleplay bot. The character has {len(editable)} non-manual memories, "
-            f"which exceeds the limit. Consolidate ALL of them into at most {target_n} compact, non-redundant memories. "
+            f"You are a memory consolidator for a roleplay bot. The character has {len(editable)} non-manual memories. "
+            f"This request supplies {len(included_ids)} editable memories for this pass; consolidate only supplied memories "
+            f"into at most {target_n} compact, non-redundant memories. "
+            "If the user prompt says some memories were omitted, those omitted memories remain unchanged and must not be invented or referenced. "
             "Merge similar items, drop outdated or trivial ones, keep the most important and durable information. "
             "Use only the supplied memories plus diary/checkpoint evidence; do not add new facts, motives, or commitments by inference. "
             "For time nodes, deadlines, appointments, schedules, or countdowns, do not drop them merely because the "
@@ -617,14 +733,21 @@ class SchedulerRuntimeMixin:
             f"memories 数组长度不超过 {target_n}。"
         )
         diary_text = "\n\n".join(f"[{d.get('diary_date')}]\n{d.get('content','')}" for d in (diaries or []))
-        mem_text = "\n".join(f"{m['id']}. [{m.get('kind')}] {m.get('summary')}" for m in editable)
-        user = f"Recent diaries:\n{diary_text or 'none'}\n\nCheckpoint:\n{checkpoint or 'none'}\n\nAll editable memories:\n{mem_text}"
+        user = f"Recent diaries:\n{diary_text or 'none'}\n\nCheckpoint:\n{checkpoint or 'none'}\n\nEditable memories for this pass:\n{mem_text or 'none'}"
         try:
-            raw = await self._call_llm(system, user, temp=0.1, tag="dream-memory-summarize", purpose="chat", disable_thinking=True, session_id=session_id)
-            parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", raw).strip())
+            raw, parsed, llm_purpose, attempts = await self._call_memory_json_llm(
+                session_id, system, user, tag="dream-memory-summarize", temp=0.1)
         except Exception as exc:
             logger.warning("dream memory summarize failed", exc_info=True)
-            result = {"status": "failed", "mode": "summarize", "error": str(exc)}
+            result = {
+                "status": "failed",
+                "mode": "summarize",
+                "error": str(exc),
+                "raw_excerpt": self._log_excerpt(locals().get("raw", ""), 500),
+                "editable": len(editable),
+                "included": len(included_ids),
+                "omitted": omitted,
+            }
             self._record_memory_operation_failure(
                 session_id,
                 "dream-memory-summarize-parse",
@@ -645,7 +768,14 @@ class SchedulerRuntimeMixin:
         deactivated = 0
         failed = 0
         for m in editable:
-            ok = self.memory.deactivate_non_manual_memory(session_id, int(m["id"]), character=character_key)
+            try:
+                mid = int(m["id"])
+            except Exception:
+                failed += 1
+                continue
+            if included_ids and mid not in included_ids:
+                continue
+            ok = self.memory.deactivate_non_manual_memory(session_id, mid, character=character_key)
             if ok:
                 deactivated += 1
             else:
@@ -686,11 +816,15 @@ class SchedulerRuntimeMixin:
         result = {
             "status": status,
             "mode": "summarize",
+            "llm_purpose": llm_purpose,
+            "llm_attempts": attempts,
             "editable": len(editable),
             "target": target_n,
             "deactivated": deactivated,
             "added": added,
             "failed": failed,
+            "included": len(included_ids),
+            "omitted": omitted,
         }
         self._ulog(session_id, "MEMORY", f"全量重写 {len(editable)}→{added} 条（上限{target_n}） result={json.dumps(result, ensure_ascii=False)}")
         return result

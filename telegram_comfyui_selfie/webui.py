@@ -130,6 +130,9 @@ def create_web_app(service) -> web.Application:
     app.router.add_delete(r"/api/sessions/{session_id:.+}/memories/{memory_id:\d+}", api_delete_memory)
     app.router.add_get("/api/sessions/{session_id:.+}/characters", api_characters)
     app.router.add_post("/api/sessions/{session_id:.+}/characters", api_save_character)
+    app.router.add_get("/api/sessions/{session_id:.+}/characters/{character_id:[^/]+}/checkpoints", api_character_checkpoints)
+    app.router.add_get("/api/sessions/{session_id:.+}/characters/{character_id:[^/]+}/checkpoints/{checkpoint_date}", api_export_character_checkpoint)
+    app.router.add_get("/api/sessions/{session_id:.+}/characters/{character_id:[^/]+}/checkpoint-current", api_export_character_current_checkpoint)
     app.router.add_delete("/api/sessions/{session_id:.+}/characters/{character_id:.+}", api_delete_character)
     app.router.add_post("/api/sessions/{session_id:.+}/characters/{character_id:.+}/activate", api_activate_character)
     app.router.add_get("/api/sessions/{session_id:.+}/diaries", api_diaries)
@@ -1050,12 +1053,21 @@ async def api_characters(request: web.Request):
     default_id = default_char.get("id") or default_char.get("bot_name") or "default"
     if default_id and default_id not in characters:
         characters[default_id] = default_char
+    checkpoints: dict[str, list[dict[str, Any]]] = {}
+    if hasattr(service, "list_character_checkpoints"):
+        for cid in characters:
+            try:
+                key = service._web_character_checkpoint_key(sid, cid) if hasattr(service, "_web_character_checkpoint_key") else cid
+                checkpoints[cid] = service.list_character_checkpoints(sid, key)
+            except Exception:
+                checkpoints[cid] = []
     return json_ok({
         "active_id": active_id,
         "default_id": default_id,
         "current": service._character_export_payload(state) if hasattr(service, "_character_export_payload") else {},
         "style_pool": service._normalize_style_pool() if hasattr(service, "_normalize_style_pool") else [],
         "characters": characters,
+        "checkpoints": checkpoints,
     })
 
 
@@ -1067,6 +1079,19 @@ async def api_save_character(request: web.Request):
     payload = await request.json()
     if not isinstance(payload, dict):
         return json_error("角色数据必须是 JSON 对象")
+    if hasattr(service, "is_character_checkpoint_payload") and service.is_character_checkpoint_payload(payload):
+        import_mode = request.query.get("import_mode") or payload.get("import_mode") or payload.get("_import_mode") or "basic"
+        try:
+            result = service.import_character_checkpoint(sid, payload, mode=import_mode)
+        except Exception as exc:
+            return json_error(f"检查点导入失败：{exc}")
+        state = service._get_session_state(sid)
+        return json_ok({
+            "active_id": character_value(state, "custom_character", "") or "",
+            "current": service._character_export_payload(state),
+            "characters": session_schema.get_saved_characters(state),
+            "import_result": result,
+        })
     state = service._get_session_state(sid)
     key = str(payload.get("id") or payload.get("character") or payload.get("bot_name") or "").strip()
     if not key:
@@ -1108,6 +1133,65 @@ async def api_save_character(request: web.Request):
     session_schema.get_saved_characters(state)[key] = {k: v for k, v in payload.items() if k != "id"}
     service._save_session_state(sid, state)
     return json_ok({"active_id": character_value(state, "custom_character", "") or "", "current": service._character_export_payload(state), "characters": session_schema.get_saved_characters(state)})
+
+
+async def api_character_checkpoints(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    character_id = request.match_info["character_id"]
+    if not hasattr(service, "list_character_checkpoints"):
+        return json_error("当前服务不支持角色检查点", status=404)
+    key = service._web_character_checkpoint_key(sid, character_id) if hasattr(service, "_web_character_checkpoint_key") else character_id
+    return json_ok({"checkpoints": service.list_character_checkpoints(sid, key), "character_id": character_id})
+
+
+def _checkpoint_filename(character_id: str, checkpoint_date: str, suffix: str = "") -> str:
+    safe_char = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in str(character_id or "character"))
+    suffix_part = f"-{suffix}" if suffix else ""
+    return f"{safe_char}-{checkpoint_date}{suffix_part}.json"
+
+
+async def api_export_character_checkpoint(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    if not hasattr(service, "read_character_checkpoint"):
+        return json_error("当前服务不支持角色检查点", status=404)
+    character_id = request.match_info["character_id"]
+    checkpoint_date = request.match_info["checkpoint_date"]
+    key = service._web_character_checkpoint_key(sid, character_id) if hasattr(service, "_web_character_checkpoint_key") else character_id
+    try:
+        checkpoint = service.read_character_checkpoint(sid, key, checkpoint_date)
+    except FileNotFoundError:
+        return json_error("检查点不存在", status=404)
+    except Exception as exc:
+        return json_error(f"检查点读取失败：{exc}")
+    return json_ok({
+        "checkpoint": checkpoint,
+        "filename": _checkpoint_filename(character_id, checkpoint.get("checkpoint_date") or checkpoint_date),
+    })
+
+
+async def api_export_character_current_checkpoint(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    if not hasattr(service, "export_current_character_checkpoint"):
+        return json_error("当前服务不支持角色检查点", status=404)
+    character_id = request.match_info["character_id"]
+    key = service._web_character_checkpoint_key(sid, character_id) if hasattr(service, "_web_character_checkpoint_key") else character_id
+    try:
+        checkpoint = service.export_current_character_checkpoint(sid, key)
+    except Exception as exc:
+        return json_error(f"当前状态导出失败：{exc}")
+    return json_ok({
+        "checkpoint": checkpoint,
+        "filename": _checkpoint_filename(character_id, checkpoint.get("checkpoint_date") or "current", "current"),
+    })
 
 
 async def api_delete_character(request: web.Request):
