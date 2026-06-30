@@ -1176,7 +1176,7 @@ class ChatContextMixin:
 
     @staticmethod
     def _format_store_messages(messages: list[dict[str, Any]], limit_chars: int = 50000, roles: set[str] | None = None) -> str:
-        lines = []
+        entries: list[tuple[str, str]] = []
         for msg in messages:
             role = msg.get("role") or ""
             if roles is not None and role not in roles:
@@ -1186,9 +1186,38 @@ class ChatContextMixin:
             if role == "user":
                 content = ChatContextMixin._sanitize_user_history_text(content)
             if content:
-                lines.append(f"{name}: {content}")
-        text = "\n".join(lines)
-        return text[-limit_chars:] if len(text) > limit_chars else text
+                entries.append((role, f"{name}: {content}"))
+        if not entries:
+            return ""
+        groups: list[list[str]] = []
+        current: list[str] = []
+        for role, line in entries:
+            if role == "user" and current:
+                groups.append(current)
+                current = [line]
+            else:
+                current.append(line)
+        if current:
+            groups.append(current)
+
+        group_texts = ["\n".join(group) for group in groups]
+        text = "\n".join(group_texts)
+        if len(text) <= limit_chars:
+            return text
+
+        selected: list[str] = []
+        total = 0
+        for group in reversed(group_texts):
+            extra = len(group) + (1 if selected else 0)
+            if total + extra <= limit_chars:
+                selected.append(group)
+                total += extra
+                continue
+            if not selected:
+                return group[-limit_chars:]
+            break
+        selected.reverse()
+        return "\n".join(selected)
 
     async def _extract_long_term_memories_from_messages(self, session_id: str, messages: list[dict[str, Any]], source_type: str = "checkpoint"):
         if not messages or not hasattr(self, "_extract_long_term_memories"):

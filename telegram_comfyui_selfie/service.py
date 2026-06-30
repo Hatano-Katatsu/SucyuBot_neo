@@ -503,6 +503,79 @@ class TelegramComfyUIService(
         safe = re.sub(r"[^0-9A-Za-z_-]", "_", str(chat)) or "unknown"
         return self._user_log_dir() / f"telegram_{safe}.log"
 
+    def _log_archive_paths(self, path: Path) -> list[Path]:
+        archive_dir = path.parent / "chunks"
+        candidates: list[Path] = []
+        if archive_dir.exists():
+            candidates.extend(archive_dir.glob(f"{path.stem}.*{path.suffix}"))
+        # 兼容上一版同目录分片，读取和清理时仍能找到。
+        candidates.extend(path.parent.glob(f"{path.stem}.*{path.suffix}"))
+        try:
+            return sorted(
+                {item.resolve(): item for item in candidates}.values(),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return []
+
+    def _log_all_paths(self, path: Path) -> list[Path]:
+        paths = []
+        if path.exists():
+            paths.append(path)
+        paths.extend(self._log_archive_paths(path))
+        return paths
+
+    def _log_latest_path(self, path: Path) -> Path:
+        if path.exists():
+            return path
+        archived = self._log_archive_paths(path)
+        return archived[0] if archived else path
+
+    def _resolve_log_chunk_path(self, path: Path, chunk: str = "") -> Path:
+        chunk = (chunk or "").strip()
+        if not chunk or chunk in {"current", "latest", path.name}:
+            return self._log_latest_path(path)
+        # 只允许按文件名选择已知分块，避免路径穿越。
+        if "/" in chunk or "\\" in chunk:
+            return self._log_latest_path(path)
+        for item in self._log_all_paths(path):
+            if item.name == chunk:
+                return item
+        return self._log_latest_path(path)
+
+    def _user_log_archive_paths(self, session_id: str) -> list[Path]:
+        return self._log_archive_paths(self._user_log_path(session_id))
+
+    def _user_log_latest_path(self, session_id: str) -> Path:
+        return self._log_latest_path(self._user_log_path(session_id))
+
+    def _user_log_all_paths(self, session_id: str) -> list[Path]:
+        return self._log_all_paths(self._user_log_path(session_id))
+
+    def _rotate_log_file_if_needed(self, path: Path) -> None:
+        """日志按完整行滚动分块；只有写入下一条前才切块，不拆当前条目。"""
+        try:
+            limit = int(self.config.get("user_log_rotate_bytes", 6 * 1024 * 1024) or 6 * 1024 * 1024)
+        except Exception:
+            limit = 6 * 1024 * 1024
+        if limit <= 0:
+            return
+        try:
+            if not path.exists() or path.stat().st_size < limit:
+                return
+            archive_dir = path.parent / "chunks"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            target = archive_dir / f"{path.stem}.{stamp}{path.suffix}"
+            index = 1
+            while target.exists():
+                target = archive_dir / f"{path.stem}.{stamp}.{index}{path.suffix}"
+                index += 1
+            path.replace(target)
+        except Exception:
+            logger.debug("user log rotate failed", exc_info=True)
+
     def _ulog(self, session_id: str, tag: str, message: str = ""):
         """按用户追加一行活动日志。事件级，纯同步，事件循环内原子完成。"""
         if not session_id or not self._user_log_enabled():
@@ -516,6 +589,7 @@ class TelegramComfyUIService(
         try:
             path = self._user_log_path(session_id)
             path.parent.mkdir(parents=True, exist_ok=True)
+            self._rotate_log_file_if_needed(path)
             with path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
         except Exception:
@@ -1759,6 +1833,7 @@ class TelegramComfyUIService(
         try:
             path = self._llm_debug_log_path()
             path.parent.mkdir(parents=True, exist_ok=True)
+            self._rotate_log_file_if_needed(path)
             if path.exists():
                 try:
                     data = json.loads(path.read_text(encoding="utf-8"))
@@ -2021,6 +2096,15 @@ class TelegramComfyUIService(
         text = re.sub(r"^```[a-zA-Z]*\n", "", text)
         text = re.sub(r"\n```$", "", text).strip()
         if not text:
+            self._record_llm_error_log(
+                session_id=session_id,
+                purpose=purpose,
+                tag=tag,
+                request_body={"messages": messages},
+                response=data,
+                status=200,
+                error="LLM returned empty content",
+            )
             raise RuntimeError("LLM 返回空内容")
         return text
 

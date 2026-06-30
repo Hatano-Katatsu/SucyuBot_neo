@@ -207,6 +207,16 @@ telegram_comfyui_selfie/
 - fire-and-forget `asyncio.create_task` 内异常可能被静默吞掉；排查生图/推送失败优先看 service log。
 - `_get_llm_value("chat", "temperature")` 的 legacy 回退会落到 `llm_temperature_scene`，除非 `chat_llm_temperature` 显式设置。
 
+## 今日变更（2026-06-30）
+
+1. **记忆整理可观测性修复**：`_organize_memories_after_dream()` 不再因没有近期日记直接静默返回，仍会基于 checkpoint/current window 尝试整理；返回结构化 `status/mode/applied/failed`，WebUI 手动整理会显示 skipped/no-op/failed/partial_failed 的真实状态。
+2. **记忆失败完整入 ERROR**：长期记忆提取、dream 增量整理、全量压缩的 LLM 解析失败、空结果、非法 ops、单条 add/update/delete 执行失败都会写入用户日志 `ERROR MEMORY_OP_FAILED`，包含本次请求 prompt/op 与执行结果；`_call_llm()` 200 但正文为空也会写 `ERROR LLM_FULL_LOG`。
+3. **dream 日记防丢内容**：dream 源聊天不再整段 tail 截断，而是按最近 user/assistant 对话组倒序装入上限，尽量保留 5w 字以内最多最近完整对话对；同日已有日记时 prompt 强化旧事实保全，并在模型漏写旧日记片段时追加“补记”兜底，避免覆盖当天日记时丢失旧信息。
+4. **会话日志补充输出**：dream 写日记会记录 source/message/diary 字数与日记摘要，记忆整理会记录每个成功 op 和最终结果，角色历史提要日志包含输出摘要；dream/history 后台异常写入 `ERROR`。
+5. **日志分块与 WebUI 最新块**：用户日志和 `llm_debug.json` 写入前达到 `user_log_rotate_bytes`（默认 6MB）会把旧块以时间后缀保存到 `logs/chunks`（如 `telegram_123.20260630_153000.log` / `llm_debug.20260630_153000.json`），原始文件名继续作为当前最新块写入；单条日志不硬拆，超大最后一条允许撑大当前块；WebUI 日志详情默认读取最新块，也可在块选择器切换历史块，清空日志会同时清理历史块，并修复 `/api/logs/llm-debug` / `/api/logs/system-errors` 被 `{chat_id}` 路由吞掉的问题。
+6. **创建角色人格兜底**：`/初始化` / `/创建角色` / `/创建OC` 在角色设定复合字段中会本地拆分 role/persona/occupation 等槽位；若用户跳过角色设定或只填身份职业，会写入纯人格默认描述，避免新角色卡 `persona` 为空并回退串味。
+7. **回归测试**：新增测试覆盖 dream 源文本完整对话组裁剪、旧日记保全、无日记仍整理并返回 no-op、失败 op 写入 ERROR 请求/结果、日志完整条目分块、创建角色人格兜底；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 294 tests in 6.377s`，`OK (skipped=1)`。
+
 ## 今日变更（2026-06-28）
 
 1. **自动推送完成标记修复**：随机推送点不再在进入触发窗口时提前写入 `daily_triggered_times`；现在只有 `_sched_fire()` 实际成功发送照片后才标记完成。错过 5 分钟窗口或晚安抑制仍会显式写入处理原因，避免“无声吃掉当天推送点”。

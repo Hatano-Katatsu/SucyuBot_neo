@@ -471,6 +471,47 @@ class CommandHandlersMixin:
         name = fields.get("name", "")
         return not name or "\n" in name
 
+    @staticmethod
+    def _derive_oc_persona_fallback(fields: dict[str, str]) -> str:
+        """创建角色时的人格兜底：只写性格/语气/习惯，不把身份和关系焊进去。"""
+        existing = (fields.get("persona") or "").strip()
+        if existing:
+            return existing
+        setting = (fields.get("character_setting") or "").strip()
+        if setting:
+            inferred = prompt_intake.heuristic_intake(setting)
+            if inferred.get("persona"):
+                return inferred["persona"]
+            parts = []
+            for part in re.split(r"[,，、;；。.\n]+", setting):
+                part = part.strip()
+                if not part:
+                    continue
+                if re.search(r"(学生|大学生|高中生|上班族|职员|白领|医生|护士|店员|司机|配送|自由职业|角色|原创|职业|身份)", part):
+                    continue
+                if re.search(r"(关系|恋人|朋友|同学|同事|称呼|叫我|主人|老师|前辈)", part):
+                    continue
+                parts.append(part)
+            if parts:
+                return "，".join(parts[:4])
+        return "性格自然、有自己的生活节奏，表达细腻，会主动承接用户话题并保持稳定的说话习惯。"
+
+    @classmethod
+    def _complete_oc_character_fields(cls, fields: dict[str, str]) -> dict[str, str]:
+        fields = dict(fields or {})
+        setting = (fields.get("character_setting") or "").strip()
+        if setting:
+            inferred = prompt_intake.heuristic_intake(setting)
+            for key in ("role", "persona", "age", "occupation", "anchor", "relationship", "user_address"):
+                if inferred.get(key) and not fields.get(key):
+                    fields[key] = inferred[key]
+            # 如果设定只有身份/职业，没有显式性格，也生成一个纯人格兜底，避免角色卡人设为空。
+            if not fields.get("persona"):
+                fields["persona"] = cls._derive_oc_persona_fallback(fields)
+        elif not fields.get("persona"):
+            fields["persona"] = cls._derive_oc_persona_fallback(fields)
+        return fields
+
     def _apply_intake_style(self, state: dict[str, Any], intake: dict[str, Any]) -> str:
         style = (intake.get("style") or "").strip()
         if not style:
@@ -708,6 +749,7 @@ class CommandHandlersMixin:
         fields: dict[str, str],
         intake: dict[str, Any],
     ) -> None:
+        fields = self._complete_oc_character_fields(fields)
         name = (fields.get("name") or "").strip()
         if not name:
             await self.send_message(chat_id, "缺少 OC 名字。\n\n" + OC_CREATE_HELP)

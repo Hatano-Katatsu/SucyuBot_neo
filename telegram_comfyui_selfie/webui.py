@@ -161,10 +161,10 @@ def create_web_app(service) -> web.Application:
     app.router.add_post("/api/admin/git-update", api_admin_git_update)
     app.router.add_post("/api/admin/freeze-inactive", api_freeze_inactive)
     app.router.add_get("/api/logs", api_logs)
-    app.router.add_get("/api/logs/{chat_id:.+}", api_log_detail)
-    app.router.add_delete("/api/logs/{chat_id:.+}", api_log_clear)
     app.router.add_get("/api/logs/llm-debug", api_llm_debug_log)
     app.router.add_get("/api/logs/system-errors", api_system_error_log)
+    app.router.add_get("/api/logs/{chat_id:.+}", api_log_detail)
+    app.router.add_delete("/api/logs/{chat_id:.+}", api_log_clear)
     app.router.add_post("/api/actions/test-comfyui", api_test_comfyui)
     app.router.add_post("/api/actions/test-llm", api_test_llm)
     app.router.add_post("/api/actions/send-message", api_send_message)
@@ -1457,6 +1457,28 @@ async def api_admin_git_update(request: web.Request):
 FREEZE_INACTIVE_DAYS = 7
 
 
+def log_chunk_items(service, base_path: Path, active_path: Path | None = None) -> list[dict[str, Any]]:
+    paths = service._log_all_paths(base_path) if hasattr(service, "_log_all_paths") else ([base_path] if base_path.exists() else [])
+    active_name = active_path.name if active_path is not None else ""
+    items = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        is_current = path == base_path
+        items.append({
+            "name": path.name,
+            "label": ("当前块 " if is_current else "历史块 ") + path.name,
+            "current": is_current,
+            "active": path.name == active_name,
+            "size": stat.st_size,
+            "mtime": stat.st_mtime,
+            "mtime_ago": human_ago(time.time() - stat.st_mtime),
+        })
+    return items
+
+
 async def api_freeze_inactive(request: web.Request):
     _require_admin(request)
     service = service_from(request)
@@ -1513,11 +1535,19 @@ async def api_organize_memories(request: web.Request):
     if not service.has_llm_config("chat", sid):
         return json_error("聊天模型未配置，无法整理记忆")
     try:
-        await service._organize_memories_after_dream(sid, char)
+        result = await service._organize_memories_after_dream(sid, char)
     except Exception as exc:
         return json_error(f"整理记忆失败: {exc}", status=500)
     memories = service.memory.list_memories(sid, character=char, limit=80)
-    return json_ok({"memories": memories, "character": char, "message": "记忆整理完成"})
+    status = (result or {}).get("status") if isinstance(result, dict) else "ok"
+    message = "记忆整理完成"
+    if status == "no_op":
+        message = "记忆整理完成：模型未给出需要执行的操作"
+    elif status == "skipped":
+        message = f"记忆整理跳过：{(result or {}).get('reason') or '无可整理内容'}"
+    elif status in {"failed", "partial_failed"}:
+        message = "记忆整理存在失败，详情已写入错误日志"
+    return json_ok({"memories": memories, "character": char, "result": result, "message": message})
 
 
 async def api_get_history_summary(request: web.Request):
@@ -1565,6 +1595,9 @@ async def api_logs(request: web.Request):
     items = []
     if log_dir.exists():
         for path in log_dir.glob("telegram_*.log"):
+            # 历史分块形如 telegram_123.20260630_153000.log；列表只展示当前块。
+            if "." in path.stem[len("telegram_"):]:
+                continue
             chat_id = path.stem[len("telegram_"):]
             try:
                 stat = path.stat()
@@ -1592,7 +1625,11 @@ async def api_log_detail(request: web.Request):
     sid = service.session_id_for_chat(chat_id)
     if not _session_allowed(request, sid):
         return json_error("无权访问此日志", status=403)
-    path = service._user_log_path(sid)
+    base_path = service._user_log_path(sid)
+    if hasattr(service, "_resolve_log_chunk_path"):
+        path = service._resolve_log_chunk_path(base_path, request.query.get("chunk") or "")
+    else:
+        path = service._user_log_latest_path(sid) if hasattr(service, "_user_log_latest_path") else base_path
     if not path.exists():
         return json_error("日志不存在", status=404)
     try:
@@ -1602,6 +1639,9 @@ async def api_log_detail(request: web.Request):
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     return json_ok({
         "chat_id": chat_id,
+        "chunk": path.name,
+        "chunk_size": path.stat().st_size,
+        "chunks": log_chunk_items(service, base_path, path),
         "total_lines": len(lines),
         "shown_lines": min(tail, len(lines)),
         "content": "\n".join(lines[-tail:]),
@@ -1614,10 +1654,11 @@ async def api_log_clear(request: web.Request):
     sid = service.session_id_for_chat(chat_id)
     if not _session_allowed(request, sid):
         return json_error("无权清除此日志", status=403)
-    path = service._user_log_path(sid)
     try:
-        if path.exists():
-            path.unlink()
+        paths = service._user_log_all_paths(sid) if hasattr(service, "_user_log_all_paths") else [service._user_log_path(sid)]
+        for path in paths:
+            if path.exists():
+                path.unlink()
     except OSError as exc:
         return json_error(str(exc), status=500)
     return json_ok()
@@ -1626,12 +1667,18 @@ async def api_log_clear(request: web.Request):
 async def api_llm_debug_log(request: web.Request):
     _require_admin(request)
     service = service_from(request)
-    path = service._llm_debug_log_path()
+    base_path = service._llm_debug_log_path()
+    path = service._resolve_log_chunk_path(base_path, request.query.get("chunk") or "") if hasattr(service, "_resolve_log_chunk_path") else base_path
     if not path.exists():
-        return json_ok({"content": {}, "updated_at": None})
+        return json_ok({"content": {}, "updated_at": None, "chunks": []})
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return json_ok({"content": data.get("entries_by_type", {}), "updated_at": data.get("updated_at")})
+        return json_ok({
+            "content": data.get("entries_by_type", {}),
+            "updated_at": data.get("updated_at"),
+            "chunk": path.name,
+            "chunks": log_chunk_items(service, base_path, path),
+        })
     except Exception as exc:
         return json_error(str(exc), status=500)
 

@@ -151,9 +151,27 @@ class MemoryPolicyMixin:
             parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
         except Exception as exc:
             logger.warning("long memory extraction failed: %s", exc)
+            try:
+                payload = {
+                    "stage": "memory-extract",
+                    "request": {"system": system, "user": user},
+                    "result": {"error": str(exc)},
+                }
+                self._ulog(session_id, "ERROR", f"MEMORY_OP_FAILED {json.dumps(payload, ensure_ascii=False, default=str)}")
+            except Exception:
+                logger.debug("long memory extraction failure log failed", exc_info=True)
             return
         memories = parsed.get("memories") if isinstance(parsed, dict) else None
         if not isinstance(memories, list):
+            try:
+                payload = {
+                    "stage": "memory-extract",
+                    "request": {"system": system, "user": user},
+                    "result": {"raw": text, "parsed": parsed},
+                }
+                self._ulog(session_id, "ERROR", f"MEMORY_OP_FAILED {json.dumps(payload, ensure_ascii=False, default=str)}")
+            except Exception:
+                logger.debug("long memory extraction invalid result log failed", exc_info=True)
             return
         source = f"用户: {user_text[:240]}\n角色: {(assistant_text or '')[:240]}"
         for item in memories[:8]:

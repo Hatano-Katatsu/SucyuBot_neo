@@ -320,6 +320,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(session_schema.get_init_flow(state), {})
             self.assertEqual(state["custom_character"], "小雨")
             self.assertEqual(state["custom_role_name"], "大学生")
+            self.assertEqual(state["custom_scheduled_persona"], "温柔、慢热")
             self.assertEqual(state["custom_character_occupation"], "大学生")
             self.assertEqual(state["custom_user_address"], "主人")
             self.assertEqual(state["custom_spatial_relationship"], "同城恋人")
@@ -329,6 +330,36 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertTrue(state["purity_user_set"])
             self.assertEqual(state["custom_daily_selfie_limit"], "0")
             self.assertEqual(state["saved_characters"]["小雨"]["user_address"], "主人")
+            svc.handle_chat.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_init_flow_generates_persona_when_setting_skipped(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.send_message = AsyncMock()
+            svc.handle_chat = AsyncMock()
+
+            for text in (
+                "初始化",
+                "小雨",
+                "原创",
+                "跳过",
+                "跳过",
+                "跳过",
+                "跳过",
+                "auto",
+                "默认",
+            ):
+                await svc.handle_update({"message": {"chat": {"id": 123}, "text": text}})
+
+            state = svc._get_session_state(sid)
+            persona = state["custom_scheduled_persona"]
+            self.assertTrue(persona)
+            self.assertIn("性格自然", persona)
+            self.assertEqual(state["saved_characters"]["小雨"]["persona"], persona)
+            self.assertTrue(state["persona_user_set"])
             svc.handle_chat.assert_not_awaited()
 
         asyncio.run(run())
@@ -1199,6 +1230,43 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("User: 看这个", text)
         self.assertIn("Assistant: 看到了。", text)
         self.assertNotIn("【用户当前输入】", text)
+
+    def test_format_store_messages_keeps_recent_complete_dialog_groups_within_limit(self):
+        svc = self.make_service()
+        text = svc._format_store_messages([
+            {"role": "user", "content": "第一轮用户内容很长"},
+            {"role": "assistant", "content": "第一轮回复很长"},
+            {"role": "user", "content": "第二轮用户"},
+            {"role": "assistant", "content": "第二轮回复"},
+            {"role": "user", "content": "第三轮用户"},
+            {"role": "assistant", "content": "第三轮回复"},
+        ], limit_chars=48, roles={"user", "assistant"})
+
+        self.assertNotIn("第一轮", text)
+        self.assertIn("User: 第三轮用户", text)
+        self.assertIn("Assistant: 第三轮回复", text)
+        self.assertTrue(text.startswith("User: "), text)
+
+    def test_user_log_rotates_by_complete_entries(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        svc.config["user_log_enabled"] = True
+        svc.config["user_log_rotate_bytes"] = 80
+
+        svc._ulog(sid, "TEST", "x" * 120)
+        svc._ulog(sid, "TEST", "second")
+
+        base = svc._user_log_path(sid)
+        archives = svc._user_log_archive_paths(sid)
+        self.assertTrue(base.exists())
+        self.assertTrue(archives)
+        self.assertEqual(archives[0].parent, base.parent / "chunks")
+        self.assertRegex(archives[0].name, r"^telegram_123\.\d{8}_\d{6}\.log$")
+        self.assertEqual(svc._resolve_log_chunk_path(base, archives[0].name), archives[0])
+        self.assertIn("second", base.read_text(encoding="utf-8"))
+        archived_text = archives[0].read_text(encoding="utf-8")
+        self.assertIn("x" * 120, archived_text)
+        self.assertTrue(archived_text.endswith("\n"))
 
     def test_low_frequency_chat_controls_stay_before_history_not_dynamic(self):
         """前缀缓存不变量：配置型控制放稳定层；发图/照片策略写进 static。"""
@@ -6567,16 +6635,31 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
                 reason="manual",
             )
 
-            self.assertEqual(diary, raw_diary)
+            self.assertIn(raw_diary, diary)
+            self.assertIn("之前写过的内容。", diary)
+            self.assertIn("补记", diary)
             self.assertIn("first-person", captured["system"])
             self.assertIn("# 2026-06-26 星期五 标题", captured["system"])
             self.assertIn("will replace that old entry", captured["system"])
             self.assertIn("not append to it", captured["system"])
+            self.assertIn("preserve every concrete fact", captured["system"])
             self.assertIn("Do not include roleplay advice", captured["system"])
             self.assertIn("Weekday: 星期五", captured["user"])
             self.assertIn("Write mode: overwrite existing diary", captured["user"])
 
         asyncio.run(run())
+
+    def test_dream_diary_preserves_existing_when_model_omits_old_content(self):
+        svc = self.make_service()
+        old = "# 2026-06-26 星期五 旧日记\n我和用户约好周末去水族馆。\n我还记得他不喜欢太吵的地方。"
+        new = "# 2026-06-26 星期五 新日记\n今天只写了新的晚安。"
+
+        merged = svc._ensure_diary_preserves_existing(old, new)
+
+        self.assertIn("今天只写了新的晚安", merged)
+        self.assertIn("我和用户约好周末去水族馆", merged)
+        self.assertIn("不喜欢太吵的地方", merged)
+        self.assertIn("补记", merged)
 
     def test_dream_memory_organize_skips_manual(self):
         async def run():
@@ -6609,6 +6692,59 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(manual_after.get("summary"), "手动记忆-不应被改",
                              "manual 记忆不应被 update")
             self.assertEqual(manual_after.get("kind"), "manual")
+
+        asyncio.run(run())
+
+    def test_dream_memory_organize_runs_without_diaries_and_reports_noop(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = "test-character"
+            svc.memory.add_memory(sid, "event", "自动记忆-待整理", character=key, source="chat")
+            svc.has_llm_config = lambda purpose, session_id="": True
+            captured = {}
+
+            async def fake_call_llm(system, user, **kw):
+                captured["user"] = user
+                return json.dumps({"ops": []})
+
+            svc._call_llm = fake_call_llm
+
+            result = await svc._organize_memories_after_dream(sid, key)
+
+            self.assertEqual(result.get("status"), "no_op")
+            self.assertIn("Recent diaries:", captured["user"])
+            self.assertIn("Editable memories:", captured["user"])
+
+        asyncio.run(run())
+
+    def test_dream_memory_organize_logs_failed_operation_request_and_result(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = "test-character"
+            svc.memory.add_memory(sid, "event", "自动记忆-待整理", character=key, source="chat")
+            svc.has_llm_config = lambda purpose, session_id="": True
+            logs = []
+            svc._ulog = lambda session_id, tag, message="": logs.append((tag, message))
+
+            async def fake_call_llm(system, user, **kw):
+                return json.dumps({"ops": [
+                    {"op": "update", "id": 999999, "summary": "不存在的记忆更新"},
+                ]})
+
+            svc._call_llm = fake_call_llm
+
+            result = await svc._organize_memories_after_dream(sid, key)
+
+            self.assertEqual(result.get("status"), "failed")
+            error_logs = [message for tag, message in logs if tag == "ERROR"]
+            self.assertTrue(error_logs)
+            joined = "\n".join(error_logs)
+            self.assertIn("MEMORY_OP_FAILED", joined)
+            self.assertIn("999999", joined)
+            self.assertIn("request", joined)
+            self.assertIn("result", joined)
 
         asyncio.run(run())
 

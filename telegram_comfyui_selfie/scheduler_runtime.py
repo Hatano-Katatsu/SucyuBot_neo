@@ -317,13 +317,19 @@ class SchedulerRuntimeMixin:
         async def runner():
             try:
                 await self._dream_once(session_id, key, local_dt, reason=reason)
-            except Exception:
+            except Exception as exc:
+                self._ulog(session_id, "ERROR", f"DREAM_FAILED reason={reason}: {exc}")
                 logger.warning("dream task failed", exc_info=True)
 
         task = asyncio.create_task(runner())
         self._dream_tasks[scope] = task
         if force:
             await task
+
+    @staticmethod
+    def _log_excerpt(text: Any, limit: int = 500) -> str:
+        text = str(text or "").replace("\r", "").replace("\n", " ⏎ ").strip()
+        return text[:limit] + ("..." if len(text) > limit else "")
 
     async def _dream_once(self, session_id: str, character_key: str, local_dt: datetime, *, reason: str):
         meta = self.app_store.get_context_meta(session_id, character_key)
@@ -341,7 +347,15 @@ class SchedulerRuntimeMixin:
         existing = self.app_store.get_diary(session_id, character_key, diary_date) or {}
         diary = await self._write_dream_diary(session_id, diary_date, source_text, existing.get("content", ""), reason=reason)
         self.app_store.upsert_diary(session_id, character_key, diary_date, diary, from_message_id=from_id + 1, to_message_id=to_id)
-        await self._organize_memories_after_dream(session_id, character_key)
+        self._ulog(
+            session_id,
+            "DREAM",
+            f"日记更新 reason={reason} date={diary_date} messages={len(messages)} "
+            f"source_chars={len(source_text)} diary_chars={len(diary or '')} output={self._log_excerpt(diary)}",
+        )
+        memory_result = await self._organize_memories_after_dream(session_id, character_key)
+        if isinstance(memory_result, dict):
+            self._ulog(session_id, "MEMORY", f"dream整理结果 {json.dumps(memory_result, ensure_ascii=False, default=str)}")
         diaries = self.app_store.recent_diaries(session_id, character_key, limit=2)
         await self._generate_character_history_summary(session_id, character_key, diaries)
         self.app_store.mark_dream(session_id, character_key, to_id)
@@ -351,12 +365,63 @@ class SchedulerRuntimeMixin:
         self._save_session_state(session_id, state)
         self._ulog(session_id, "DREAM", f"reason={reason} date={diary_date} messages={len(messages)}")
 
+    @staticmethod
+    def _diary_body_without_heading(text: str) -> str:
+        lines = str(text or "").strip().splitlines()
+        if lines and lines[0].lstrip().startswith("#"):
+            lines = lines[1:]
+        return "\n".join(lines).strip()
+
+    @classmethod
+    def _diary_preservation_fragments(cls, text: str) -> list[str]:
+        body = cls._diary_body_without_heading(text)
+        if not body:
+            return []
+        raw_parts = re.split(r"\n\s*\n|(?<=[。！？!?])\s*", body)
+        fragments: list[str] = []
+        for part in raw_parts:
+            part = part.strip()
+            if not part:
+                continue
+            if len(part) <= 700:
+                fragments.append(part)
+                continue
+            for idx in range(0, len(part), 600):
+                chunk = part[idx:idx + 600].strip()
+                if chunk:
+                    fragments.append(chunk)
+        return fragments
+
+    @staticmethod
+    def _diary_norm(text: str) -> str:
+        return re.sub(r"\s+", "", str(text or ""))
+
+    @classmethod
+    def _ensure_diary_preserves_existing(cls, existing_diary: str, new_diary: str) -> str:
+        existing_diary = str(existing_diary or "").strip()
+        new_diary = str(new_diary or "").strip()
+        if not existing_diary or not new_diary:
+            return new_diary or existing_diary
+        new_norm = cls._diary_norm(new_diary)
+        missing = []
+        for fragment in cls._diary_preservation_fragments(existing_diary):
+            norm = cls._diary_norm(fragment)
+            if len(norm) >= 8 and norm not in new_norm:
+                missing.append(fragment)
+        if not missing:
+            return new_diary
+        supplement = "\n".join(f"- {fragment}" for fragment in missing)
+        return (
+            new_diary.rstrip()
+            + "\n\n补记（保留旧日记中未被新版本明确写入的信息）:\n"
+            + supplement
+        )
+
     async def _write_dream_diary(self, session_id: str, diary_date: str, source_text: str, existing_diary: str = "", *, reason: str = "") -> str:
         if not source_text and existing_diary:
             return existing_diary
         if not self.has_llm_config("chat", session_id):
-            base = (existing_diary + "\n" if existing_diary else "") + (source_text or "No new dialogue.")
-            return base[-4000:]
+            return ((existing_diary.rstrip() + "\n\n") if existing_diary else "") + (source_text or "No new dialogue.")
         weekday = self._dream_diary_weekday(diary_date)
         overwrite_note = ""
         if str(existing_diary or "").strip():
@@ -364,6 +429,9 @@ class SchedulerRuntimeMixin:
                 "Existing diary is the previous saved entry for the same date. "
                 "Your output will replace that old entry, not append to it or continue after it. "
                 "Rewrite one complete diary for the date by merging the old entry with the new dialogue. "
+                "You must preserve every concrete fact, promise, emotional turning point, unresolved issue, "
+                "and relationship change already recorded in Existing diary, even if the new dialogue does not mention it. "
+                "Do not shorten the entry by deleting old information; rewrite or compress it only when the same information remains recoverable. "
             )
         system = (
             "You write a private diary from the character's first-person perspective. Consolidate the existing diary and "
@@ -378,27 +446,58 @@ class SchedulerRuntimeMixin:
         )
         write_mode = "overwrite existing diary" if str(existing_diary or "").strip() else "new diary"
         user = f"Diary date: {diary_date}\nWeekday: {weekday or 'unknown'}\nWrite mode: {write_mode}\nReason: {reason}\n\nExisting diary:\n{existing_diary or 'none'}\n\nNew dialogue since last dream:\n{source_text or 'none'}"
-        return await self._call_llm(system, user, temp=0.2, tag="dream-diary", purpose="chat", disable_thinking=True, session_id=session_id)
+        diary = await self._call_llm(system, user, temp=0.2, tag="dream-diary", purpose="chat", disable_thinking=True, session_id=session_id)
+        preserved = self._ensure_diary_preserves_existing(existing_diary, diary)
+        if preserved != diary:
+            self._ulog(session_id, "DREAM", f"旧日记保全追加 date={diary_date} missing_chars={len(preserved) - len(diary)}")
+        return preserved
 
-    async def _organize_memories_after_dream(self, session_id: str, character_key: str):
+    def _record_memory_operation_failure(self, session_id: str, stage: str, request: Any, result: Any) -> None:
+        payload = {
+            "stage": stage,
+            "request": request,
+            "result": result,
+        }
+        try:
+            if hasattr(self, "_json_safe"):
+                payload = self._json_safe(payload)
+            text = json.dumps(payload, ensure_ascii=False, default=str)
+        except Exception:
+            text = str(payload)
+        self._ulog(session_id, "ERROR", f"MEMORY_OP_FAILED {text}")
+
+    async def _organize_memories_after_dream(self, session_id: str, character_key: str) -> dict[str, Any]:
         diaries = self.app_store.recent_diaries(session_id, character_key, limit=2)
-        if not diaries or not self.has_llm_config("chat", session_id):
-            return
-        memories = self.memory.list_memories(session_id, character=character_key, limit=120)
+        if not self.has_llm_config("chat", session_id):
+            result = {"status": "skipped", "reason": "no_chat_llm", "character": character_key}
+            self._ulog(session_id, "MEMORY", f"整理跳过 {json.dumps(result, ensure_ascii=False)}")
+            return result
+        try:
+            scan_limit = max(120, int(self.config.get("long_memory_organize_scan_limit", "1000") or 1000))
+        except Exception:
+            scan_limit = 1000
+        memories = self.memory.list_memories(session_id, character=character_key, limit=scan_limit)
         editable = [m for m in memories if m.get("kind") != "manual"]
         if not editable:
-            return
+            result = {
+                "status": "skipped",
+                "reason": "no_editable_memories",
+                "character": character_key,
+                "total": len(memories),
+                "diaries": len(diaries or []),
+            }
+            self._ulog(session_id, "MEMORY", f"整理跳过 {json.dumps(result, ensure_ascii=False)}")
+            return result
         limit = self._long_memory_limit()
         threshold = max(1, limit // 2)
         if len(editable) > limit:
-            await self._summarize_all_memories(session_id, character_key, editable, target_n=threshold, diaries=diaries)
-        else:
-            await self._incremental_organize_memories(session_id, character_key, editable, diaries=diaries)
+            return await self._summarize_all_memories(session_id, character_key, editable, target_n=threshold, diaries=diaries)
+        return await self._incremental_organize_memories(session_id, character_key, editable, diaries=diaries)
 
     async def _incremental_organize_memories(
         self, session_id: str, character_key: str,
         editable: list[dict[str, Any]], *, diaries: list[dict[str, Any]] | None = None,
-    ):
+    ) -> dict[str, Any]:
         checkpoint = self.app_store.get_checkpoint(session_id, character_key).get("summary", "")
         current = self._format_store_messages(
             self._active_chat_history(self._get_session_state(session_id), self._checkpoint_keep_message_limit()),
@@ -422,28 +521,80 @@ class SchedulerRuntimeMixin:
         try:
             raw = await self._call_llm(system, user, temp=0.1, tag="dream-memory", purpose="chat", disable_thinking=True, session_id=session_id)
             parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", raw).strip())
-        except Exception:
+        except Exception as exc:
             logger.warning("dream memory organize failed", exc_info=True)
-            return
+            result = {"status": "failed", "mode": "incremental", "error": str(exc)}
+            self._record_memory_operation_failure(
+                session_id,
+                "dream-memory-parse",
+                {"system": system, "user": user},
+                result,
+            )
+            return result
         ops = parsed.get("ops") if isinstance(parsed, dict) else None
         if not isinstance(ops, list):
-            return
+            result = {"status": "failed", "mode": "incremental", "raw": raw, "parsed": parsed}
+            self._record_memory_operation_failure(
+                session_id,
+                "dream-memory-invalid-ops",
+                {"system": system, "user": user},
+                result,
+            )
+            return result
+        if not ops:
+            result = {"status": "no_op", "mode": "incremental", "editable": len(editable), "ops": 0}
+            self._ulog(session_id, "MEMORY", f"增量整理无操作 {json.dumps(result, ensure_ascii=False)}")
+            return result
+        applied = 0
+        failed = 0
+        details: list[dict[str, Any]] = []
         for op in ops[:30]:
             if not isinstance(op, dict):
+                failed += 1
+                detail = {"op": "invalid", "ok": False, "request": op, "result": "op is not object"}
+                details.append(detail)
+                self._record_memory_operation_failure(session_id, "dream-memory-op", op, detail)
                 continue
             action = str(op.get("op") or "").lower()
+            ok = False
+            result_detail: dict[str, Any] = {"op": action or "unknown", "id": op.get("id"), "ok": False}
             if action == "add" and op.get("summary"):
-                self.memory.add_memory(session_id, op.get("kind", "event"), op.get("summary", ""), character=character_key, importance=op.get("importance", 3), tags=op.get("tags") or [], source="dream")
+                mid = self.memory.add_memory(session_id, op.get("kind", "event"), op.get("summary", ""), character=character_key, importance=op.get("importance", 3), tags=op.get("tags") or [], source="dream")
+                ok = mid is not None
+                result_detail.update({"id": mid, "ok": ok, "summary": self._log_excerpt(op.get("summary"), 160)})
             elif action == "update" and op.get("id") and op.get("summary"):
-                self.memory.update_memory(session_id, int(op.get("id")), character=character_key, summary=op.get("summary"), kind=op.get("kind"), importance=op.get("importance"), tags=op.get("tags") or [], source="dream")
+                ok = self.memory.update_memory(session_id, int(op.get("id")), character=character_key, summary=op.get("summary"), kind=op.get("kind"), importance=op.get("importance"), tags=op.get("tags") or [], source="dream")
+                result_detail.update({"ok": ok, "summary": self._log_excerpt(op.get("summary"), 160)})
             elif action == "delete" and op.get("id"):
-                self.memory.deactivate_non_manual_memory(session_id, int(op.get("id")), character=character_key)
+                ok = self.memory.deactivate_non_manual_memory(session_id, int(op.get("id")), character=character_key)
+                result_detail.update({"ok": ok})
+            else:
+                result_detail.update({"ok": False, "error": "invalid op or missing required fields"})
+            if ok:
+                applied += 1
+                self._ulog(session_id, "MEMORY", f"增量整理 op={action} result={json.dumps(result_detail, ensure_ascii=False, default=str)}")
+            else:
+                failed += 1
+                self._record_memory_operation_failure(session_id, "dream-memory-op", op, result_detail)
+            details.append(result_detail)
+        status = "ok" if failed == 0 else ("partial_failed" if applied else "failed")
+        result = {
+            "status": status,
+            "mode": "incremental",
+            "editable": len(editable),
+            "ops": len(ops[:30]),
+            "applied": applied,
+            "failed": failed,
+            "details": details[:20],
+        }
+        self._ulog(session_id, "MEMORY", f"增量整理完成 {json.dumps(result, ensure_ascii=False, default=str)}")
+        return result
 
     async def _summarize_all_memories(
         self, session_id: str, character_key: str,
         editable: list[dict[str, Any]], *, target_n: int = 4,
         diaries: list[dict[str, Any]] | None = None,
-    ):
+    ) -> dict[str, Any]:
         checkpoint = self.app_store.get_checkpoint(session_id, character_key).get("summary", "")
         system = (
             f"You are a memory consolidator for a roleplay bot. The character has {len(editable)} non-manual memories, "
@@ -464,23 +615,78 @@ class SchedulerRuntimeMixin:
         try:
             raw = await self._call_llm(system, user, temp=0.1, tag="dream-memory-summarize", purpose="chat", disable_thinking=True, session_id=session_id)
             parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", raw).strip())
-        except Exception:
+        except Exception as exc:
             logger.warning("dream memory summarize failed", exc_info=True)
-            return
+            result = {"status": "failed", "mode": "summarize", "error": str(exc)}
+            self._record_memory_operation_failure(
+                session_id,
+                "dream-memory-summarize-parse",
+                {"system": system, "user": user},
+                result,
+            )
+            return result
         new_memories = parsed.get("memories") if isinstance(parsed, dict) else None
         if not isinstance(new_memories, list) or not new_memories:
-            return
+            result = {"status": "failed", "mode": "summarize", "raw": raw, "parsed": parsed}
+            self._record_memory_operation_failure(
+                session_id,
+                "dream-memory-summarize-empty",
+                {"system": system, "user": user},
+                result,
+            )
+            return result
+        deactivated = 0
+        failed = 0
         for m in editable:
-            self.memory.deactivate_non_manual_memory(session_id, int(m["id"]), character=character_key)
+            ok = self.memory.deactivate_non_manual_memory(session_id, int(m["id"]), character=character_key)
+            if ok:
+                deactivated += 1
+            else:
+                failed += 1
+                self._record_memory_operation_failure(
+                    session_id,
+                    "dream-memory-summarize-deactivate",
+                    {"id": m.get("id"), "summary": m.get("summary")},
+                    {"ok": False},
+                )
+        added = 0
         for item in new_memories[:target_n]:
             if not isinstance(item, dict) or not item.get("summary"):
+                failed += 1
+                self._record_memory_operation_failure(
+                    session_id,
+                    "dream-memory-summarize-add",
+                    item,
+                    {"ok": False, "error": "invalid memory item"},
+                )
                 continue
-            self.memory.add_memory(
+            mid = self.memory.add_memory(
                 session_id, item.get("kind", "event"), item["summary"],
                 character=character_key, importance=item.get("importance", 3),
                 tags=item.get("tags") or [], source="dream-summarize",
             )
-        self._ulog(session_id, "MEMORY", f"全量重写 {len(editable)}→{min(len(new_memories), target_n)} 条（上限{target_n}）")
+            if mid is None:
+                failed += 1
+                self._record_memory_operation_failure(
+                    session_id,
+                    "dream-memory-summarize-add",
+                    item,
+                    {"ok": False, "error": "add_memory returned None"},
+                )
+            else:
+                added += 1
+        status = "ok" if failed == 0 else ("partial_failed" if added else "failed")
+        result = {
+            "status": status,
+            "mode": "summarize",
+            "editable": len(editable),
+            "target": target_n,
+            "deactivated": deactivated,
+            "added": added,
+            "failed": failed,
+        }
+        self._ulog(session_id, "MEMORY", f"全量重写 {len(editable)}→{added} 条（上限{target_n}） result={json.dumps(result, ensure_ascii=False)}")
+        return result
 
     async def _generate_character_history_summary(self, session_id: str, character_key: str, diaries: list[dict[str, Any]]):
         if not diaries or not self.has_llm_config("chat", session_id):
@@ -515,8 +721,9 @@ class SchedulerRuntimeMixin:
             state = self._get_session_state(session_id)
             session_schema.set_character_history_summary(state, summary)
             self._save_session_state(session_id, state)
-            self._ulog(session_id, "HISTORY", f"角色历史提要更新 chars={len(summary)}")
-        except Exception:
+            self._ulog(session_id, "HISTORY", f"角色历史提要更新 chars={len(summary)} output={self._log_excerpt(summary)}")
+        except Exception as exc:
+            self._ulog(session_id, "ERROR", f"HISTORY_FAILED: {exc}")
             logger.warning("character history summary generation failed", exc_info=True)
 
     def _mark_daily_triggered_time(self, session_id: str, trigger_time: str, *, reason: str = "sent"):

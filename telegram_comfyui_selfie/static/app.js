@@ -12,6 +12,8 @@ const state = {
   worldPreview: null,
   logs: [],
   selectedLog: null,
+  selectedLogType: null,
+  selectedLogChunk: "",
   profiles: {},
 };
 
@@ -1423,31 +1425,79 @@ function renderLogList(meta) {
   }
 }
 
-async function selectLog(chatId) {
+function formatLogChunkOption(chunk) {
+  const size = chunk.size ? ` · ${formatBytes(chunk.size)}` : "";
+  const ago = chunk.mtime_ago ? ` · ${chunk.mtime_ago}` : "";
+  return `${chunk.label || chunk.name}${size}${ago}`;
+}
+
+function renderLogChunkSelector(chunks = [], activeChunk = "", onChange = null) {
+  const bar = $("#log-chunk-bar");
+  const select = $("#log-chunk-select");
+  if (!bar || !select) return;
+  if (!chunks.length) {
+    bar.hidden = true;
+    select.innerHTML = "";
+    return;
+  }
+  bar.hidden = false;
+  select.innerHTML = chunks.map(chunk => (
+    `<option value="${escapeHtml(chunk.name || "")}">${escapeHtml(formatLogChunkOption(chunk))}</option>`
+  )).join("");
+  select.value = activeChunk || (chunks[0]?.name || "");
+  select.onchange = () => {
+    state.selectedLogChunk = select.value;
+    if (onChange) onChange(select.value);
+  };
+}
+
+function hideLogChunkSelector() {
+  const bar = $("#log-chunk-bar");
+  const select = $("#log-chunk-select");
+  if (bar) bar.hidden = true;
+  if (select) {
+    select.innerHTML = "";
+    select.onchange = null;
+  }
+  state.selectedLogChunk = "";
+}
+
+async function selectLog(chatId, chunk = null) {
+  const sameLog = state.selectedLog === chatId && !state.selectedLogType;
   state.selectedLog = chatId;
   state.selectedLogType = null;
+  const chosenChunk = chunk === null ? (sameLog ? state.selectedLogChunk : "") : chunk;
   $("#log-title").textContent = `日志 · ${chatId}`;
   $all("#log-list .session-item").forEach(btn => btn.classList.toggle("active", btn.dataset.chat === chatId));
   try {
-    const data = await api(`/api/logs/${encodeURIComponent(chatId)}?tail=1000`);
+    const suffix = chosenChunk ? `&chunk=${encodeURIComponent(chosenChunk)}` : "";
+    const data = await api(`/api/logs/${encodeURIComponent(chatId)}?tail=1000${suffix}`);
     const box = $("#log-content");
+    state.selectedLogChunk = data.chunk || chosenChunk || "";
+    renderLogChunkSelector(data.chunks || [], state.selectedLogChunk, nextChunk => selectLog(chatId, nextChunk));
     box.textContent = data.content || "（空）";
     box.scrollTop = box.scrollHeight;
   } catch (err) {
+    hideLogChunkSelector();
     $("#log-content").textContent = err.message;
   }
 }
 
-async function selectSystemLog(logType) {
+async function selectSystemLog(logType, chunk = null) {
+  const sameLog = state.selectedLogType === logType && !state.selectedLog;
   state.selectedLog = null;
   state.selectedLogType = logType;
+  const chosenChunk = chunk === null ? (sameLog ? state.selectedLogChunk : "") : chunk;
   $("#log-title").textContent = logType === "llm-debug" ? "LLM 调试日志" : "错误日志";
   $all("#log-list .session-item").forEach(btn => btn.classList.toggle("active", btn.dataset.logType === logType));
   const box = $("#log-content");
   box.textContent = "加载中...";
   try {
     if (logType === "llm-debug") {
-      const data = await api("/api/logs/llm-debug");
+      const suffix = chosenChunk ? `?chunk=${encodeURIComponent(chosenChunk)}` : "";
+      const data = await api(`/api/logs/llm-debug${suffix}`);
+      state.selectedLogChunk = data.chunk || chosenChunk || "";
+      renderLogChunkSelector(data.chunks || [], state.selectedLogChunk, nextChunk => selectSystemLog(logType, nextChunk));
       const content = data.content || {};
       let text = "";
       Object.keys(content).forEach(key => {
@@ -1478,6 +1528,7 @@ async function selectSystemLog(logType) {
       });
       box.textContent = text || "暂无 LLM 调试日志";
     } else if (logType === "system-errors") {
+      hideLogChunkSelector();
       const data = await api("/api/logs/system-errors");
       const errors = data.errors || [];
       if (errors.length === 0) {
@@ -1488,6 +1539,7 @@ async function selectSystemLog(logType) {
     }
     box.scrollTop = box.scrollHeight;
   } catch (err) {
+    hideLogChunkSelector();
     box.textContent = `加载失败: ${err.message}`;
   }
 }
@@ -1609,7 +1661,10 @@ async function initEvents() {
       setBusy(btn, false);
     }
   };
-  $("#log-refresh").onclick = () => { if (state.selectedLog) selectLog(state.selectedLog); };
+  $("#log-refresh").onclick = () => {
+    if (state.selectedLog) selectLog(state.selectedLog);
+    else if (state.selectedLogType) selectSystemLog(state.selectedLogType);
+  };
   $("#usage-refresh").onclick = (event) => {
     const btn = event.currentTarget;
     setBusy(btn, true);

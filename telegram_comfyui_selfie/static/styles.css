@@ -831,6 +831,22 @@ select {
   word-break: break-word;
 }
 
+.log-chunk-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.log-chunk-bar label {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.log-chunk-bar select {
+  min-width: 260px;
+}
+
 /* World route */
 .world-panel .panel-head {
   align-items: flex-start;
