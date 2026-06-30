@@ -188,7 +188,7 @@ telegram_comfyui_selfie/
 ### WebUI 与运维
 
 - WebUI 支持管理员与普通用户登录；普通用户只看自己的会话与私有模型。
-- 管理员可以查看用量、维护全局模型 profile、执行 Git 更新、重启服务、冻结不活跃用户。
+- 管理员可以查看用量、维护全局模型 profile、执行 Git 更新、重启服务、从当前配置文件热载运行态配置、冻结不活跃用户。
 - 基础设施/运维配置如 Web host/port、日志路径、数据库路径仍只允许 YAML 修改，不通过通用 Web 配置表单写入。
 - WebUI 角色面板不展示场景偏好/自拍偏好栏；这些字段保留为内部数据和兼容字段。
 - WebUI 总览页包含反馈板：反馈运行时读写项目根目录 `TODO.md`，按 `## 角色名` + `<!-- session_id: ... -->` 分段；普通用户只看到自己的反馈，管理员可见全部。`TODO.md` 是运行时文件，已加入 `.gitignore`，不要提交。
@@ -216,6 +216,11 @@ telegram_comfyui_selfie/
 5. **日志分块与 WebUI 最新块**：用户日志和 `llm_debug.json` 写入前达到 `user_log_rotate_bytes`（默认 6MB）会把旧块以时间后缀保存到 `logs/chunks`（如 `telegram_123.20260630_153000.log` / `llm_debug.20260630_153000.json`），原始文件名继续作为当前最新块写入；单条日志不硬拆，超大最后一条允许撑大当前块；WebUI 日志详情默认读取最新块，也可在块选择器切换历史块，清空日志会同时清理历史块，并修复 `/api/logs/llm-debug` / `/api/logs/system-errors` 被 `{chat_id}` 路由吞掉的问题。
 6. **创建角色人格兜底**：`/初始化` / `/创建角色` / `/创建OC` 在角色设定复合字段中会本地拆分 role/persona/occupation 等槽位；若用户跳过角色设定或只填身份职业，会写入纯人格默认描述，避免新角色卡 `persona` 为空并回退串味。
 7. **回归测试**：新增测试覆盖 dream 源文本完整对话组裁剪、旧日记保全、无日记仍整理并返回 no-op、失败 op 写入 ERROR 请求/结果、日志完整条目分块、创建角色人格兜底；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 294 tests in 6.377s`，`OK (skipped=1)`。
+8. **高频生图规划归因修复**：`plan_roleplay_image()` 调用 `roleplay-image-plan` 时传递 `session_id`，让用量、调试日志和用户级 fast profile 归到真实会话；不改变 prompt 内容和缓存结构。
+9. **聊天反幻觉与记忆提取边界**：聊天静态前缀新增事实来源优先级（本轮输入 > 最近真实对话 > checkpoint > 长期记忆 > 世界/动线背景），低优先级背景不能覆盖高优先级事实；旧的 `_queue_long_memory_extraction()` 改为保护性 no-op，普通聊天不再即时抽取长期记忆，长期记忆仍只在 checkpoint 折叠阶段从溢出对话异步提取；`_queue_checkpoint_if_needed()` 明确只排后台任务，不阻塞本轮回复。
+10. **dream/历史提要防幻觉结构化**：保留 dream 日记、记忆整理、角色历史提要全量流程；日记 prompt 把旧日记视为存档、新对话视为证据，压缩重复动作但保留事实、承诺、未解张力和情绪转折；dream 记忆整理只允许基于日记/checkpoint/current window/已有记忆证据更新；角色历史提要建议输出「关系/剧情惯性」「角色心理与心情界定」「未解事件」「新一天演绎提示」，新一天提示必须尊重剧情逻辑惯性，聚焦心理和心情边界，不写死台词、地点、日程或剧情分支。
+11. **本轮回归验证**：新增/更新测试覆盖普通聊天不触发即时记忆提取、checkpoint 后台异步不阻塞聊天、`roleplay-image-plan` 会话归因、聊天事实来源优先级、dream/历史提要 grounding 与新一天心理提示；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`py -3 -m unittest tests.test_core -v`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 prompt 比对脚本，结果 `Ran 296 tests in 8.729s`，`OK (skipped=1)`，prompt 比对 `entries=10 sessions=2 pairs=8`。
+12. **WebUI 配置热载入口**：操作页“Git 更新与重启”区域新增“重新载入配置文件”按钮，调用 `POST /api/service/reload-config` 从当前 `config_path` 重新读取 YAML/JSON 并替换运行态 `service.config`，同时清理依赖配置的穿搭/配饰关键词缓存；该接口不调用 `save_config()`、不重启服务。重启入口保持原行为，仍会先保存当前运行态配置再准备进程重启。新增测试覆盖热载不写回配置文件、重启仍保存配置。
 
 ## 今日变更（2026-06-28）
 
@@ -311,11 +316,11 @@ telegram_comfyui_selfie/
 
 ## 最新验证
 
-- `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m compileall -q telegram_comfyui_selfie`
+- `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m compileall -q telegram_comfyui_selfie tests`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core -v`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m py_compile scripts\compare_llm_chat_prompts.py`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 scripts\compare_llm_chat_prompts.py --log "data\logs\llm_debug.json" --output .tmp\llm_chat_prompt_compare_current.md`
-- 最新结果：`Ran 269 tests in 6.571s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
+- 最新结果：`Ran 297 tests in 6.807s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
 - 工具 schema 当前紧凑 JSON 长度：`1898` 字符；chat 回复请求体 key 顺序为 `model, max_tokens, temperature, top_p, frequency_penalty, tools, tool_choice, messages`（`presence_penalty` 留空时不下发；checkpoint/dream/memory 等内部任务不下发采样参数）
 - 当前 `data/logs/llm_debug.json` 复跑 prompt 比对：报告生成 `.tmp\llm_chat_prompt_compare_current.md`，`entries=10 sessions=2 pairs=8`；会话 pair 的 `tools` / `tool_choice` / 非 prompt 请求参数均稳定，变化集中在 `messages`。
 - 真实 API 缓存探针：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。

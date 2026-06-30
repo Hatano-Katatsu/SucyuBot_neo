@@ -372,6 +372,8 @@ class ChatContextMixin:
             "长期记忆只在与本轮话题直接相关时自然融入，不要逐条复述。"
             "不要连续几轮发出结构、语义或情绪走向都类似的信息；不要反复提及同一个具体物件、食物、配饰或旧事件，"
             "除非用户本轮主动提起或上下文确实需要。"
+            "\n事实来源优先级：用户本轮明确输入 > 最近真实对话 > checkpoint > 长期记忆 > 世界/动线背景。"
+            "低优先级背景不能覆盖高优先级事实；不确定时承认不确定或轻描淡写，不要把推测说成已经发生。"
         )
 
         active_dialog = bool(self._active_chat_history(state))
@@ -1089,6 +1091,7 @@ class ChatContextMixin:
             char_over = not msg_over and sum(len(str(m.get("content") or "")) for m in history_snapshot) > 30000
             if not msg_over and not char_over:
                 return
+        # 只排后台任务，不 await；checkpoint 摘要和记忆提取不能阻塞本轮聊天回复。
         self._checkpoint_tasks[scope] = asyncio.create_task(self._run_context_checkpoint(session_id, key, keep))
 
     async def _run_context_checkpoint(self, session_id: str, character_key: str, keep: int, *, force: bool = False):

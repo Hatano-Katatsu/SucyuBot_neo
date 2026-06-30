@@ -977,6 +977,7 @@ async def plan_roleplay_image(
             temp=float(service._get_llm_value("image", "temperature_scene", "0.95")),
             tag="roleplay-image-plan",
             purpose="image",
+            session_id=session_id,
         )
         parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
     except Exception as exc:

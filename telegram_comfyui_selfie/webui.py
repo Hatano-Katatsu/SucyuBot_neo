@@ -153,6 +153,7 @@ def create_web_app(service) -> web.Application:
     app.router.add_get("/api/world/{session_id:.+}", api_world_route)
     app.router.add_post("/api/bot/start", api_bot_start)
     app.router.add_post("/api/bot/stop", api_bot_stop)
+    app.router.add_post("/api/service/reload-config", api_service_reload_config)
     app.router.add_post("/api/service/restart", api_service_restart)
     app.router.add_post("/api/service/stop", api_service_stop)
     app.router.add_get("/api/admin/llm-usage", api_admin_llm_usage)
@@ -1372,6 +1373,20 @@ async def api_service_restart(request: web.Request):
         return json_error(f"无法准备重启: {exc}", status=500)
     asyncio.create_task(service.shutdown_for_process_restart())
     return json_ok({"restart": restart})
+
+
+async def api_service_reload_config(request: web.Request):
+    _require_admin(request)
+    service = service_from(request)
+    try:
+        config = service.reload_config_from_disk()
+    except Exception as exc:
+        return json_error(f"配置文件重新载入失败: {exc}", status=500)
+    return json_ok({
+        "config": masked_config(service),
+        "config_path": str(service.config_path),
+        "loaded_keys": len(config),
+    })
 
 
 async def api_service_stop(request: web.Request):

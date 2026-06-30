@@ -943,6 +943,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
     def test_process_restart_prepares_once_and_flushes_state(self):
         svc = self.make_service()
         svc._spawn_restart_helper = lambda: 4242
+        svc.config["chat_reply_length"] = "重启前保存"
         sid = "telegram:1"
         state = svc._get_session_state(sid)
         state["custom_character"] = "重启测试角色"
@@ -955,8 +956,44 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(info["helper_pid"], 4242)
         saved = svc.app_store.load_session_state(sid)
         self.assertEqual(saved["custom_character"], "重启测试角色")
+        saved_config = json.loads(svc.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved_config["chat_reply_length"], "重启前保存")
         self.assertTrue(svc._restart_requested)
         self.assertTrue(svc.prepare_process_restart()["already_requested"])
+
+    def test_reload_config_from_disk_updates_runtime_without_saving(self):
+        async def run():
+            from aiohttp import web
+            from aiohttp.test_utils import make_mocked_request
+            from telegram_comfyui_selfie.webui import api_service_reload_config
+
+            svc = self.make_service()
+            svc.config["chat_reply_length"] = "运行态旧值"
+            svc.config["outfit_keywords"] = {"top": ["old top"]}
+            _ = svc._outfit_kw
+            self.assertTrue(hasattr(svc, "_cached_outfit_kw"))
+            file_config = {
+                "telegram_bot_token": "TEST",
+                "chat_reply_length": "文件新值",
+                "outfit_keywords": {"top": ["new top"]},
+            }
+            expected_text = json.dumps(file_config, ensure_ascii=False)
+            svc.config_path.write_text(expected_text, encoding="utf-8")
+
+            app = web.Application()
+            app["service"] = svc
+            req = make_mocked_request("POST", "/api/service/reload-config", app=app)
+            req["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+            resp = await api_service_reload_config(req)
+            data = json.loads(resp.text)
+
+            self.assertTrue(data["ok"])
+            self.assertEqual(svc.config["chat_reply_length"], "文件新值")
+            self.assertEqual(data["config"]["values"]["chat_reply_length"], "文件新值")
+            self.assertEqual(svc.config_path.read_text(encoding="utf-8"), expected_text)
+            self.assertFalse(hasattr(svc, "_cached_outfit_kw"))
+
+        asyncio.run(run())
 
     def test_appearance_merge_replaces_outfit_and_accumulates_accessories(self):
         svc = self.make_service()
@@ -1585,6 +1622,15 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         memory = next(m for m in svc.memory.list_memories(sid, limit=10) if int(m["id"]) == int(memory_id))
         self.assertEqual(memory.get("hit_count"), 0)
+
+    def test_long_memory_queue_is_disabled_for_normal_chat(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        svc._extract_long_term_memories = AsyncMock()
+
+        svc._queue_long_memory_extraction(sid, "以后温柔一点", "好，我记住了。")
+
+        svc._extract_long_term_memories.assert_not_called()
 
     def test_long_memory_extraction_writes_structured_memory(self):
         async def run():
@@ -3540,6 +3586,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             await plan_roleplay_image(svc, sid, intent="坐回座位戳脸倒计时")
 
             planner_user = svc._call_llm.await_args.args[1]
+            self.assertEqual(svc._call_llm.await_args.kwargs.get("session_id"), sid)
             self.assertIn("短期连续性:", planner_user)
             self.assertIn("最近已发图片摘要:", planner_user)
             self.assertNotIn("照片历史（系统记录", planner_user)
@@ -6459,6 +6506,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         static = messages[0]["content"]
         self.assertIn("不是表白或调情", static)
         self.assertIn("不要反复提及", static)
+        self.assertIn("事实来源优先级", static)
+        self.assertIn("低优先级背景不能覆盖高优先级事实", static)
 
     def test_checkpoint_summarizer_prompt_has_grounding_rule(self):
         """checkpoint 摘要 prompt 应包含反幻觉约束。"""
@@ -6487,6 +6536,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         src = inspect.getsource(svc._generate_character_history_summary)
         self.assertIn("不要编造", src)
         self.assertIn("只基于日记原文", src)
+        self.assertIn("剧情逻辑惯性", src)
+        self.assertIn("角色心理", src)
+        self.assertIn("心情界定", src)
 
     def test_dream_memory_prompt_keeps_time_nodes_until_faded(self):
         """dream 记忆整理应软约束过时时间节点，不是一过期就删。"""
@@ -6496,7 +6548,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         summarize = inspect.getsource(svc._summarize_all_memories)
         self.assertIn("time nodes", incremental)
         self.assertIn("fully faded", incremental)
+        self.assertIn("Do not create new memories from inference", incremental)
         self.assertIn("do not drop them merely", summarize)
+        self.assertIn("Use only the supplied memories", summarize)
 
     def test_scene_stale_hint_when_gap_exceeds_threshold(self):
         """场景断档感知: 距离上次对话超过阈值时在 system_dynamic 注入提示。"""
@@ -6528,6 +6582,41 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
 class CheckpointTrimTestCase(ServiceFixtureMixin, unittest.TestCase):
     """TODO #9.4: checkpoint 裁剪测试 — 51+ messages 后 checkpoint，窗口 10 messages，不能 assistant 开头。"""
+
+    def test_queue_checkpoint_schedules_background_task_without_blocking_chat(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["context_window_message_limit"] = "10"
+            sid = "telegram:1"
+            key = svc._context_character_key(sid)
+            messages = []
+            for i in range(6):
+                messages.append({"role": "user", "content": f"用户消息 {i}"})
+                messages.append({"role": "assistant", "content": f"角色回复 {i}"})
+            svc.app_store.append_messages(sid, key, messages)
+            started = asyncio.Event()
+            blocker = asyncio.Event()
+
+            async def slow_checkpoint(session_id, character_key, keep, *, force=False):
+                started.set()
+                await blocker.wait()
+
+            svc._run_context_checkpoint = slow_checkpoint
+
+            before = time.perf_counter()
+            svc._queue_checkpoint_if_needed(sid, messages)
+            elapsed = time.perf_counter() - before
+
+            self.assertLess(elapsed, 0.05)
+            await asyncio.wait_for(started.wait(), timeout=1)
+            task = svc._checkpoint_tasks[f"{sid}\n{key}"]
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(run())
 
     def test_checkpoint_trims_to_keep_and_never_starts_with_assistant(self):
         async def run():
@@ -6643,6 +6732,8 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("will replace that old entry", captured["system"])
             self.assertIn("not append to it", captured["system"])
             self.assertIn("preserve every concrete fact", captured["system"])
+            self.assertIn("Treat Existing diary as the archived record", captured["system"])
+            self.assertIn("Do not invent events", captured["system"])
             self.assertIn("Do not include roleplay advice", captured["system"])
             self.assertIn("Weekday: 星期五", captured["user"])
             self.assertIn("Write mode: overwrite existing diary", captured["user"])

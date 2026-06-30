@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -116,11 +115,12 @@ class MemoryPolicyMixin:
         return True
 
     def _queue_long_memory_extraction(self, session_id: str, user_text: str, assistant_text: str):
-        if not session_id or not self._long_memory_extract_enabled() or not self.has_llm_config("chat", session_id):
-            return
-        if not (user_text or assistant_text):
-            return
-        asyncio.create_task(self._extract_long_term_memories(session_id, user_text, assistant_text))
+        """旧版每轮聊天记忆提取入口。
+
+        现在长期记忆只在 checkpoint 折叠阶段从溢出的真实对话中异步提取，避免普通聊天每轮额外跑
+        LLM，也避免未稳定的即时剧情被过早固化为长期记忆。
+        """
+        return
 
     async def _extract_long_term_memories(self, session_id: str, user_text: str, assistant_text: str):
         existing = self._long_term_memory_context(session_id, f"{user_text}\n{assistant_text}", limit=10)

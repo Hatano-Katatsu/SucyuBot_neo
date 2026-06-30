@@ -319,6 +319,14 @@ class TelegramComfyUIService(
         else:
             self.config_path.write_text(json.dumps(self.config, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    def reload_config_from_disk(self) -> dict[str, Any]:
+        """从当前配置文件重新载入运行态配置，不写回磁盘。"""
+        self.config = self._load_config()
+        for attr in ("_cached_outfit_kw", "_cached_accessory_kw"):
+            if hasattr(self, attr):
+                delattr(self, attr)
+        return self.config
+
     def _memory_db_path(self) -> Path:
         raw = str(self.config.get("long_memory_db_path") or "").strip()
         if not raw:

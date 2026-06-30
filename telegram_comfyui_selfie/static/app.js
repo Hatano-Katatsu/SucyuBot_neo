@@ -1846,6 +1846,25 @@ async function initEvents() {
   $("#prompt-cleanup-preview").onclick = (event) => runPromptCleanup(false, event.currentTarget);
   $("#prompt-cleanup-apply").onclick = (event) => runPromptCleanup(true, event.currentTarget);
 
+  $("#reload-config-file-btn").onclick = async (event) => {
+    if (!window.confirm("这会从当前配置文件重新载入运行态配置。\n\n不会保存设置，也不会重启服务。继续吗？")) return;
+    const btn = event.currentTarget;
+    const out = $("#git-update-output");
+    setBusy(btn, true);
+    out.textContent = "正在重新载入配置文件...";
+    try {
+      const data = await api("/api/service/reload-config", { method: "POST" });
+      await loadAll();
+      out.textContent = `已重新载入配置文件:\n${data.config_path}\n配置项: ${data.loaded_keys}`;
+      toast("配置文件已重新载入");
+    } catch (err) {
+      out.textContent = err.message;
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+    }
+  };
+
   $("#git-update-btn").onclick = async (event) => {
     if (!window.confirm("这会从远端 Git 拉取最新代码并自动重启服务。继续吗？")) return;
     const btn = event.currentTarget;
