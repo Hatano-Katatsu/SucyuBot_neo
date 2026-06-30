@@ -228,6 +228,8 @@ telegram_comfyui_selfie/
 15. **检查点 Web 导入导出**：角色页新增“角色检查点”区，可导出某日检查点或当前状态；角色池导入支持粘贴 JSON 和上传 `.json` 文件，导入模式包括 basic（只保存/写入角色基础字段）、memory（合并长期记忆和日记但不替换 checkpoint/上下文）、full（覆盖当前上下文、角色历史提要和 SQLite checkpoint）。新增测试覆盖当天聊天过滤、7 天保留、dream 前写检查点、三种导入模式边界；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 302 tests in 5.811s`，`OK (skipped=1)`。
 16. **`roleplay-image-plan` 稳定规则前置**：`plan_roleplay_image()` 将 scene boundary、推送模式通用规则、世界/地点优先级、自然光硬规则、空间/身体关系、亲密/同框/用户身体归属、单帧构图、视角和 JSON 字段契约集中到 dynamic system 最前段；角色身份、人设、当前外貌、天气/世界状态、地点 pin、用户位置状态和短期上下文保留在后段，避免稳定规则被角色穿搭、天气、地点和推送状态提前打断 provider prefix cache。新增 `test_roleplay_image_planner_orders_stable_rules_before_dynamic_context` 锁定稳定规则位于 `当前附加外貌` 前且不重复。
 
+17. **dream 记忆压缩输出预算与截断观测**：`dream-memory-summarize` 不再继承聊天 profile 的低 `max_tokens`，而是通过 `dream_memory_summarize_max_tokens` 单独覆盖输出预算，默认 `8192`，可在配置中调到 `12000`；chat 失败回落 fast/flash 时同样沿用该预算。`llm_debug.json` 每条记录顶层新增 `finish_reason`、`completion_tokens` 和请求 `max_tokens`，`ERROR LLM_FULL_LOG` 也补同样摘要，后续看到 `finish_reason="length"` 即可直接确认是否输出截断。新增测试覆盖请求体预算覆盖、debug/error 日志截断字段、默认 8192 和配置 12000。
+
 ## 今日变更（2026-06-28）
 
 1. **自动推送完成标记修复**：随机推送点不再在进入触发窗口时提前写入 `daily_triggered_times`；现在只有 `_sched_fire()` 实际成功发送照片后才标记完成。错过 5 分钟窗口或晚安抑制仍会显式写入处理原因，避免“无声吃掉当天推送点”。
@@ -322,13 +324,15 @@ telegram_comfyui_selfie/
 
 ## 最新验证
 
-- `py -3 -m unittest tests.test_core.ServiceTestCase.test_roleplay_image_planner_orders_stable_rules_before_dynamic_context tests.test_core.ServiceTestCase.test_roleplay_image_planner_uses_slim_continuity_and_photo_summary tests.test_core.ServiceTestCase.test_roleplay_image_planner_keeps_spatial_constraints_outside_slim_context tests.test_core.ServiceTestCase.test_scheduled_push_transition_does_not_lock_stale_previous_scene_place tests.test_core.ServiceTestCase.test_call_llm_adds_cache_anchor_for_hot_simple_tasks -v`
+- `py -3 -m unittest tests.test_core.ServiceTestCase.test_call_llm_messages_records_finish_reason_and_completion_tokens tests.test_core.DreamManualMemoryTestCase.test_dream_memory_summarize_falls_back_to_fast_model tests.test_core.DreamManualMemoryTestCase.test_dream_memory_summarize_max_tokens_can_be_configured -v`
 - `$env:PYTHONPYCACHEPREFIX='.tmp\pycache_compile'; py -3 -m compileall -q telegram_comfyui_selfie tests`
+- `py -3 -m py_compile scripts\compare_llm_chat_prompts.py`
+- `py -3 scripts\compare_llm_chat_prompts.py --log "data\logs\llm_debug.json" --output .tmp\llm_chat_prompt_compare_current.md`
 - `node --check telegram_comfyui_selfie\static\app.js`
 - `py -3 -m unittest tests.test_core -v`
-- 最新结果：`Ran 303 tests in 6.610s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
+- 最新结果：`Ran 305 tests in 7.350s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
 - 工具 schema 当前紧凑 JSON 长度：`1898` 字符；chat 回复请求体 key 顺序为 `model, max_tokens, temperature, top_p, frequency_penalty, tools, tool_choice, messages`（`presence_penalty` 留空时不下发；checkpoint/dream/memory 等内部任务不下发采样参数）
-- 当前未复跑 prompt 比对脚本；最近一次 `data/logs/llm_debug.json` 报告为 `.tmp\llm_chat_prompt_compare_current.md`，`entries=10 sessions=2 pairs=8`；会话 pair 的 `tools` / `tool_choice` / 非 prompt 请求参数均稳定，变化集中在 `messages`。
+- 当前已复跑 prompt 比对脚本；`data/logs/llm_debug.json` 报告写入 `.tmp\llm_chat_prompt_compare_current.md`，`entries=10 sessions=1 pairs=9`。
 - 真实 API 缓存探针沿用上一轮结论：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。
 - 额外真实 API 缓存探针 `test_live_chat_context_cache_probe_uses_current_config_when_available`：默认跳过；设置 `SUCYUBOT_TEST_LIVE_CACHE_PROBE=1` 后才使用当前配置文件中的模型连接信息，通过真实 `handle_chat()` 链路连续回答三轮预设问题并输出缓存命中率。运行态 state / SQLite / 用户日志均隔离在测试临时目录；模型临时未返回可用回复时跳过。
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示

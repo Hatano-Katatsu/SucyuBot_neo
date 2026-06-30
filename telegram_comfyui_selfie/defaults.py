@@ -319,6 +319,7 @@ DEFAULT_CONFIG = {
     "checkpoint_soft_limit_chars": "2000",
     "checkpoint_hard_limit_chars": "3000",
     "dream_source_hard_limit_chars": "50000",
+    "dream_memory_summarize_max_tokens": "8192",
     "dream_morning_hour": "8",
     "dream_idle_hours": "2",
     "scene_stale_minutes": "30",

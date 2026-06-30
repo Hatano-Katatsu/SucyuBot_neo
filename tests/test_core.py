@@ -5973,6 +5973,90 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_call_llm_messages_records_finish_reason_and_completion_tokens(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "chat_llm_api_key": "k",
+                "chat_llm_model": "m",
+                "chat_llm_api_base": "http://x",
+                "chat_llm_max_tokens": "96",
+            })
+            captured = {}
+
+            class FakeResponse:
+                status = 200
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                async def json(self):
+                    return {
+                        "choices": [{"finish_reason": "length", "message": {"content": "truncated"}}],
+                        "usage": {
+                            "prompt_tokens": 100,
+                            "completion_tokens": 8192,
+                            "total_tokens": 8292,
+                        },
+                    }
+
+                async def text(self):
+                    return ""
+
+            class FakeSession:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                def post(self, *args, **kwargs):
+                    captured["body"] = dict(kwargs["json"])
+                    return FakeResponse()
+
+            with patch("telegram_comfyui_selfie.service.aiohttp.ClientSession", FakeSession):
+                await svc._call_llm_messages(
+                    [{"role": "user", "content": "summarize"}],
+                    purpose="chat",
+                    tag="dream-memory-summarize",
+                    session_id="telegram:1",
+                    max_tokens=8192,
+                )
+
+            self.assertEqual(captured["body"]["max_tokens"], 8192)
+            svc._flush_llm_debug(force=True)
+            data = json.loads(svc._llm_debug_log_path().read_text(encoding="utf-8"))
+            entry = data["entries_by_type"]["chat:dream-memory-summarize"][-1]
+            self.assertEqual(entry["finish_reason"], "length")
+            self.assertEqual(entry["completion_tokens"], 8192)
+            self.assertEqual(entry["max_tokens"], 8192)
+            self.assertEqual(entry["usage"]["completion_tokens"], 8192)
+
+            logs = []
+            svc._ulog = lambda session_id, tag, message="": logs.append((tag, message))
+            svc._record_llm_error_log(
+                session_id="telegram:1",
+                purpose="chat",
+                tag="dream-memory-summarize",
+                response={
+                    "choices": [{"finish_reason": "length", "message": {"content": ""}}],
+                    "usage": {"completion_tokens": 8192},
+                },
+                status=200,
+                error="parse failed",
+            )
+            payload = json.loads(logs[-1][1].split("LLM_FULL_LOG ", 1)[1])
+            self.assertEqual(payload["finish_reason"], "length")
+            self.assertEqual(payload["completion_tokens"], 8192)
+
+        asyncio.run(run())
+
     def test_call_llm_adds_cache_anchor_for_hot_simple_tasks(self):
         async def run():
             svc = self.make_service()
@@ -6993,8 +7077,38 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertTrue(calls[0].get("disable_thinking"))
             self.assertIsNone(calls[1].get("disable_thinking"))
             self.assertEqual(calls[1].get("tag"), "dream-memory-summarize-fast-fallback")
+            self.assertEqual(calls[0].get("max_tokens"), 8192)
+            self.assertEqual(calls[1].get("max_tokens"), 8192)
             active = svc.memory.list_memories(sid, character=key, limit=20)
             self.assertTrue(any(m.get("summary") == "压缩后的记忆" for m in active))
+
+        asyncio.run(run())
+
+    def test_dream_memory_summarize_max_tokens_can_be_configured(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = "test-character"
+            svc.config["dream_memory_summarize_max_tokens"] = "12000"
+            for i in range(3):
+                svc.memory.add_memory(
+                    sid, "event", f"auto memory {i}", character=key, importance=3, tags=[f"m{i}"], source="chat")
+            editable = svc.memory.list_memories(sid, character=key, limit=20)
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "chat"
+            calls = []
+
+            async def fake_call_llm(system, user, **kw):
+                calls.append(kw)
+                return json.dumps({"memories": [
+                    {"kind": "event", "summary": "compressed memory", "importance": 4, "tags": ["compressed"]},
+                ]})
+
+            svc._call_llm = fake_call_llm
+
+            result = await svc._summarize_all_memories(sid, key, editable, target_n=2)
+
+            self.assertEqual(result.get("status"), "ok")
+            self.assertEqual(calls[0].get("max_tokens"), 12000)
 
         asyncio.run(run())
 

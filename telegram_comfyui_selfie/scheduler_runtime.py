@@ -389,6 +389,7 @@ class SchedulerRuntimeMixin:
         tag: str,
         temp: float = 0.1,
         allow_fast_fallback: bool = True,
+        max_tokens: int | None = None,
     ) -> tuple[str, Any, str, list[dict[str, str]]]:
         attempts: list[dict[str, str]] = []
         purposes: list[str] = []
@@ -411,6 +412,7 @@ class SchedulerRuntimeMixin:
                     purpose=purpose,
                     disable_thinking=True if purpose == "chat" else None,
                     session_id=session_id,
+                    max_tokens=max_tokens,
                 )
                 parsed = self._parse_llm_json(raw)
                 attempts.append({"purpose": purpose, "status": "ok"})
@@ -735,8 +737,12 @@ class SchedulerRuntimeMixin:
         diary_text = "\n\n".join(f"[{d.get('diary_date')}]\n{d.get('content','')}" for d in (diaries or []))
         user = f"Recent diaries:\n{diary_text or 'none'}\n\nCheckpoint:\n{checkpoint or 'none'}\n\nEditable memories for this pass:\n{mem_text or 'none'}"
         try:
+            summarize_max_tokens = max(1024, int(self.config.get("dream_memory_summarize_max_tokens", "8192") or 8192))
+        except (TypeError, ValueError):
+            summarize_max_tokens = 8192
+        try:
             raw, parsed, llm_purpose, attempts = await self._call_memory_json_llm(
-                session_id, system, user, tag="dream-memory-summarize", temp=0.1)
+                session_id, system, user, tag="dream-memory-summarize", temp=0.1, max_tokens=summarize_max_tokens)
         except Exception as exc:
             logger.warning("dream memory summarize failed", exc_info=True)
             result = {

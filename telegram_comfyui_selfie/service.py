@@ -1829,6 +1829,16 @@ class TelegramComfyUIService(
             "cache_hit_rate": round(cached_tokens / prompt_tokens, 4) if prompt_tokens else 0,
         }
 
+    @staticmethod
+    def _llm_finish_reason(data: dict[str, Any] | None) -> str:
+        if not isinstance(data, dict):
+            return ""
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+        choice = choices[0] if isinstance(choices[0], dict) else {}
+        return str(choice.get("finish_reason") or "")
+
     def _llm_debug_log_path(self) -> Path:
         return self._user_log_dir() / "llm_debug.json"
 
@@ -1894,6 +1904,7 @@ class TelegramComfyUIService(
         """按 purpose:tag 保存最近 10 次完整 LLM 请求/返回，供上下文缓存命中分析。"""
         key = f"{purpose or 'unknown'}:{tag or 'untagged'}"
         now = time.time()
+        usage_summary = self._llm_usage_debug_summary(response if isinstance(response, dict) else None)
         entry = {
             "ts": now,
             "time": datetime.fromtimestamp(now).isoformat(timespec="seconds"),
@@ -1905,12 +1916,15 @@ class TelegramComfyUIService(
             "model": str(resolved.get("model") or ""),
             "thinking": bool(resolved.get("thinking")),
             "status": status,
+            "finish_reason": self._llm_finish_reason(response if isinstance(response, dict) else None),
+            "completion_tokens": usage_summary.get("completion_tokens", 0),
+            "max_tokens": (request_body or {}).get("max_tokens"),
             "request": {
                 "url": request_url,
                 "body": self._json_safe(request_body),
             },
             "response": self._json_safe(response),
-            "usage": self._llm_usage_debug_summary(response if isinstance(response, dict) else None),
+            "usage": usage_summary,
         }
         if error:
             entry["error"] = error
@@ -1932,11 +1946,15 @@ class TelegramComfyUIService(
         """把失败时的完整 LLM 请求/返回写入用户 ERROR 日志，避免只看到兜底文案。"""
         if not session_id:
             return
+        response_data = response if isinstance(response, dict) else None
+        usage_summary = self._llm_usage_debug_summary(response_data)
         payload = {
             "purpose": purpose or "",
             "tag": tag or "",
             "status": status,
             "error": error or "",
+            "finish_reason": self._llm_finish_reason(response_data),
+            "completion_tokens": usage_summary.get("completion_tokens", 0),
             "request": {
                 "url": request_url or "",
                 "body": self._json_safe(request_body or {}),
@@ -1989,6 +2007,7 @@ class TelegramComfyUIService(
         disable_thinking: bool | None = None,
         session_id: str = "",
         sampling: bool = False,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         resolved = self._resolved_llm_config(purpose, session_id, disable_thinking=disable_thinking)
         api_base = resolved["api_base"]
@@ -1996,9 +2015,14 @@ class TelegramComfyUIService(
         if not api_key:
             label = "chat model" if purpose == "chat" else ("vision model" if purpose == "vision" else "fast model")
             raise RuntimeError(f"{label} API Key is not configured")
+        max_tokens_value = max_tokens if max_tokens is not None else (resolved.get("max_tokens") or "4096")
+        try:
+            max_tokens_int = max(1, int(max_tokens_value))
+        except (TypeError, ValueError):
+            max_tokens_int = 4096
         body = {
             "model": resolved["model"],
-            "max_tokens": int(resolved.get("max_tokens") or "4096"),
+            "max_tokens": max_tokens_int,
             "temperature": float(self._get_llm_value(purpose, "temperature", "0.95")) if temp is None else temp,
         }
         # 采样参数（top_p / 重复惩罚）：仅真实聊天回复链路显式开启。
@@ -2089,13 +2113,13 @@ class TelegramComfyUIService(
         )
         return data
 
-    async def _call_llm(self, system: str, user: str, temp: float = 0.3, tag: str = "", purpose: str = "image", disable_thinking: bool | None = None, session_id: str = "") -> str:
+    async def _call_llm(self, system: str, user: str, temp: float = 0.3, tag: str = "", purpose: str = "image", disable_thinking: bool | None = None, session_id: str = "", max_tokens: int | None = None) -> str:
         anchor = _SIMPLE_LLM_CACHE_ANCHORS.get(tag or "")
         messages = []
         if anchor:
             messages.append({"role": "system", "content": anchor})
         messages.extend([{"role": "system", "content": system}, {"role": "user", "content": user}])
-        data = await self._call_llm_messages(messages, tag=tag, temp=temp, purpose=purpose, disable_thinking=disable_thinking, session_id=session_id)
+        data = await self._call_llm_messages(messages, tag=tag, temp=temp, purpose=purpose, disable_thinking=disable_thinking, session_id=session_id, max_tokens=max_tokens)
         msg = data.get("choices", [{}])[0].get("message", {})
         text = (msg.get("content") or "").strip()
         if not text:
