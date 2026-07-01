@@ -232,6 +232,7 @@ telegram_comfyui_selfie/
 18. **聊天回复格式统一**：聊天静态 system 新增回复格式规则，要求角色说出口的语言单独放入中文直角引号 `「」`，动作、神态、姿态、心理、环境和状态描写单独放入全角括号 `（）`；台词段和状态段用空行分成独立自然段，继续沿用 `chat_split_paragraphs=true` 的空行分段发送机制。新增测试锁定该规则存在于静态前缀。
 19. **`chat-final` DSML-only 空回复修复**：兼容 OpenAI 兼容端在最终文字阶段返回 `finish_reason=stop` 但把 DSML 工具调用文本塞进 `message.content` 的情况；如果剥离 DSML 后没有自然语言，会和结构化 `tool_calls` 空回复一样追加 text-only system 提示并重试 `chat-final-retry`，不执行最终阶段泄漏出的工具调用。新增测试覆盖 DSML-only `generate_roleplay_image` 触发重试且不写 `LLM_FULL_LOG`。
 20. **AnimaTool 自拍手机旁路修复**：AnimaTool Turbo 的 slots planner 不再把未清洗的原始 `scene_desc` 作为 `用户意图` 重喂给 LLM，避免 raw scene 中的 `holds her phone` 绕过 `PromptSlots.scene` 清洗；`plan_animatool_slots()` 在最终 `tags/nltag` 入 payload 前会按 `view=selfie/portrait/pov` 再跑一次设备/手机/UI 清理。新增测试覆盖 raw scene 不再作为 intent 传入，以及 LLM 泄漏手机词时 Turbo nltag 被清洗。
+21. **聊天话题转换柔化**：聊天静态 system 的对话推进规则新增两条硬约束：当用户本轮话题与前文、旧场景或旧动作明显无关时，直接接续用户的新话题，不为了显得连续而强行呼应上一场景；用户一句话里同时包含寒暄、解释、问题和转折时，先抓核心意图与最需要被接住的情绪自然推进，不逐句逐点机械回应。更新 `test_chat_system_static_has_interpretation_rules` 锁定规则；验证 `py -3 -m unittest tests.test_core.ServiceTestCase.test_chat_system_static_has_interpretation_rules -v`、`py -3 -m compileall -q telegram_comfyui_selfie tests` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 321 tests in 7.480s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-06-30）
 

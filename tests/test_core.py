@@ -7506,6 +7506,10 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("不要反复提及", static)
         self.assertIn("事实来源优先级", static)
         self.assertIn("低优先级背景不能覆盖高优先级事实", static)
+        self.assertIn("直接接续用户的新话题", static)
+        self.assertIn("不要为了显得连续而强行呼应上一场景", static)
+        self.assertIn("先判断核心意图", static)
+        self.assertIn("不要逐句逐点机械回应", static)
 
     def test_checkpoint_summarizer_prompt_has_grounding_rule(self):
         """checkpoint 摘要 prompt 应包含反幻觉约束。"""
