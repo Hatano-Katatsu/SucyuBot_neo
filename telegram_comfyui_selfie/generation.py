@@ -393,10 +393,14 @@ def _strip_conflicting_scene_appearance(
 
 
 PUBLIC_MODEST_OUTFIT_TAG = "modest casual clothes"
-PUBLIC_PRIVATE_OUTFIT_NEGATIVES = (
-    "lingerie", "underwear", "bra", "panties", "g-string", "thong",
+PUBLIC_PRIVATE_OUTFIT_TERMS = (
+    "lingerie", "underwear", "panties", "g-string", "thong",
     "nightgown", "nightdress", "negligee", "sleepwear", "pajamas",
-    "bikini", "swimsuit", "babydoll", "chemise", "slip dress",
+    "babydoll", "chemise", "slip dress",
+)
+PUBLIC_SWIMWEAR_TERMS = ("bikini", "swimsuit", "school swimsuit")
+PUBLIC_EXPOSURE_NEGATIVE_GUARDS = (
+    "lingerie", "underwear", "nightgown", "nightdress", "negligee", "sleepwear",
     "revealing clothes", "cleavage", "underboob", "sideboob", "see-through clothing",
 )
 PUBLIC_SCENE_ANCHOR_RE = re.compile(
@@ -411,13 +415,67 @@ PRIVATE_SCENE_ANCHOR_RE = re.compile(
     r"\b(home|bedroom|living room|kitchen|bathroom|hotel room|private room|sofa|bed)\b|家中|卧室|客厅|厨房|浴室|酒店房间|私人房间",
     re.IGNORECASE,
 )
+PUBLIC_SWIMWEAR_CONTEXT_RE = re.compile(
+    r"\b(beach|shore|seaside|ocean|sea|pool|swimming pool|swim|water park|onsen|hot spring)\b|海边|海滩|泳池|游泳|水上乐园|温泉",
+    re.IGNORECASE,
+)
+PUBLIC_SPORT_UNDERWEAR_CONTEXT_RE = re.compile(
+    r"\b(gym|fitness|workout|yoga|sports?|training|dance studio)\b|健身房|运动|训练|瑜伽|舞蹈室",
+    re.IGNORECASE,
+)
+PUBLIC_EXPLICIT_PLAY_RE = re.compile(
+    r"\b(exhibitionism|public play|public sex|exposure play|humiliation play|bdsm|roleplay|punishment)\b|"
+    r"露出|公开play|户外play|公开调教|羞耻play|惩罚play|过激play|故意穿|故意露|大胆露出",
+    re.IGNORECASE,
+)
 
 
-def _is_public_private_outfit_tag(tag: str) -> bool:
+def _world_character_place_key(service: Any, session_id: str) -> str:
+    if not session_id or not hasattr(service, "build_world_state"):
+        return ""
+    try:
+        world = service.build_world_state(session_id, user_text="", mode="image")
+        place = world.get("character_place") or {}
+        return str(place.get("key") or "").strip().lower()
+    except Exception:
+        logger.debug("world place key detection failed", exc_info=True)
+        return ""
+
+
+def _allows_public_private_outfit(scene_desc: str, is_intimate: bool = False, clothing_off: str = "") -> bool:
+    if is_intimate:
+        return True
+    text = f"{scene_desc}\n{clothing_off}"
+    if PUBLIC_EXPLICIT_PLAY_RE.search(text):
+        return True
+    low = _tag_key(clothing_off)
+    return any(term in low for term in ("nude", "topless", "bottomless", "no underwear", "no panties", "completely nude"))
+
+
+def _allows_public_swimwear(scene_desc: str, place_key: str = "") -> bool:
+    return place_key == "beach" or bool(PUBLIC_SWIMWEAR_CONTEXT_RE.search(scene_desc or ""))
+
+
+def _is_public_private_outfit_tag(
+    tag: str,
+    *,
+    allow_swimwear: bool = False,
+    allow_sport_underwear: bool = False,
+) -> bool:
     low = _tag_key(tag)
     if not low:
         return False
-    if any(term in low for term in PUBLIC_PRIVATE_OUTFIT_NEGATIVES):
+    if allow_swimwear and any(term in low for term in PUBLIC_SWIMWEAR_TERMS):
+        return False
+    if allow_sport_underwear and "sports bra" in low:
+        return False
+    if "bikini" in low and any(term in low for term in ("armor", "armour", "costume")):
+        return False
+    if low == "bra":
+        return True
+    if any(term in low for term in PUBLIC_PRIVATE_OUTFIT_TERMS):
+        return True
+    if any(term in low for term in PUBLIC_SWIMWEAR_TERMS):
         return True
     if "camisole" in low and any(term in low for term in ("lace", "night", "sleep", "lingerie")):
         return True
@@ -428,11 +486,25 @@ def _is_public_private_outfit_tag(tag: str) -> bool:
     return False
 
 
-def _remove_public_private_outfit_tags(text: str) -> tuple[str, list[str]]:
+def _remove_public_private_outfit_tags(
+    text: str,
+    candidate_tags: list[str] | None = None,
+    *,
+    allow_swimwear: bool = False,
+    allow_sport_underwear: bool = False,
+) -> tuple[str, list[str]]:
+    candidates = None if candidate_tags is None else {_tag_key(tag) for tag in candidate_tags if _tag_key(tag)}
     removed: list[str] = []
     kept: list[str] = []
     for tag in _split_tags(text):
-        if _is_public_private_outfit_tag(tag):
+        if candidates is not None and _tag_key(tag) not in candidates:
+            kept.append(tag)
+            continue
+        if _is_public_private_outfit_tag(
+            tag,
+            allow_swimwear=allow_swimwear,
+            allow_sport_underwear=allow_sport_underwear,
+        ):
             removed.append(tag)
         else:
             kept.append(tag)
@@ -465,12 +537,29 @@ def _guard_public_outfit(
     effective_appearance: str,
     one_shot_appearance: str,
     negative: str,
+    current_outfit_tags: list[str] | None = None,
+    is_intimate: bool = False,
+    clothing_off: str = "",
 ) -> tuple[str, str, str, list[str]]:
     """公开场合里把睡衣/内衣类持久穿搭降成仅本图的得体日常穿搭。"""
     if not _public_render_context(service, state, session_id, scene_desc):
         return effective_appearance, one_shot_appearance, negative, []
-    effective_clean, removed_effective = _remove_public_private_outfit_tags(effective_appearance)
-    one_shot_clean, removed_one_shot = _remove_public_private_outfit_tags(one_shot_appearance)
+    if _allows_public_private_outfit(scene_desc, is_intimate=is_intimate, clothing_off=clothing_off):
+        return effective_appearance, one_shot_appearance, negative, []
+    place_key = _world_character_place_key(service, session_id)
+    allow_swimwear = _allows_public_swimwear(scene_desc, place_key)
+    allow_sport_underwear = bool(PUBLIC_SPORT_UNDERWEAR_CONTEXT_RE.search(scene_desc or ""))
+    effective_clean, removed_effective = _remove_public_private_outfit_tags(
+        effective_appearance,
+        current_outfit_tags,
+        allow_swimwear=allow_swimwear,
+        allow_sport_underwear=allow_sport_underwear,
+    )
+    one_shot_clean, removed_one_shot = _remove_public_private_outfit_tags(
+        one_shot_appearance,
+        allow_swimwear=allow_swimwear,
+        allow_sport_underwear=allow_sport_underwear,
+    )
     removed = removed_effective + removed_one_shot
     if not removed:
         return effective_appearance, one_shot_appearance, negative, []
@@ -478,7 +567,7 @@ def _guard_public_outfit(
     combined = _dedupe_prompt_modules([effective_clean, one_shot_clean])
     if not service._parse_appearance(combined).get("outfit"):
         effective_clean = _dedupe_prompt_modules([effective_clean, PUBLIC_MODEST_OUTFIT_TAG])
-    negative = _append_negatives(negative, *removed, *PUBLIC_PRIVATE_OUTFIT_NEGATIVES, "revealing public outfit")
+    negative = _append_negatives(negative, *removed, *PUBLIC_EXPOSURE_NEGATIVE_GUARDS, "revealing public outfit")
     return effective_clean, one_shot_clean, negative, removed
 
 
@@ -486,7 +575,14 @@ def public_outfit_guard_context(service: Any, session_id: str, dynamic_appearanc
     state = service._get_session_state(session_id) if session_id else {}
     if not _public_render_context(service, state, session_id, scene_desc):
         return ""
-    _, removed = _remove_public_private_outfit_tags(dynamic_appearance)
+    if _allows_public_private_outfit(scene_desc):
+        return ""
+    place_key = _world_character_place_key(service, session_id)
+    _, removed = _remove_public_private_outfit_tags(
+        dynamic_appearance,
+        allow_swimwear=_allows_public_swimwear(scene_desc, place_key),
+        allow_sport_underwear=bool(PUBLIC_SPORT_UNDERWEAR_CONTEXT_RE.search(scene_desc or "")),
+    )
     if not removed:
         return ""
     preview = ", ".join(removed[:4])
@@ -1111,6 +1207,9 @@ def build_prompt(
     if appearance_override:
         effective_appearance = f"{effective_appearance}, {appearance_override}" if effective_appearance else appearance_override
     one_shot_effective = (one_shot_appearance or "").strip()
+    # 当前衣柜标签单独传给公开场合兜底，避免误删角色 base 里的标志性暴露服装/装甲/原皮造型。
+    worn_src = service._effective_dynamic_appearance(session_id) if session_id else session_schema.get_outfit(state)
+    current_outfit_tags = [t.strip() for t in str(worn_src).split(",") if t.strip()]
     effective_appearance, one_shot_effective, neg, _public_outfit_removed = _guard_public_outfit(
         service,
         state,
@@ -1119,11 +1218,13 @@ def build_prompt(
         effective_appearance,
         one_shot_effective,
         neg,
+        current_outfit_tags=current_outfit_tags,
+        is_intimate=is_sex_scene,
+        clothing_off=clothing_off,
     )
     # 一次性脱衣/裸露：让规划器的逐图判断剥离本次着装（不落盘），覆盖陈旧持久态。
     # "当前所穿"标签取自生效的 dynamic_appearance + 本次一次性外观，按标签匹配剥离。
-    worn_src = service._effective_dynamic_appearance(session_id) if session_id else session_schema.get_outfit(state)
-    worn_tags = [t.strip() for t in str(worn_src).split(",") if t.strip()]
+    worn_tags = list(current_outfit_tags)
     if one_shot_effective:
         worn_tags += [t.strip() for t in str(one_shot_effective).split(",") if t.strip()]
     effective_appearance, neg = _apply_clothing_off(service, clothing_off, effective_appearance, neg, worn_tags)

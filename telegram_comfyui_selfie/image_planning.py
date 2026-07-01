@@ -948,7 +948,12 @@ async def plan_roleplay_image(
         "输出适合发给用户的一张图。不要输出英文画图标签。\n"
         "公开场合必须穿着得体；私密场合可以更放松。避免和最近照片重复。"
     )
-    public_outfit_context = public_outfit_guard_context(service, session_id, dynamic)
+    public_outfit_context = public_outfit_guard_context(
+        service,
+        session_id,
+        dynamic,
+        "\n".join(part for part in (intent, mood, must_include, prompt) if part),
+    )
     if public_outfit_context:
         system += "\n" + public_outfit_context
     if world_context:

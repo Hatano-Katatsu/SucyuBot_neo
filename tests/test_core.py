@@ -6350,6 +6350,49 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("black lace camisole nightgown", pos_lower)
         self.assertNotIn("modest casual clothes", pos_lower)
 
+    def test_build_prompt_public_guard_preserves_character_base_costume(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["custom_character"] = "既有角色"
+        state["custom_positive_prefix"] = "long hair, bikini armor, cleavage"
+
+        pos, _ = svc._build_prompt("standing by a university classroom window", session_id=sid)
+
+        pos_lower = pos.lower()
+        self.assertIn("bikini armor", pos_lower)
+        self.assertIn("cleavage", pos_lower)
+        self.assertNotIn("modest casual clothes", pos_lower)
+
+    def test_build_prompt_public_guard_allows_beach_swimwear(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        session_schema.set_outfit(state, "black bikini")
+        svc._set_character_place(sid, "beach", "海边", 0.95, source="tool")
+
+        pos, _ = svc._build_prompt("standing on the beach near the shoreline", session_id=sid)
+
+        pos_lower = pos.lower()
+        self.assertIn("black bikini", pos_lower)
+        self.assertNotIn("modest casual clothes", pos_lower)
+
+    def test_build_prompt_public_guard_allows_explicit_play(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        session_schema.set_outfit(state, "black lace camisole nightgown")
+
+        pos, _ = svc._build_prompt(
+            "public exhibitionism play in a university classroom, wearing a black lace camisole nightgown",
+            session_id=sid,
+            is_intimate=True,
+        )
+
+        pos_lower = pos.lower()
+        self.assertIn("black lace camisole nightgown", pos_lower)
+        self.assertNotIn("modest casual clothes", pos_lower)
+
     def test_clothing_off_strips_named_garment_for_this_image_only(self):
         svc = self.make_service()
         sid = "telegram:1"
