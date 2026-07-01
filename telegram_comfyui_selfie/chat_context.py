@@ -221,7 +221,13 @@ class ChatContextMixin:
                 final_msg = final.get("choices", [{}])[0].get("message", {})
                 final_tool_calls = final_msg.get("tool_calls") or []
                 final_text = (final_msg.get("content") or "").strip()
-                if final_tool_calls and not final_text:
+                final_dsml_tool_calls: list[dict[str, Any]] = []
+                final_cleaned_text = final_text
+                if final_text:
+                    final_dsml_tool_calls, final_cleaned_text = self._extract_dsml_tool_calls(final_text)
+                    final_cleaned_text = final_cleaned_text.strip()
+                final_tool_only = (final_tool_calls and not final_text) or (final_dsml_tool_calls and not final_cleaned_text)
+                if final_tool_only:
                     retry_messages = messages + [{
                         "role": "system",
                         "content": (
@@ -243,12 +249,17 @@ class ChatContextMixin:
                         retry_msg = retry.get("choices", [{}])[0].get("message", {})
                         retry_text = (retry_msg.get("content") or "").strip()
                         retry_tool_calls = retry_msg.get("tool_calls") or []
+                        retry_cleaned_text = retry_text
                         if retry_text:
+                            _retry_dsml_tool_calls, retry_cleaned_text = self._extract_dsml_tool_calls(retry_text)
+                            retry_cleaned_text = retry_cleaned_text.strip()
+                        if retry_cleaned_text:
                             self._ulog(session_id, "WARN", "chat-final returned tool_calls without content; retried text-only")
                             final = retry
                             final_request_body = retry_request_body
-                            final_msg = retry_msg
-                            final_text = retry_text
+                            final_msg = dict(retry_msg)
+                            final_msg["content"] = retry_cleaned_text
+                            final_text = retry_cleaned_text
                             final_tool_calls = retry_tool_calls
                         else:
                             self._record_llm_error_log(
@@ -271,7 +282,7 @@ class ChatContextMixin:
                             error=f"chat-final retry exception after unexpected tool_calls: {exc}",
                         )
                         empty_error_logged = True
-                if final_tool_calls and not final_text and not empty_error_logged:
+                if final_tool_only and not final_text and not empty_error_logged:
                     self._record_llm_error_log(
                         session_id=session_id,
                         purpose="chat",

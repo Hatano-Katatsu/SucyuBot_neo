@@ -6905,6 +6905,69 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_chat_final_retries_when_dsml_tool_call_is_only_content(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "chat_llm_api_key": "k",
+                "chat_llm_model": "m",
+                "chat_llm_api_base": "http://x",
+                "selfie_frequency": "关闭",
+            })
+            sid = "telegram:1"
+            calls = []
+            logs = []
+            dsml = (
+                "<｜｜DSML｜｜tool_calls>\n"
+                "<｜｜DSML｜｜invoke name=\"generate_roleplay_image\">\n"
+                "<｜｜DSML｜｜parameter name=\"intent\" string=\"true\">沙发上回复消息</｜｜DSML｜｜parameter>\n"
+                "</｜｜DSML｜｜invoke>\n"
+                "</｜｜DSML｜｜tool_calls>"
+            )
+
+            async def fake_msgs(messages, tools=None, tool_choice=None, **kw):
+                calls.append({
+                    "messages": list(messages),
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                    "tag": kw.get("tag"),
+                })
+                if len(calls) == 1:
+                    return {"choices": [{"message": {"content": "", "tool_calls": [
+                        {"id": "t1", "function": {"name": "update_user_location", "arguments": json.dumps({"place": "区役所"})}}
+                    ]}}]}
+                if len(calls) == 2:
+                    return {"choices": [{"message": {"content": dsml}, "finish_reason": "stop"}]}
+                self.assertEqual(kw.get("tag"), "chat-final-retry")
+                self.assertIsNone(tools)
+                self.assertIsNone(tool_choice)
+                self.assertIn("最终回复阶段返回了工具调用", messages[-1]["content"])
+                return {"choices": [{"message": {"content": "（她低头看了眼手机。）\n\n「被窗口折腾了？回来姐姐给你泡茶。」"}}]}
+
+            svc._call_llm_messages = fake_msgs
+            svc._execute_tool_call = AsyncMock(return_value="无法识别用户地点「区役所」，未更新。")
+            svc._ensure_life_profile = AsyncMock(return_value={})
+            svc._update_character_place_from_text = AsyncMock()
+            svc._extract_long_term_memories = AsyncMock()
+            svc._judge_image_moment = AsyncMock(return_value=None)
+            svc._ulog = lambda session_id, kind, text="": logs.append((session_id, kind, text))
+
+            reply = await svc.run_roleplay_chat(1, sid, "区役所好麻烦")
+
+            self.assertEqual(reply, "（她低头看了眼手机。）\n\n「被窗口折腾了？回来姐姐给你泡茶。」")
+            self.assertEqual([call["tag"] for call in calls], ["chat", "chat-final", "chat-final-retry"])
+            self.assertIsNone(calls[1]["tools"])
+            self.assertIsNone(calls[1]["tool_choice"])
+            self.assertIsNone(calls[2]["tools"])
+            self.assertIsNone(calls[2]["tool_choice"])
+            svc._execute_tool_call.assert_awaited_once()
+            error_logs = [text for _sid, kind, text in logs if kind == "ERROR"]
+            self.assertFalse(any("LLM_FULL_LOG" in text for text in error_logs))
+            warn_logs = [text for _sid, kind, text in logs if kind == "WARN"]
+            self.assertTrue(any("chat-final returned tool_calls without content; retried text-only" in text for text in warn_logs))
+
+        asyncio.run(run())
+
     def test_dsml_tool_call_content_is_executed_and_not_leaked(self):
         async def run():
             svc = self.make_service()
