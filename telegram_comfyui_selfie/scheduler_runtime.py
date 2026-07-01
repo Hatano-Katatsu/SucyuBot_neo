@@ -89,9 +89,13 @@ class SchedulerRuntimeMixin:
         stale = bool(latest and stale_minutes > 0 and gap_minutes > stale_minutes)
         too_old = bool(latest and gap_minutes > continuity_hours * 60.0)
         morning = (mode or "").strip().lower() == "morning"
-        should_transition = morning or has_end_signal or (stale and not has_hold_signal) or too_old
+        # 半小时级的 scene_stale 只说明“旧场景需要推进一拍”，不足以让随机推送每次都硬转场。
+        # 主动推送的硬切换交给明确结束信号、早安新一天，或 push_continuity_hours 的更长 TTL。
+        should_transition = morning or has_end_signal or too_old
+        should_advance_beat = stale and not should_transition
         return {
             "should_transition": should_transition,
+            "should_advance_beat": should_advance_beat,
             "drop_continuity": too_old and not has_hold_signal,
             "gap_minutes": gap_minutes,
             "stale_minutes": stale_minutes,
@@ -100,6 +104,24 @@ class SchedulerRuntimeMixin:
             "too_old": too_old,
             "morning": morning,
         }
+
+    def _format_push_scene_advance_context(
+        self,
+        state: dict[str, Any],
+        session_id: str = "",
+        now: datetime | None = None,
+        mode: str = "normal",
+    ) -> str:
+        decision = self._push_scene_transition_decision(state, session_id, now=now, mode=mode)
+        if not decision.get("should_advance_beat"):
+            return ""
+        return (
+            "推送场景节拍推进: 距离上次互动已超过场景断档阈值，但尚未超过主动推送连续性时效。\n"
+            "处理规则: 保留最近已建立的大地点、同处/异地关系、情绪和未完成约定；但时间已经自然流逝，"
+            "不要把上一幕的短动作、手势、姿势、正在喝/吃的一份食物饮料、刚拿起的物件或同一句话原样冻结到此刻。"
+            "如果上一幕有茶、咖啡、饭、点心、手机消息、书页等消耗品或瞬时动作，本次应写成已经喝完/放下/换了姿势/转入相邻动作，"
+            "或另起同一空间里的新日常小片段；只有最近文本明确说明该动作仍在持续时才继续。"
+        )
 
     def _format_push_scene_transition_context(
         self,

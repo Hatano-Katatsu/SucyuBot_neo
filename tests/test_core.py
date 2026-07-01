@@ -4578,6 +4578,81 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_scheduled_push_stale_gap_alone_keeps_continuity(self):
+        svc = self.make_service()
+        svc.config.update({
+            "scene_stale_minutes": "30",
+            "push_continuity_hours": "2",
+        })
+        sid = "telegram:123"
+        now = datetime.fromtimestamp(time.time(), timezone.utc)
+        ts = now.timestamp()
+        state = svc._get_session_state(sid)
+        session_schema.set_last_interaction(state, ts - 45 * 60)
+        session_schema.set_last_message_time(state, ts - 45 * 60)
+        session_schema.set_recent_message_history(state, [
+            {"text": "姐姐把蜂蜜茶放在茶几上，靠在沙发边听雨。", "time": ts - 45 * 60},
+        ])
+        session_schema.set_chat_history(state, [
+            {"role": "user", "content": "我们在沙发上看电影吧。"},
+            {"role": "assistant", "content": "好呀，姐姐把蜂蜜茶端过来。"},
+        ])
+
+        decision = svc._push_scene_transition_decision(state, sid, now=now)
+
+        self.assertTrue(decision["gap_minutes"] > decision["stale_minutes"])
+        self.assertFalse(decision["has_end_signal"])
+        self.assertFalse(decision["too_old"])
+        self.assertFalse(decision["should_transition"])
+        self.assertTrue(decision["should_advance_beat"])
+        self.assertEqual(svc._format_push_scene_transition_context(state, sid, now=now), "")
+        self.assertIn("推送场景节拍推进", svc._format_push_scene_advance_context(state, sid, now=now))
+
+    def test_scheduled_push_stale_gap_advances_beat_without_dropping_place(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+                "scene_stale_minutes": "30",
+                "push_continuity_hours": "2",
+            })
+            sid = "telegram:123"
+            now = datetime.fromtimestamp(time.time(), timezone.utc)
+            ts = now.timestamp()
+            state = svc._get_session_state(sid)
+            session_schema.set_last_interaction(state, ts - 60 * 60)
+            session_schema.set_last_message_time(state, ts - 60 * 60)
+            session_schema.set_recent_message_history(state, [
+                {"text": "姐姐把蜂蜜茶端过来，靠在沙发上陪你看电影。", "time": ts - 60 * 60},
+            ])
+            session_schema.set_chat_history(state, [
+                {"role": "user", "content": "我们在沙发上看电影吧。"},
+                {"role": "assistant", "content": "好呀，姐姐把蜂蜜茶端过来。"},
+            ])
+            svc._set_character_place(sid, "home", "家中客厅", 0.95, source="tool")
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "A pov living-room moment after the tea has been set down on the table.",
+                "view": "pov",
+                "character_location": "home",
+                "user_location": "with_user",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            }, ensure_ascii=False))
+
+            await plan_roleplay_image(svc, sid, mode="normal", weather_data={"desc": "雨", "temp": "22"}, now=now)
+
+            system = svc._call_llm.await_args.args[0]
+            self.assertIn("推送场景节拍推进", system)
+            self.assertNotIn("推送场景转换判定", system)
+            self.assertIn("不要把上一幕的短动作", system)
+            self.assertIn("已经喝完/放下/换了姿势", system)
+            self.assertIn("地点锁定（最高优先", system)
+
+        asyncio.run(run())
+
     def test_roleplay_image_planner_does_not_embed_animatool_schema(self):
         async def run():
             svc = self.make_service()

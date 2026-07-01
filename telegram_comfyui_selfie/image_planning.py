@@ -695,6 +695,7 @@ async def plan_roleplay_image(
     is_push = mode in ("normal", "morning", "ntr")
     push_transition_decision: dict[str, Any] = {}
     push_transition_context = ""
+    push_advance_context = ""
     if is_push and hasattr(service, "_push_scene_transition_decision"):
         try:
             push_transition_decision = service._push_scene_transition_decision(
@@ -705,6 +706,13 @@ async def plan_roleplay_image(
             )
             if push_transition_decision.get("should_transition") and hasattr(service, "_format_push_scene_transition_context"):
                 push_transition_context = service._format_push_scene_transition_context(
+                    state,
+                    session_id,
+                    now=now,
+                    mode=mode,
+                )
+            elif push_transition_decision.get("should_advance_beat") and hasattr(service, "_format_push_scene_advance_context"):
+                push_advance_context = service._format_push_scene_advance_context(
                     state,
                     session_id,
                     now=now,
@@ -948,6 +956,8 @@ async def plan_roleplay_image(
     )
     if push_transition_context:
         system += "\n" + push_transition_context
+    if push_advance_context:
+        system += "\n" + push_advance_context
     public_outfit_context = public_outfit_guard_context(
         service,
         session_id,
