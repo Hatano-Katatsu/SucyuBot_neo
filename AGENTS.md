@@ -210,6 +210,11 @@ telegram_comfyui_selfie/
 - fire-and-forget `asyncio.create_task` 内异常可能被静默吞掉；排查生图/推送失败优先看 service log。
 - `_get_llm_value("chat", "temperature")` 的 legacy 回退会落到 `llm_temperature_scene`，除非 `chat_llm_temperature` 显式设置。
 
+## 今日变更（2026-07-02）
+
+1. **文爱/性爱聊天语言规则**：聊天静态前缀新增 `CHAT_INTIMATE_LANGUAGE_RULES`，仅在明确进入文爱、性爱、插入、抽插、高潮或同等性行为描写时启用；普通调情、拥抱、亲吻和日常亲密不套用。规则覆盖台词字数上限、兴奋度 1-6 对应的语言破碎度、拟声词优先、失语优先、回复结构不规则化，以及禁止评论员口吻、完整逻辑推演和“不是……而是……”句式。该段接在“回复格式规则”之后、“对话推进规则”之前，仍位于 `messages[0]` 静态槽，避免随穿搭、世界状态或动态尾部变化破坏 checkpoint/history 前缀形状。
+2. **本轮回归验证**：新增 `test_chat_system_static_has_intimate_language_rules`，锁定启用边界、阶段密度、拟声词要求、禁用句式和静态前缀内顺序；验证 `py -3 -m unittest tests.test_core.ServiceTestCase.test_chat_system_static_has_intimate_language_rules -v`、`py -3 -m compileall -q telegram_comfyui_selfie tests`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 330 tests in 6.615s`，`OK (skipped=1)`。
+
 ## 今日变更（2026-07-01）
 
 1. **拉取远端更新**：本轮先从 `origin/main` 快进到 `c907f36`，包含 `591a15b Improve roleplay image planner cache ordering`、dream 记忆压缩输出预算和 chat 默认输出预算上调等更新。
@@ -356,13 +361,11 @@ telegram_comfyui_selfie/
 ## 最新验证
 
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m compileall -q telegram_comfyui_selfie tests`
-- `node --check telegram_comfyui_selfie\static\app.js`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m py_compile scripts\compare_llm_chat_prompts.py`
-- `py -3 scripts\compare_llm_chat_prompts.py --log "data\logs\llm_debug.json" --output .tmp\llm_chat_prompt_compare_current.md`
-- `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core`
-- 最新结果：`Ran 318 tests in 7.589s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
+- `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core -v`
+- 最新结果：`Ran 330 tests in 6.615s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
 - 工具 schema 当前紧凑 JSON 长度：`1898` 字符；chat 回复请求体 key 顺序为 `model, max_tokens, temperature, top_p, frequency_penalty, tools, tool_choice, messages`（`presence_penalty` 留空时不下发；checkpoint/dream/memory 等内部任务不下发采样参数）
-- 当前已复跑 prompt 比对脚本；`data/logs/llm_debug.json` 报告写入 `.tmp\llm_chat_prompt_compare_current.md`，`entries=10 sessions=2 pairs=8`。
+- 本轮未改 WebUI，未运行 `node --check`；未改 prompt 比对脚本逻辑，未重新生成 `.tmp\llm_chat_prompt_compare_current.md`。
 - 真实 API 缓存探针沿用上一轮结论：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。
 - 额外真实 API 缓存探针 `test_live_chat_context_cache_probe_uses_current_config_when_available`：默认跳过；设置 `SUCYUBOT_TEST_LIVE_CACHE_PROBE=1` 后才使用当前配置文件中的模型连接信息，通过真实 `handle_chat()` 链路连续回答三轮预设问题并输出缓存命中率。运行态 state / SQLite / 用户日志均隔离在测试临时目录；模型临时未返回可用回复时跳过。
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示

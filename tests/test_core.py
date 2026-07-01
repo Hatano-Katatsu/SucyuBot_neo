@@ -7708,6 +7708,23 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("先判断核心意图", static)
         self.assertIn("不要逐句逐点机械回应", static)
 
+    def test_chat_system_static_has_intimate_language_rules(self):
+        """system_static 应包含明确性行为时的语言密度与破碎度规则。"""
+        svc = self.make_service()
+        sid = "telegram:1"
+        static = svc._build_chat_messages(sid, "测试")[0]["content"]
+        self.assertIn("文爱/性爱语言规则", static)
+        self.assertIn("仅在明确进入文爱、性爱、插入、抽插、高潮或同等性行为描写时启用", static)
+        self.assertIn("普通调情、拥抱、亲吻、日常亲密不要套用本段", static)
+        self.assertIn("挑逗/前戏台词总量不超过40字", static)
+        self.assertIn("激烈抽插不超过15字", static)
+        self.assertIn("高潮前/高潮中不写完整句", static)
+        self.assertIn("每轮至少1个拟声词，激烈阶段至少2个", static)
+        self.assertIn("不要写「不是……而是……」句式", static)
+        self.assertIn("失语优先", static)
+        self.assertLess(static.index("回复格式规则"), static.index("文爱/性爱语言规则"))
+        self.assertLess(static.index("文爱/性爱语言规则"), static.index("对话推进规则"))
+
     def test_checkpoint_summarizer_prompt_has_grounding_rule(self):
         """checkpoint 摘要 prompt 应包含反幻觉约束。"""
         svc = self.make_service()
