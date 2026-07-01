@@ -513,6 +513,15 @@ class TelegramComfyUIService(
         safe = re.sub(r"[^0-9A-Za-z_-]", "_", str(chat)) or "unknown"
         return self._user_log_dir() / f"telegram_{safe}.log"
 
+    def _error_log_enabled(self) -> bool:
+        value = self.config.get("error_log_enabled", True)
+        if isinstance(value, str):
+            return value.strip().lower() in ("true", "1", "yes", "on", "开启", "启用")
+        return bool(value)
+
+    def _error_log_path(self) -> Path:
+        return self._user_log_dir() / "errors.log"
+
     def _log_archive_paths(self, path: Path) -> list[Path]:
         archive_dir = path.parent / "chunks"
         candidates: list[Path] = []
@@ -563,6 +572,9 @@ class TelegramComfyUIService(
     def _user_log_all_paths(self, session_id: str) -> list[Path]:
         return self._log_all_paths(self._user_log_path(session_id))
 
+    def _error_log_all_paths(self) -> list[Path]:
+        return self._log_all_paths(self._error_log_path())
+
     def _rotate_log_file_if_needed(self, path: Path) -> None:
         """日志按完整行滚动分块；只有写入下一条前才切块，不拆当前条目。"""
         try:
@@ -588,13 +600,17 @@ class TelegramComfyUIService(
 
     def _ulog(self, session_id: str, tag: str, message: str = ""):
         """按用户追加一行活动日志。事件级，纯同步，事件循环内原子完成。"""
-        if not session_id or not self._user_log_enabled():
+        if not session_id:
             return
         try:
             stamp = self._session_now(session_id).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         body = (message or "").replace("\r", "").replace("\n", " ⏎ ").strip()
+        if str(tag or "").upper() == "ERROR":
+            self._write_error_log_line(stamp, session_id, body)
+        if not self._user_log_enabled():
+            return
         line = f"{stamp} {tag}" + (f" {body}" if body else "")
         try:
             path = self._user_log_path(session_id)
@@ -604,6 +620,21 @@ class TelegramComfyUIService(
                 f.write(line + "\n")
         except Exception:
             logger.debug("user log write failed", exc_info=True)
+
+    def _write_error_log_line(self, stamp: str, session_id: str, body: str) -> None:
+        """把 ERROR 镜像到全局错误日志，便于 Web 错误页直接读取完整请求/返回。"""
+        if not self._error_log_enabled():
+            return
+        safe_session = str(session_id or "").replace("\r", "").replace("\n", " ").strip() or "unknown"
+        line = f"{stamp} ERROR session={safe_session}" + (f" {body}" if body else "")
+        try:
+            path = self._error_log_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._rotate_log_file_if_needed(path)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            logger.debug("error log write failed", exc_info=True)
 
     @staticmethod
     def session_id_for_chat(chat_id: int | str) -> str:
@@ -1063,11 +1094,14 @@ class TelegramComfyUIService(
         appearance: str | None = None,
         view: str = "",
         source_description: str = "",
+        nltag: str = "",
         defer_history_message: bool = False,
     ):
         state = self._get_session_state(session_id)
         history = session_schema.get_sent_photos_history(state)
         source_description = (source_description or "").strip()
+        nltag_text = (nltag or self._last_generated_photo_nltag(session_id) or scene or "").strip()
+        source_intent = self._compact_photo_source_intent(source_description)
         appearance_snapshot = (appearance or "").strip()
         if not appearance_snapshot:
             try:
@@ -1081,6 +1115,8 @@ class TelegramComfyUIService(
             "appearance": appearance_snapshot,
             "view": (view or "").strip().lower(),
             "source_description": source_description,
+            "source_intent": source_intent,
+            "nltag": nltag_text,
         }
         history.append(photo)
         session_schema.set_sent_photos_history(state, history[-10:])
@@ -1100,20 +1136,60 @@ class TelegramComfyUIService(
             f"view={(view or '').strip().lower() or '?'} caption={caption or '-'} scene={scene}",
         )
 
+    def _last_generated_photo_nltag(self, session_id: str = "") -> str:
+        try:
+            if session_id:
+                cache = getattr(self, "_last_generated_nltag_by_session", {})
+                if isinstance(cache, dict):
+                    text = str(cache.get(session_id) or "").strip()
+                    if text:
+                        return text
+            return str(getattr(self, "_last_generated_nltag", "") or "").strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _compact_photo_source_intent(source_description: str, max_chars: int = 180) -> str:
+        text = re.sub(r"\s+", " ", str(source_description or "")).strip()
+        if not text:
+            return ""
+        chunks = [part.strip() for part in re.split(r"[；;]\s*", text) if part.strip()]
+        keep: list[str] = []
+        saw_labeled = False
+        for chunk in chunks:
+            match = re.match(r"^(意图|情绪/关系推进|必须包含|原始草案/上下文)\s*[:：]\s*(.+)$", chunk)
+            if not match:
+                continue
+            saw_labeled = True
+            label, value = match.group(1), match.group(2).strip()
+            if label == "原始草案/上下文" or not value:
+                continue
+            keep.append(f"{label}: {value}")
+        result = "；".join(keep)
+        if not result and not saw_labeled and "原始草案/上下文" not in text:
+            result = f"意图: {text}"
+        if len(result) > max_chars:
+            result = result[:max_chars].rstrip() + "..."
+        return result
+
     @staticmethod
     def _format_photo_history_system_message(photo: dict[str, Any]) -> dict[str, str]:
         scene = str(photo.get("scene") or "").strip()
         caption = str(photo.get("caption") or "").strip()
-        source = str(photo.get("source_description") or "").strip()
+        nltag = str(photo.get("nltag") or "").strip() or scene
+        source_intent = (
+            str(photo.get("source_intent") or "").strip()
+            or TelegramComfyUIService._compact_photo_source_intent(str(photo.get("source_description") or ""))
+        )
         view = str(photo.get("view") or "").strip()
         lines = [
-            "照片历史（系统记录，保留到对话历史裁剪；用户明确提到照片/刚才画面时再引用，不要主动复述）：",
-            f"画面: {scene or '未记录'}",
+            "照片历史（系统记录，保留到对话历史裁剪；用户明确提到照片/刚才画面时再引用，不要主动复述；视觉内容只保留最终 nltag）：",
+            f"nltag: {nltag or '未记录'}",
         ]
+        if source_intent:
+            lines.append(source_intent)
         if caption and caption != scene:
             lines.append(f"配文: {caption}")
-        if source and source != scene:
-            lines.append(f"当时要回应的原始描写: {source}")
         if view:
             lines.append(f"视角: {view}")
         return {"role": "system", "content": "\n".join(lines)}

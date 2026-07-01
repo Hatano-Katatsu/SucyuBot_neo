@@ -222,6 +222,56 @@ class ChatContextMixin:
                 final_tool_calls = final_msg.get("tool_calls") or []
                 final_text = (final_msg.get("content") or "").strip()
                 if final_tool_calls and not final_text:
+                    retry_messages = messages + [{
+                        "role": "system",
+                        "content": (
+                            "上一轮模型错误地在最终回复阶段返回了工具调用。工具阶段已经结束，"
+                            "现在禁止调用任何工具；请只输出要发给用户的自然语言回复，"
+                            "承接已经执行的工具结果，不要提到工具调用或内部错误。"
+                        ),
+                    }]
+                    retry_request_body = {"messages": retry_messages}
+                    try:
+                        retry = await self._call_llm_messages(
+                            retry_messages,
+                            tag="chat-final-retry",
+                            purpose="chat",
+                            temp=float(self._get_llm_value("chat", "temperature", "0.9")),
+                            session_id=session_id,
+                            sampling=True,
+                        )
+                        retry_msg = retry.get("choices", [{}])[0].get("message", {})
+                        retry_text = (retry_msg.get("content") or "").strip()
+                        retry_tool_calls = retry_msg.get("tool_calls") or []
+                        if retry_text:
+                            self._ulog(session_id, "WARN", "chat-final returned tool_calls without content; retried text-only")
+                            final = retry
+                            final_request_body = retry_request_body
+                            final_msg = retry_msg
+                            final_text = retry_text
+                            final_tool_calls = retry_tool_calls
+                        else:
+                            self._record_llm_error_log(
+                                session_id=session_id,
+                                purpose="chat",
+                                tag="chat-final-retry",
+                                request_body=retry_request_body,
+                                response=retry,
+                                status=200,
+                                error="chat-final retry returned empty content after unexpected tool_calls",
+                            )
+                            empty_error_logged = True
+                    except Exception as exc:
+                        self._record_llm_error_log(
+                            session_id=session_id,
+                            purpose="chat",
+                            tag="chat-final-retry",
+                            request_body=retry_request_body,
+                            response=None,
+                            error=f"chat-final retry exception after unexpected tool_calls: {exc}",
+                        )
+                        empty_error_logged = True
+                if final_tool_calls and not final_text and not empty_error_logged:
                     self._record_llm_error_log(
                         session_id=session_id,
                         purpose="chat",
@@ -328,10 +378,10 @@ class ChatContextMixin:
         state = self._get_session_state(session_id)
         now = self._session_now(session_id)
         weekday = WEEKDAY_NAMES[now.weekday()]
-        include_world_dynamic = self._should_include_chat_world_context(user_text)
+        explicit_image_req = self._user_requested_image(user_text)
+        include_world_dynamic = self._should_include_chat_world_context(user_text, explicit_image=explicit_image_req)
         time_ctx = self._get_time_context(session_id, now=now)
         time_period = time_ctx.get("period") or self._get_time_period(now.hour)
-        light_guard = self._format_light_guard(session_id, now=now)
         # 静态前缀不含穿搭（中频变化），避免换装作废整条历史前缀缓存；穿搭见下方动态层 visual_context。
         persona = self._get_effective_persona(session_id, include_appearance=False)
         role_name, bot_name, bot_self_name = self._session_role_identity(session_id)
@@ -400,42 +450,47 @@ class ChatContextMixin:
             )
             if world_semistable:
                 semistable_parts.append(world_semistable)
-        # 自然光硬规则随 light_phase（日间/黄昏/暮色/入夜）日内漂移，挪到动态尾部，
-        # 不再常驻 semistable，避免光相滚动作废 checkpoint+历史前缀。
+        # 自然光硬规则随 light_phase（日间/黄昏/暮色/入夜）低频变化，单独放进后面的
+        # world_conditions 半稳定槽，避免把稳定世界规则和外观槽一起改掉。
         semistable_context = "\n\n".join(semistable_parts)
         self._track_semistable_context_change(session_id, semistable_context)
+        world_conditions_context = self._chat_world_conditions_context(session_id, now=now)
+        self._track_world_conditions_context_change(session_id, world_conditions_context)
 
-        # ── 动态后缀（每请求变化：精确时间/世界条件/本轮位置判断/发图 overdue）──
-        # 城市/天气/季节自然光与自然光硬规则随时钟漂移，放在非缓存尾部，不作废常驻前缀。
+        # ── 动态后缀（每请求变化：精确时间/本轮位置判断/发图 overdue）──
+        # 城市/天气/季节自然光与自然光硬规则是低频变化，放在 checkpoint 前的独立半稳定槽。
         freq = self.config.get("selfie_frequency", "频繁")
-        system_dynamic = f"当前时间: {now.strftime('%H:%M')} ({weekday}) {time_period}。\n"
-        if hasattr(self, "_format_world_conditions_context"):
-            world_conditions = self._format_world_conditions_context(session_id, now=now, mode="chat")
-            if world_conditions:
-                system_dynamic += f"{world_conditions}\n"
-        if light_guard:
-            system_dynamic += f"{light_guard}\n"
-        if self._image_nudge_due(freq, session_schema.get_rounds_since_image(state)):
-            system_dynamic += "发图提醒: 已有多轮未配图，本轮请优先调用 generate_roleplay_image。\n"
+        image_nudge_due = self._image_nudge_due(freq, session_schema.get_rounds_since_image(state))
         # 场景断档感知：距离上次对话超过阈值时提醒 LLM 旧场景可能已自然结束
         try:
             stale_minutes = float(self.config.get("scene_stale_minutes", "30") or 0)
         except Exception:
             stale_minutes = 30
         previous_interaction = session_schema.get_last_interaction(state)
-        if stale_minutes > 0 and previous_interaction and time.time() - previous_interaction > stale_minutes * 60:
+        scene_stale = bool(stale_minutes > 0 and previous_interaction and time.time() - previous_interaction > stale_minutes * 60)
+        system_dynamic = f"当前时间: {now.strftime('%H:%M')} ({weekday}) {time_period}。\n"
+        if image_nudge_due:
+            system_dynamic += "发图提醒: 已有多轮未配图，本轮请优先调用 generate_roleplay_image。\n"
+        if scene_stale:
             system_dynamic += (
                 "距离上次对话已过超过半小时，之前的日常场景可能已自然结束；请优先依据结束前场景和动作的特征判断其是否延续。"
                 "重新思考你和用户的位置关系。\n"
             )
         # 对话进行中：对话已建立的场景优先，动线只作背景。低频世界模板在 semistable，
         # 这里只保留本轮用户位置/空间关系等高频尾部。
+        world_dynamic = ""
         if include_world_dynamic and hasattr(self, "_format_world_dynamic_context"):
             world_dynamic = self._format_world_dynamic_context(
                 session_id, user_text, mode="chat", now=now, pin_location=not active_dialog
             )
             if world_dynamic:
                 system_dynamic += f"\n{world_dynamic}\n"
+        dynamic_signature = "\n".join([
+            f"image_nudge={int(image_nudge_due)}",
+            f"scene_stale={int(scene_stale)}",
+            f"world_dynamic={world_dynamic or 'off'}",
+        ])
+        self._track_dynamic_context_change(session_id, dynamic_signature)
         if session_schema.get_replying_to_selfie(state):
             session_schema.set_replying_to_selfie(state, False)
         # ── 天级/低频稳定上下文（角色历史、长期记忆、配置控制）──
@@ -471,6 +526,8 @@ class ChatContextMixin:
             messages.append({"role": "system", "content": durable_context})
         if semistable_context:
             messages.append({"role": "system", "content": semistable_context})
+        if world_conditions_context:
+            messages.append({"role": "system", "content": world_conditions_context})
         if checkpoint_part:
             messages.append({"role": "system", "content": checkpoint_part})
         history = self._chat_prompt_history(state)
@@ -482,6 +539,7 @@ class ChatContextMixin:
             static=system_static,
             durable=durable_context,
             semistable=semistable_context,
+            conditions=world_conditions_context,
             checkpoint=checkpoint_part,
             history_count=len(history),
         )
@@ -503,6 +561,7 @@ class ChatContextMixin:
         semistable: str,
         checkpoint: str,
         history_count: int,
+        conditions: str = "",
     ) -> None:
         """把各常驻前缀槽的哈希写进用户日志，便于和 USAGE 的 cached 命中对照，
         定位某轮命中率下降到底是哪个槽（static/durable/semistable/checkpoint）变了。
@@ -516,6 +575,7 @@ class ChatContextMixin:
             f"static={self._slot_hash(static)} "
             f"durable={self._slot_hash(durable)} "
             f"semistable={self._slot_hash(semistable)} "
+            f"conditions={self._slot_hash(conditions)} "
             f"ckpt={self._slot_hash(checkpoint)} "
             f"hist={history_count}",
         )
@@ -743,26 +803,113 @@ class ChatContextMixin:
         bucket[session_id] = context
         if previous is None or previous == context:
             return
+        self._queue_checkpoint_if_pending_half(session_id, force=True)
+
+    def _chat_world_conditions_context(self, session_id: str, *, now: Any = None) -> str:
+        """低频世界条件槽：按日期/天气/光线阶段更新，不随每分钟滚动。"""
+        if hasattr(self, "_world_runtime_enabled") and not self._world_runtime_enabled():
+            return ""
+        now = now or self._session_now(session_id)
+        weather = None
+        cached = getattr(self, "_weather_caches", {}).get(session_id or "__default__")
+        if isinstance(cached, dict):
+            weather = cached.get("data")
+        city = self._get_session_cfg(session_id, "location", self.config.get("location", "上海"))
+        day = self._day_type(now).get("label", "工作日") if hasattr(self, "_day_type") else ""
+        weather_text = self._weather_text(weather) if hasattr(self, "_weather_text") else str(weather or "未知")
+        time_ctx = self._get_time_context(session_id, now=now, weather=weather)
+        light_guard = self._format_light_guard(session_id, now=now, weather=weather)
+        sunrise = time_ctx.get("sunrise")
+        sunset = time_ctx.get("sunset")
+        sun_key = ""
+        if hasattr(sunrise, "strftime") and hasattr(sunset, "strftime"):
+            sun_key = f"{sunrise.strftime('%H:%M')}-{sunset.strftime('%H:%M')}"
+        signature = json.dumps({
+            "city": city,
+            "date": now.strftime("%Y-%m-%d") if hasattr(now, "strftime") else "",
+            "day": day,
+            "weather": weather_text,
+            "season": time_ctx.get("season") or "",
+            "light_phase": time_ctx.get("light_phase") or "",
+            "sun": sun_key,
+            "guard": light_guard,
+        }, ensure_ascii=False, sort_keys=True)
+        cache = getattr(self, "_chat_world_conditions_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._chat_world_conditions_cache = cache
+        cached_entry = cache.get(session_id)
+        if isinstance(cached_entry, tuple) and len(cached_entry) == 2 and cached_entry[0] == signature:
+            return cached_entry[1]
+        lines = [
+            "世界当前条件（半稳定；仅日期/天气/自然光阶段变化时更新，不随每分钟滚动）:",
+            f"- 城市/日期: {city}，{now.strftime('%Y-%m-%d')}，{day}",
+            f"- 天气: {weather_text}",
+            f"- 季节/自然光: {self._format_time_context(session_id, now=now, weather=weather)}",
+        ]
+        if light_guard:
+            lines.append(light_guard)
+        content = "\n".join(lines)
+        cache[session_id] = (signature, content)
+        return content
+
+    def _track_world_conditions_context_change(self, session_id: str, context: str):
+        """世界条件半稳定槽变化后，未折叠历史过半则 checkpoint。"""
+        if not session_id:
+            return
+        bucket = getattr(self, "_world_conditions_context_signatures", None)
+        if not isinstance(bucket, dict):
+            bucket = {}
+            self._world_conditions_context_signatures = bucket
+        previous = bucket.get(session_id)
+        bucket[session_id] = context
+        if previous is None or previous == context:
+            return
+        self._queue_checkpoint_if_pending_half(session_id, force=True)
+
+    def _track_dynamic_context_change(self, session_id: str, signature: str):
+        """动态尾部结构变化时，历史足够长则异步 checkpoint，避免长窗口一直拖着旧场景。
+
+        signature 不包含精确分钟时间，只包含发图提醒、场景断档和本轮动线这类结构性动态信息，
+        避免时钟每分钟滚动造成无意义 checkpoint。
+        """
+        if not session_id:
+            return
+        bucket = getattr(self, "_dynamic_context_signatures", None)
+        if not isinstance(bucket, dict):
+            bucket = {}
+            self._dynamic_context_signatures = bucket
+        previous = bucket.get(session_id)
+        bucket[session_id] = signature
+        if previous is None or previous == signature:
+            return
+        self._queue_checkpoint_if_pending_half(session_id, force=True)
+
+    def _queue_checkpoint_if_pending_half(self, session_id: str, *, force: bool = False) -> bool:
+        """未折叠历史达到窗口一半时排一次 checkpoint；用于上下文结构变化后的前缀收敛。"""
+        if not session_id:
+            return False
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            return
+            return False
         key = self._context_character_key(session_id)
         try:
             checkpoint = self.app_store.get_checkpoint(session_id, key)
             pending = self.app_store.list_messages(session_id, key, after_id=int(checkpoint.get("source_until_id") or 0))
         except Exception:
-            return
+            return False
         threshold = max(2, self._context_window_message_limit() // 2)
         if len(pending) < threshold:
-            return
+            return False
         scope = f"{session_id}\n{key}"
         task = getattr(self, "_checkpoint_tasks", {}).get(scope)
         if task and not task.done():
-            return
+            return False
         self._checkpoint_tasks[scope] = loop.create_task(
-            self._run_context_checkpoint(session_id, key, self._checkpoint_keep_message_limit(), force=True)
+            self._run_context_checkpoint(session_id, key, self._checkpoint_keep_message_limit(), force=force)
         )
+        return True
 
     def _image_min_gap(self, freq: str | None = None) -> int:
         """最小配图间隔（轮）：刚发过图后留白几轮再考虑，避免连刷。随频率档位变化。

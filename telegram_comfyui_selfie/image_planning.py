@@ -383,6 +383,28 @@ def _compact_context_text(text: Any, max_chars: int = 0) -> str:
     return compact
 
 
+def _compact_photo_source_intent(source_description: Any, max_chars: int = 180) -> str:
+    text = _compact_context_text(source_description)
+    if not text:
+        return ""
+    chunks = [part.strip() for part in re.split(r"[；;]\s*", text) if part.strip()]
+    keep: list[str] = []
+    saw_labeled = False
+    for chunk in chunks:
+        match = re.match(r"^(意图|情绪/关系推进|必须包含|原始草案/上下文)\s*[:：]\s*(.+)$", chunk)
+        if not match:
+            continue
+        saw_labeled = True
+        label, value = match.group(1), match.group(2).strip()
+        if label == "原始草案/上下文" or not value:
+            continue
+        keep.append(f"{label}: {value}")
+    result = "；".join(keep)
+    if not result and not saw_labeled and "原始草案/上下文" not in text:
+        result = f"意图: {text}"
+    return _compact_context_text(result, max_chars=max_chars)
+
+
 _SPATIAL_HINT_RE = re.compile(
     r"坐|站|躺|跪|趴|蹲|靠|倚|抱|搂|贴|牵|握|脚边|腿上|膝上|怀里|身后|背后|面前|旁边|身边|"
     r"肩膀|肩头|胸口|锁骨|腰|后背|背部|背向|背对|腿|脚|手臂|手指|手心|手掌|双手|一只手|手里|手边|手腕|"
@@ -549,16 +571,13 @@ def format_sent_photo_context(service: Any, state: dict[str, Any], session_id: s
     for photo in photos:
         ts = photo.get("timestamp", 0)
         stamp = datetime.fromtimestamp(ts, tz).strftime("%H:%M") if ts else "未知时间"
-        scene = (photo.get("scene") or "").strip()
-        source = (photo.get("source_description") or "").strip()
+        visual = (photo.get("nltag") or photo.get("scene") or "").strip()
         view = (photo.get("view") or "").strip() or "未知视角"
-        appearance = (photo.get("appearance") or "").strip()
-        parts = [f"[{stamp}] {view}: {scene}"]
-        if source and source != scene:
-            parts.append(f"原始描述: {source}")
-        if appearance:
-            parts.append(f"外貌: {appearance}")
-        lines.append("；".join(parts))
+        source_intent = (photo.get("source_intent") or "").strip() or _compact_photo_source_intent(photo.get("source_description"))
+        line = f"[{stamp}] {view}: {visual or '未记录'}"
+        if source_intent:
+            line += f"；{source_intent}"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -582,8 +601,15 @@ def format_recent_photo_dedup_context(
         ts = photo.get("timestamp", 0)
         stamp = datetime.fromtimestamp(ts, tz).strftime("%H:%M") if ts else "未知时间"
         view = (photo.get("view") or "").strip() or "未知视角"
-        scene = _compact_context_text(photo.get("scene"), max_chars=max_chars) or "未记录"
-        lines.append(f"[{stamp}] {view}: {scene}")
+        scene = _compact_context_text(photo.get("nltag") or photo.get("scene"), max_chars=max_chars) or "未记录"
+        source_intent = _compact_context_text(
+            (photo.get("source_intent") or "").strip() or _compact_photo_source_intent(photo.get("source_description")),
+            max_chars=max_chars,
+        )
+        line = f"[{stamp}] {view}: {scene}"
+        if source_intent:
+            line += f"；{source_intent}"
+        lines.append(line)
     return "\n".join(lines)
 
 

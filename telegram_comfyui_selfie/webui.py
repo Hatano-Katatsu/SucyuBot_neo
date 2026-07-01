@@ -4,6 +4,7 @@ import asyncio
 import json
 import secrets
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -1578,6 +1579,62 @@ def log_chunk_items(service, base_path: Path, active_path: Path | None = None) -
     return items
 
 
+USER_LOG_LINE_RE = re.compile(
+    r"^(?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+(?P<tag>\S+)(?:\s+(?P<message>.*))?$"
+)
+
+
+def _error_log_paths(service) -> list[Path]:
+    """只读取专用错误日志 errors.log 及其历史分块。"""
+    if hasattr(service, "_error_log_all_paths"):
+        return service._error_log_all_paths()
+    path = service._user_log_dir() / "errors.log"
+    return [path] if path.exists() else []
+
+
+def _parse_error_log_line(path: Path, line: str, line_no: int, mtime: float) -> dict[str, Any] | None:
+    match = USER_LOG_LINE_RE.match(line)
+    timestamp = match.group("time") if match else ""
+    tag = match.group("tag") if match else ""
+    message = (match.group("message") if match else line) or ""
+    if tag != "ERROR" and "ERROR" not in line and "error" not in line.lower():
+        return None
+    session_id = ""
+    session_match = re.match(r"session=([^\s]+)\s*(.*)$", message)
+    if session_match:
+        session_id = session_match.group(1)
+        message = session_match.group(2).strip()
+    payload = None
+    marker = ""
+    for candidate in ("LLM_FULL_LOG", "MEMORY_OP_FAILED"):
+        if candidate in message:
+            marker = candidate
+            raw_json = message.split(candidate, 1)[1].strip()
+            try:
+                payload = json.loads(raw_json)
+            except Exception:
+                payload = None
+            break
+    item: dict[str, Any] = {
+        "file": path.name,
+        "line_no": line_no,
+        "line": line,
+        "time": timestamp,
+        "tag": tag or "",
+        "message": message,
+        "session_id": session_id,
+        "kind": marker,
+        "mtime": mtime,
+    }
+    if payload is not None:
+        item["payload"] = payload
+        if isinstance(payload, dict):
+            item["error"] = payload.get("error") or ""
+            item["request"] = payload.get("request")
+            item["response"] = payload.get("response")
+    return item
+
+
 async def api_freeze_inactive(request: web.Request):
     _require_admin(request)
     service = service_from(request)
@@ -1785,19 +1842,23 @@ async def api_llm_debug_log(request: web.Request):
 async def api_system_error_log(request: web.Request):
     _require_admin(request)
     service = service_from(request)
-    log_dir = service._user_log_dir()
-    error_lines = []
-    if log_dir.exists():
-        for path in log_dir.glob("*.log"):
-            try:
-                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-                for line in lines:
-                    if "ERROR" in line or "error" in line.lower():
-                        error_lines.append({"file": path.name, "line": line})
-            except Exception:
-                continue
-    error_lines.sort(key=lambda x: x["line"], reverse=True)
-    return json_ok({"errors": error_lines[:100]})
+    try:
+        limit = max(1, min(1000, int(request.query.get("limit", "300"))))
+    except ValueError:
+        limit = 300
+    error_lines: list[dict[str, Any]] = []
+    for path in _error_log_paths(service):
+        try:
+            stat = path.stat()
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for index, line in enumerate(lines, start=1):
+                item = _parse_error_log_line(path, line, index, stat.st_mtime)
+                if item:
+                    error_lines.append(item)
+        except Exception:
+            continue
+    error_lines.sort(key=lambda x: (x.get("time") or "", x.get("mtime") or 0, x.get("line_no") or 0), reverse=True)
+    return json_ok({"errors": error_lines[:limit], "total": len(error_lines)})
 
 
 async def api_test_comfyui(request: web.Request):

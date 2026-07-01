@@ -32,6 +32,32 @@ BOTTOM_EXPOSURE_NEGATIVES = ("no panties", "no underwear", "bottomless", "crotch
 ANIMATOOL_NLTAG_FIELDS = ("nltag", "nl_tag", "nl_tags", "tags")
 
 
+def _remember_generated_nltag(service: Any, session_id: str, nltag: str):
+    text = str(nltag or "").strip()
+    if not text:
+        return
+    try:
+        service._last_generated_nltag = text
+        if session_id:
+            cache = getattr(service, "_last_generated_nltag_by_session", None)
+            if not isinstance(cache, dict):
+                cache = {}
+            cache[session_id] = text
+            service._last_generated_nltag_by_session = cache
+    except Exception:
+        logger.debug("failed to store generated nltag", exc_info=True)
+
+
+def _payload_nltag(payload: dict[str, Any]) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for field in ANIMATOOL_NLTAG_FIELDS:
+        text = str(payload.get(field) or "").strip()
+        if text:
+            return text
+    return ""
+
+
 def _preferred_animatool_nltag_field(properties: dict[str, Any], required: set[str] | None = None) -> str:
     required = required or set()
     for field in ANIMATOOL_NLTAG_FIELDS:
@@ -60,6 +86,7 @@ class PromptSlots:
     one_shot_appearance: str = ""
     negative: str = ""
     positive: str = ""
+    session_id: str = ""
 
     def compact(self, limit: int = 420) -> str:
         parts = []
@@ -996,6 +1023,7 @@ def build_prompt(
         safety=safety_tag,
         one_shot_appearance=(one_shot_appearance or "").strip(),
         negative=neg,
+        session_id=session_id,
     )
     positive = slots.render_positive()
     if service._parse_appearance(positive).get("outfit"):
@@ -1005,6 +1033,7 @@ def build_prompt(
     slots.positive = positive
     try:
         service._last_prompt_slots = slots
+        _remember_generated_nltag(service, session_id, slots.scene)
         if session_id:
             cache = getattr(service, "_last_prompt_slots_by_session", None)
             if not isinstance(cache, dict):
@@ -1307,6 +1336,7 @@ async def _do_generate_animatool(
         if props:
             hyper_keys = {"seed", "filename_prefix", "steps", "cfg", "aspect_ratio", "width", "height", "batch_size"}
             llm_payload = {k: v for k, v in llm_payload.items() if k in props or k in hyper_keys}
+        _remember_generated_nltag(service, session_id, _payload_nltag(llm_payload))
         return await _post_animatool(service, session_id, slots, seed, llm_payload)
 
     # 回退：旧逻辑
@@ -1324,6 +1354,7 @@ async def _post_animatool(
     """POST /anima/generate_turbo 并下载图片。"""
     payload = dict(payload or {})
     try:
+        _remember_generated_nltag(service, session_id, _payload_nltag(payload))
         if hasattr(service, "_ulog") and isinstance(slots, PromptSlots):
             service._ulog(
                 session_id,
@@ -1389,6 +1420,7 @@ async def submit_animatool_turbo(service: Any, positive: str, negative: str, see
         cleaned = {k: v for k, v in payload.items() if v not in (None, "")}
     else:
         cleaned = _build_animatool_turbo_payload(service, slots, positive, negative, seed, schema)
+    _remember_generated_nltag(service, getattr(slots, "session_id", "") if isinstance(slots, PromptSlots) else "", _payload_nltag(cleaned))
     try:
         if hasattr(service, "_ulog") and isinstance(slots, PromptSlots):
             service._ulog(

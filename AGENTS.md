@@ -117,19 +117,20 @@ telegram_comfyui_selfie/
 
 1. 静态 system：身份、人设、关系、工具规则、照片历史规则、固定发图节奏规则。
 2. 天级/低频稳定层：低频对话控制、角色历史提要、按重要性选取的长期记忆。
-3. 半稳定状态快照：当前可见外型、衣橱、当前附加外貌；低频世界模板（天气/光线阶段/角色身份/日常动线背景/场景约束）只在本轮出现地点、天气、发图等世界状态信号时展开。
-4. checkpoint 会话连续性：近期已折叠对话摘要。
-5. 未折叠历史：checkpoint 之后的真实 `user/assistant/system` 历史。
-6. 动态尾部：精确当前时间、按需本轮用户位置/空间关系判断、overdue 发图提醒、场景断档提醒、当前用户输入。
+3. 半稳定状态快照：当前可见外型、衣橱、当前附加外貌；低频世界规则（角色身份、地点来源、空间覆盖、位置优先级/不瞬移段落）固定在 checkpoint/历史之前。
+4. 世界当前条件半稳定槽：城市/日期、天气、季节/自然光、自然光硬规则；按城市/日期/天气/自然光阶段签名缓存，只在这些字段变化时更新，不随每分钟滚动。
+5. checkpoint 会话连续性：近期已折叠对话摘要。
+6. 未折叠历史：checkpoint 之后的真实 `user/assistant/system` 历史。
+7. 动态尾部：精确当前时间、按需本轮用户位置/空间关系判断、overdue 发图提醒、场景断档提醒、当前用户输入。
 
 关键约束：
 
 - `_chat_prompt_history(state)` 使用 checkpoint 之后的全量未折叠历史，checkpoint 之间只追加不滑动。
 - checkpoint 裁剪后第一条必须是 `user`；多余的孤立 `assistant` / `system` 会进入 checkpoint 摘要。
 - dream 和 dream 记忆整理只读取实际 `user/assistant` 对话，不消费照片历史 system。
-- 照片历史是真正的历史 `system` 消息，保留到被正常历史裁剪为止，并参与 checkpoint 摘要。
-- 外观/衣柜等持久半稳定层变化时，如果未折叠历史达到 `context_window_message_limit / 2`，会异步强制 checkpoint 一次，近似恢复后续前缀稳定；按需展开的世界块不参与该签名，避免一次天气/地点问题触发无意义 checkpoint。
-- 普通聊天默认不注入天气、光线阶段、城市、角色身份和动线背景；只有本轮出现地点/天气/时间/发图等信号时，才展开世界 semistable 与本轮动态位置尾部，避免把高变动世界状态塞进每轮缓存前缀。
+- 照片历史是真正的历史 `system` 消息，位于 checkpoint 锚定的未折叠历史段中，保留到被正常历史裁剪为止，并参与 checkpoint 摘要；内容只保留最终生图 `nltag/tags` 与瘦身后的短意图/情绪/必须包含，不再写入完整原始草案、外观槽位或全部 PromptSlots，避免照片记录污染后续前缀缓存。
+- 外观/衣柜、低频世界规则、世界当前条件或动态尾部结构变化时，如果未折叠历史达到 `context_window_message_limit / 2`，会异步强制 checkpoint 一次，近似恢复后续前缀稳定；动态签名不包含精确分钟，避免时钟滚动触发无意义 checkpoint。
+- 普通聊天保留固定位置的世界规则槽和世界当前条件槽；只有本轮出现地点/天气/时间/发图等信号时，才展开本轮用户位置/动线/空间关系动态尾部，避免每句普通对话都跑高频世界判断。
 - `/新场景` / `/上下文重置` 会先对切换前未折叠上下文跑一次 checkpoint 摘要和记忆提取，再清空当前模型侧 `chat_history` 和 checkpoint 摘要，并把 checkpoint 边界推进到当前最新消息；SQLite `chat_messages` 不删除，后续 dream 仍会读取真实 `user/assistant` 对话。
 - 兼容部分 OpenAI 兼容端点把工具调用以 DSML 文本写进 `message.content` 的情况；聊天链路会提取 `<...DSML...invoke>` 为内部工具调用并清理残留标记，避免原始工具 XML/DSML 泄漏给用户。
 
@@ -171,7 +172,7 @@ telegram_comfyui_selfie/
 - `clothing_off` 对衣物/裸体默认仍是“仅本图生效”；但当它明确命中当前已穿戴的可持久配饰（如眼镜、项链、耳环、发夹）时，生图成功后会把该配饰从当前穿搭中移除，避免下一张图被稳定外貌重新加回去。
 - OC 不把中文名、昵称或作品名塞进视觉 identity；只有已知公开角色才注入角色/作品 tag。
 - 亲密场景默认走 POV，只允许用户/伴侣身体局部入画；除非用户明确要求拍照、录像或对镜，才允许设备入画。
-- `/配图`（同义词 `/画图`、`/绘图` 等）按当前聊天场景生成图片，不强制自拍或看镜头；命令后的参数作为最高优先级场景/视角/机位/远近/局部特写要求，但规划器只消费瘦身后的短期连续性、最近已发图片摘要、世界状态和记忆，不再直接吞完整聊天流水。
+- `/配图`（同义词 `/画图`、`/绘图` 等）按当前聊天场景生成图片，不强制自拍或看镜头；命令后的参数作为最高优先级场景/视角/机位/远近/局部特写要求，但规划器只消费瘦身后的短期连续性、最近已发图片的最终 `nltag/tags` 与短意图、世界状态和记忆，不再直接吞完整聊天流水、原始草案或整段外观快照。
 - `roleplay-image-plan` 在瘦身连续性之外保留“空间/身体关系硬约束”旁路：坐/站/躺/跪、脚边、腿上、身后、怀里、肩膀、背向、俯身等站位线索会单独进入 planner，并在 planner 漏写时追回到最终 `scene`，避免关键身体关系被每条 140 字截断吃掉。
 - `partner_in_frame` 区分日常局部同框和真正亲密/性爱场景；日常帮吹头发、坐脚边、靠肩等只去掉 `solo` 冲突并允许必要的手/脚/肩局部，不再自动追加 `male torso` / `intimate close-up`。
 - POV 正向开场只声明“用户视角看向角色”，不再默认强塞 `eye contact` / `solo`；翻译层允许保留 `she/the character` 动作主语，确保姿态和身体关系归属清楚。
@@ -208,6 +209,18 @@ telegram_comfyui_selfie/
 - 长期记忆不写临时服装、上一轮场景台词、一次性道具；这些属于短期上下文、衣柜或照片历史。
 - fire-and-forget `asyncio.create_task` 内异常可能被静默吞掉；排查生图/推送失败优先看 service log。
 - `_get_llm_value("chat", "temperature")` 的 legacy 回退会落到 `llm_temperature_scene`，除非 `chat_llm_temperature` 显式设置。
+
+## 今日变更（2026-07-01）
+
+1. **拉取远端更新**：本轮先从 `origin/main` 快进到 `c907f36`，包含 `591a15b Improve roleplay image planner cache ordering`、dream 记忆压缩输出预算和 chat 默认输出预算上调等更新。
+2. **09:05 `LLM_FULL_LOG` 报错定位与修复**：附件里的 `chat-final returned tool_calls without content` 不是网络失败，而是兼容层在最终文本请求阶段（请求体已不携带 `tools`）仍返回 `finish_reason=tool_calls`，并给出 `generate_roleplay_image` 工具调用且 `content=""`；现在检测到这种情况会追加禁止工具的 text-only system 提示重试一次 `chat-final-retry`，成功则写 `WARN` 并发自然语言回复，只有重试仍为空或异常时才写 `ERROR LLM_FULL_LOG`。前一轮工具调用已成功记录“用户在公司 / 角色在家”。
+3. **`591a15b` 行为说明**：该提交把 `roleplay-image-plan` 的 scene boundary、模式、世界/地点、空间关系、亲密同框、单帧构图、视角和 JSON 契约等稳定规则集中到 planner system 最前段；角色身份、外貌、天气、地点 pin、用户位置和短期上下文保留在后段，减少动态角色/天气/穿搭打断 provider prefix cache。
+4. **照片历史上下文瘦身**：发送图片成功后缓存并持久化最终生图 `nltag/tags`（普通后端取 `PromptSlots.scene`，AnimaTool 取实际 payload 的 `nltag/nl_tag/nl_tags/tags`）；照片历史 system 消息和 `format_sent_photo_context()` / `format_recent_photo_dedup_context()` 均优先使用该字段，只附加从 `source_description` 提取的短意图/情绪/必须包含，明确排除 `原始草案/上下文`、外观快照和全部 PromptSlots。
+5. **照片历史位置稳定性**：照片历史仍作为真实 `chat_history` 里的 `system` 消息写入 checkpoint 锚定的未折叠历史段，位于动态时间/天气尾部之前；checkpoint 之间只追加不滑动，不再每轮动态注入。新增测试锁定照片历史不会进入 `system_dynamic`，短意图保留但长上下文和外观槽不进入 prompt。
+6. **动态 system 门控与 checkpoint 收敛**：`_build_chat_messages()` 先轻量判定本轮是否明确发图，再复用 `_should_include_chat_world_context(..., explicit_image=...)` 控制本轮位置/动线/空间关系动态尾部；`_track_dynamic_context_change()` 只跟踪发图提醒、场景断档和世界动态文本，不把精确分钟纳入签名。动态结构变化、半稳定状态变化或世界当前条件变化时，统一经 `_queue_checkpoint_if_pending_half()` 在未折叠历史过半后排一次 forced checkpoint。
+7. **世界条件/自然光降频**：新增 `_chat_world_conditions_context()`，把城市/日期、天气、季节/自然光和自然光硬规则放在 semistable 之后、checkpoint/历史之前的独立半稳定 system 槽；签名包含城市、日期、星期/节假日、天气、季节、`light_phase`、日出日落和自然光硬规则。同一自然光阶段内如 12:00→12:10 内容字节稳定，跨阶段如白天→夜晚才更新并按需触发 checkpoint。
+8. **专用错误日志**：所有 `_ulog(..., "ERROR", ...)` 会继续写入用户活动日志，同时额外镜像到全局 `errors.log`（独立 `error_log_enabled`，默认开启；即使关闭 `user_log_enabled` 仍会记录错误）；`errors.log` 使用同一套完整行轮转机制，历史块进入 `logs/chunks/errors.<timestamp>.log`。`/api/logs/system-errors` 只读取 `errors.log` 及其历史分块，不再扫描 `telegram_*.log`；结构化返回 `session_id`、错误类型、原始行，且会解析 `LLM_FULL_LOG` / `MEMORY_OP_FAILED` 的 JSON payload，把完整 `request` / `response` 展示到 WebUI。
+9. **回归验证**：新增/更新测试覆盖照片历史 nltag 写入、短意图保留、原始草案/外观槽排除、planner 图片摘要使用 nltag、照片历史在未折叠历史中的稳定位置、`chat-final` 空工具调用 text-only 重试、世界当前条件同阶段稳定/跨阶段更新、条件变化过半窗口触发 checkpoint、专用错误日志写入/轮转、错误页只读 `errors.log` 不扫描用户日志、错误 payload 展开 LLM 请求/返回；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core`，结果 `Ran 313 tests in 6.027s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-06-30）
 
@@ -326,15 +339,14 @@ telegram_comfyui_selfie/
 
 ## 最新验证
 
-- `py -3 -m unittest tests.test_core.ModelProfileTestCase.test_default_chat_max_tokens_is_high_enough_for_thinking tests.test_core.ServiceTestCase.test_call_llm_messages_records_finish_reason_and_completion_tokens tests.test_core.ConfigStoreTestCase.test_load_nested_model_profiles -v`
-- `$env:PYTHONPYCACHEPREFIX='.tmp\pycache_compile'; py -3 -m compileall -q telegram_comfyui_selfie tests`
-- `py -3 -m py_compile scripts\compare_llm_chat_prompts.py`
-- `py -3 scripts\compare_llm_chat_prompts.py --log "data\logs\llm_debug.json" --output .tmp\llm_chat_prompt_compare_current.md`
+- `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m compileall -q telegram_comfyui_selfie tests`
 - `node --check telegram_comfyui_selfie\static\app.js`
-- `py -3 -m unittest tests.test_core -v`
-- 最新结果：`Ran 306 tests in 7.555s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
+- `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m py_compile scripts\compare_llm_chat_prompts.py`
+- `py -3 scripts\compare_llm_chat_prompts.py --log "data\logs\llm_debug.json" --output .tmp\llm_chat_prompt_compare_current.md`
+- `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core`
+- 最新结果：`Ran 313 tests in 6.027s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
 - 工具 schema 当前紧凑 JSON 长度：`1898` 字符；chat 回复请求体 key 顺序为 `model, max_tokens, temperature, top_p, frequency_penalty, tools, tool_choice, messages`（`presence_penalty` 留空时不下发；checkpoint/dream/memory 等内部任务不下发采样参数）
-- 当前已复跑 prompt 比对脚本；`data/logs/llm_debug.json` 报告写入 `.tmp\llm_chat_prompt_compare_current.md`，`entries=10 sessions=1 pairs=9`。
+- 当前已复跑 prompt 比对脚本；`data/logs/llm_debug.json` 报告写入 `.tmp\llm_chat_prompt_compare_current.md`，`entries=10 sessions=2 pairs=8`。
 - 真实 API 缓存探针沿用上一轮结论：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。
 - 额外真实 API 缓存探针 `test_live_chat_context_cache_probe_uses_current_config_when_available`：默认跳过；设置 `SUCYUBOT_TEST_LIVE_CACHE_PROBE=1` 后才使用当前配置文件中的模型连接信息，通过真实 `handle_chat()` 链路连续回答三轮预设问题并输出缓存命中率。运行态 state / SQLite / 用户日志均隔离在测试临时目录；模型临时未返回可用回复时跳过。
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示

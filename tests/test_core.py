@@ -16,7 +16,7 @@ from telegram_comfyui_selfie import character_card
 from telegram_comfyui_selfie import session_schema
 from telegram_comfyui_selfie.config_store import flatten_config, load_simple_yaml
 from telegram_comfyui_selfie.generation import PromptSlots, _build_animatool_turbo_payload
-from telegram_comfyui_selfie.image_planning import _detect_intimate_context, _detect_nudity_context, _infer_clothing_off_fallback, format_dialog_context, format_planning_spatial_context, format_sent_photo_context, normalize_scene_visual_subject, plan_animatool_slots, plan_roleplay_image
+from telegram_comfyui_selfie.image_planning import _detect_intimate_context, _detect_nudity_context, _infer_clothing_off_fallback, format_dialog_context, format_planning_spatial_context, format_recent_photo_dedup_context, format_sent_photo_context, normalize_scene_visual_subject, plan_animatool_slots, plan_roleplay_image
 from telegram_comfyui_selfie.commands import (
     SESSION_GLOBAL_STATE_KEYS,
     _is_character_config_key,
@@ -24,7 +24,7 @@ from telegram_comfyui_selfie.commands import (
 )
 from telegram_comfyui_selfie.command_aliases import COMMAND_ALIAS_GROUPS, resolve_command_alias
 from telegram_comfyui_selfie.prompt_intake import heuristic_intake
-from telegram_comfyui_selfie.webui import build_world_route_preview, cast_config_value, masked_config, serialize_prompt_slots, session_summary
+from telegram_comfyui_selfie.webui import api_system_error_log, build_world_route_preview, cast_config_value, masked_config, serialize_prompt_slots, session_summary
 
 
 os.environ.setdefault("SUCYUBOT_TEST_FAST_SQLITE", "1")
@@ -1132,6 +1132,56 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("照片历史", photo_history["content"])
         self.assertIn("standing by a window", photo_history["content"])
 
+    def test_record_sent_photo_uses_nltag_for_history_context(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        svc._last_generated_nltag_by_session = {
+            sid: "A final natural-language nltag sentence beside the window. no text, no logo"
+        }
+
+        svc._record_sent_photo(
+            sid,
+            "planner scene with broader context",
+            caption="给你看一眼。",
+            appearance="masterpiece, 1girl, silver hair, all slot appearance",
+            view="selfie",
+            source_description="意图: 用户想看窗边照片；原始草案/上下文: 原始意图和聊天草案不应进入照片历史上下文",
+        )
+
+        state = svc._get_session_state(sid)
+        photo = state["sent_photos_history"][-1]
+        self.assertEqual(photo["nltag"], "A final natural-language nltag sentence beside the window. no text, no logo")
+        history_message = session_schema.get_chat_history(state)[-1]["content"]
+        self.assertIn("nltag: A final natural-language nltag sentence", history_message)
+        self.assertIn("意图: 用户想看窗边照片", history_message)
+        self.assertIn("配文: 给你看一眼。", history_message)
+        self.assertNotIn("原始意图", history_message)
+        self.assertNotIn("all slot appearance", history_message)
+
+    def test_sent_photo_context_prefers_nltag_without_source_or_appearance(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["sent_photos_history"] = [{
+            "timestamp": time.time(),
+            "scene": "quality, 1girl, full slot scene should stay out",
+            "nltag": "A compact final nltag sentence in the kitchen.",
+            "caption": "",
+            "appearance": "masterpiece, fox ears, camisole, full appearance should stay out",
+            "source_description": "意图: 用户想看厨房照片；原始草案/上下文: 原始描述不应进入图片上下文",
+            "view": "third",
+        }]
+
+        full = format_sent_photo_context(svc, state, sid)
+        dedup = format_recent_photo_dedup_context(svc, state, sid)
+
+        for text in (full, dedup):
+            self.assertIn("A compact final nltag sentence in the kitchen.", text)
+            self.assertIn("用户想看厨房照片", text)
+            self.assertNotIn("full slot scene", text)
+            self.assertNotIn("full appearance", text)
+            self.assertNotIn("原始描述", text)
+
     def test_chat_prompt_injects_visible_appearance_and_accessories(self):
         svc = self.make_service()
         sid = "telegram:1"
@@ -1304,6 +1354,77 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         archived_text = archives[0].read_text(encoding="utf-8")
         self.assertIn("x" * 120, archived_text)
         self.assertTrue(archived_text.endswith("\n"))
+
+    def test_web_system_error_log_reads_dedicated_chunks_and_expands_llm_payload(self):
+        async def run():
+            from aiohttp import web
+
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config["user_log_enabled"] = True
+            svc.config["user_log_rotate_bytes"] = 120
+            svc._record_llm_error_log(
+                session_id=sid,
+                purpose="chat",
+                tag="chat-final",
+                request_url="https://llm.example/v1/chat/completions",
+                request_body={"messages": [{"role": "user", "content": "hello"}], "model": "x"},
+                response={"choices": [{"finish_reason": "tool_calls", "message": {"content": None}}]},
+                status=200,
+                error="chat-final returned tool_calls without content",
+            )
+            # 触发下一条写入前轮转，确保错误页能读到 chunks 下的旧块。
+            svc._ulog(sid, "ERROR", "plain later error")
+
+            app = web.Application()
+            app["service"] = svc
+            req = make_mock_request(app, "/api/logs/system-errors", admin=True)
+            resp = await api_system_error_log(req)
+            data = json.loads(resp.text)
+            self.assertTrue(data["ok"])
+            self.assertGreaterEqual(data["total"], 2)
+            llm_errors = [item for item in data["errors"] if item.get("kind") == "LLM_FULL_LOG"]
+            self.assertTrue(llm_errors)
+            item = llm_errors[0]
+            self.assertRegex(item["file"], r"^errors\.\d{8}_\d{6}(?:\.\d+)?\.log$")
+            self.assertEqual(item["session_id"], sid)
+            self.assertEqual(item["error"], "chat-final returned tool_calls without content")
+            self.assertEqual(item["request"]["body"]["messages"][0]["content"], "hello")
+            self.assertEqual(item["response"]["choices"][0]["finish_reason"], "tool_calls")
+
+        asyncio.run(run())
+
+    def test_web_system_error_log_does_not_scan_user_logs(self):
+        async def run():
+            from aiohttp import web
+
+            svc = self.make_service()
+            sid = "telegram:999"
+            user_log = svc._user_log_path(sid)
+            user_log.parent.mkdir(parents=True, exist_ok=True)
+            user_log.write_text("2026-07-01 10:00:00 ERROR old user log only\n", encoding="utf-8")
+
+            app = web.Application()
+            app["service"] = svc
+            req = make_mock_request(app, "/api/logs/system-errors", admin=True)
+            resp = await api_system_error_log(req)
+            data = json.loads(resp.text)
+            self.assertTrue(data["ok"])
+            self.assertEqual(data["total"], 0)
+            self.assertEqual(data["errors"], [])
+
+        asyncio.run(run())
+
+    def test_error_log_writes_even_when_user_log_disabled(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        svc.config["user_log_enabled"] = False
+
+        svc._ulog(sid, "ERROR", "critical failure")
+
+        self.assertFalse(svc._user_log_path(sid).exists())
+        text = svc._error_log_path().read_text(encoding="utf-8")
+        self.assertIn("ERROR session=telegram:123 critical failure", text)
 
     def test_low_frequency_chat_controls_stay_before_history_not_dynamic(self):
         """前缀缓存不变量：配置型控制放稳定层；发图/照片策略写进 static。"""
@@ -1787,11 +1908,12 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         svc = self.make_service()
         sid = "telegram:123"
 
-        def build_at(hour):
-            svc._session_now = lambda session_id="", _h=hour: datetime(2026, 6, 18, _h, 0, tzinfo=timezone.utc)
+        def build_at(hour, minute=0):
+            svc._session_now = lambda session_id="", _h=hour, _m=minute: datetime(2026, 6, 18, _h, _m, tzinfo=timezone.utc)
             return svc._build_chat_messages(sid, "你好")
 
         noon = build_at(12)
+        noon_later = build_at(12, 10)
         night = build_at(23)
         world_marker = "世界状态规则"  # 世界状态规则
         conditions_marker = "世界当前条件"  # 世界当前条件
@@ -1803,6 +1925,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         noon_resident = resident_world(noon)
         night_resident = resident_world(night)
+        noon_conditions = next(m["content"] for m in noon if conditions_marker in m.get("content", ""))
+        noon_later_conditions = next(m["content"] for m in noon_later if conditions_marker in m.get("content", ""))
+        night_conditions = next(m["content"] for m in night if conditions_marker in m.get("content", ""))
 
         # 常驻世界规则槽随 time_period 滚动（中午→深夜）保持字节一致，不再作废前缀缓存。
         self.assertEqual(noon_resident, night_resident)
@@ -1810,13 +1935,44 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn(light_marker, noon_resident)
         self.assertNotIn(weather_marker, noon_resident)
 
-        # 揮发条件落到非缓存尾部（system_dynamic），且随时间变化。
+        # 揮发条件降频到独立半稳定槽，不随精确分钟滚动，但会随自然光阶段变化。
+        self.assertIn(light_marker, noon_conditions)
+        self.assertIn(weather_marker, noon_conditions)
+        self.assertEqual(noon_conditions, noon_later_conditions)
+        self.assertNotEqual(noon_conditions, night_conditions)
         noon_tail = noon[-2]["content"]
         night_tail = night[-2]["content"]
         self.assertEqual(noon[-2]["role"], "system")
-        self.assertIn(conditions_marker, noon_tail)
-        self.assertIn(light_marker, noon_tail)
+        self.assertNotIn(conditions_marker, noon_tail)
+        self.assertNotIn(light_marker, noon_tail)
         self.assertNotEqual(noon_tail, night_tail)
+
+    def test_world_conditions_change_can_force_checkpoint_after_half_window(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            key = svc._context_character_key(sid)
+            svc.config["context_window_message_limit"] = "10"
+            messages = []
+            for i in range(3):
+                messages.append({"role": "user", "content": f"用户消息 {i}"})
+                messages.append({"role": "assistant", "content": f"角色回复 {i}"})
+            svc.app_store.append_messages(sid, key, messages)
+            started = asyncio.Event()
+
+            async def fake_checkpoint(session_id, character_key, keep, *, force=False):
+                self.assertTrue(force)
+                started.set()
+
+            svc._run_context_checkpoint = fake_checkpoint
+            svc._session_now = lambda session_id="": datetime(2026, 6, 18, 12, 0, tzinfo=timezone.utc)
+            svc._build_chat_messages(sid, "你好")
+            svc._session_now = lambda session_id="": datetime(2026, 6, 18, 23, 0, tzinfo=timezone.utc)
+            svc._build_chat_messages(sid, "你好")
+
+            await asyncio.wait_for(started.wait(), timeout=1)
+
+        asyncio.run(run())
 
     def test_character_place_autoextract_overrides_clock(self):
         async def run():
@@ -3568,7 +3724,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "scene": "restaurant booth smile " + ("scene " * 30) + "END_PHOTO_MARKER",
                 "caption": "",
                 "appearance": "light blue round glasses, shell bracelet",
-                "source_description": "原始描述不该出现在瘦身后的图片摘要里",
+                "source_description": "意图: 餐厅卡座照片；原始草案/上下文: 原始描述不该出现在瘦身后的图片摘要里",
                 "view": "third",
             }]
             svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
@@ -3590,7 +3746,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("短期连续性:", planner_user)
             self.assertIn("最近已发图片摘要:", planner_user)
             self.assertNotIn("照片历史（系统记录", planner_user)
-            self.assertNotIn("原始描述:", planner_user)
+            self.assertIn("意图: 餐厅卡座照片", planner_user)
+            self.assertNotIn("原始描述", planner_user)
             self.assertNotIn("外貌:", planner_user)
             self.assertNotIn("END_USER_MARKER", planner_user)
             self.assertNotIn("END_BOT_MARKER", planner_user)
@@ -4192,13 +4349,50 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual([m["role"] for m in history], ["user", "assistant", "system"])
         injected = history[-1]["content"]
         self.assertIn("照片历史", injected)
+        self.assertIn("nltag:", injected)
         self.assertIn("站在玄关等用户回家", injected)
         self.assertIn("快回来，我给你留了灯。", injected)
-        self.assertIn("用户想看角色下班后在家等自己的样子", injected)
+        self.assertIn("意图: 用户想看角色下班后在家等自己的样子", injected)
+        self.assertIn("必须包含: 玄关灯", injected)
+        self.assertNotIn("black dress", injected)
 
         messages = svc._build_chat_messages(sid, "刚才那张照片很好看")
         contents = [m.get("content", "") for m in messages]
         self.assertIn(injected, contents)
+
+    def test_photo_history_stays_in_checkpoint_anchored_history_before_dynamic_tail(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        session_schema.set_chat_history(state, [
+            {"role": "user", "content": "第一轮用户"},
+            {"role": "assistant", "content": "第一轮回复"},
+        ])
+        svc._record_sent_photo(
+            sid,
+            "A final nltag-like scene at the doorway.",
+            appearance="full slot appearance should not enter prompt",
+            view="selfie",
+            source_description="意图: 用户想看玄关照片；原始草案/上下文: 长上下文不应进入 prompt",
+        )
+        state = svc._get_session_state(sid)
+        session_schema.get_chat_history(state).extend([
+            {"role": "user", "content": "第二轮用户"},
+            {"role": "assistant", "content": "第二轮回复"},
+        ])
+
+        messages = svc._build_chat_messages(sid, "刚才那张呢")
+        contents = [m.get("content", "") for m in messages]
+        photo_i = next(i for i, text in enumerate(contents) if text.startswith("照片历史"))
+        dynamic_i = next(i for i, text in enumerate(contents) if text.startswith("当前时间:"))
+        latest_history_i = next(i for i, text in enumerate(contents) if text == "第二轮回复")
+
+        self.assertLess(photo_i, latest_history_i)
+        self.assertLess(latest_history_i, dynamic_i)
+        self.assertIn("意图: 用户想看玄关照片", contents[photo_i])
+        self.assertNotIn("长上下文", contents[photo_i])
+        self.assertNotIn("full slot appearance", contents[photo_i])
+        self.assertNotIn("照片历史", contents[dynamic_i])
 
     def test_photo_history_can_be_deferred_for_chat_tool_turn(self):
         svc = self.make_service()
@@ -6258,30 +6452,36 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                     return {"choices": [{"message": {"content": "", "tool_calls": [
                         {"id": "t1", "function": {"name": "update_location", "arguments": json.dumps({"place": "office"})}}
                     ]}}]}
-                return {"choices": [{"message": {"content": None, "tool_calls": [
+                if len(calls) == 2:
+                    return {"choices": [{"message": {"content": None, "tool_calls": [
                     {"id": "t2", "function": {"name": "generate_roleplay_image", "arguments": json.dumps({"intent": "again"})}}
-                ]}}]}
+                    ]}}]}
+                return {"choices": [{"message": {"content": "我刚醒，看到你已经到公司了。糖粥我会好好吃的。"}}]}
 
             svc._call_llm_messages = fake_msgs
             svc._execute_tool_call = AsyncMock(return_value="tool ok")
             svc._ensure_life_profile = AsyncMock(return_value={})
             svc._update_character_place_from_text = AsyncMock()
             svc._extract_long_term_memories = AsyncMock()
-            svc._judge_image_moment = AsyncMock(return_value={"intent": "should not run"})
+            svc._judge_image_moment = AsyncMock(return_value=None)
             svc._ulog = lambda session_id, kind, text="": logs.append((session_id, kind, text))
 
             reply = await svc.run_roleplay_chat(1, sid, "hello")
 
-            self.assertEqual(reply, "")
+            self.assertEqual(reply, "我刚醒，看到你已经到公司了。糖粥我会好好吃的。")
             self.assertEqual(calls[0]["tool_choice"], "auto")
             self.assertIsNotNone(calls[0]["tools"])
             self.assertEqual(calls[1]["tag"], "chat-final")
             self.assertIsNone(calls[1]["tools"])
             self.assertIsNone(calls[1]["tool_choice"])
-            svc._judge_image_moment.assert_not_awaited()
+            self.assertEqual(calls[2]["tag"], "chat-final-retry")
+            self.assertIsNone(calls[2]["tools"])
+            self.assertIsNone(calls[2]["tool_choice"])
+            svc._judge_image_moment.assert_awaited_once()
             error_logs = [text for _sid, kind, text in logs if kind == "ERROR"]
-            self.assertTrue(any("LLM_FULL_LOG" in text for text in error_logs))
-            self.assertTrue(any("chat-final returned tool_calls without content" in text for text in error_logs))
+            self.assertFalse(any("LLM_FULL_LOG" in text for text in error_logs))
+            warn_logs = [text for _sid, kind, text in logs if kind == "WARN"]
+            self.assertTrue(any("chat-final returned tool_calls without content; retried text-only" in text for text in warn_logs))
 
         asyncio.run(run())
 

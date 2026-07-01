@@ -1656,12 +1656,12 @@ async function selectSystemLog(logType, chunk = null) {
       box.textContent = text || "暂无 LLM 调试日志";
     } else if (logType === "system-errors") {
       hideLogChunkSelector();
-      const data = await api("/api/logs/system-errors");
+      const data = await api("/api/logs/system-errors?limit=500");
       const errors = data.errors || [];
       if (errors.length === 0) {
         box.textContent = "暂无错误日志";
       } else {
-        box.textContent = errors.map(e => `[${e.file}] ${e.line}`).join("\n");
+        box.textContent = errors.map(formatSystemErrorEntry).join("\n\n---\n\n");
       }
     }
     box.scrollTop = box.scrollHeight;
@@ -1669,6 +1669,46 @@ async function selectSystemLog(logType, chunk = null) {
     hideLogChunkSelector();
     box.textContent = `加载失败: ${err.message}`;
   }
+}
+
+function prettyJson(value) {
+  if (value === undefined || value === null || value === "") return "";
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch (err) {
+    return String(value);
+  }
+}
+
+function formatSystemErrorEntry(entry) {
+  const header = `[${entry.time || "-"}] [${entry.file}:${entry.line_no || "-"}] ${entry.kind || entry.tag || "ERROR"}`;
+  const lines = [header];
+  if (entry.session_id) lines.push(`会话: ${entry.session_id}`);
+  const message = entry.message || entry.line || "";
+  if (entry.error) lines.push(`错误: ${entry.error}`);
+  if (entry.kind && message) {
+    const brief = message.split(entry.kind, 1)[0].trim();
+    if (brief) lines.push(brief);
+  } else if (message) {
+    lines.push(message);
+  }
+  if (entry.payload) {
+    const request = entry.request !== undefined ? entry.request : entry.payload.request;
+    const response = entry.response !== undefined ? entry.response : entry.payload.response;
+    if (request !== undefined) lines.push(`请求:\n${prettyJson(request)}`);
+    if (response !== undefined) lines.push(`返回:\n${prettyJson(response)}`);
+    if (request === undefined && response === undefined) {
+      lines.push(`详情:\n${prettyJson(entry.payload)}`);
+    } else {
+      const rest = { ...entry.payload };
+      delete rest.request;
+      delete rest.response;
+      if (Object.keys(rest).length) lines.push(`摘要:\n${prettyJson(rest)}`);
+    }
+  } else if (entry.line && entry.line !== message) {
+    lines.push(`原始行: ${entry.line}`);
+  }
+  return lines.join("\n");
 }
 
 function fillCommandSelect() {
