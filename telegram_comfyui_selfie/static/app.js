@@ -124,7 +124,7 @@ const characterFieldSections = [
   ]],
 ];
 
-const commands = ["创建角色", "初始化", "菜单", "帮助", "创建OC", "新建角色", "自拍", "拍照", "天气", "天气设置", "画风", "角色", "外型", "人格", "纯良度", "新场景", "记忆", "记住", "忘记", "推送频率", "调度", "测试推送", "推送测试", "测试生图", "提示词", "生图状态", "管理", "turbo"];
+const commands = ["创建角色", "初始化", "菜单", "帮助", "创建OC", "新建角色", "自拍", "拍照", "天气", "天气设置", "画风", "角色", "外型", "人格", "纯良度", "新场景", "记忆", "记住", "忘记", "推送频率", "调度", "手动推送", "测试生图", "提示词", "生图状态", "管理", "turbo"];
 
 const memoryKindMap = {
   manual: "手动",
@@ -178,8 +178,7 @@ const commandHelp = {
   "忘记": ["删除指定长期记忆，关键词会先列候选。", "ID / 关键词"],
   "推送频率": ["设置每天主动发图次数，0 为关闭。", "3"],
   "调度": ["查看今日主动推送计划。", ""],
-  "测试推送": ["强制触发一次主动推送。", "normal / morning / ntr"],
-  "推送测试": ["等同于 /测试推送。", "normal / morning / ntr"],
+  "手动推送": ["强制触发一次主动推送。", "normal / morning / ntr"],
   "测试生图": ["直接用文本测试 ComfyUI 生图链路。", "坐在窗边看雨"],
   "提示词": ["查看最终提示词拼接示例。", ""],
   "生图状态": ["查看 ComfyUI 连通性、模型和参数。", ""],
@@ -224,6 +223,42 @@ function escapeHtml(value) {
     '"': "&quot;",
     "'": "&#39;",
   }[ch]));
+}
+
+function compactText(value, max = 80) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length > max ? `${text.slice(0, Math.max(0, max - 1)).trim()}...` : text;
+}
+
+function characterAvatarUrl(characterId, char) {
+  if (!state.selectedSession || !characterId || !char?.avatar_path) return "";
+  const stamp = char.avatar_updated_at || char.avatar_path || "";
+  return `/api/sessions/${encodeURIComponent(state.selectedSession)}/characters/${encodeURIComponent(characterId)}/avatar-image?v=${encodeURIComponent(stamp)}`;
+}
+
+function characterAvatarMarkup(char, characterId, className) {
+  const url = characterAvatarUrl(characterId, char);
+  return `<span class="${className} ${url ? "has-avatar" : "is-empty"}">${url ? `<img src="${escapeHtml(url)}" alt="">` : ""}</span>`;
+}
+
+function characterPill(label, value, className = "") {
+  const text = compactText(value, 54);
+  if (!text) return "";
+  return `<span class="character-pill ${className}"><b>${escapeHtml(label)}</b>${escapeHtml(text)}</span>`;
+}
+
+function diaryTitle(content, date) {
+  const first = String(content || "").split(/\r?\n/).map(line => line.trim()).find(Boolean) || "";
+  const title = first.replace(/^#+\s*/, "").trim();
+  return compactText(title || date || "日记", 34);
+}
+
+function diaryDateLabel(date) {
+  const parsed = new Date(`${date}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return date || "-";
+  const week = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][parsed.getDay()];
+  return `${date} · ${week}`;
 }
 
 function downloadJson(filename, data) {
@@ -567,10 +602,23 @@ function renderCharacterPool() {
     const isDefault = char.is_default === true;
     const activeBadge = isActive ? `<span class="active-badge">当前</span>` : "";
     const defaultBadge = isDefault ? `<span class="default-badge">默认</span>` : "";
+    const name = char.character || char.bot_name || id;
+    const meta = [char.series || "未设定出处", char.role_name || "未设定类型"].filter(Boolean).join(" · ");
+    const summary = compactText(char.persona || char.relationship || char.appearance || "", 82);
+    const chips = [
+      char.bot_name ? characterPill("对话", char.bot_name) : "",
+      char.purity !== undefined && char.purity !== "" ? characterPill("纯良", char.purity) : "",
+      char.style ? characterPill("画风", char.style) : "",
+    ].filter(Boolean).join("");
     return `
       <button class="character-card ${state.selectedCharacter === id ? "selected" : ""}" data-character-id="${escapeHtml(id)}" type="button">
-        <div class="character-card-title">${escapeHtml(char.character || id)}${activeBadge}${defaultBadge}</div>
-        <div class="character-card-meta">${escapeHtml(char.series || "")} · ${escapeHtml(char.role_name || "未设定角色类型")}</div>
+        ${characterAvatarMarkup(char, id, "character-card-avatar")}
+        <span class="character-card-main">
+          <span class="character-card-title">${escapeHtml(name)}<span class="character-card-badges">${activeBadge}${defaultBadge}</span></span>
+          <span class="character-card-meta">${escapeHtml(meta)}</span>
+          ${summary ? `<span class="character-card-summary">${escapeHtml(summary)}</span>` : ""}
+          ${chips ? `<span class="character-card-chips">${chips}</span>` : ""}
+        </span>
       </button>
     `;
   }).join("");
@@ -616,6 +664,47 @@ function renderCharacterForm() {
   }
 
   form.innerHTML = "";
+  const overview = document.createElement("section");
+  overview.className = "character-profile-strip";
+  const overviewTitle = char.character || char.bot_name || state.selectedCharacter;
+  const overviewSubtitle = [
+    char.series || "未设定出处",
+    char.role_name || "未设定类型",
+    char.occupation || "",
+  ].filter(Boolean).join(" · ");
+  const overviewSummary = compactText(char.persona || char.relationship || char.appearance || "暂无核心描述", 180);
+  const autoChange = char.allow_change_appearance === true || char.allow_change_appearance === "true"
+    ? "开启"
+    : (char.allow_change_appearance === false || char.allow_change_appearance === "false" ? "关闭" : "跟随全局");
+  const overviewPills = [
+    characterPill("对话名", char.bot_name || "-"),
+    characterPill("自称", char.bot_self_name || "-"),
+    characterPill("称呼用户", char.user_address || "-"),
+    characterPill("关系", char.relationship || "-"),
+    characterPill("画风", char.style || "不注入"),
+    characterPill("纯良度", char.purity ?? "-"),
+    characterPill("自动换装", autoChange),
+  ].join("");
+  overview.innerHTML = `
+    ${characterAvatarMarkup(char, state.selectedCharacter, "character-profile-avatar")}
+    <div class="character-profile-main">
+      <div class="character-profile-title">
+        <strong>${escapeHtml(overviewTitle)}</strong>
+        <span>${isActive ? "当前角色" : "未激活"}</span>
+        ${isDefault ? `<span>系统默认</span>` : ""}
+      </div>
+      <div class="character-profile-subtitle">${escapeHtml(overviewSubtitle || "基础身份未完整填写")}</div>
+      <p>${escapeHtml(overviewSummary)}</p>
+      <div class="character-profile-pills">${overviewPills}</div>
+    </div>
+    <div class="character-profile-actions">
+      <button type="button" id="character-avatar-generate">${char.avatar_path ? "重新生成头像" : "生成头像"}</button>
+    </div>
+    <input type="hidden" name="avatar_path" value="${escapeHtml(char.avatar_path || "")}">
+    <input type="hidden" name="avatar_updated_at" value="${escapeHtml(char.avatar_updated_at || "")}">
+  `;
+  form.appendChild(overview);
+
   characterFieldSections.forEach(([sectionTitle, fields], index) => {
     const section = document.createElement("section");
     section.className = "form-section character-section";
@@ -707,6 +796,10 @@ function renderCharacterForm() {
   if (exportCurrentBtn) {
     exportCurrentBtn.onclick = () => exportCurrentCharacterCheckpoint(exportCurrentBtn);
   }
+  const avatarBtn = $("#character-avatar-generate");
+  if (avatarBtn) {
+    avatarBtn.onclick = () => generateCharacterAvatar(avatarBtn);
+  }
 
   form.onsubmit = async (event) => {
     event.preventDefault();
@@ -733,11 +826,14 @@ async function loadHistorySummary() {
   const saveBtn = $("#history-summary-save");
   if (!editor || !state.selectedSession) return;
   const sid = encodeURIComponent(state.selectedSession);
-  const charKey = state.selectedCharacter || "";
+  const rawCharKey = state.selectedCharacter || "";
+  const charKey = rawCharKey;
   try {
     const data = await api(`/api/sessions/${sid}/history-summary?character_key=${encodeURIComponent(charKey)}`);
+    if (state.selectedCharacter !== rawCharKey) return;
     editor.value = data.summary || "";
   } catch (_) {
+    if (state.selectedCharacter !== rawCharKey) return;
     editor.value = "";
   }
   if (saveBtn) {
@@ -799,9 +895,11 @@ async function loadMemories() {
     return;
   }
   const sid = encodeURIComponent(state.selectedSession);
-  const charKey = encodeURIComponent(state.selectedCharacter);
+  const rawCharKey = state.selectedCharacter;
+  const charKey = encodeURIComponent(rawCharKey);
   try {
     const data = await api(`/api/sessions/${sid}/memories?character_key=${charKey}`);
+    if (state.selectedCharacter !== rawCharKey) return;
     const rows = (data.memories || []).map(mem => `
       <div class="manager-row memory-row">
         <textarea data-memory-summary="${mem.id}" rows="1" placeholder="记忆内容">${escapeHtml(mem.summary || "")}</textarea>
@@ -859,6 +957,7 @@ async function loadMemories() {
       };
     });
   } catch (err) {
+    if (state.selectedCharacter !== rawCharKey) return;
     box.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
     toast(err.message, "error");
   }
@@ -871,11 +970,14 @@ async function loadDiaries() {
     return;
   }
   const sid = encodeURIComponent(state.selectedSession);
-  const charKey = encodeURIComponent(state.selectedCharacter);
+  const rawCharKey = state.selectedCharacter;
+  const charKey = encodeURIComponent(rawCharKey);
   try {
     const data = await api(`/api/sessions/${sid}/diaries?character_key=${charKey}&limit=30`);
+    if (state.selectedCharacter !== rawCharKey) return;
     renderDiaries(data.diaries || [], sid, charKey);
   } catch (err) {
+    if (state.selectedCharacter !== rawCharKey) return;
     box.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
     toast(err.message, "error");
   }
@@ -887,27 +989,31 @@ function renderDiaries(diaries, sid, charKey) {
   const rows = diaries.map(diary => {
     const date = diary.diary_date;
     const updated = new Date(diary.updated_at * 1000).toLocaleString("zh-CN");
+    const content = diary.content || "";
     return `
-      <div class="manager-row diary-row">
+      <article class="diary-note">
         <div class="diary-header">
-          <strong>${escapeHtml(date)}</strong>
-          <span class="muted">${escapeHtml(updated)}</span>
+          <div>
+            <strong>${escapeHtml(diaryDateLabel(date))}</strong>
+            <span>${escapeHtml(diaryTitle(content, date))}</span>
+          </div>
+          <time>${escapeHtml(updated)}</time>
         </div>
-        <textarea data-diary-date="${escapeHtml(date)}" rows="3">${escapeHtml(diary.content || "")}</textarea>
-        <div class="button-row">
+        <textarea class="diary-note-editor" data-diary-date="${escapeHtml(date)}" rows="9">${escapeHtml(content)}</textarea>
+        <div class="diary-note-actions">
           <button data-diary-save="${escapeHtml(date)}" type="button">保存</button>
           <button class="danger" data-diary-delete="${escapeHtml(date)}" type="button">删除</button>
         </div>
-      </div>
+      </article>
     `;
   }).join("");
   box.innerHTML = `
-    <form id="diary-add-form" class="inline-manager-form">
+    <form id="diary-add-form" class="diary-compose">
       <input type="date" name="diary_date" value="${today}">
-      <textarea name="content" placeholder="新增或覆盖一条日记" rows="3"></textarea>
+      <textarea name="content" placeholder="新增或覆盖一条日记" rows="4"></textarea>
       <button class="primary" type="submit">新增日记</button>
     </form>
-    <div class="manager-list">${rows || `<div class="empty-state">暂无日记。</div>`}</div>
+    <div class="diary-note-grid">${rows || `<div class="empty-state">暂无日记。</div>`}</div>
   `;
   $("#diary-add-form").onsubmit = async event => {
     event.preventDefault();
@@ -974,6 +1080,29 @@ async function exportCurrentCharacterCheckpoint(button) {
     const data = await api(`/api/sessions/${sid}/characters/${cid}/checkpoint-current`);
     downloadJson(data.filename, data.checkpoint);
     toast("当前状态已导出");
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+async function generateCharacterAvatar(button) {
+  if (!state.selectedSession || !state.selectedCharacter) return;
+  setBusy(button, true);
+  try {
+    const sid = encodeURIComponent(state.selectedSession);
+    const cid = encodeURIComponent(state.selectedCharacter);
+    const data = await api(`/api/sessions/${sid}/characters/${cid}/avatar`, { method: "POST" });
+    if (data.characters) {
+      state.characterData.characters = data.characters;
+    } else if (state.characterData?.characters?.[state.selectedCharacter]) {
+      state.characterData.characters[state.selectedCharacter].avatar_path = data.avatar_path || "";
+      state.characterData.characters[state.selectedCharacter].avatar_updated_at = data.avatar_updated_at || "";
+    }
+    renderCharacterPool();
+    renderCharacterForm();
+    toast("头像已生成");
   } catch (err) {
     toast(err.message, "error");
   } finally {
@@ -1974,16 +2103,17 @@ async function initEvents() {
     btn.onclick = async () => {
       pushMenu.classList.remove("open");
       if (!state.selectedSession) { toast("请先选择会话", "error"); return; }
+      if (!state.selectedCharacter) { toast("请先选择角色", "error"); return; }
       const mode = btn.dataset.mode;
-      const chatId = state.selectedSession.replace("telegram:", "");
-      if (!window.confirm(`确定触发 ${mode} 模式测试推送吗？`)) return;
+      const charLabel = state.characterData?.characters?.[state.selectedCharacter]?.character || state.selectedCharacter;
+      if (!window.confirm(`确定为 ${charLabel} 触发 ${mode} 模式手动推送吗？`)) return;
       setBusy(btn, true);
       try {
-        await api("/api/actions/run-command", {
+        const data = await api(`/api/sessions/${encodeURIComponent(state.selectedSession)}/test-push`, {
           method: "POST",
-          body: { chat_id: chatId, command: "测试推送", arg: mode },
+          body: { character_key: state.selectedCharacter, mode },
         });
-        toast(`${mode} 推送已触发`);
+        toast(data.message || `${mode} 手动推送已触发`);
       } catch (err) {
         toast(err.message, "error");
       } finally {

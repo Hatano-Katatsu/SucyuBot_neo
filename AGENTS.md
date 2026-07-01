@@ -221,6 +221,12 @@ telegram_comfyui_selfie/
 7. **世界条件/自然光降频**：新增 `_chat_world_conditions_context()`，把城市/日期、天气、季节/自然光和自然光硬规则放在 semistable 之后、checkpoint/历史之前的独立半稳定 system 槽；签名包含城市、日期、星期/节假日、天气、季节、`light_phase`、日出日落和自然光硬规则。同一自然光阶段内如 12:00→12:10 内容字节稳定，跨阶段如白天→夜晚才更新并按需触发 checkpoint。
 8. **专用错误日志**：所有 `_ulog(..., "ERROR", ...)` 会继续写入用户活动日志，同时额外镜像到全局 `errors.log`（独立 `error_log_enabled`，默认开启；即使关闭 `user_log_enabled` 仍会记录错误）；`errors.log` 使用同一套完整行轮转机制，历史块进入 `logs/chunks/errors.<timestamp>.log`。`/api/logs/system-errors` 只读取 `errors.log` 及其历史分块，不再扫描 `telegram_*.log`；结构化返回 `session_id`、错误类型、原始行，且会解析 `LLM_FULL_LOG` / `MEMORY_OP_FAILED` 的 JSON payload，把完整 `request` / `response` 展示到 WebUI。
 9. **回归验证**：新增/更新测试覆盖照片历史 nltag 写入、短意图保留、原始草案/外观槽排除、planner 图片摘要使用 nltag、照片历史在未折叠历史中的稳定位置、`chat-final` 空工具调用 text-only 重试、世界当前条件同阶段稳定/跨阶段更新、条件变化过半窗口触发 checkpoint、专用错误日志写入/轮转、错误页只读 `errors.log` 不扫描用户日志、错误 payload 展开 LLM 请求/返回；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core`，结果 `Ran 313 tests in 6.027s`，`OK (skipped=1)`。
+10. **WebUI 角色卡与日记改版**：角色池卡片改为头像 + 身份摘要 + chips 的紧凑布局；角色编辑区顶部增加资料条，未生成头像时留空白占位。日记页改为双栏便签式网格，每篇日记有日期/标题头和更高的正文编辑区，提高连续阅读性。
+11. **角色头像生成**：角色页新增“生成头像”按钮，按当前选中角色卡构造头像场景，临时把生图上下文切到该角色后调用 `_do_generate()`，图片保存到 `data/avatars/<session>/<character>.png`，再次点击会覆盖旧头像；角色卡保存 `avatar_path/avatar_updated_at`，快照 `_snapshot_character()` 会保留头像字段，避免切角色或推送后头像丢失。
+12. **角色页操作强制按选中角色隔离**：WebUI 的长期记忆、日记、角色历史提要和手动记忆整理接口不再回落到当前 active 角色，必须携带 `character_key`；历史提要只有请求的是 active 角色时才允许读取 session state 兜底，防止选中 B 时显示 A 的角色信息。
+13. **WebUI 手动推送按选中角色执行**：角色页按钮文案从“测试推送”改为“手动推送”，前端改走 `POST /api/sessions/{session_id}/test-push` 并传 `character_key`；后端会临时切到选中角色执行 `_sched_fire(..., skip_active_check=True)`，推送产生的照片历史和上下文保存进选中角色的 `character_contexts`，最后恢复原 active 角色。
+14. **命令兼容**：Telegram 命令处理器仍保留规范命令 `测试推送` 与旧别名 `推送测试`，新增别名 `手动推送`；WebUI 命令提示只展示“手动推送”。
+15. **本轮回归验证**：新增测试覆盖头像生成覆盖写入、WebUI 角色页记忆/日记/历史提要不回落 active、手动推送期间临时切到选中角色并在结束后恢复原 active，且照片历史落入选中角色上下文；验证 `node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m compileall -q telegram_comfyui_selfie tests`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 316 tests in 7.067s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-06-30）
 
@@ -344,7 +350,7 @@ telegram_comfyui_selfie/
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m py_compile scripts\compare_llm_chat_prompts.py`
 - `py -3 scripts\compare_llm_chat_prompts.py --log "data\logs\llm_debug.json" --output .tmp\llm_chat_prompt_compare_current.md`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core`
-- 最新结果：`Ran 313 tests in 6.027s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
+- 最新结果：`Ran 316 tests in 7.067s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
 - 工具 schema 当前紧凑 JSON 长度：`1898` 字符；chat 回复请求体 key 顺序为 `model, max_tokens, temperature, top_p, frequency_penalty, tools, tool_choice, messages`（`presence_penalty` 留空时不下发；checkpoint/dream/memory 等内部任务不下发采样参数）
 - 当前已复跑 prompt 比对脚本；`data/logs/llm_debug.json` 报告写入 `.tmp\llm_chat_prompt_compare_current.md`，`entries=10 sessions=2 pairs=8`。
 - 真实 API 缓存探针沿用上一轮结论：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。

@@ -1495,7 +1495,12 @@ class CommandHandlersMixin:
             return
         card = character_card.card_from_state(state)
         card["character"] = name  # 存档键用 stripped 名，character 字段与键对齐
-        session_schema.get_saved_characters(state)[name] = card
+        saved = session_schema.get_saved_characters(state)
+        existing = saved.get(name) if isinstance(saved.get(name), dict) else {}
+        for extra_key in ("avatar_path", "avatar_updated_at"):
+            if extra_key in existing:
+                card[extra_key] = existing[extra_key]
+        saved[name] = card
 
     async def cmd_purity(self, chat_id, session_id, arg):
         text = arg.strip().lower()

@@ -24,7 +24,7 @@ from telegram_comfyui_selfie.commands import (
 )
 from telegram_comfyui_selfie.command_aliases import COMMAND_ALIAS_GROUPS, resolve_command_alias
 from telegram_comfyui_selfie.prompt_intake import heuristic_intake
-from telegram_comfyui_selfie.webui import api_system_error_log, build_world_route_preview, cast_config_value, masked_config, serialize_prompt_slots, session_summary
+from telegram_comfyui_selfie.webui import api_character_avatar_image, api_diaries, api_generate_character_avatar, api_get_history_summary, api_organize_memories, api_save_character, api_save_diary, api_save_history_summary, api_system_error_log, api_test_push_selected_character, build_world_route_preview, cast_config_value, masked_config, serialize_prompt_slots, session_summary
 
 
 os.environ.setdefault("SUCYUBOT_TEST_FAST_SQLITE", "1")
@@ -119,6 +119,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(svc.parse_command("/画图 低机位手部特写"), ("配图", "低机位手部特写"))
         self.assertEqual(svc.parse_command("配图 车窗外远景"), ("配图", "车窗外远景"))
         self.assertEqual(svc.parse_command("推送测试 normal"), ("测试推送", "normal"))
+        self.assertEqual(svc.parse_command("手动推送 normal"), ("测试推送", "normal"))
         self.assertEqual(svc.parse_command("我想看自拍"), (None, "我想看自拍"))
 
     def test_command_aliases_are_grouped_lists_and_cover_reversed_forms(self):
@@ -126,6 +127,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(resolve_command_alias("角色创建"), "初始化")
         self.assertEqual(resolve_command_alias("菜单查看"), "菜单")
         self.assertEqual(resolve_command_alias("推送测试"), "测试推送")
+        self.assertEqual(resolve_command_alias("手动推送"), "测试推送")
         self.assertEqual(resolve_command_alias("画风添加"), "添加画风")
         self.assertEqual(resolve_command_alias("关系设置"), "关系")
         self.assertEqual(resolve_command_alias("画图"), "配图")
@@ -1358,6 +1360,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
     def test_web_system_error_log_reads_dedicated_chunks_and_expands_llm_payload(self):
         async def run():
             from aiohttp import web
+            from aiohttp.test_utils import make_mocked_request
 
             svc = self.make_service()
             sid = "telegram:123"
@@ -1425,6 +1428,253 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertFalse(svc._user_log_path(sid).exists())
         text = svc._error_log_path().read_text(encoding="utf-8")
         self.assertIn("ERROR session=telegram:123 critical failure", text)
+
+    def test_character_avatar_generation_updates_dedicated_file_and_card(self):
+        async def run():
+            from aiohttp import web
+            from aiohttp.test_utils import make_mocked_request
+
+            svc = self.make_service()
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            session_schema.get_saved_characters(state)["小雨"] = {
+                "character": "小雨",
+                "persona": "温柔、慢热，说话简短",
+                "appearance": "short black hair, blue eyes",
+                "outfit": "white shirt",
+            }
+            svc._save_session_state(sid, state)
+            generated = [b"first-avatar", b"second-avatar"]
+
+            async def fake_generate(*args, **kwargs):
+                return True, [generated.pop(0)], ""
+
+            svc._do_generate = fake_generate
+            app = web.Application()
+            app["service"] = svc
+            req = make_mocked_request(
+                "POST",
+                "/api/sessions/telegram:123/characters/%E5%B0%8F%E9%9B%A8/avatar",
+                app=app,
+                match_info={"session_id": sid, "character_id": "小雨"},
+            )
+            req["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+
+            first = await api_generate_character_avatar(req)
+            first_data = json.loads(first.text)
+            self.assertTrue(first_data["ok"])
+            self.assertEqual(first_data["characters"]["小雨"]["avatar_path"], "avatars/telegram_123/小雨.png")
+            avatar_path = svc.state_path.parent / "avatars" / "telegram_123" / "小雨.png"
+            self.assertEqual(avatar_path.read_bytes(), b"first-avatar")
+
+            second = await api_generate_character_avatar(req)
+            second_data = json.loads(second.text)
+            self.assertTrue(second_data["ok"])
+            self.assertEqual(second_data["characters"]["小雨"]["avatar_path"], "avatars/telegram_123/小雨.png")
+            self.assertGreater(second_data["characters"]["小雨"]["avatar_updated_at"], first_data["characters"]["小雨"]["avatar_updated_at"])
+            self.assertEqual(avatar_path.read_bytes(), b"second-avatar")
+
+            image_resp = await api_character_avatar_image(req)
+            self.assertEqual(image_resp.status, 200)
+
+        asyncio.run(run())
+
+    def test_webui_role_scoped_operations_do_not_fallback_to_active_character(self):
+        async def run():
+            from aiohttp import web
+            from aiohttp.test_utils import make_mocked_request
+
+            class JsonRequest(dict):
+                def __init__(self, app, method, path, match_info, payload=None, query=None):
+                    super().__init__()
+                    self.app = app
+                    self.match_info = match_info
+                    self.query = query or {}
+                    self._payload = payload or {}
+                    self["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+
+                async def json(self):
+                    return self._payload
+
+            svc = self.make_service()
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "角色A")
+            session_schema.set_character_value(state, "custom_scheduled_persona", "A persona")
+            session_schema.set_character_history_summary(state, "A active summary")
+            session_schema.get_saved_characters(state).update({
+                "角色A": {"character": "角色A", "persona": "A persona"},
+                "角色B": {"character": "角色B", "persona": "B old"},
+            })
+            svc._save_session_state(sid, state)
+            app = web.Application()
+            app["service"] = svc
+
+            get_b = make_mocked_request(
+                "GET",
+                f"/api/sessions/{sid}/history-summary?character_key=%E8%A7%92%E8%89%B2B",
+                app=app,
+                match_info={"session_id": sid},
+            )
+            get_b["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+            history_resp = await api_get_history_summary(get_b)
+            history_data = json.loads(history_resp.text)
+            self.assertEqual(history_data["character_key"], "角色B")
+            self.assertEqual(history_data["summary"], "")
+
+            save_history_req = JsonRequest(
+                app, "PUT", f"/api/sessions/{sid}/history-summary",
+                {"session_id": sid},
+                payload={"character_key": "角色B", "summary": "B summary"},
+            )
+            await api_save_history_summary(save_history_req)
+            self.assertEqual(svc.app_store.get_context_meta(sid, "角色B").get("character_history_summary"), "B summary")
+            self.assertEqual(session_schema.get_character_history_summary(svc._get_session_state(sid)), "A active summary")
+
+            save_diary_req = JsonRequest(
+                app, "POST", f"/api/sessions/{sid}/diaries/2026-07-01",
+                {"session_id": sid, "diary_date": "2026-07-01"},
+                payload={"character_key": "角色B", "content": "B diary"},
+            )
+            await api_save_diary(save_diary_req)
+            self.assertEqual(svc.app_store.get_diary(sid, "角色B", "2026-07-01").get("content"), "B diary")
+            self.assertFalse(svc.app_store.get_diary(sid, "角色A", "2026-07-01"))
+
+            no_key_diaries = make_mocked_request(
+                "GET", f"/api/sessions/{sid}/diaries", app=app, match_info={"session_id": sid}
+            )
+            no_key_diaries["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+            no_key_resp = await api_diaries(no_key_diaries)
+            no_key_data = json.loads(no_key_resp.text)
+            self.assertFalse(no_key_data["ok"])
+            self.assertIn("character_key", no_key_data["error"])
+
+            svc.has_llm_config = lambda purpose, session_id="": True
+            svc._organize_memories_after_dream = AsyncMock(return_value={"status": "no_op"})
+            organize_req = make_mocked_request(
+                "POST",
+                f"/api/sessions/{sid}/organize-memories?character_key=%E8%A7%92%E8%89%B2B",
+                app=app,
+                match_info={"session_id": sid},
+            )
+            organize_req["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+            organize_resp = await api_organize_memories(organize_req)
+            organize_data = json.loads(organize_resp.text)
+            self.assertTrue(organize_data["ok"])
+            self.assertEqual(organize_data["character"], "角色B")
+            svc._organize_memories_after_dream.assert_awaited_once_with(sid, "角色B")
+
+            save_char_req = JsonRequest(
+                app, "POST", f"/api/sessions/{sid}/characters",
+                {"session_id": sid},
+                payload={"id": "角色B", "character": "角色B", "persona": "B new"},
+            )
+            await api_save_character(save_char_req)
+            after = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_character_value(after, "custom_character"), "角色A")
+            self.assertEqual(session_schema.get_character_value(after, "custom_scheduled_persona"), "A persona")
+            self.assertEqual(session_schema.get_saved_characters(after)["角色B"]["persona"], "B new")
+
+        asyncio.run(run())
+
+    def test_webui_manual_push_uses_selected_character_context(self):
+        async def run():
+            from aiohttp import web
+
+            class DummyHttp:
+                closed = False
+
+            class JsonRequest(dict):
+                def __init__(self, app, match_info, payload=None):
+                    super().__init__()
+                    self.app = app
+                    self.match_info = match_info
+                    self.query = {}
+                    self._payload = payload or {}
+                    self["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+
+                async def json(self):
+                    return self._payload
+
+            svc = self.make_service()
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "角色A")
+            session_schema.set_character_value(state, "custom_scheduled_persona", "A persona")
+            session_schema.set_chat_history(state, [{"role": "user", "content": "A current chat"}])
+            session_schema.get_saved_characters(state).update({
+                "角色A": {"character": "角色A", "persona": "A persona", "outfit": "A outfit"},
+                "角色B": {
+                    "character": "角色B",
+                    "persona": "B persona",
+                    "outfit": "B outfit",
+                    "avatar_path": "avatars/telegram_123/角色B.png",
+                },
+            })
+            session_schema.get_character_contexts(state)["角色B"] = {
+                "chat_history": [{"role": "user", "content": "B old chat"}],
+                "sent_photos_history": [{"scene": "B old photo"}],
+            }
+            svc._save_session_state(sid, state)
+
+            keepalive = asyncio.create_task(asyncio.sleep(60))
+            svc.http = DummyHttp()
+            svc._bot_tasks = [keepalive]
+            observed = {}
+
+            async def fake_sched(session_id, local_dt, mode_override=None, skip_active_check=False):
+                active_state = svc._get_session_state(session_id)
+                observed["character"] = session_schema.get_character_value(active_state, "custom_character", "")
+                observed["mode"] = mode_override
+                observed["skip_active_check"] = skip_active_check
+                svc._record_sent_photo(
+                    session_id,
+                    "B push scene",
+                    "B caption",
+                    appearance="B outfit",
+                    view="selfie",
+                    nltag="B final nltag",
+                )
+                return True
+
+            svc._sched_fire = fake_sched
+            app = web.Application()
+            app["service"] = svc
+            req = JsonRequest(
+                app,
+                {"session_id": sid},
+                payload={"character_key": "角色B", "mode": "morning"},
+            )
+            try:
+                resp = await api_test_push_selected_character(req)
+            finally:
+                keepalive.cancel()
+                try:
+                    await keepalive
+                except asyncio.CancelledError:
+                    pass
+            data = json.loads(resp.text)
+            self.assertTrue(data["ok"])
+            self.assertTrue(data["triggered"])
+            self.assertEqual(observed, {"character": "角色B", "mode": "morning", "skip_active_check": True})
+
+            after = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_character_value(after, "custom_character", ""), "角色A")
+            self.assertEqual(session_schema.get_chat_history(after), [{"role": "user", "content": "A current chat"}])
+            contexts = session_schema.get_character_contexts(after)
+            self.assertIn("角色B", contexts)
+            b_context = contexts["角色B"]
+            self.assertEqual(b_context["sent_photos_history"][-1]["scene"], "B push scene")
+            self.assertEqual(
+                session_schema.get_saved_characters(after)["角色B"]["avatar_path"],
+                "avatars/telegram_123/角色B.png",
+            )
+            b_history_text = "\n".join(m.get("content", "") for m in b_context.get("chat_history", []))
+            self.assertIn("B final nltag", b_history_text)
+            active_history_text = "\n".join(m.get("content", "") for m in session_schema.get_chat_history(after))
+            self.assertNotIn("B final nltag", active_history_text)
+
+        asyncio.run(run())
 
     def test_low_frequency_chat_controls_stay_before_history_not_dynamic(self):
         """前缀缓存不变量：配置型控制放稳定层；发图/照片策略写进 static。"""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import secrets
 import os
@@ -47,6 +48,28 @@ def active_character_id(state: dict[str, Any]) -> str:
         or character_value(state, "custom_role_name", "")
         or ""
     ).strip()
+
+
+def active_context_character_key(service, session_id: str) -> str:
+    if hasattr(service, "_context_character_key"):
+        try:
+            return service._context_character_key(session_id)
+        except Exception:
+            pass
+    if hasattr(service, "_memory_character"):
+        try:
+            return service._memory_character(session_id)
+        except Exception:
+            pass
+    return ""
+
+
+def required_character_key_from_request(request: web.Request, payload: dict[str, Any] | None = None) -> str | None:
+    value = request.query.get("character_key")
+    if value is None and payload is not None:
+        value = payload.get("character_key")
+    value = str(value or "").strip()
+    return value or None
 
 
 @web.middleware
@@ -131,6 +154,8 @@ def create_web_app(service) -> web.Application:
     app.router.add_delete(r"/api/sessions/{session_id:.+}/memories/{memory_id:\d+}", api_delete_memory)
     app.router.add_get("/api/sessions/{session_id:.+}/characters", api_characters)
     app.router.add_post("/api/sessions/{session_id:.+}/characters", api_save_character)
+    app.router.add_post("/api/sessions/{session_id:.+}/characters/{character_id:[^/]+}/avatar", api_generate_character_avatar)
+    app.router.add_get("/api/sessions/{session_id:.+}/characters/{character_id:[^/]+}/avatar-image", api_character_avatar_image)
     app.router.add_get("/api/sessions/{session_id:.+}/characters/{character_id:[^/]+}/checkpoints", api_character_checkpoints)
     app.router.add_get("/api/sessions/{session_id:.+}/characters/{character_id:[^/]+}/checkpoints/{checkpoint_date}", api_export_character_checkpoint)
     app.router.add_get("/api/sessions/{session_id:.+}/characters/{character_id:[^/]+}/checkpoint-current", api_export_character_current_checkpoint)
@@ -143,6 +168,7 @@ def create_web_app(service) -> web.Application:
     app.router.add_post("/api/sessions/{session_id:.+}/freeze", api_freeze_session)
     app.router.add_post("/api/sessions/{session_id:.+}/unfreeze", api_unfreeze_session)
     app.router.add_post("/api/sessions/{session_id:.+}/organize-memories", api_organize_memories)
+    app.router.add_post("/api/sessions/{session_id:.+}/test-push", api_test_push_selected_character)
     app.router.add_get("/api/sessions/{session_id:.+}/history-summary", api_get_history_summary)
     app.router.add_put("/api/sessions/{session_id:.+}/history-summary", api_save_history_summary)
     # 通用会话路由放在最后，且只匹配不含 / 的 session_id（session_id 含 : 但不含 /）
@@ -963,10 +989,9 @@ async def api_memories(request: web.Request):
     sid = request.match_info["session_id"]
     if not _session_allowed(request, sid):
         return json_error("无权访问此会话", status=403)
-    if "character_key" in request.query:
-        char = request.query.get("character_key") or ""
-    else:
-        char = service._memory_character(sid) if hasattr(service, "_memory_character") else ""
+    char = required_character_key_from_request(request)
+    if char is None:
+        return json_error("缺少 character_key，角色页操作必须指定目标角色")
     try:
         limit = max(1, min(200, int(request.query.get("limit", "80"))))
     except ValueError:
@@ -984,7 +1009,9 @@ async def api_add_memory(request: web.Request):
     summary = str(payload.get("summary") or "").strip()
     if not summary:
         return json_error("记忆内容不能为空")
-    char = request.query.get("character_key") or (service._memory_character(sid) if hasattr(service, "_memory_character") else "")
+    char = required_character_key_from_request(request, payload)
+    if char is None:
+        return json_error("缺少 character_key，角色页操作必须指定目标角色")
     memory_id = service.memory.add_memory(
         sid,
         payload.get("kind") or "manual",
@@ -1004,7 +1031,9 @@ async def api_update_memory(request: web.Request):
     if not _session_allowed(request, sid):
         return json_error("无权访问此会话", status=403)
     payload = await request.json()
-    char = request.query.get("character_key") or (service._memory_character(sid) if hasattr(service, "_memory_character") else "")
+    char = required_character_key_from_request(request, payload)
+    if char is None:
+        return json_error("缺少 character_key，角色页操作必须指定目标角色")
     ok = service.memory.edit_memory(
         sid,
         int(request.match_info["memory_id"]),
@@ -1026,7 +1055,9 @@ async def api_delete_memory(request: web.Request):
     sid = request.match_info["session_id"]
     if not _session_allowed(request, sid):
         return json_error("无权访问此会话", status=403)
-    char = request.query.get("character_key") or (service._memory_character(sid) if hasattr(service, "_memory_character") else "")
+    char = required_character_key_from_request(request)
+    if char is None:
+        return json_error("缺少 character_key，角色页操作必须指定目标角色")
     ok = service.memory.deactivate_memory(sid, int(request.match_info["memory_id"]), character=char)
     if not ok:
         return json_error("记忆不存在", status=404)
@@ -1134,6 +1165,208 @@ async def api_save_character(request: web.Request):
     session_schema.get_saved_characters(state)[key] = {k: v for k, v in payload.items() if k != "id"}
     service._save_session_state(sid, state)
     return json_ok({"active_id": character_value(state, "custom_character", "") or "", "current": service._character_export_payload(state), "characters": session_schema.get_saved_characters(state)})
+
+
+def _safe_avatar_part(value: str) -> str:
+    text = str(value or "").strip().replace("..", "_")
+    return re.sub(r"[\s/\\:*?\"<>|]+", "_", text).strip("._") or "unknown"
+
+
+def _avatar_file_path(service, session_id: str, character_id: str) -> Path:
+    session_part = _safe_avatar_part(session_id)
+    character_part = _safe_avatar_part(character_id)
+    return service.state_path.parent / "avatars" / session_part / f"{character_part}.png"
+
+
+def _avatar_public_marker(service, session_id: str, character_id: str) -> str:
+    try:
+        rel = _avatar_file_path(service, session_id, character_id).relative_to(service.state_path.parent)
+        return rel.as_posix()
+    except Exception:
+        return f"avatars/{_safe_avatar_part(session_id)}/{_safe_avatar_part(character_id)}.png"
+
+
+def _character_for_avatar(service, state: dict[str, Any], session_id: str, character_id: str) -> dict[str, Any]:
+    saved = session_schema.get_saved_characters(state)
+    if character_id in saved:
+        return dict(saved.get(character_id) or {})
+    active_id = active_character_id(state)
+    if character_id == active_id:
+        current = service._character_export_payload(state) if hasattr(service, "_character_export_payload") else {}
+        if current:
+            return dict(current)
+    default_char = service._default_character_payload()
+    default_id = default_char.get("id") or default_char.get("bot_name") or "default"
+    if character_id == default_id:
+        return dict(default_char)
+    return {}
+
+
+def _character_payload_for_operation(service, state: dict[str, Any], session_id: str, character_id: str) -> dict[str, Any]:
+    payload = _character_for_avatar(service, state, session_id, character_id)
+    if not payload:
+        return {}
+    payload.setdefault("id", character_id)
+    if not payload.get("character") and not payload.get("is_default"):
+        payload["character"] = character_id
+    return payload
+
+
+def _selected_character_is_active(service, state: dict[str, Any], session_id: str, character_id: str, payload: dict[str, Any]) -> bool:
+    active_key = active_context_character_key(service, session_id)
+    if active_key and character_id == active_key:
+        return True
+    current_character = character_value(state, "custom_character", "")
+    if current_character and current_character == (payload.get("character") or character_id):
+        return True
+    try:
+        default_id = str(service._default_character_payload().get("id") or "").strip()
+    except Exception:
+        default_id = ""
+    return bool(default_id and character_id == default_id and not current_character)
+
+
+def _switch_state_to_selected_character(service, session_id: str, state: dict[str, Any], character_id: str, payload: dict[str, Any]) -> None:
+    if hasattr(service, "_save_current_character_context"):
+        service._save_current_character_context(state)
+    if hasattr(service, "_snapshot_character"):
+        service._snapshot_character(state)
+    next_payload = dict(payload)
+    if "style" not in payload:
+        next_payload.pop("style", None)
+    if payload.get("purity") is None or character_value(state, "purity_user_set", False):
+        next_payload.pop("purity", None)
+    if hasattr(service, "_apply_character_payload"):
+        service._apply_character_payload(state, next_payload)
+    if not character_value(state, "custom_character", "") and not payload.get("is_default"):
+        session_schema.set_character_value(state, "custom_character", character_id)
+    has_clothing_context = False
+    if hasattr(service, "_restore_character_context"):
+        has_clothing_context = service._restore_character_context(session_id, state)
+    if hasattr(service, "_apply_card_outfit_after_switch"):
+        service._apply_card_outfit_after_switch(state, next_payload, has_clothing_context=has_clothing_context)
+    state.pop("life_profile", None)
+    service._save_session_state(session_id, state)
+
+
+def _merge_character_containers(dst_state: dict[str, Any], src_state: dict[str, Any]) -> None:
+    dst_contexts = session_schema.get_character_contexts(dst_state)
+    dst_contexts.clear()
+    dst_contexts.update(copy.deepcopy(session_schema.get_character_contexts(src_state)))
+    dst_saved = session_schema.get_saved_characters(dst_state)
+    dst_saved.clear()
+    dst_saved.update(copy.deepcopy(session_schema.get_saved_characters(src_state)))
+
+
+def _avatar_scene_from_character(character: dict[str, Any]) -> tuple[str, str]:
+    name = character.get("character") or character.get("bot_name") or "the character"
+    role = character.get("role_name") or ""
+    series = character.get("series") or ""
+    persona = compact_text_for_avatar(character.get("persona") or "", 180)
+    relationship = compact_text_for_avatar(character.get("relationship") or "", 120)
+    scene_parts = [
+        "single character avatar portrait",
+        "upper body, shoulders visible, centered composition",
+        "looking at viewer, calm natural expression",
+        "clean simple background, no text, no logo, no UI",
+        f"character name/reference: {name}",
+    ]
+    if role:
+        scene_parts.append(f"role/type: {role}")
+    if series:
+        scene_parts.append(f"series/source: {series}")
+    if persona:
+        scene_parts.append(f"personality mood: {persona}")
+    if relationship:
+        scene_parts.append(f"relationship tone: {relationship}")
+    appearance_parts = [
+        character.get("count") or "",
+        character.get("visual_character") or "",
+        character.get("visual_series") or "",
+        character.get("appearance") or "",
+        character.get("outfit") or "",
+        character.get("style") or "",
+    ]
+    one_shot = ", ".join(str(part).strip() for part in appearance_parts if str(part or "").strip())
+    return ", ".join(scene_parts), one_shot
+
+
+def compact_text_for_avatar(value: Any, max_chars: int) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text[:max_chars].rstrip() + ("..." if len(text) > max_chars else "")
+
+
+async def api_generate_character_avatar(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    character_id = request.match_info["character_id"]
+    state = service._get_session_state(sid)
+    character = _character_for_avatar(service, state, sid, character_id)
+    if not character:
+        return json_error("角色不存在", status=404)
+    scene, one_shot = _avatar_scene_from_character(character)
+    avatar_state = copy.deepcopy(state)
+    payload = dict(character)
+    payload.setdefault("id", character_id)
+    payload.setdefault("character", character.get("character") or character_id)
+    if hasattr(service, "_apply_character_payload"):
+        service._apply_character_payload(avatar_state, payload)
+    original_session_state = service.sessions.get(sid)
+    service.sessions[sid] = avatar_state
+    try:
+        ok, images, err = await service._do_generate(
+            scene,
+            session_id=sid,
+            one_shot_appearance=one_shot,
+            device_in_frame=False,
+            orientation="2:3",
+        )
+    except Exception as exc:
+        if original_session_state is not None:
+            service.sessions[sid] = original_session_state
+        service._ulog(sid, "ERROR", f"CHARACTER_AVATAR_FAILED character={character_id} error={exc}")
+        return json_error(f"头像生成失败: {exc}", status=502)
+    finally:
+        if original_session_state is not None:
+            service.sessions[sid] = original_session_state
+    if not ok or not images:
+        service._ulog(sid, "ERROR", f"CHARACTER_AVATAR_FAILED character={character_id} error={err}")
+        return json_error(f"头像生成失败: {err or '无图片'}", status=502)
+    path = _avatar_file_path(service, sid, character_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(images[0])
+    except Exception as exc:
+        service._ulog(sid, "ERROR", f"CHARACTER_AVATAR_SAVE_FAILED character={character_id} error={exc}")
+        return json_error(f"头像保存失败: {exc}", status=500)
+    marker = _avatar_public_marker(service, sid, character_id)
+    updated_at = time.time()
+    saved = session_schema.get_saved_characters(state)
+    stored = dict(saved.get(character_id) or character)
+    stored["avatar_path"] = marker
+    stored["avatar_updated_at"] = updated_at
+    saved[character_id] = stored
+    service._save_session_state(sid, state)
+    return json_ok({
+        "character_id": character_id,
+        "avatar_path": marker,
+        "avatar_updated_at": updated_at,
+        "characters": saved,
+    })
+
+
+async def api_character_avatar_image(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    character_id = request.match_info["character_id"]
+    path = _avatar_file_path(service, sid, character_id)
+    if not path.exists():
+        return json_error("头像不存在", status=404)
+    return web.FileResponse(path, headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 async def api_character_checkpoints(request: web.Request):
@@ -1265,7 +1498,9 @@ async def api_diaries(request: web.Request):
     sid = request.match_info["session_id"]
     if not _session_allowed(request, sid):
         return json_error("无权访问此会话", status=403)
-    character_key = request.query.get("character_key") or ""
+    character_key = required_character_key_from_request(request)
+    if character_key is None:
+        return json_error("缺少 character_key，角色页操作必须指定目标角色")
     try:
         limit = max(1, min(100, int(request.query.get("limit", "30"))))
     except ValueError:
@@ -1279,7 +1514,9 @@ async def api_diary_detail(request: web.Request):
     sid = request.match_info["session_id"]
     if not _session_allowed(request, sid):
         return json_error("无权访问此会话", status=403)
-    character_key = request.query.get("character_key") or ""
+    character_key = required_character_key_from_request(request)
+    if character_key is None:
+        return json_error("缺少 character_key，角色页操作必须指定目标角色")
     diary_date = request.match_info["diary_date"]
     diary = service.app_store.get_diary(sid, character_key, diary_date)
     if not diary:
@@ -1293,7 +1530,9 @@ async def api_save_diary(request: web.Request):
     if not _session_allowed(request, sid):
         return json_error("无权访问此会话", status=403)
     payload = await request.json()
-    character_key = request.query.get("character_key") or str(payload.get("character_key") or "").strip()
+    character_key = required_character_key_from_request(request, payload)
+    if character_key is None:
+        return json_error("缺少 character_key，角色页操作必须指定目标角色")
     diary_date = request.match_info["diary_date"]
     content = str(payload.get("content") or "").strip()
     if not content:
@@ -1315,7 +1554,9 @@ async def api_delete_diary(request: web.Request):
     sid = request.match_info["session_id"]
     if not _session_allowed(request, sid):
         return json_error("无权访问此会话", status=403)
-    character_key = request.query.get("character_key") or ""
+    character_key = required_character_key_from_request(request)
+    if character_key is None:
+        return json_error("缺少 character_key，角色页操作必须指定目标角色")
     diary_date = request.match_info["diary_date"]
     service.app_store.delete_diary(sid, character_key, diary_date)
     diaries = service.app_store.recent_diaries(sid, character_key, limit=30)
@@ -1687,7 +1928,9 @@ async def api_organize_memories(request: web.Request):
     sid = request.match_info["session_id"]
     if not _session_allowed(request, sid):
         return json_error("无权操作此会话", status=403)
-    char = request.query.get("character_key") or (service._memory_character(sid) if hasattr(service, "_memory_character") else "")
+    char = required_character_key_from_request(request)
+    if char is None:
+        return json_error("缺少 character_key，角色页操作必须指定目标角色")
     if not service.has_llm_config("chat", sid):
         return json_error("聊天模型未配置，无法整理记忆")
     try:
@@ -1706,12 +1949,69 @@ async def api_organize_memories(request: web.Request):
     return json_ok({"memories": memories, "character": char, "result": result, "message": message})
 
 
+async def api_test_push_selected_character(request: web.Request):
+    service = service_from(request)
+    if not service.is_bot_running:
+        return json_error("机器人尚未启动", status=409)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权操作此会话", status=403)
+    payload = await request.json()
+    char = required_character_key_from_request(request, payload)
+    if char is None:
+        return json_error("缺少 character_key，手动推送必须指定目标角色")
+    mode = str(payload.get("mode") or payload.get("arg") or "normal").strip() or "normal"
+    state = service._get_session_state(sid)
+    character_payload = _character_payload_for_operation(service, state, sid, char)
+    if not character_payload:
+        return json_error("角色不存在", status=404)
+    already_active = _selected_character_is_active(service, state, sid, char, character_payload)
+    original_snapshot = copy.deepcopy(state)
+    restored = already_active
+    try:
+        if not already_active:
+            _switch_state_to_selected_character(service, sid, state, char, character_payload)
+        now = service._session_now(sid)
+        ok = await service._sched_fire(sid, now, mode_override=mode, skip_active_check=True)
+        if not already_active:
+            target_state = service._get_session_state(sid)
+            if hasattr(service, "_save_current_character_context"):
+                service._save_current_character_context(target_state)
+            if hasattr(service, "_snapshot_character"):
+                service._snapshot_character(target_state)
+            _merge_character_containers(original_snapshot, target_state)
+            service.sessions[sid] = original_snapshot
+            service._save_session_state(sid, original_snapshot)
+            restored = True
+        message = "手动推送已发送" if ok else "手动推送未发送，详情请查看日志"
+        return json_ok({"triggered": bool(ok), "character_key": char, "mode": mode, "message": message})
+    except Exception as exc:
+        service._ulog(sid, "ERROR", f"MANUAL_PUSH_FAILED character={char} mode={mode} error={exc}")
+        return json_error(f"手动推送失败: {exc}", status=502)
+    finally:
+        if not restored:
+            target_state = service.sessions.get(sid)
+            if isinstance(target_state, dict):
+                try:
+                    if hasattr(service, "_save_current_character_context"):
+                        service._save_current_character_context(target_state)
+                    if hasattr(service, "_snapshot_character"):
+                        service._snapshot_character(target_state)
+                    _merge_character_containers(original_snapshot, target_state)
+                except Exception:
+                    pass
+            service.sessions[sid] = original_snapshot
+            service._save_session_state(sid, original_snapshot)
+
+
 async def api_get_history_summary(request: web.Request):
     service = service_from(request)
     sid = request.match_info["session_id"]
     if not _session_allowed(request, sid):
         return json_error("无权访问此会话", status=403)
-    char = request.query.get("character_key") or (service._memory_character(sid) if hasattr(service, "_memory_character") else "")
+    char = required_character_key_from_request(request)
+    if char is None:
+        return json_error("缺少 character_key，角色页操作必须指定目标角色")
     key = char
     summary = ""
     try:
@@ -1719,7 +2019,7 @@ async def api_get_history_summary(request: web.Request):
         summary = (meta.get("character_history_summary") or "").strip()
     except Exception:
         pass
-    if not summary:
+    if not summary and key == active_context_character_key(service, sid):
         state = service._get_session_state(sid)
         summary = session_schema.get_character_history_summary(state)
     return json_ok({"character_key": key, "summary": summary})
@@ -1732,16 +2032,17 @@ async def api_save_history_summary(request: web.Request):
         return json_error("无权操作此会话", status=403)
     payload = await request.json()
     summary = str(payload.get("summary") or "").strip()
-    char = str(payload.get("character_key") or "").strip()
-    if not char:
-        char = service._memory_character(sid) if hasattr(service, "_memory_character") else ""
+    char = required_character_key_from_request(request, payload)
+    if char is None:
+        return json_error("缺少 character_key，角色页操作必须指定目标角色")
     try:
         service.app_store.upsert_character_history_summary(sid, char, summary)
     except Exception as exc:
         return json_error(f"保存历史提要失败: {exc}", status=500)
-    state = service._get_session_state(sid)
-    session_schema.set_character_history_summary(state, summary)
-    service._save_session_state(sid, state)
+    if char == active_context_character_key(service, sid):
+        state = service._get_session_state(sid)
+        session_schema.set_character_history_summary(state, summary)
+        service._save_session_state(sid, state)
     return json_ok({"character_key": char, "summary": summary})
 
 

@@ -34,7 +34,7 @@ COMMAND_ALIAS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "位置设置", "设置位置", "城市设置", "设置城市",
     )),
     ("测试推送", (
-        "testpush", "push-test", "推送测试", "测试主动推送", "主动推送测试",
+        "testpush", "push-test", "推送测试", "测试主动推送", "主动推送测试", "手动推送",
     )),
     ("测试生图", (
         "testimage", "image-test", "生图测试", "测试图片", "图片测试",
