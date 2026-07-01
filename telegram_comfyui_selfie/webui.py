@@ -72,6 +72,18 @@ def required_character_key_from_request(request: web.Request, payload: dict[str,
     return value or None
 
 
+def character_operation_lock(service, session_id: str) -> asyncio.Lock:
+    locks = getattr(service, "_web_character_operation_locks", None)
+    if not isinstance(locks, dict):
+        locks = {}
+        service._web_character_operation_locks = locks
+    lock = locks.get(session_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[session_id] = lock
+    return lock
+
+
 @web.middleware
 async def _no_cache_assets(request: web.Request, handler):
     """控制台 HTML/JS/CSS 不走浏览器缓存，避免改完 UI 还显示旧界面。"""
@@ -1302,6 +1314,11 @@ async def api_generate_character_avatar(request: web.Request):
     if not _session_allowed(request, sid):
         return json_error("无权访问此会话", status=403)
     character_id = request.match_info["character_id"]
+    async with character_operation_lock(service, sid):
+        return await _generate_character_avatar_locked(service, sid, character_id)
+
+
+async def _generate_character_avatar_locked(service, sid: str, character_id: str):
     state = service._get_session_state(sid)
     character = _character_for_avatar(service, state, sid, character_id)
     if not character:
@@ -1961,6 +1978,11 @@ async def api_test_push_selected_character(request: web.Request):
     if char is None:
         return json_error("缺少 character_key，手动推送必须指定目标角色")
     mode = str(payload.get("mode") or payload.get("arg") or "normal").strip() or "normal"
+    async with character_operation_lock(service, sid):
+        return await _test_push_selected_character_locked(service, sid, char, mode)
+
+
+async def _test_push_selected_character_locked(service, sid: str, char: str, mode: str):
     state = service._get_session_state(sid)
     character_payload = _character_payload_for_operation(service, state, sid, char)
     if not character_payload:
