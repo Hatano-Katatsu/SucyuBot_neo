@@ -2842,6 +2842,48 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_planner_warns_private_sleepwear_in_public_world_context(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 7, 1, 10, 30, tzinfo=timezone.utc)
+            svc._session_now = lambda session_id="": fixed_now
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            state = svc._get_session_state(sid)
+            state["life_profile"] = {
+                "age_stage": "adult",
+                "day_anchor": "school",
+                "persona_hash": "test",
+            }
+            session_schema.set_outfit(state, "black lace camisole nightgown")
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "standing by a university classroom window in modest casual clothes",
+                "caption": "课间给你看一眼。",
+                "view": "selfie",
+                "character_location": "school",
+                "user_location": "unknown",
+                "new_appearance_tags": "modest casual clothes",
+            }, ensure_ascii=False))
+
+            await plan_roleplay_image(
+                svc,
+                sid,
+                mode="normal",
+                now=fixed_now,
+                weather_data={"desc": "晴", "temp": "25", "code": "113"},
+            )
+
+            system_prompt = svc._call_llm.await_args.args[0]
+            self.assertIn("公开场合穿搭约束", system_prompt)
+            self.assertIn("black lace camisole nightgown", system_prompt)
+            self.assertIn("modest casual clothes", system_prompt)
+
+        asyncio.run(run())
+
     def test_scheduler_scene_injects_recent_photo_continuity(self):
         async def run():
             svc = self.make_service()
@@ -6273,6 +6315,40 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("no panties", neg_lower)
         self.assertIn("no underwear", neg_lower)
         self.assertIn("bottomless", neg_lower)
+
+    def test_build_prompt_public_context_replaces_private_sleepwear_outfit(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        session_schema.set_outfit(state, "black lace camisole nightgown")
+
+        pos, neg = svc._build_prompt(
+            "standing by a university classroom window wearing a black lace camisole nightgown",
+            session_id=sid,
+            one_shot_appearance="black lace camisole nightgown",
+        )
+
+        pos_lower = pos.lower()
+        self.assertIn("modest casual clothes", pos_lower)
+        self.assertNotIn("nightgown", pos_lower)
+        self.assertNotIn("camisole", pos_lower)
+        self.assertIn("nightgown", neg.lower())
+        self.assertEqual(session_schema.get_outfit(state), "black lace camisole nightgown")
+
+    def test_build_prompt_private_context_keeps_sleepwear_outfit(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        session_schema.set_outfit(state, "black lace camisole nightgown")
+
+        pos, _ = svc._build_prompt(
+            "standing in the bedroom wearing a black lace camisole nightgown",
+            session_id=sid,
+        )
+
+        pos_lower = pos.lower()
+        self.assertIn("black lace camisole nightgown", pos_lower)
+        self.assertNotIn("modest casual clothes", pos_lower)
 
     def test_clothing_off_strips_named_garment_for_this_image_only(self):
         svc = self.make_service()

@@ -392,6 +392,112 @@ def _strip_conflicting_scene_appearance(
     return scene_desc
 
 
+PUBLIC_MODEST_OUTFIT_TAG = "modest casual clothes"
+PUBLIC_PRIVATE_OUTFIT_NEGATIVES = (
+    "lingerie", "underwear", "bra", "panties", "g-string", "thong",
+    "nightgown", "nightdress", "negligee", "sleepwear", "pajamas",
+    "bikini", "swimsuit", "babydoll", "chemise", "slip dress",
+    "revealing clothes", "cleavage", "underboob", "sideboob", "see-through clothing",
+)
+PUBLIC_SCENE_ANCHOR_RE = re.compile(
+    r"\b("
+    r"school|campus|university|classroom|library|office|workplace|company|meeting room|"
+    r"mall|shopping mall|street|sidewalk|cafe|coffee shop|restaurant|station|subway|train|"
+    r"bus stop|convenience store|supermarket|bookstore|museum|hospital|gym|park|stadium"
+    r")\b|学校|校园|大学|教室|图书馆|办公室|公司|商场|街|咖啡店|餐厅|车站|地铁|便利店|超市|书店|博物馆|医院|健身房|公园",
+    re.IGNORECASE,
+)
+PRIVATE_SCENE_ANCHOR_RE = re.compile(
+    r"\b(home|bedroom|living room|kitchen|bathroom|hotel room|private room|sofa|bed)\b|家中|卧室|客厅|厨房|浴室|酒店房间|私人房间",
+    re.IGNORECASE,
+)
+
+
+def _is_public_private_outfit_tag(tag: str) -> bool:
+    low = _tag_key(tag)
+    if not low:
+        return False
+    if any(term in low for term in PUBLIC_PRIVATE_OUTFIT_NEGATIVES):
+        return True
+    if "camisole" in low and any(term in low for term in ("lace", "night", "sleep", "lingerie")):
+        return True
+    if "robe" in low and any(term in low for term in ("bath", "sleep", "night", "lace")):
+        return True
+    if any(term in low for term in ("see through", "see-through", "transparent")):
+        return True
+    return False
+
+
+def _remove_public_private_outfit_tags(text: str) -> tuple[str, list[str]]:
+    removed: list[str] = []
+    kept: list[str] = []
+    for tag in _split_tags(text):
+        if _is_public_private_outfit_tag(tag):
+            removed.append(tag)
+        else:
+            kept.append(tag)
+    return normalize_appearance_text(", ".join(kept)), removed
+
+
+def _public_render_context(service: Any, state: dict[str, Any], session_id: str, scene_desc: str) -> bool:
+    scene = str(scene_desc or "")
+    scene_is_public = bool(PUBLIC_SCENE_ANCHOR_RE.search(scene))
+    if scene_is_public:
+        return True
+    if PRIVATE_SCENE_ANCHOR_RE.search(scene):
+        return False
+    if not session_id or not hasattr(service, "build_world_state"):
+        return False
+    try:
+        world = service.build_world_state(session_id, user_text="", mode="image")
+        place = world.get("character_place") or {}
+        return bool(place.get("public"))
+    except Exception:
+        logger.debug("public render context detection failed", exc_info=True)
+        return False
+
+
+def _guard_public_outfit(
+    service: Any,
+    state: dict[str, Any],
+    session_id: str,
+    scene_desc: str,
+    effective_appearance: str,
+    one_shot_appearance: str,
+    negative: str,
+) -> tuple[str, str, str, list[str]]:
+    """公开场合里把睡衣/内衣类持久穿搭降成仅本图的得体日常穿搭。"""
+    if not _public_render_context(service, state, session_id, scene_desc):
+        return effective_appearance, one_shot_appearance, negative, []
+    effective_clean, removed_effective = _remove_public_private_outfit_tags(effective_appearance)
+    one_shot_clean, removed_one_shot = _remove_public_private_outfit_tags(one_shot_appearance)
+    removed = removed_effective + removed_one_shot
+    if not removed:
+        return effective_appearance, one_shot_appearance, negative, []
+
+    combined = _dedupe_prompt_modules([effective_clean, one_shot_clean])
+    if not service._parse_appearance(combined).get("outfit"):
+        effective_clean = _dedupe_prompt_modules([effective_clean, PUBLIC_MODEST_OUTFIT_TAG])
+    negative = _append_negatives(negative, *removed, *PUBLIC_PRIVATE_OUTFIT_NEGATIVES, "revealing public outfit")
+    return effective_clean, one_shot_clean, negative, removed
+
+
+def public_outfit_guard_context(service: Any, session_id: str, dynamic_appearance: str, scene_desc: str = "") -> str:
+    state = service._get_session_state(session_id) if session_id else {}
+    if not _public_render_context(service, state, session_id, scene_desc):
+        return ""
+    _, removed = _remove_public_private_outfit_tags(dynamic_appearance)
+    if not removed:
+        return ""
+    preview = ", ".join(removed[:4])
+    return (
+        "公开场合穿搭约束: 当前附加外貌里含睡衣/内衣/泳装类暴露项"
+        f"（{preview}），但本轮世界地点属于公开场合。"
+        "本图不要直接使用这些项；请改写为得体日常外出穿搭（例如 modest casual clothes、外套/校内日常服），"
+        "new_appearance_tags 只写本图需要的得体替代穿搭。"
+    )
+
+
 _FULL_NUDE_RE = re.compile(
     r"\b(nude|naked|fully undressed|completely undressed|stark naked|no clothes|nothing on)\b",
     re.IGNORECASE,
@@ -1004,12 +1110,22 @@ def build_prompt(
     effective_appearance = char
     if appearance_override:
         effective_appearance = f"{effective_appearance}, {appearance_override}" if effective_appearance else appearance_override
+    one_shot_effective = (one_shot_appearance or "").strip()
+    effective_appearance, one_shot_effective, neg, _public_outfit_removed = _guard_public_outfit(
+        service,
+        state,
+        session_id,
+        scene_desc,
+        effective_appearance,
+        one_shot_effective,
+        neg,
+    )
     # 一次性脱衣/裸露：让规划器的逐图判断剥离本次着装（不落盘），覆盖陈旧持久态。
     # "当前所穿"标签取自生效的 dynamic_appearance + 本次一次性外观，按标签匹配剥离。
     worn_src = service._effective_dynamic_appearance(session_id) if session_id else session_schema.get_outfit(state)
     worn_tags = [t.strip() for t in str(worn_src).split(",") if t.strip()]
-    if one_shot_appearance:
-        worn_tags += [t.strip() for t in str(one_shot_appearance).split(",") if t.strip()]
+    if one_shot_effective:
+        worn_tags += [t.strip() for t in str(one_shot_effective).split(",") if t.strip()]
     effective_appearance, neg = _apply_clothing_off(service, clothing_off, effective_appearance, neg, worn_tags)
     slots = PromptSlots(
         raw_scene=raw_scene_desc,
@@ -1024,7 +1140,7 @@ def build_prompt(
         style_artist=", ".join(part for part in (artist, legacy_style) if part),
         style_general=style_general,
         safety=safety_tag,
-        one_shot_appearance=(one_shot_appearance or "").strip(),
+        one_shot_appearance=one_shot_effective,
         negative=neg,
         session_id=session_id,
     )

@@ -15,6 +15,7 @@ from .generation import (
     ANIMATOOL_NLTAG_FIELDS,
     _infer_prompt_view,
     _strip_non_mirror_camera_artifacts,
+    public_outfit_guard_context,
 )
 from .world_runtime import PLACE_TYPES
 
@@ -947,6 +948,9 @@ async def plan_roleplay_image(
         "输出适合发给用户的一张图。不要输出英文画图标签。\n"
         "公开场合必须穿着得体；私密场合可以更放松。避免和最近照片重复。"
     )
+    public_outfit_context = public_outfit_guard_context(service, session_id, dynamic)
+    if public_outfit_context:
+        system += "\n" + public_outfit_context
     if world_context:
         # 与聊天侧同构：进行中的对话已经确立了地点时，动线只作背景，避免配图把角色按现实时段“传送”
         # （家→商场这类漂移）；只有冷启动/无对话时才用动线引导地点。
