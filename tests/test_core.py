@@ -4568,6 +4568,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             system = svc._call_llm.await_args.args[0]
             self.assertIn("推送场景转换判定", system)
+            self.assertIn("距离上次互动已超过场景断档阈值", system)
+            self.assertNotIn("45 分钟", system)
+            self.assertLess(system.index("当前附加外貌:"), system.index("推送场景转换判定"))
             self.assertIn("不要把上一场景的地点", system)
             self.assertNotIn("地点锁定（最高优先", system)
             self.assertIn("地点参考（较弱", system)

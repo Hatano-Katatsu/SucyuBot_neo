@@ -893,8 +893,6 @@ async def plan_roleplay_image(
             "主动推送时把画面写成角色日常动线里的自然片段，不要无理由瞬移到用户身边；短期连续性上下文可用于承接，但必须先服从场景转换判定。\n"
             f"角色身份: 当前角色是「{bot_name}」（{role_name}），优先使用「{bot_self_name}」作为自称；不要写成其他默认角色。\n"
         )
-        if push_transition_context:
-            role_context += push_transition_context + "\n"
         temporal = time_period
     else:
         if free_composition:
@@ -948,6 +946,8 @@ async def plan_roleplay_image(
         "输出适合发给用户的一张图。不要输出英文画图标签。\n"
         "公开场合必须穿着得体；私密场合可以更放松。避免和最近照片重复。"
     )
+    if push_transition_context:
+        system += "\n" + push_transition_context
     public_outfit_context = public_outfit_guard_context(
         service,
         session_id,

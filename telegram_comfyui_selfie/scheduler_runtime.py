@@ -119,7 +119,7 @@ class SchedulerRuntimeMixin:
         if decision.get("too_old"):
             reasons.append("已超过主动推送连续性时效")
         elif decision.get("gap_minutes", 0) > decision.get("stale_minutes", 0) > 0:
-            reasons.append(f"距离上次互动约 {decision['gap_minutes']:.0f} 分钟，超过场景断档阈值")
+            reasons.append("距离上次互动已超过场景断档阈值")
         if not reasons:
             reasons.append("短期场景可能已经自然结束")
         return (
