@@ -15,7 +15,7 @@ from telegram_comfyui_selfie import appearance as appearance_rules
 from telegram_comfyui_selfie import character_card
 from telegram_comfyui_selfie import session_schema
 from telegram_comfyui_selfie.config_store import flatten_config, load_simple_yaml
-from telegram_comfyui_selfie.generation import PromptSlots, _build_animatool_turbo_payload
+from telegram_comfyui_selfie.generation import PromptSlots, _build_animatool_turbo_payload, _do_generate_animatool
 from telegram_comfyui_selfie.image_planning import _detect_intimate_context, _detect_nudity_context, _infer_clothing_off_fallback, format_dialog_context, format_planning_spatial_context, format_recent_photo_dedup_context, format_sent_photo_context, normalize_scene_visual_subject, plan_animatool_slots, plan_roleplay_image
 from telegram_comfyui_selfie.commands import (
     SESSION_GLOBAL_STATE_KEYS,
@@ -4696,6 +4696,109 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("湿痕", system_prompt)
             self.assertNotIn("neg", payload)
             self.assertIn("nltag", payload)
+
+        asyncio.run(run())
+
+    def test_animatool_slots_sanitizes_selfie_nltag_phone_leak(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "quality_meta_year_safe": "masterpiece, best quality, highres, newest, year 2025, safe",
+                "count": "1girl",
+                "nltag": (
+                    "A selfie of a woman relaxing on a sofa. "
+                    "She holds her phone with one hand as she types a message, looking smug."
+                ),
+            }, ensure_ascii=False))
+            slots = PromptSlots(
+                scene=(
+                    "A selfie of a woman, solo, upper body framing, looking at viewer, "
+                    "one arm extended toward the viewer, relaxing on a sofa."
+                ),
+                quality="masterpiece",
+                count="1girl",
+                effective_appearance="casual outfit",
+                negative="bad hands",
+            )
+            schema = {
+                "parameters": {
+                    "properties": {
+                        "quality_meta_year_safe": {"description": "quality and safety"},
+                        "count": {"description": "count"},
+                        "nltag": {"description": "natural language scene"},
+                    },
+                    "required": ["quality_meta_year_safe", "count", "nltag"],
+                }
+            }
+
+            with patch("telegram_comfyui_selfie.image_planning._fetch_animatool_turbo_knowledge", new=AsyncMock(return_value={})), \
+                 patch("telegram_comfyui_selfie.image_planning._fetch_animatool_turbo_schema", new=AsyncMock(return_value=schema)):
+                payload = await plan_animatool_slots(
+                    svc,
+                    sid,
+                    slots,
+                    intent="raw scene says she holds her phone while typing a message",
+                )
+
+            self.assertIsNotNone(payload)
+            nltag = payload["nltag"].lower()
+            self.assertIn("selfie", nltag)
+            self.assertIn("sofa", nltag)
+            self.assertNotIn("phone", nltag)
+            self.assertNotIn("smartphone", nltag)
+            self.assertNotIn("typing a message", nltag)
+
+        asyncio.run(run())
+
+    def test_animatool_generation_does_not_pass_raw_scene_as_slots_intent(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            slots = PromptSlots(
+                scene="A selfie of a woman, solo, looking at viewer, relaxing on a sofa.",
+                quality="masterpiece",
+                count="1girl",
+                effective_appearance="casual outfit",
+                negative="bad hands",
+            )
+            svc._last_prompt_slots = slots
+            planner = AsyncMock(return_value={"tags": "A clean selfie scene without devices."})
+            poster = AsyncMock(return_value=(True, [b"img"], ""))
+            schema = {
+                "parameters": {
+                    "properties": {
+                        "tags": {"description": "natural language scene"},
+                        "seed": {},
+                        "filename_prefix": {},
+                        "steps": {},
+                        "cfg": {},
+                        "aspect_ratio": {},
+                    }
+                }
+            }
+
+            with patch("telegram_comfyui_selfie.image_planning.plan_animatool_slots", new=planner), \
+                 patch("telegram_comfyui_selfie.generation._fetch_animatool_turbo_schema", new=AsyncMock(return_value=schema)), \
+                 patch("telegram_comfyui_selfie.generation._post_animatool", new=poster):
+                ok, imgs, err = await _do_generate_animatool(
+                    svc,
+                    "RAW scene: she holds her phone with one hand on the sofa.",
+                    sid,
+                    123,
+                )
+
+            self.assertTrue(ok)
+            self.assertEqual(imgs, [b"img"])
+            self.assertEqual(err, "")
+            planner.assert_awaited_once()
+            self.assertEqual(planner.await_args.args[:3], (svc, sid, slots))
+            self.assertNotIn("intent", planner.await_args.kwargs)
 
         asyncio.run(run())
 

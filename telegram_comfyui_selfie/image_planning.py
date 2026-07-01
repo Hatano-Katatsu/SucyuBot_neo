@@ -14,17 +14,25 @@ from .defaults import DEFAULT_CONFIG, WEEKDAY_NAMES
 from .generation import (
     ANIMATOOL_NLTAG_FIELDS,
     _infer_prompt_view,
+    _strip_non_mirror_camera_artifacts,
 )
 from .world_runtime import PLACE_TYPES
 
 logger = logging.getLogger(__name__)
 
 VALID_VIEWS = {"selfie", "mirror", "pov", "third", "portrait"}
+DEVICE_FREE_VIEWS = {"selfie", "portrait", "pov"}
 
 # AnimaTool turbo knowledge/schema 缓存（按 comfyui_url 分键）
 _animatool_turbo_knowledge_cache: dict[str, tuple[dict[str, Any], float]] = {}
 _animatool_turbo_schema_cache: dict[str, tuple[dict[str, Any], float]] = {}
 _ANIMATOOL_KNOWLEDGE_TTL = 300.0
+
+
+def _sanitize_nltag_for_view(text: str, view: str) -> str:
+    if view not in DEVICE_FREE_VIEWS:
+        return str(text or "").strip()
+    return _strip_non_mirror_camera_artifacts(str(text or "")).strip()
 
 
 async def _fetch_animatool_turbo_knowledge(service: Any, ttl: float = _ANIMATOOL_KNOWLEDGE_TTL) -> dict[str, Any]:
@@ -1335,7 +1343,12 @@ async def plan_animatool_slots(
                 break
     raw_nltag = next((str(parsed.get(field) or "").strip() for field in ANIMATOOL_NLTAG_FIELDS if str(parsed.get(field) or "").strip()), "")
     if nltag_field:
-        parsed[nltag_field] = raw_nltag or slots.scene or ""
+        nltag_value = raw_nltag or slots.scene or ""
+        view_for_nltag = prompt_view or _infer_prompt_view(nltag_value)
+        nltag_value = _sanitize_nltag_for_view(nltag_value, view_for_nltag)
+        if not nltag_value and slots.scene:
+            nltag_value = _sanitize_nltag_for_view(slots.scene, prompt_view or _infer_prompt_view(slots.scene))
+        parsed[nltag_field] = nltag_value
         for field in ANIMATOOL_NLTAG_FIELDS:
             if field != nltag_field:
                 parsed.pop(field, None)

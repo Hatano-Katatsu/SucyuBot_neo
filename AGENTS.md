@@ -231,6 +231,7 @@ telegram_comfyui_selfie/
 17. **角色操作并发串味修复**：WebUI 头像生成和手动推送都会临时把同一会话切到目标角色后执行长耗时任务；此前同一会话连续触发 A/B 头像或头像+手动推送时，两个请求可能交错恢复 `service.sessions[session_id]`，导致 active 角色被恢复成另一个临时角色，甚至把照片历史写入错误上下文。新增 session 级 `_web_character_operation_locks`，让这些会临时切角色的操作按会话串行执行；新增并发测试覆盖 A/B 头像同时生成后 active/chat_history 不变，以及头像生成与手动推送混跑时只会按序进入目标角色上下文。
 18. **聊天回复格式统一**：聊天静态 system 新增回复格式规则，要求角色说出口的语言单独放入中文直角引号 `「」`，动作、神态、姿态、心理、环境和状态描写单独放入全角括号 `（）`；台词段和状态段用空行分成独立自然段，继续沿用 `chat_split_paragraphs=true` 的空行分段发送机制。新增测试锁定该规则存在于静态前缀。
 19. **`chat-final` DSML-only 空回复修复**：兼容 OpenAI 兼容端在最终文字阶段返回 `finish_reason=stop` 但把 DSML 工具调用文本塞进 `message.content` 的情况；如果剥离 DSML 后没有自然语言，会和结构化 `tool_calls` 空回复一样追加 text-only system 提示并重试 `chat-final-retry`，不执行最终阶段泄漏出的工具调用。新增测试覆盖 DSML-only `generate_roleplay_image` 触发重试且不写 `LLM_FULL_LOG`。
+20. **AnimaTool 自拍手机旁路修复**：AnimaTool Turbo 的 slots planner 不再把未清洗的原始 `scene_desc` 作为 `用户意图` 重喂给 LLM，避免 raw scene 中的 `holds her phone` 绕过 `PromptSlots.scene` 清洗；`plan_animatool_slots()` 在最终 `tags/nltag` 入 payload 前会按 `view=selfie/portrait/pov` 再跑一次设备/手机/UI 清理。新增测试覆盖 raw scene 不再作为 intent 传入，以及 LLM 泄漏手机词时 Turbo nltag 被清洗。
 
 ## 今日变更（2026-06-30）
 

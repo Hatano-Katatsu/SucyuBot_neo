@@ -576,6 +576,9 @@ def _strip_non_mirror_camera_artifacts(scene_desc: str) -> str:
         flags=re.IGNORECASE,
     )
     phrase_patterns = [
+        r"\b(?:she|he|the\s+character|the\s+woman|the\s+girl|the\s+man|the\s+boy)\s+(?:holds?|holding|grips?|gripping|checks?|checking|scrolls?\s+through|scrolling\s+through|plays?\s+with|using|uses?|shakes?|shaking|types?\s+on|typing\s+on|texts?\s+on|texting\s+on)\s+(?:a\s+|an\s+|one\s+|her\s+|his\s+|the\s+)?(?:smartphone|phone|cellphone|mobile phone)(?:\s+with\s+[^,.;]*)?",
+        r"\b(?:as|while)\s+(?:she|he|the\s+character|the\s+woman|the\s+girl|the\s+man|the\s+boy)\s+(?:types?|typing|texts?|texting)\s+(?:a\s+)?message\b",
+        r"\b(?:typing|texting)\s+(?:a\s+)?message\b",
         r"\b(?:while\s+)?(?:the\s+)?(?:other|another|one)\s+(?:hand\s+)?(?:is\s+)?(?:idly\s+|casually\s+)?(?:holds?|holding|grips?|gripping|checks?|checking|scrolls?\s+through|scrolling\s+through|plays?\s+with|using)\s+(?:a\s+|an\s+|one\s+|her\s+|his\s+|the\s+)?(?:smartphone|phone|cellphone|mobile phone)\b",
         r"\b(?:one|another|the other)\s+hand\s+(?:is\s+)?(?:on|near|around)\s+(?:a\s+|one\s+|her\s+|his\s+|the\s+)?(?:smartphone|phone|cellphone|mobile phone)\b",
         r"\bholding\s+(?:a\s+|one\s+|her\s+)?(?:smartphone|phone|cellphone|mobile phone)\b",
@@ -1309,13 +1312,12 @@ async def _do_generate_animatool(
     from .image_planning import plan_animatool_slots
 
     slots = getattr(service, "_last_prompt_slots", None)
-    intent = scene_desc or ""
 
     # 尝试新流程：LLM 直出 animatool JSON
     llm_payload = None
     if isinstance(slots, PromptSlots):
         llm_payload = await plan_animatool_slots(
-            service, session_id, slots, intent=intent,
+            service, session_id, slots,
         )
 
     if llm_payload:
