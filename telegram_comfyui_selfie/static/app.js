@@ -94,33 +94,33 @@ const configSections = [
 
 const characterFieldSections = [
   ["身份", [
-    ["character", "角色名", "text"],
-    ["series", "作品/系列", "text"],
-    ["role_name", "角色类型", "text"],
-    ["bot_name", "角色对话名", "text"],
-    ["bot_self_name", "自称", "text"],
-    ["user_address", "对用户称呼", "text"],
-    ["visual_character", "生图角色 Tag", "text"],
-    ["visual_series", "生图作品 Tag", "text"],
+    ["character", "角色名", "text", "half"],
+    ["series", "作品/系列", "text", "half"],
+    ["role_name", "角色类型", "text", "half"],
+    ["bot_name", "角色对话名", "text", "half"],
+    ["bot_self_name", "自称", "text", "half"],
+    ["user_address", "对用户称呼", "text", "half"],
+    ["visual_character", "生图角色 Tag", "text", "half"],
+    ["visual_series", "生图作品 Tag", "text", "half"],
   ]],
   ["人格", [
-    ["persona", "人格描述", "textarea"],
+    ["persona", "人格描述", "textarea", "wide tall"],
   ]],
   ["外貌", [
-    ["count", "人数标签", "text"],
-    ["appearance", "身体特征", "textarea"],
-    ["outfit", "服装标签", "textarea"],
-    ["style", "画风", "style_combo"],
-    ["allow_change_appearance", "自动换装", "tristate"],
+    ["count", "人数标签", "text", "half"],
+    ["style", "画风", "style_combo", "half"],
+    ["appearance", "身体特征", "textarea", "wide"],
+    ["outfit", "服装标签", "textarea", "wide"],
+    ["allow_change_appearance", "自动换装", "tristate", "half"],
   ]],
   ["关系与背景", [
-    ["relationship", "空间关系", "textarea"],
-    ["age_stage", "年龄段", "select:,minor,adult"],
-    ["occupation", "职业", "text"],
-    ["day_anchor", "白天去向", "select:,company,school,factory,farm,construction,medical,retail,delivery,driver,home,flexible"],
+    ["relationship", "空间关系", "textarea", "wide"],
+    ["age_stage", "年龄段", "select:,minor,adult", "third"],
+    ["occupation", "职业", "text", "third"],
+    ["day_anchor", "白天去向", "select:,company,school,factory,farm,construction,medical,retail,delivery,driver,home,flexible", "third"],
   ]],
   ["边界", [
-    ["purity", "纯良度", "number"],
+    ["purity", "纯良度", "number", "third"],
   ]],
 ];
 
@@ -240,6 +240,45 @@ function characterAvatarUrl(characterId, char) {
 function characterAvatarMarkup(char, characterId, className) {
   const url = characterAvatarUrl(characterId, char);
   return `<span class="${className} ${url ? "has-avatar" : "is-empty"}">${url ? `<img src="${escapeHtml(url)}" alt="">` : ""}</span>`;
+}
+
+function ensureAvatarPreview() {
+  let overlay = $("#avatar-preview");
+  if (overlay) return overlay;
+  document.body.insertAdjacentHTML("beforeend", `
+    <div id="avatar-preview" class="avatar-preview" hidden>
+      <button class="avatar-preview-close" type="button" aria-label="关闭头像预览">×</button>
+      <figure>
+        <img alt="">
+        <figcaption></figcaption>
+      </figure>
+    </div>
+  `);
+  overlay = $("#avatar-preview");
+  const close = () => {
+    overlay.hidden = true;
+    const img = overlay.querySelector("img");
+    if (img) img.removeAttribute("src");
+  };
+  overlay.addEventListener("click", event => {
+    if (event.target === overlay) close();
+  });
+  overlay.querySelector(".avatar-preview-close").onclick = close;
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && !overlay.hidden) close();
+  });
+  return overlay;
+}
+
+function openAvatarPreview(src, title) {
+  if (!src) return;
+  const overlay = ensureAvatarPreview();
+  const img = overlay.querySelector("img");
+  const caption = overlay.querySelector("figcaption");
+  img.src = src;
+  img.alt = title || "角色头像";
+  caption.textContent = title || "角色头像";
+  overlay.hidden = false;
 }
 
 function characterPill(label, value, className = "") {
@@ -461,10 +500,11 @@ async function loadFeedbackBoard() {
   }
 }
 
-function inputFor([key, label, type], values) {
+function inputFor([key, label, type, layout], values) {
   const fieldId = "field-" + key;
   const wrap = document.createElement("div");
-  wrap.className = "field-wrap";
+  const layoutClasses = String(layout || "").split(/\s+/).filter(Boolean).map(item => `field-${item}`);
+  wrap.className = ["field-wrap", ...layoutClasses].join(" ");
   const labelEl = document.createElement("label");
   labelEl.htmlFor = fieldId;
   labelEl.textContent = label;
@@ -474,7 +514,7 @@ function inputFor([key, label, type], values) {
   const value = values[key];
   if (type === "textarea" || type === "list") {
     input = document.createElement("textarea");
-    input.rows = type === "list" ? 3 : 5;
+    input.rows = layoutClasses.includes("field-tall") ? 8 : (type === "list" ? 3 : 4);
     input.value = Array.isArray(value) ? value.join("\n") : (value ?? "");
   } else if (type === "bool") {
     input = document.createElement("select");
@@ -604,12 +644,7 @@ function renderCharacterPool() {
     const defaultBadge = isDefault ? `<span class="default-badge">默认</span>` : "";
     const name = char.character || char.bot_name || id;
     const meta = [char.series || "未设定出处", char.role_name || "未设定类型"].filter(Boolean).join(" · ");
-    const summary = compactText(char.persona || char.relationship || char.appearance || "", 82);
-    const chips = [
-      char.bot_name ? characterPill("对话", char.bot_name) : "",
-      char.purity !== undefined && char.purity !== "" ? characterPill("纯良", char.purity) : "",
-      char.style ? characterPill("画风", char.style) : "",
-    ].filter(Boolean).join("");
+    const summary = compactText(char.persona || char.relationship || char.appearance || "", 58);
     return `
       <button class="character-card ${state.selectedCharacter === id ? "selected" : ""}" data-character-id="${escapeHtml(id)}" type="button">
         ${characterAvatarMarkup(char, id, "character-card-avatar")}
@@ -617,7 +652,6 @@ function renderCharacterPool() {
           <span class="character-card-title">${escapeHtml(name)}<span class="character-card-badges">${activeBadge}${defaultBadge}</span></span>
           <span class="character-card-meta">${escapeHtml(meta)}</span>
           ${summary ? `<span class="character-card-summary">${escapeHtml(summary)}</span>` : ""}
-          ${chips ? `<span class="character-card-chips">${chips}</span>` : ""}
         </span>
       </button>
     `;
@@ -703,6 +737,23 @@ function renderCharacterForm() {
     <input type="hidden" name="avatar_path" value="${escapeHtml(char.avatar_path || "")}">
     <input type="hidden" name="avatar_updated_at" value="${escapeHtml(char.avatar_updated_at || "")}">
   `;
+  const profileAvatar = overview.querySelector(".character-profile-avatar.has-avatar");
+  if (profileAvatar) {
+    const previewUrl = characterAvatarUrl(state.selectedCharacter, char);
+    profileAvatar.classList.add("is-clickable");
+    profileAvatar.title = "查看头像大图";
+    profileAvatar.tabIndex = 0;
+    profileAvatar.setAttribute("role", "button");
+    profileAvatar.setAttribute("aria-label", "查看头像大图");
+    const openPreview = () => openAvatarPreview(previewUrl, overviewTitle);
+    profileAvatar.onclick = openPreview;
+    profileAvatar.onkeydown = event => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openPreview();
+      }
+    };
+  }
   form.appendChild(overview);
 
   characterFieldSections.forEach(([sectionTitle, fields], index) => {

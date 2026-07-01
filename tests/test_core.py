@@ -419,7 +419,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
     def test_character_panel_hides_preference_fields(self):
         app_js = (Path(__file__).resolve().parents[1] / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
         character_fields = app_js.split("const characterFieldSections = [", 1)[1].split("const commands =", 1)[0]
-        self.assertIn('["user_address", "对用户称呼", "text"]', character_fields)
+        self.assertIn('["user_address", "对用户称呼", "text", "half"]', character_fields)
         self.assertNotIn('["scene_preference"', character_fields)
         self.assertNotIn('["selfie_preference"', character_fields)
 
@@ -1082,7 +1082,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             self.assertEqual(data["style_pool"], ["@base", "@dream_style"])
             app_js = (Path(__file__).resolve().parents[1] / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
-            self.assertIn('["style", "画风", "style_combo"]', app_js)
+            self.assertIn('["style", "画风", "style_combo", "half"]', app_js)
             self.assertIn("state.characterData?.style_pool", app_js)
             self.assertIn("留空表示本角色不注入画风", app_js)
 
