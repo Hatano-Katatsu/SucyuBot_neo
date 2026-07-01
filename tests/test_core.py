@@ -7333,6 +7333,10 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         messages = svc._build_chat_messages(sid, "测试")
         static = messages[0]["content"]
         self.assertIn("不是表白或调情", static)
+        self.assertIn("回复格式规则", static)
+        self.assertIn("语言必须单独放在中文直角引号「」中", static)
+        self.assertIn("状态描写必须单独放在全角括号（）中", static)
+        self.assertIn("空行分成独立段落", static)
         self.assertIn("不要反复提及", static)
         self.assertIn("事实来源优先级", static)
         self.assertIn("低优先级背景不能覆盖高优先级事实", static)

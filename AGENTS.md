@@ -229,6 +229,7 @@ telegram_comfyui_selfie/
 15. **本轮回归验证**：新增测试覆盖头像生成覆盖写入、WebUI 角色页记忆/日记/历史提要不回落 active、手动推送期间临时切到选中角色并在结束后恢复原 active，且照片历史落入选中角色上下文；验证 `node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m compileall -q telegram_comfyui_selfie tests`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 318 tests in 7.589s`，`OK (skipped=1)`。
 16. **角色页布局二次收敛**：左侧角色池从多行信息卡改为固定高度列表行，仅展示头像、名称、来源/类型和一行摘要，避免窄列中内容高度不稳和视觉重叠；右侧角色编辑表单增加字段布局元数据，`persona/appearance/outfit/relationship` 等长文本字段横跨整行，`persona` 使用更高 textarea，身份短字段保持二列/三列网格。右侧简介栏已有头像时可点击查看大图，支持点击背景、关闭按钮或 Esc 退出预览。
 17. **角色操作并发串味修复**：WebUI 头像生成和手动推送都会临时把同一会话切到目标角色后执行长耗时任务；此前同一会话连续触发 A/B 头像或头像+手动推送时，两个请求可能交错恢复 `service.sessions[session_id]`，导致 active 角色被恢复成另一个临时角色，甚至把照片历史写入错误上下文。新增 session 级 `_web_character_operation_locks`，让这些会临时切角色的操作按会话串行执行；新增并发测试覆盖 A/B 头像同时生成后 active/chat_history 不变，以及头像生成与手动推送混跑时只会按序进入目标角色上下文。
+18. **聊天回复格式统一**：聊天静态 system 新增回复格式规则，要求角色说出口的语言单独放入中文直角引号 `「」`，动作、神态、姿态、心理、环境和状态描写单独放入全角括号 `（）`；台词段和状态段用空行分成独立自然段，继续沿用 `chat_split_paragraphs=true` 的空行分段发送机制。新增测试锁定该规则存在于静态前缀。
 
 ## 今日变更（2026-06-30）
 
