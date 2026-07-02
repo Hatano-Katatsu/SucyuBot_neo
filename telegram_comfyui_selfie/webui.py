@@ -192,6 +192,7 @@ def create_web_app(service) -> web.Application:
     app.router.add_patch("/api/models/settings", api_update_model_settings)
     app.router.add_get("/api/prompt-slots/{session_id:.+}", api_prompt_slots)
     app.router.add_post("/api/world/{session_id:.+}/places/refresh", api_world_refresh_places)
+    app.router.add_post("/api/world/{session_id:.+}/life-plan", api_world_life_plan_generate)
     app.router.add_get("/api/world/{session_id:.+}", api_world_route)
     app.router.add_post("/api/bot/start", api_bot_start)
     app.router.add_post("/api/bot/stop", api_bot_stop)
@@ -707,6 +708,85 @@ def build_catalog_preview(service, city: str) -> dict[str, Any]:
     }
 
 
+def serialize_life_plan_preview(service, session_id: str) -> dict[str, Any]:
+    enabled = service._life_plan_enabled(session_id) if hasattr(service, "_life_plan_enabled") else False
+    character_key = active_context_character_key(service, session_id)
+    row = None
+    if enabled and hasattr(service, "_load_life_plan_row"):
+        row = service._load_life_plan_row(session_id, character_key)
+    if not row:
+        return {
+            "enabled": enabled,
+            "exists": False,
+            "character_key": character_key,
+            "updated_at": 0,
+            "updated_ago": "",
+            "long_goals": [],
+            "mid_goals": [],
+            "today": {"date": "", "texture": "", "events": []},
+        }
+
+    payload = row.get("payload") if isinstance(row, dict) else {}
+    if hasattr(service, "_normalize_life_plan_payload"):
+        payload = service._normalize_life_plan_payload(payload, session_id=session_id)
+    payload = payload if isinstance(payload, dict) else {}
+    long_goals = payload.get("long_goals") if isinstance(payload.get("long_goals"), list) else []
+    mid_goals = payload.get("mid_goals") if isinstance(payload.get("mid_goals"), list) else []
+    today = payload.get("today") if isinstance(payload.get("today"), dict) else {}
+    long_by_id = {str(item.get("id") or ""): item for item in long_goals if isinstance(item, dict)}
+    mid_by_id = {str(item.get("id") or ""): item for item in mid_goals if isinstance(item, dict)}
+
+    def goal_item(item: dict[str, Any], *, parent: bool = False) -> dict[str, Any]:
+        result = {
+            "id": str(item.get("id") or ""),
+            "text": str(item.get("text") or ""),
+            "status": str(item.get("status") or "active"),
+            "updated_date": str(item.get("updated_date") or ""),
+        }
+        if parent:
+            parent_id = str(item.get("parent_id") or "")
+            result["parent_id"] = parent_id
+            result["parent_text"] = str((long_by_id.get(parent_id) or {}).get("text") or "")
+            result["progress_note"] = str(item.get("progress_note") or "")
+        else:
+            result["motivation"] = str(item.get("motivation") or "")
+        return result
+
+    events = []
+    for event in today.get("events") or []:
+        if not isinstance(event, dict):
+            continue
+        place_key = str(event.get("place_key") or "")
+        related_id = str(event.get("related_mid_id") or "")
+        events.append({
+            "id": str(event.get("id") or ""),
+            "time_hint": str(event.get("time_hint") or ""),
+            "text": str(event.get("text") or ""),
+            "status": str(event.get("status") or ""),
+            "place_key": place_key,
+            "place_label": PLACE_TYPES.get(place_key, {}).get("label", place_key),
+            "related_mid_id": related_id,
+            "related_mid_text": str((mid_by_id.get(related_id) or {}).get("text") or ""),
+            "side_note": str(event.get("side_note") or ""),
+        })
+
+    updated = float(row.get("updated_at", 0) or 0) if isinstance(row, dict) else 0
+    return {
+        "enabled": enabled,
+        "exists": True,
+        "character_key": character_key,
+        "updated_at": updated,
+        "updated_ago": human_ago(time.time() - updated) if updated else "",
+        "long_goals": [goal_item(item) for item in long_goals if isinstance(item, dict)],
+        "mid_goals": [goal_item(item, parent=True) for item in mid_goals if isinstance(item, dict)],
+        "today": {
+            "date": str(today.get("date") or ""),
+            "texture": str(today.get("texture") or ""),
+            "events": events,
+        },
+    }
+
+
 def build_world_route_preview(service, session_id: str, weather: Any = None) -> dict[str, Any]:
     state = service._get_session_state(session_id)
     summary = session_summary(service, session_id, state)
@@ -721,6 +801,7 @@ def build_world_route_preview(service, session_id: str, weather: Any = None) -> 
         "timezone": service._get_session_cfg(session_id, "timezone_offset", ""),
         "weather": service._weather_text(weather) if hasattr(service, "_weather_text") else (weather or ""),
         "catalog": catalog,
+        "life_plan": serialize_life_plan_preview(service, session_id),
         "current": {},
         "timeline": [],
     }
@@ -1688,6 +1769,26 @@ async def api_world_refresh_places(request: web.Request):
     except Exception:
         weather = None
     return json_ok({"catalog": catalog, "world": build_world_route_preview(service, sid, weather=weather)})
+
+
+async def api_world_life_plan_generate(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    if not hasattr(service, "ensure_life_plan_for_today"):
+        return json_error("生活线功能不可用", status=409)
+    async with character_operation_lock(service, sid):
+        result = await service.ensure_life_plan_for_today(sid, force=True, reason="web")
+        try:
+            weather = await service._fetch_weather("", sid)
+        except Exception:
+            weather = None
+        return json_ok({
+            "result": result,
+            "world": build_world_route_preview(service, sid, weather=weather),
+            "life_plan": serialize_life_plan_preview(service, sid),
+        })
 
 
 async def api_bot_start(request: web.Request):

@@ -480,7 +480,22 @@ class SchedulerRuntimeMixin:
                 logger.warning("character checkpoint before dream failed", exc_info=True)
                 self._ulog(session_id, "ERROR", f"CHARACTER_CHECKPOINT_FAILED date={diary_date} error={exc}")
         existing = self.app_store.get_diary(session_id, character_key, diary_date) or {}
-        diary = await self._write_dream_diary(session_id, diary_date, source_text, existing.get("content", ""), reason=reason)
+        life_plan_diary_context = ""
+        if hasattr(self, "_format_life_plan_diary_context"):
+            try:
+                life_plan_diary_context = self._format_life_plan_diary_context(session_id, character_key, diary_date)
+            except Exception:
+                logger.debug("life plan diary context failed", exc_info=True)
+        diary_kwargs: dict[str, Any] = {"reason": reason}
+        if life_plan_diary_context:
+            diary_kwargs["life_plan_context"] = life_plan_diary_context
+        diary = await self._write_dream_diary(
+            session_id,
+            diary_date,
+            source_text,
+            existing.get("content", ""),
+            **diary_kwargs,
+        )
         self.app_store.upsert_diary(session_id, character_key, diary_date, diary, from_message_id=from_id + 1, to_message_id=to_id)
         self._ulog(
             session_id,
@@ -491,6 +506,17 @@ class SchedulerRuntimeMixin:
         memory_result = await self._organize_memories_after_dream(session_id, character_key)
         if isinstance(memory_result, dict):
             self._ulog(session_id, "MEMORY", f"dream整理结果 {json.dumps(memory_result, ensure_ascii=False, default=str)}")
+        if hasattr(self, "_update_life_plan_after_dream"):
+            life_result = await self._update_life_plan_after_dream(
+                session_id,
+                character_key,
+                local_dt,
+                diary_date=diary_date,
+                diary=diary,
+                reason=reason,
+            )
+            if isinstance(life_result, dict):
+                self._ulog(session_id, "LIFE", f"dream生活线结果 {json.dumps(life_result, ensure_ascii=False, default=str)}")
         diaries = self.app_store.recent_diaries(session_id, character_key, limit=2)
         await self._generate_character_history_summary(session_id, character_key, diaries)
         self.app_store.mark_dream(session_id, character_key, to_id)
@@ -552,7 +578,16 @@ class SchedulerRuntimeMixin:
             + supplement
         )
 
-    async def _write_dream_diary(self, session_id: str, diary_date: str, source_text: str, existing_diary: str = "", *, reason: str = "") -> str:
+    async def _write_dream_diary(
+        self,
+        session_id: str,
+        diary_date: str,
+        source_text: str,
+        existing_diary: str = "",
+        *,
+        reason: str = "",
+        life_plan_context: str = "",
+    ) -> str:
         if not source_text and existing_diary:
             return existing_diary
         if not self.has_llm_config("chat", session_id):
@@ -584,7 +619,12 @@ class SchedulerRuntimeMixin:
             "or sections such as 「新一天演绎提示」/「角色扮演建议」. Output Chinese diary text only."
         )
         write_mode = "overwrite existing diary" if str(existing_diary or "").strip() else "new diary"
-        user = f"Diary date: {diary_date}\nWeekday: {weekday or 'unknown'}\nWrite mode: {write_mode}\nReason: {reason}\n\nExisting diary:\n{existing_diary or 'none'}\n\nNew dialogue since last dream:\n{source_text or 'none'}"
+        user = (
+            f"Diary date: {diary_date}\nWeekday: {weekday or 'unknown'}\nWrite mode: {write_mode}\nReason: {reason}"
+            f"\n\nExisting diary:\n{existing_diary or 'none'}"
+            f"\n\nNew dialogue since last dream:\n{source_text or 'none'}"
+            f"\n\nPrivate life background for diary:\n{life_plan_context or 'none'}"
+        )
         diary = await self._call_llm(system, user, temp=0.2, tag="dream-diary", purpose="chat", disable_thinking=True, session_id=session_id)
         preserved = self._ensure_diary_preserves_existing(existing_diary, diary)
         if preserved != diary:
@@ -1074,6 +1114,11 @@ class SchedulerRuntimeMixin:
                 await self._run_dream(session_id, local_dt, reason="morning", force=True)
             elif self._should_run_dream_before_push(session_id, state):
                 await self._run_dream(session_id, local_dt, reason=f"push-{mode}", force=False)
+            if hasattr(self, "ensure_life_plan_for_today"):
+                try:
+                    await self.ensure_life_plan_for_today(session_id, force=False, reason=f"push-{mode}")
+                except Exception:
+                    logger.debug("life plan ensure failed for scheduler push", exc_info=True)
             self._ulog(session_id, "PUSH", f"触发 mode={mode}")
             w = await self._fetch_weather(session_id=session_id)
             weather = f"{w['desc']} {w['temp']} C" if w else "未知"

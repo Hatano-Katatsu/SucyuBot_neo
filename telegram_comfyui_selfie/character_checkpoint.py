@@ -256,6 +256,7 @@ class CharacterCheckpointMixin:
                 "character_history_summary": history_summary,
                 "diaries": self.app_store.recent_diaries(session_id, character_key, limit=7),
             },
+            "life_plan": self.life_plan_snapshot(session_id, character_key) if hasattr(self, "life_plan_snapshot") else None,
             "memories": self.memory.list_memories(session_id, character=character_key, limit=1000, include_inactive=False),
             "chat_messages": self._format_checkpoint_messages(session_id, messages),
         }
@@ -409,6 +410,14 @@ class CharacterCheckpointMixin:
                     self.app_store.upsert_diary(session_id, character_key, diary_date, content, from_message_id=0, to_message_id=0)
                     imported_diaries += 1
 
+        life_plan_replaced = False
+        life_plan_data = payload.get("life_plan") if isinstance(payload.get("life_plan"), dict) else None
+        if mode == "full" and life_plan_data and hasattr(self, "_save_life_plan_payload"):
+            life_payload = life_plan_data.get("payload") if isinstance(life_plan_data.get("payload"), dict) else life_plan_data
+            if isinstance(life_payload, dict):
+                self._save_life_plan_payload(session_id, character_key, life_payload)
+                life_plan_replaced = True
+
         imported_memories = 0
         if mode in {"memory", "full"}:
             for memory in payload.get("memories") or []:
@@ -438,5 +447,6 @@ class CharacterCheckpointMixin:
             "diaries": imported_diaries,
             "context_restored": context_restored,
             "checkpoint_replaced": checkpoint_replaced,
+            "life_plan_replaced": life_plan_replaced,
             "chat_messages_archived": len(payload.get("chat_messages") or []),
         }

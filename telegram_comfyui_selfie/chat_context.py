@@ -176,6 +176,11 @@ class ChatContextMixin:
             self._tick_ntr_reconcile(state)
 
         self._save_session_state(session_id, state)
+        if hasattr(self, "queue_life_plan_refresh_if_needed"):
+            try:
+                self.queue_life_plan_refresh_if_needed(session_id, reason="lazy-chat")
+            except Exception:
+                logger.debug("queue life plan refresh failed", exc_info=True)
 
         if not self.has_llm_config("chat", session_id):
             await self.send_message(chat_id, "聊天与角色扮演模型未配置，聊天和工具触发不可用。命令功能仍可使用。")
@@ -620,6 +625,9 @@ class ChatContextMixin:
                 "角色历史提要（宏观关系与剧情发展脉络；用于理解长期阶段变化，不复述近期细节，不替代长期记忆）:\n"
                 f"{history_summary}"
             )
+        life_context = self._life_plan_chat_context(session_id, now=now) if hasattr(self, "_life_plan_chat_context") else ""
+        if life_context:
+            durable_parts.append(life_context)
         memory_context = self._long_term_memory_context(session_id)
         if memory_context:
             durable_parts.append(

@@ -73,6 +73,12 @@ const configSections = [
     ["world_runtime_enabled", "启用自动动线", "bool"],
     ["world_city_places_enabled", "城市地点增强", "bool"],
     ["world_city_places_ttl_days", "城市地点缓存天数", "number"],
+    ["life_plan_enabled", "启用角色生活线", "bool"],
+    ["life_plan_long_review_days", "长期线复盘天数", "number"],
+    ["life_plan_texture_goal_count", "底色参考中期线数", "number"],
+    ["life_plan_max_long", "生活线长期上限", "number"],
+    ["life_plan_max_mid", "生活线中期上限", "number"],
+    ["life_plan_max_events", "每日片段上限", "number"],
     ["amap_api_key", "高德 POI API Key", "secret"],
     ["amap_poi_enabled", "启用高德真实POI", "bool"],
     ["amap_poi_per_type", "每类POI数量", "number"],
@@ -1497,6 +1503,69 @@ function renderTimeline(timeline = []) {
   }).join("")}</div>`;
 }
 
+function renderLifePlan(plan) {
+  if (!plan || !plan.enabled) {
+    return `<div class="empty-state small">生活线已关闭。</div>`;
+  }
+  if (!plan.exists) {
+    return `<div class="empty-state small">还没有生活线，可点击右上角生成生活线。</div>`;
+  }
+  const today = plan.today || {};
+  const statusLabel = value => ({
+    active: "进行中",
+    achieved: "已达成",
+    abandoned: "已放下",
+    planned: "待发生",
+    done: "已发生",
+    derailed: "偏离",
+    skipped: "略过",
+  }[value] || value || "-");
+  const goalList = (items, kind) => {
+    if (!items.length) return `<div class="empty-state small">暂无${kind}。</div>`;
+    return `<div class="life-goal-list">${items.map(item => `
+      <article class="life-goal">
+        <div>
+          <strong>${escapeHtml(item.text || "")}</strong>
+          ${item.parent_text ? `<small>承接：${escapeHtml(item.parent_text)}</small>` : ""}
+          ${item.progress_note ? `<small>${escapeHtml(item.progress_note)}</small>` : ""}
+        </div>
+        <span>${escapeHtml(statusLabel(item.status))}</span>
+      </article>
+    `).join("")}</div>`;
+  };
+  const eventList = (today.events || []).map(event => `
+    <article class="life-event">
+      <time>${escapeHtml(event.time_hint || "-")}</time>
+      <div>
+        <strong>${escapeHtml(event.text || "")}</strong>
+        <small>${escapeHtml(event.place_label || event.place_key || "-")} · ${escapeHtml(statusLabel(event.status))}${event.related_mid_text ? ` · 关联：${escapeHtml(event.related_mid_text)}` : ""}</small>
+        ${event.side_note ? `<p>${escapeHtml(event.side_note)}</p>` : ""}
+      </div>
+    </article>
+  `).join("");
+  return `
+    <div class="life-plan-head">
+      <span>角色：${escapeHtml(plan.character_key || "默认角色")}</span>
+      <span>${escapeHtml(today.date || "未定日期")}${plan.updated_ago ? ` · ${escapeHtml(plan.updated_ago)}` : ""}</span>
+    </div>
+    ${today.texture ? `<p class="life-texture">${escapeHtml(today.texture)}</p>` : `<div class="empty-state small">暂无生活底色。</div>`}
+    <div class="life-plan-grid">
+      <div>
+        <h5>长期线</h5>
+        ${goalList(plan.long_goals || [], "长期线")}
+      </div>
+      <div>
+        <h5>中期线</h5>
+        ${goalList(plan.mid_goals || [], "中期线")}
+      </div>
+    </div>
+    <div>
+      <h5>今日片段</h5>
+      ${eventList ? `<div class="life-event-list">${eventList}</div>` : `<div class="empty-state small">暂无今日片段。</div>`}
+    </div>
+  `;
+}
+
 function renderWorldRoute(world) {
   const box = $("#world-content");
   if (!world) {
@@ -1535,6 +1604,10 @@ function renderWorldRoute(world) {
       <h4>空间判断</h4>
       <p>${escapeHtml(current.relation || "暂无判断")}</p>
       ${override}
+    </section>
+    <section class="world-block">
+      <h4>生活线</h4>
+      ${renderLifePlan(world.life_plan || {})}
     </section>
     <section class="world-block">
       <h4>最近轨迹</h4>
@@ -1978,6 +2051,21 @@ async function initEvents() {
     try {
       await loadWorldRoute({ refreshPlaces: true });
       toast("城市地点已刷新");
+    } finally {
+      setBusy(btn, false);
+    }
+  };
+  $("#world-generate-life").onclick = async (event) => {
+    if (!state.selectedWorldSession) return;
+    const btn = event.currentTarget;
+    setBusy(btn, true);
+    try {
+      const data = await api(`/api/world/${encodeURIComponent(state.selectedWorldSession)}/life-plan`, { method: "POST" });
+      state.worldPreview = data.world;
+      renderWorldRoute(data.world);
+      toast("生活线已生成");
+    } catch (err) {
+      toast(err.message, "error");
     } finally {
       setBusy(btn, false);
     }

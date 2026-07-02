@@ -965,6 +965,91 @@ select {
   font-weight: 600;
 }
 
+.life-plan-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+
+.life-texture {
+  padding: 10px 12px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  white-space: pre-wrap;
+}
+
+.life-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+  margin: 14px 0;
+}
+
+.life-plan-grid h5,
+.world-block h5 {
+  margin: 0 0 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.life-goal-list,
+.life-event-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.life-goal,
+.life-event {
+  display: grid;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.life-goal {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.life-event {
+  grid-template-columns: 80px minmax(0, 1fr);
+}
+
+.life-goal strong,
+.life-event strong {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.life-goal small,
+.life-event small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.life-goal span,
+.life-event time {
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.life-event p {
+  margin-top: 6px;
+}
+
 .timeline-list {
   display: flex;
   flex-direction: column;

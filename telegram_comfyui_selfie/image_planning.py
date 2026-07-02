@@ -701,6 +701,7 @@ async def plan_roleplay_image(
     push_transition_decision: dict[str, Any] = {}
     push_transition_context = ""
     push_advance_context = ""
+    life_push_context = ""
     if is_push and hasattr(service, "_push_scene_transition_decision"):
         try:
             push_transition_decision = service._push_scene_transition_decision(
@@ -725,6 +726,11 @@ async def plan_roleplay_image(
                 )
         except Exception:
             logger.debug("push scene transition decision failed", exc_info=True)
+    if is_push and hasattr(service, "_life_plan_push_context"):
+        try:
+            life_push_context = service._life_plan_push_context(session_id, now=now)
+        except Exception:
+            logger.debug("life plan push context failed", exc_info=True)
     hard_scene_transition = bool(push_transition_decision.get("should_transition"))
     if hard_scene_transition:
         session_schema.clear_nudity(state)
@@ -968,6 +974,8 @@ async def plan_roleplay_image(
         system += "\n" + push_transition_context
     if push_advance_context:
         system += "\n" + push_advance_context
+    if life_push_context:
+        system += "\n" + life_push_context
     public_outfit_context = public_outfit_guard_context(
         service,
         session_id,

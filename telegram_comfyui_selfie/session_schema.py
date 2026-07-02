@@ -201,7 +201,9 @@ STATE_SCHEMA: dict[str, Field] = {
         "last_message_text": "",
         "last_message_time": 0.0,
         "character_history_summary": "",
+        "life_plan": {},
     }, reset_preserved=False),
+    "life_plan": Field(T, default={}, reset_preserved=True),
 }
 
 
@@ -657,6 +659,7 @@ _CONTEXT_DEFAULT: dict[str, Any] = {
     "last_message_text": "",
     "last_message_time": 0.0,
     "character_history_summary": "",
+    "life_plan": {},
 }
 _LEGACY_CONTEXT_FLAT_KEYS = (
     "recent_message_history", "chat_history", "checkpoint_summary",
@@ -666,7 +669,7 @@ _LEGACY_CONTEXT_FLAT_KEYS = (
     "last_sent_selfie_source_description", "last_sent_selfie_replied",
     "rounds_since_image", "short_context_start", "short_context_reset_time",
     "short_context_reset_reason", "last_message_text", "last_message_time",
-    "character_history_summary",
+    "character_history_summary", "life_plan",
 )
 
 
@@ -908,6 +911,15 @@ def get_character_history_summary(state):
 
 def set_character_history_summary(state, value):
     _context_set(state, "character_history_summary", str(value or ""))
+
+
+def get_life_plan_payload(state) -> dict[str, Any]:
+    value = _context_get(state, "life_plan")
+    return value if isinstance(value, dict) else {}
+
+
+def set_life_plan_payload(state, value: Any) -> None:
+    _context_set(state, "life_plan", value if isinstance(value, dict) else {})
 
 
 # ──────────────────────────────────────────────────────────────────────────

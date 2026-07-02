@@ -26,6 +26,7 @@ from .memory import LongTermMemoryStore
 from .chat_context import ChatContextMixin
 from .commands import CommandHandlersMixin
 from .git_update import GitUpdateMixin
+from .life_plan import LifePlanMixin
 from .memory_policy import MemoryPolicyMixin
 from .process_restart import ProcessRestartMixin
 from .scheduler_runtime import SchedulerRuntimeMixin
@@ -138,6 +139,7 @@ class TelegramComfyUIService(
     CommandHandlersMixin,
     ChatContextMixin,
     MemoryPolicyMixin,
+    LifePlanMixin,
     SchedulerRuntimeMixin,
     WorldRuntimeMixin,
     GitUpdateMixin,
@@ -172,6 +174,7 @@ class TelegramComfyUIService(
         self._bot_tasks: list[asyncio.Task] = []
         self._checkpoint_tasks: dict[str, asyncio.Task] = {}
         self._dream_tasks: dict[str, asyncio.Task] = {}
+        self._life_plan_tasks: dict[str, asyncio.Task] = {}
         self._llm_debug_buffer: list[dict[str, Any]] = []
         self._llm_debug_flush_threshold = 10
         self._web_runner: Any = None

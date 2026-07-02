@@ -1596,6 +1596,8 @@ class CommandHandlersMixin:
         if sub == "clearup":
             count = len(saved)
             self._reset_session_customization(state)
+            if hasattr(self, "delete_life_plans_for_session"):
+                self.delete_life_plans_for_session(session_id)
             self._save_session_state(session_id, state)
             self._ulog(session_id, "RESET", f"/角色 clearup 恢复全局默认（清角色/人设/对话/角色池，共 {count} 个角色档案）")
             await self.send_message(chat_id, CLEARUP_DONE_MSG)
@@ -1694,6 +1696,8 @@ class CommandHandlersMixin:
                 await self.send_message(chat_id, f"未找到角色 {sub_arg}。")
                 return
             del saved[sub_arg]
+            if hasattr(self, "delete_life_plan"):
+                self.delete_life_plan(session_id, sub_arg)
             # 删的若是当前角色，必须同步清空当前角色态：否则下次 _snapshot_character（load/
             # 切换/create_oc/设定角色都会触发）会用 state["custom_character"] 把刚删的角色重新
             # 写回 saved_characters，表现为"删了又出现"。这里只复用字段清理原语，不动其它角色。

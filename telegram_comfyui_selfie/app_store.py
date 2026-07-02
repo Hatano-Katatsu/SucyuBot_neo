@@ -112,6 +112,17 @@ class AppStateStore:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS life_plans (
+                    session_id TEXT NOT NULL,
+                    character_key TEXT NOT NULL DEFAULT '',
+                    payload TEXT NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(session_id, character_key)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS context_meta (
                     session_id TEXT NOT NULL,
                     character_key TEXT NOT NULL DEFAULT '',
@@ -442,6 +453,49 @@ class AppStateStore:
             )
             conn.commit()
             return cur.rowcount > 0
+
+    def get_life_plan(self, session_id: str, character_key: str) -> dict[str, Any] | None:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT * FROM life_plans WHERE session_id = ? AND character_key = ?",
+                (session_id, character_key or ""),
+            ).fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        data["payload"] = _json_loads(data.get("payload") or "{}", {})
+        return data
+
+    def upsert_life_plan(self, session_id: str, character_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+        now = _now()
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO life_plans(session_id, character_key, payload, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(session_id, character_key) DO UPDATE SET
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (session_id, character_key or "", _json_dumps(payload or {}), now),
+            )
+            conn.commit()
+        return {"session_id": session_id, "character_key": character_key or "", "payload": payload or {}, "updated_at": now}
+
+    def delete_life_plan(self, session_id: str, character_key: str = "") -> bool:
+        with closing(self._connect()) as conn:
+            cur = conn.execute(
+                "DELETE FROM life_plans WHERE session_id = ? AND character_key = ?",
+                (session_id, character_key or ""),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def delete_life_plans_for_session(self, session_id: str) -> int:
+        with closing(self._connect()) as conn:
+            cur = conn.execute("DELETE FROM life_plans WHERE session_id = ?", (session_id,))
+            conn.commit()
+            return int(cur.rowcount or 0)
 
     def set_web_password(self, user_id: str, password: str) -> dict[str, str]:
         token = self.get_or_create_web_token(user_id)

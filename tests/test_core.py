@@ -2064,6 +2064,156 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(len(preview["timeline"]), 12)
         self.assertTrue(any(item["is_current_slot"] for item in preview["timeline"]))
 
+    def test_life_plan_chat_context_injects_texture_only(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        fixed_now = datetime(2026, 7, 2, 10, 0, tzinfo=timezone.utc)
+        svc._session_now = lambda session_id="": fixed_now
+        state = svc._get_session_state(sid)
+        session_schema.set_character_value(state, "custom_character", "小雨")
+        svc._save_session_state(sid, state)
+        svc._save_life_plan_payload(sid, "小雨", {
+            "long_goals": [{
+                "id": "l1",
+                "text": "攒钱搬到靠海的房子",
+                "motivation": "想给自己留一点安静空间",
+                "status": "active",
+            }],
+            "mid_goals": [{
+                "id": "m1",
+                "parent_id": "l1",
+                "text": "整理作品集",
+                "progress_note": "已经改完第一版",
+                "status": "active",
+            }],
+            "today": {
+                "date": "2026-07-02",
+                "texture": "早上醒来还有点困，心里压着一点细碎的牵挂。",
+                "events": [],
+            },
+        })
+
+        messages = svc._build_chat_messages(sid, "你好")
+        life_messages = [m["content"] for m in messages if m.get("role") == "system" and "生活底色" in m.get("content", "")]
+
+        self.assertEqual(len(life_messages), 1)
+        self.assertIn("早上醒来还有点困", life_messages[0])
+        self.assertNotIn("攒钱搬到靠海的房子", life_messages[0])
+        self.assertNotIn("整理作品集", life_messages[0])
+        self.assertNotIn("任务", life_messages[0])
+
+        payload = svc.app_store.get_life_plan(sid, "小雨")["payload"]
+        payload["today"]["texture"] = "今天计划完成作品集。"
+        svc._save_life_plan_payload(sid, "小雨", payload)
+        self.assertEqual(svc._life_plan_chat_context(sid, now=fixed_now), "")
+
+    def test_life_plan_ops_apply_caps_and_ignore_unknown_ids(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        svc.config["life_plan_max_mid"] = "2"
+        previous = {
+            "long_goals": [{"id": "l1", "text": "把生活过稳一点", "status": "active"}],
+            "mid_goals": [{"id": "m1", "parent_id": "l1", "text": "整理手头小事", "status": "active"}],
+            "today": {"date": "2026-07-01", "events": [], "texture": ""},
+        }
+        parsed = {
+            "ops": [
+                {"op": "progress", "id": "m1", "note": "下午终于松了一点"},
+                {"op": "add_mid", "id": "m2", "parent_id": "l1", "text": "把白天的杂事收口"},
+                {"op": "add_mid", "id": "m3", "parent_id": "l1", "text": "这条会被上限挡住"},
+                {"op": "progress", "id": "missing", "note": "不存在"},
+            ],
+            "today_events": [{
+                "id": "e1",
+                "time_hint": "afternoon",
+                "text": "找个安静角落缓一缓",
+                "place_key": "cafe",
+                "related_mid_id": "m2",
+                "status": "planned",
+            }],
+        }
+
+        plan, result = svc._life_plan_from_update(previous, parsed, today_date="2026-07-02", session_id=sid)
+
+        self.assertEqual(len(plan["mid_goals"]), 2)
+        self.assertEqual(plan["mid_goals"][0]["progress_note"], "下午终于松了一点")
+        self.assertEqual(plan["mid_goals"][1]["id"], "m2")
+        self.assertGreaterEqual(result["ignored"], 2)
+        self.assertEqual(plan["today"]["events"][0]["related_mid_id"], "m2")
+
+    def test_life_plan_texture_retries_purpose_word_output(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "chat"
+            svc._call_llm = AsyncMock(side_effect=[
+                json.dumps({"texture": "今天计划完成作品集。", "event_sides": {}}, ensure_ascii=False),
+                json.dumps({
+                    "texture": "心里还压着一点没有散开的疲惫，语气会比平时更轻。",
+                    "event_sides": {"e1": "她刚从咖啡店的嘈杂里缓过来一点。"},
+                }, ensure_ascii=False),
+            ])
+            plan = {
+                "long_goals": [{"id": "l1", "text": "把生活过稳一点", "status": "active"}],
+                "mid_goals": [{"id": "m1", "parent_id": "l1", "text": "整理手头小事", "status": "active"}],
+                "today": {
+                    "date": "2026-07-02",
+                    "events": [{
+                        "id": "e1",
+                        "time_hint": "afternoon",
+                        "text": "找个角落缓一缓",
+                        "place_key": "cafe",
+                        "related_mid_id": "m1",
+                        "status": "planned",
+                    }],
+                },
+            }
+
+            rendered = await svc._render_life_plan_texture(sid, "小雨", plan, today_date="2026-07-02")
+
+            self.assertEqual(svc._call_llm.await_count, 2)
+            self.assertIn("疲惫", rendered["today"]["texture"])
+            self.assertIn("咖啡店", rendered["today"]["events"][0]["side_note"])
+            self.assertNotIn("计划", rendered["today"]["texture"])
+        asyncio.run(run())
+
+    def test_world_preview_serializes_life_plan(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        fixed_now = datetime(2026, 7, 2, 15, 0, tzinfo=timezone.utc)
+        svc._session_now = lambda session_id="": fixed_now
+        state = svc._get_session_state(sid)
+        session_schema.set_character_value(state, "custom_character", "小雨")
+        svc._save_session_state(sid, state)
+        svc._save_life_plan_payload(sid, "小雨", {
+            "long_goals": [{"id": "l1", "text": "把生活过稳一点", "status": "active"}],
+            "mid_goals": [{"id": "m1", "parent_id": "l1", "text": "整理手头小事", "progress_note": "还差一点", "status": "active"}],
+            "today": {
+                "date": "2026-07-02",
+                "texture": "心里有点惦记白天没收好的尾巴。",
+                "events": [{
+                    "id": "e1",
+                    "time_hint": "afternoon",
+                    "text": "去咖啡店坐一会儿",
+                    "place_key": "cafe",
+                    "related_mid_id": "m1",
+                    "status": "planned",
+                    "side_note": "她刚从店里的嘈杂里缓过来一点。",
+                }],
+            },
+        })
+
+        preview = build_world_route_preview(svc, sid, weather={"desc": "晴", "temp": "22"})
+        life = preview["life_plan"]
+        push_side = svc._life_plan_push_context(sid, now=fixed_now)
+
+        self.assertTrue(life["exists"])
+        self.assertEqual(life["character_key"], "小雨")
+        self.assertEqual(life["mid_goals"][0]["parent_text"], "把生活过稳一点")
+        self.assertEqual(life["today"]["events"][0]["place_label"], "咖啡店")
+        self.assertEqual(life["today"]["events"][0]["related_mid_text"], "整理手头小事")
+        self.assertIn("嘈杂", push_side)
+
     def test_webui_prompt_slot_preview_exposes_editable_fields(self):
         svc = self.make_service()
         sid = "telegram:123"
@@ -5699,7 +5849,13 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         src.app_store.upsert_checkpoint(sid, key, "导出的 checkpoint", 12)
         src.app_store.upsert_character_history_summary(sid, key, "导出的历史提要")
         src.app_store.upsert_diary(sid, key, "2026-06-24", "导出的日记", from_message_id=1, to_message_id=2)
+        src._save_life_plan_payload(sid, key, {
+            "long_goals": [{"id": "l1", "text": "把生活过稳一点", "status": "active"}],
+            "mid_goals": [{"id": "m1", "parent_id": "l1", "text": "整理手头小事", "status": "active"}],
+            "today": {"date": "2026-06-24", "texture": "心里压着一点细碎牵挂。", "events": []},
+        })
         payload = src.export_current_character_checkpoint(sid, key)
+        self.assertEqual(payload["life_plan"]["payload"]["today"]["texture"], "心里压着一点细碎牵挂。")
 
         basic = self.make_service()
         basic.app_store.upsert_checkpoint(sid, "小雨", "原有 checkpoint", 99)
@@ -5712,6 +5868,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(basic.memory.list_memories(sid, character="小雨", limit=10), [])
         self.assertEqual(basic.app_store.get_checkpoint(sid, "小雨")["summary"], "原有 checkpoint")
         self.assertIsNone(basic.app_store.get_diary(sid, "小雨", "2026-06-24"))
+        self.assertFalse(basic_result["life_plan_replaced"])
+        self.assertIsNone(basic.app_store.get_life_plan(sid, "小雨"))
 
         memory = self.make_service()
         memory.app_store.upsert_checkpoint(sid, "小雨", "原有 checkpoint", 99)
@@ -5722,7 +5880,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(memory.app_store.get_checkpoint(sid, "小雨")["summary"], "原有 checkpoint")
         self.assertFalse(memory_result["checkpoint_replaced"])
         self.assertFalse(memory_result["context_restored"])
+        self.assertFalse(memory_result["life_plan_replaced"])
         self.assertEqual(memory.app_store.get_diary(sid, "小雨", "2026-06-24")["content"], "导出的日记")
+        self.assertIsNone(memory.app_store.get_life_plan(sid, "小雨"))
 
         full = self.make_service()
         full.app_store.upsert_checkpoint(sid, "小雨", "原有 checkpoint", 99)
@@ -5731,10 +5891,12 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(full_result["mode"], "full")
         self.assertTrue(full_result["checkpoint_replaced"])
         self.assertTrue(full_result["context_restored"])
+        self.assertTrue(full_result["life_plan_replaced"])
         self.assertEqual(session_schema.get_outfit(full_state), "blue dress")
         self.assertEqual(full.app_store.get_checkpoint(sid, "小雨")["summary"], "导出的 checkpoint")
         self.assertEqual(int(full.app_store.get_checkpoint(sid, "小雨")["source_until_id"]), 12)
         self.assertEqual(full.app_store.get_context_meta(sid, "小雨")["character_history_summary"], "导出的历史提要")
+        self.assertEqual(full.app_store.get_life_plan(sid, "小雨")["payload"]["today"]["texture"], "心里压着一点细碎牵挂。")
 
     def test_default_character_is_a_loadable_card(self):
         """内置默认角色（蕾伊）以正常角色卡形态存在：list 可见、可 load 回到隐式默认、不可删除。"""
@@ -5814,9 +5976,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         })
         self.assertEqual(set(ss.CHARACTER_CONFIG_EXTRA_KEYS),
                          {"character", "purity", "purity_user_set", "persona_user_set"})
-        # clothing 三字段已收进 clothing 盒；reset 保留的短期态单元现为 clothing + life_profile。
+        # clothing 三字段已收进 clothing 盒；reset 保留的短期态单元现为 clothing + life_profile + life_plan。
         self.assertEqual(set(ss.RESET_PRESERVED_TRANSIENT_KEYS),
-                         {"clothing", "life_profile"})
+                         {"clothing", "life_profile", "life_plan"})
         # 默认值表：代表性字段 + 无默认字段不进表
         defaults = ss.state_defaults()
         self.assertIn("last_interaction", defaults)          # 动态时间戳
@@ -5824,6 +5986,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(defaults["character"], {})
         self.assertIsNone(defaults["purity"])
         self.assertEqual(defaults["clothing"]["wardrobe"], {})  # 衣柜在 clothing 盒内
+        self.assertEqual(defaults["life_plan"], {})
         self.assertNotIn("ntr_affection_reset", defaults)    # 动态产生，无默认
         self.assertNotIn("life_profile", defaults)
         # 每次调用产生独立可变对象，不跨会话共享引用

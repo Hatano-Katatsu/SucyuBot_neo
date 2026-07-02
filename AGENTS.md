@@ -143,6 +143,7 @@ telegram_comfyui_selfie/
 - 长期记忆只负责高重要度稳定事实、偏好、边界和纠正。
 - 用户明确提到的未来/待完成时间节点在 checkpoint 记忆提取阶段通过提示词软约束保存为 `event`；dream 整理过时时间节点时，只有事件已解决/取消/被替代，或已从近期日记、checkpoint 和当前窗口完全淡出，才删除或合并。
 - 手动记忆（`kind=manual`）不被自动整理删除。
+- 角色生活线保存在 SQLite `life_plans(session_id, character_key)`，结构化长线/中期线/今日片段只给 dream、WebUI 与推送 planner 后台使用；聊天 prompt 只注入渲染后的“生活底色”自然语言，不泄漏目标/计划/任务式结构。dream 后更新，首次聊天或手动推送缺当天生活线时会后台懒生成。
 
 ### 角色系统
 
@@ -223,6 +224,8 @@ telegram_comfyui_selfie/
 9. **生图翻译失败不再丢场景细节**：排查 12:32 日常同空间配图发现 `IMAGE scene` 已正确包含“背对用户卷头发、尾巴绕脚踝、雨天客厅”，但 `_translate_to_tags()` 在翻译模型空返或原样回显中文 scene 时只返回 `view_opener`，导致 `PROMPT_SLOTS.scene` 退化成泛化 POV，AnimaTool slots planner 再把画面补成正面对用户。现在固定视角 fallback 会保留原始 scene 细节（`view_opener + 原始 scene`），无固定视角时也会在空返时回退原始 scene，避免最终 prompt/payload 把已规划正确的动作和站位吞掉。
 10. **本轮回归验证**：新增 `test_translate_to_tags_fallback_preserves_scene_details_with_fixed_view`，覆盖翻译模型原样回显和空返两种失败形态下，固定 POV 仍保留“背对、卷头发、尾巴绕脚踝”等关键 scene 细节；验证 `py -3 -m unittest tests.test_core.ServiceTestCase.test_translate_to_tags_fallback_preserves_scene_details_with_fixed_view tests.test_core.ServiceTestCase.test_translate_to_tags_uses_anima_mixed_prompt_with_fixed_view tests.test_core.ServiceTestCase.test_translate_to_tags_injects_current_weather tests.test_core.ServiceTestCase.test_build_prompt_partner_flag_routes_to_everyday_partner_path -v`、`py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 334 tests in 6.165s`，`OK (skipped=1)`。
 11. **基础外观变更即时进入生图规划**：`roleplay-image-plan` 的动态 system 槽新增 `当前可见外貌`，内容来自最终可见外观标签 `_effective_visual_prompt_tags()`，并放在 `当前附加外貌` 之前；稳定规则同步声明当前可见外貌优先，旧短期连续性或最近照片摘要里的发色、瞳色、体貌等冲突细节视为过期参考，避免改基础外观后必须 `/新场景` 清掉旧上下文才生效。新增 `test_roleplay_image_planner_prioritizes_current_visible_appearance`，覆盖旧连续性/旧照片仍写 `black hair` 时 planner system 仍优先携带当前 `silver hair`、`blue eyes` 和当前穿搭。
+12. **角色生活线功能**：新增 `LifePlanMixin` 与 SQLite `life_plans` 表，按 `session_id + character_key` 存储长线目标、中期目标和今日片段；dream 后用 op-list 更新并渲染成低目的性的“生活底色”，首次聊天或推送缺当天生活线时异步/按需懒生成。聊天 durable 层只注入通过禁词过滤的自然语言底色，不把结构化目标、计划或任务泄漏给 chat；主动推送 planner 只收到当前事件的一句侧面状态，用于地点/情绪/余韵，不写进度汇报。角色 checkpoint 完整导出/导入支持 life_plan，`/角色 clearup` 和删除角色会清理对应生活线。
+13. **WebUI 与验证**：动线页新增“生成生活线”按钮和生活线预览，展示角色、底色、长线/中期线和今日片段关联；设置页新增 life plan 开关、复盘天数和容量上限。新增测试覆盖底色-only 注入、目的词重试、op-list 上限/未知 ID、动线页序列化、推送侧面提示和 checkpoint full 恢复；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 339 tests in 9.488s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-07-01）
 
@@ -373,7 +376,7 @@ telegram_comfyui_selfie/
 - `node --check telegram_comfyui_selfie\static\app.js`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m py_compile scripts\compare_llm_chat_prompts.py`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core -v`
-- 最新结果：`Ran 335 tests in 8.800s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
+- 最新结果：`Ran 339 tests in 9.488s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
 - 工具 schema 当前紧凑 JSON 长度：`1898` 字符；chat 回复请求体 key 顺序为 `model, max_tokens, temperature, top_p, frequency_penalty, tools, tool_choice, messages`（`presence_penalty` 留空时不下发；checkpoint/dream/memory 等内部任务不下发采样参数）
 - 本轮未改 prompt 比对脚本逻辑，未重新生成 `.tmp\llm_chat_prompt_compare_current.md`。
 - 真实 API 缓存探针沿用上一轮结论：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。
