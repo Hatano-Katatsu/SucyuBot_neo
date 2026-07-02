@@ -4599,6 +4599,64 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_morning_push_hard_transition_drops_temporary_undress_context(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+                "scene_stale_minutes": "30",
+                "push_continuity_hours": "2",
+            })
+            sid = "telegram:123"
+            now = datetime.fromtimestamp(time.time(), timezone.utc)
+            ts = now.timestamp()
+            state = svc._get_session_state(sid)
+            session_schema.set_last_interaction(state, ts - 20 * 60)
+            session_schema.set_last_message_time(state, ts - 20 * 60)
+            session_schema.set_recent_message_history(state, [
+                {"text": "上一幕还在做爱，衣服脱了。", "time": ts - 20 * 60},
+            ])
+            session_schema.set_chat_history(state, [
+                {"role": "user", "content": "上一幕还在做爱，衣服脱了。"},
+                {"role": "assistant", "content": "她只披着宽松针织衫靠在床边。"},
+            ])
+            session_schema.set_sent_photos_history(state, [{
+                "timestamp": ts - 19 * 60,
+                "nltag": "wearing only a loose cotton knit cardigan, black silk slip dress bunched at her waist",
+                "scene": "bedroom after sex",
+                "caption": "",
+                "appearance": "",
+                "view": "pov",
+                "source_description": "意图: 上一幕性爱后只披针织衫",
+            }])
+            session_schema.set_nudity(state, "completely nude", at=time.time())
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "A quiet morning pov in the kitchen, greeting the user after waking up.",
+                "view": "pov",
+                "character_location": "home",
+                "user_location": "with_user",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            }, ensure_ascii=False))
+
+            plan = await plan_roleplay_image(svc, sid, mode="morning", weather_data={"desc": "晴", "temp": "22"}, now=now)
+
+            system = svc._call_llm.await_args.args[0]
+            user = svc._call_llm.await_args.args[1]
+            self.assertIn("早安推送开启新一天", system)
+            self.assertNotIn("短期连续性", user)
+            self.assertNotIn("最近已发图片摘要", user)
+            self.assertNotIn("衣服脱了", user)
+            self.assertNotIn("loose cotton knit cardigan", user)
+            self.assertEqual(plan["clothing_off"], "")
+            self.assertEqual(session_schema.get_nudity(state), "")
+
+        asyncio.run(run())
+
     def test_scheduled_push_stale_gap_alone_keeps_continuity(self):
         svc = self.make_service()
         svc.config.update({

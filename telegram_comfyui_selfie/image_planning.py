@@ -720,8 +720,11 @@ async def plan_roleplay_image(
                 )
         except Exception:
             logger.debug("push scene transition decision failed", exc_info=True)
+    hard_scene_transition = bool(push_transition_decision.get("should_transition"))
+    if hard_scene_transition:
+        session_schema.clear_nudity(state)
     continuity_context = format_planning_continuity_context(service, state, session_id)
-    if push_transition_decision.get("drop_continuity"):
+    if hard_scene_transition or push_transition_decision.get("drop_continuity"):
         continuity_context = None
     spatial_context = format_planning_spatial_context(
         service,
@@ -730,8 +733,8 @@ async def plan_roleplay_image(
         intent=intent,
         must_include=must_include,
         prompt=prompt,
-    ) if not push_transition_decision.get("should_transition") else None
-    photo_context = format_recent_photo_dedup_context(service, state, session_id)
+    ) if not hard_scene_transition else None
+    photo_context = None if hard_scene_transition else format_recent_photo_dedup_context(service, state, session_id)
     memory_query = "\n".join(part for part in (intent, mood, must_include, prompt, continuity_context or "") if part)
     memory_context = ""
     if hasattr(service, "_long_term_memory_context"):
@@ -746,7 +749,7 @@ async def plan_roleplay_image(
                 weather=weather_data,
                 mode="image",
                 now=now,
-                apply_persisted_place=not push_transition_decision.get("should_transition"),
+                apply_persisted_place=not hard_scene_transition,
             )
         except Exception:
             logger.debug("world context build failed for image planning", exc_info=True)
@@ -757,7 +760,7 @@ async def plan_roleplay_image(
     #   允许规划器结合对话重新判断并回写刷新，避免陈旧 pin 把角色卡死在某地。
     # - None（超硬 TTL）：完全交规划器自行判断。
     pinned_place = service._active_character_place(state) if hasattr(service, "_active_character_place") else None
-    if push_transition_decision.get("should_transition"):
+    if hard_scene_transition:
         strong_pin = None
         weak_pin = pinned_place
     else:
@@ -975,7 +978,7 @@ async def plan_roleplay_image(
             "自行判断【此刻用户是否和角色在同一空间】，并据此决定视角——"
             "判断同处则优先 pov 或近距离 third 同框互动；判断异地、独处或仅线上联系才用 selfie/mirror。"
         )
-        if continuity_context and not push_transition_decision.get("should_transition"):
+        if continuity_context and not hard_scene_transition:
             system += (
                 f"\n{world_context}\n"
                 "以上“角色当前所在/接下来动线”只是日常背景参考。当前正在进行的对话场景优先级最高："
@@ -983,7 +986,7 @@ async def plan_roleplay_image(
                 "不要因为动线显示的时间点不同，就擅自把角色挪到别处（严禁无理由瞬移）。\n"
                 + space_judgement
             )
-        elif push_transition_decision.get("should_transition"):
+        elif hard_scene_transition:
             system += (
                 f"\n{world_context}\n"
                 "以上世界状态用于确定转场后的当前落点；旧短期连续性若只是在描述上一幕地点或动作，不得覆盖当前动线。"

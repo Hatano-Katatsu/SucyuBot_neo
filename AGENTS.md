@@ -218,6 +218,8 @@ telegram_comfyui_selfie/
 4. **地点工具自然语言归一**：`tool_update_location()` / `tool_update_user_location()` 新增统一 `_match_place_key()`，保留模型给出的原始地点文本作为显示名，但用 `PLACE_TEXT_ALIASES` 与“路上/途中/前往”等转场提示归一到固定 `PLACE_TYPES` key；`前往私立中学的路上` 会落到 `street/大街`，`私立中学` 会落到 `school/学校`，`街道` 不再因内置 label 是“大街”而被拒绝。
 5. **最终回复工具粘连恢复**：当 `chat-final` 因兼容端点在无 tools 请求中仍返回空 `tool_calls` 时，先按原逻辑追加禁止工具的 `chat-final-retry`；如果 retry 仍只有空工具调用，新增 `chat-final-recovery`，去掉 `role=tool` 和 `assistant.tool_calls` 协议消息，只保留普通上下文与工具结果摘要，要求模型直接输出自然语言回复，避免地点修正循环导致“回复生成失败”。
 6. **本轮追加验证**：新增测试覆盖自然语言地点别名/路上归一，以及 final+retry 连续返回 `update_location` 空工具调用时的 text-only recovery；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 332 tests in 7.880s`，`OK (skipped=1)`。
+7. **早安/硬转场临时脱衣边界修复**：`roleplay-image-plan` 在主动推送判定为硬转场时（早安、明确结束/离开/改约信号、超过 `push_continuity_hours`）不再把上一幕 `短期连续性` 和 `最近已发图片摘要` 注入本轮 planner，避免上一场性爱、临时脱衣或照片 tags 被当作跨天当前穿搭继续使用；同时在硬转场边界清除临时裸体态。保留同一场景内的持久裸体 TTL 续态逻辑不变，`scene_stale_minutes` 的软节拍推进也仍保留连续性，不影响昨天公共场合睡衣/内衣兜底。
+8. **本轮综合验证**：新增 `test_morning_push_hard_transition_drops_temporary_undress_context`，覆盖上一幕性爱/只披针织衫/裸体态在早安推送中不进入 planner user prompt 且不续 `clothing_off`；同步回归公共场合穿搭兜底、同场裸体续态、scene stale 软推进。综合远端地点归一与 final recovery 更新后，验证 `py -3 -m unittest tests.test_core.ServiceTestCase.test_morning_push_hard_transition_drops_temporary_undress_context tests.test_core.ServiceTestCase.test_persistent_nudity_continues_until_dressed_or_new_scene tests.test_core.ServiceTestCase.test_build_prompt_public_context_replaces_private_sleepwear_outfit tests.test_core.ServiceTestCase.test_planner_warns_private_sleepwear_in_public_world_context tests.test_core.ServiceTestCase.test_scheduled_push_stale_gap_alone_keeps_continuity tests.test_core.ServiceTestCase.test_scheduled_push_stale_gap_advances_beat_without_dropping_place -v`、`py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 333 tests in 6.301s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-07-01）
 
@@ -368,7 +370,7 @@ telegram_comfyui_selfie/
 - `node --check telegram_comfyui_selfie\static\app.js`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m py_compile scripts\compare_llm_chat_prompts.py`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core -v`
-- 最新结果：`Ran 332 tests in 7.880s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
+- 最新结果：`Ran 333 tests in 6.301s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
 - 工具 schema 当前紧凑 JSON 长度：`1898` 字符；chat 回复请求体 key 顺序为 `model, max_tokens, temperature, top_p, frequency_penalty, tools, tool_choice, messages`（`presence_penalty` 留空时不下发；checkpoint/dream/memory 等内部任务不下发采样参数）
 - 本轮未改 prompt 比对脚本逻辑，未重新生成 `.tmp\llm_chat_prompt_compare_current.md`。
 - 真实 API 缓存探针沿用上一轮结论：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。
