@@ -104,6 +104,52 @@ def _sanitize_judge_view_hint(view: str | None, *sources: str) -> str:
     return ""
 
 class ChatContextMixin:
+    def _build_chat_final_recovery_messages(
+        self,
+        messages: list[dict[str, Any]],
+        tool_results: list[dict[str, str]],
+    ) -> list[dict[str, str]]:
+        """构造不含 tool 协议消息的最终回复恢复 prompt。"""
+        recovered: list[dict[str, str]] = []
+        for msg in messages:
+            role = str(msg.get("role") or "")
+            if role == "tool":
+                continue
+            if role not in {"system", "user", "assistant"}:
+                continue
+            content = (msg.get("content") or "").strip()
+            if role == "assistant" and msg.get("tool_calls"):
+                # 去掉 assistant.tool_calls，避免兼容端点继续粘在工具模式。
+                if content:
+                    recovered.append({"role": role, "content": self._strip_dsml_tool_markup(content)})
+                continue
+            if content:
+                recovered.append({"role": role, "content": content})
+
+        labels = {
+            "change_appearance": "外观记录",
+            "update_location": "角色位置记录",
+            "update_user_location": "用户位置记录",
+            "generate_roleplay_image": "配图处理",
+        }
+        result_lines = []
+        for item in tool_results[-6:]:
+            name = labels.get(item.get("name") or "", item.get("name") or "工具")
+            result = (item.get("result") or "").strip()
+            if result:
+                result_lines.append(f"- {name}: {result[:160]}")
+        result_text = "\n".join(result_lines) if result_lines else "- 无可用工具结果。"
+        recovered.append({
+            "role": "system",
+            "content": (
+                "工具阶段已经结束。上方如有 assistant/tool 调用记录，已在本请求中改写为普通上下文；"
+                "现在只能输出要发给用户的自然语言角色回复，禁止再调用、补调用或修正任何工具。"
+                "如果地点工具曾提示无法识别，也不要继续尝试改参数；按剧情把当前位置自然写成路上、街道或目标地点附近即可。\n"
+                f"已执行工具结果:\n{result_text}"
+            ),
+        })
+        return recovered
+
     async def handle_chat(self, chat_id: int | str, session_id: str, text: str):
         state = self._get_session_state(session_id)
         previous_interaction = session_schema.get_last_interaction(state)
@@ -208,6 +254,7 @@ class ChatContextMixin:
         explicit_image_req = self._user_requested_image(user_text)
 
         image_emitted = False
+        tool_results: list[dict[str, str]] = []
         if tool_calls:
             messages.append(assistant)
             for call in tool_calls:
@@ -222,10 +269,12 @@ class ChatContextMixin:
                         "tool_call_id": call.get("id", "tool"),
                         "content": "Skipped: image cooldown.",
                     })
+                    tool_results.append({"name": fn_name or "", "result": "Skipped: image cooldown."})
                     continue
                 tool_result = await self._execute_tool_call(chat_id, session_id, call)
                 if fn_name == "generate_roleplay_image":
                     image_emitted = True
+                tool_results.append({"name": fn_name or "", "result": str(tool_result or "")})
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call.get("id", "tool"),
@@ -257,6 +306,7 @@ class ChatContextMixin:
                             "上一轮模型错误地在最终回复阶段返回了工具调用。工具阶段已经结束，"
                             "现在禁止调用任何工具；请只输出要发给用户的自然语言回复，"
                             "承接已经执行的工具结果，不要提到工具调用或内部错误。"
+                            "即使上方工具结果提示地点未更新，也不要再尝试修正地点参数。"
                         ),
                     }]
                     retry_request_body = {"messages": retry_messages}
@@ -285,16 +335,41 @@ class ChatContextMixin:
                             final_text = retry_cleaned_text
                             final_tool_calls = retry_tool_calls
                         else:
-                            self._record_llm_error_log(
-                                session_id=session_id,
+                            recovery_messages = self._build_chat_final_recovery_messages(messages, tool_results)
+                            recovery_request_body = {"messages": recovery_messages}
+                            recovery = await self._call_llm_messages(
+                                recovery_messages,
+                                tag="chat-final-recovery",
                                 purpose="chat",
-                                tag="chat-final-retry",
-                                request_body=retry_request_body,
-                                response=retry,
-                                status=200,
-                                error="chat-final retry returned empty content after unexpected tool_calls",
+                                temp=float(self._get_llm_value("chat", "temperature", "0.9")),
+                                session_id=session_id,
+                                sampling=True,
                             )
-                            empty_error_logged = True
+                            recovery_msg = recovery.get("choices", [{}])[0].get("message", {})
+                            recovery_text = (recovery_msg.get("content") or "").strip()
+                            recovery_cleaned_text = recovery_text
+                            if recovery_text:
+                                _recovery_dsml_tool_calls, recovery_cleaned_text = self._extract_dsml_tool_calls(recovery_text)
+                                recovery_cleaned_text = recovery_cleaned_text.strip()
+                            if recovery_cleaned_text:
+                                self._ulog(session_id, "WARN", "chat-final retry still returned empty tool_calls; recovered text-only")
+                                final = recovery
+                                final_request_body = recovery_request_body
+                                final_msg = dict(recovery_msg)
+                                final_msg["content"] = recovery_cleaned_text
+                                final_text = recovery_cleaned_text
+                                final_tool_calls = recovery_msg.get("tool_calls") or []
+                            else:
+                                self._record_llm_error_log(
+                                    session_id=session_id,
+                                    purpose="chat",
+                                    tag="chat-final-recovery",
+                                    request_body=recovery_request_body,
+                                    response=recovery,
+                                    status=200,
+                                    error="chat-final recovery returned empty content after unexpected tool_calls",
+                                )
+                                empty_error_logged = True
                     except Exception as exc:
                         self._record_llm_error_log(
                             session_id=session_id,

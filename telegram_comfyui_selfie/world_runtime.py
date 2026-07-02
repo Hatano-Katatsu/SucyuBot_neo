@@ -332,6 +332,44 @@ PLACE_TYPES: dict[str, dict[str, Any]] = {
 
 CITY_CATALOG_KEYS = set(PLACE_TYPES)
 
+# 聊天工具拿到的是自然语言位置，不总是 PLACE_TYPES 的规范 label。
+# 这里只做保守类目归一：保留原始 place 作为显示名，key 只用于动线/生图场所类别。
+PLACE_TEXT_ALIASES: dict[str, tuple[str, ...]] = {
+    "home": ("家", "家里", "家中", "屋里", "房间", "宿舍", "公寓", "客厅", "卧室"),
+    "company": ("公司", "单位", "办公室", "写字楼", "工位", "职场", "上班", "office", "work"),
+    "school": ("学校", "校园", "校门", "教室", "操场", "中学", "高中", "初中", "小学", "大学", "学院", "school"),
+    "park": ("公园", "花园", "草坪", "湖边", "林荫道", "park"),
+    "mall": ("商场", "购物中心", "商圈", "百货", "逛街", "mall", "shopping"),
+    "street": ("街道", "大街", "街上", "街边", "路边", "马路", "人行道", "路口", "street", "road"),
+    "cafe": ("咖啡", "咖啡店", "咖啡厅", "星巴克", "cafe", "coffee"),
+    "restaurant": ("餐厅", "饭店", "食堂", "居酒屋", "餐馆", "restaurant"),
+    "transit": ("车站", "地铁", "公交", "站台", "机场", "火车", "出租车", "车厢", "station", "subway", "airport"),
+    "convenience": ("便利店", "便利商店", "小卖部", "超商", "convenience"),
+    "cinema": ("电影院", "影院", "影厅", "cinema", "movie theater"),
+    "hotel": ("酒店", "旅馆", "宾馆", "民宿", "hotel"),
+    "hospital": ("医院", "诊所", "病房", "候诊", "hospital", "clinic"),
+    "gym": ("健身房", "健身馆", "gym"),
+    "factory": ("工厂", "车间", "厂区", "factory"),
+    "farm": ("田间", "田地", "菜地", "农场", "果园", "farm"),
+    "construction": ("工地", "施工", "脚手架", "construction"),
+    "museum": ("博物馆", "展馆", "美术馆", "museum", "gallery"),
+    "landmark": ("景点", "地标", "广场", "塔", "landmark"),
+    "temple": ("寺", "神社", "庙", "教堂", "temple", "shrine", "church"),
+    "library": ("图书馆", "书库", "阅览室", "library"),
+    "zoo": ("动物园", "水族馆", "zoo", "aquarium"),
+    "amusement": ("游乐园", "乐园", "摩天轮", "amusement"),
+    "bar": ("酒吧", "清吧", "bar"),
+    "ktv": ("ktv", "KTV", "卡拉ok", "卡拉OK", "karaoke"),
+    "stadium": ("体育馆", "体育场", "球场", "stadium"),
+    "supermarket": ("超市", "卖场", "supermarket"),
+    "bookstore": ("书店", "书城", "bookstore"),
+    "beach": ("海边", "海滩", "沙滩", "beach"),
+    "salon": ("理发", "美发", "美甲", "美容", "salon"),
+}
+
+ROUTE_TRANSIT_HINTS = ("地铁", "公交", "车站", "站台", "机场", "火车", "出租车", "车厢", "subway", "bus", "station", "airport", "train", "taxi")
+ROUTE_STREET_HINTS = ("路上", "途中", "半路", "出发", "前往", "赶往", "走去", "走向", "回去", "回家路上", "通勤")
+
 # 场所类目 → 高德 POI 关键字搜索用的中文关键字。只映射"有真实公共 POI"的类目；
 # home/street/factory/farm/construction 没有有意义的可命名公共地点，留给 PLACE_TYPES 内置示例兜底。
 AMAP_KEYWORDS: dict[str, str] = {
@@ -863,19 +901,37 @@ class WorldRuntimeMixin:
             return {"key": "", "label": "与角色同处", "co_located": True, "source": "checkpoint"}
         return None
 
+    def _match_place_key(self, place: str) -> str:
+        """把聊天工具给出的自然语言地点归一成 PLACE_TYPES key。"""
+        text = (place or "").strip()
+        if not text:
+            return ""
+        lowered = text.lower()
+        if lowered in PLACE_TYPES:
+            return lowered
+        for pkey, pinfo in PLACE_TYPES.items():
+            label = pinfo["label"]
+            if label in text or text in label:
+                return pkey
+            if any(ex in text for ex in pinfo.get("examples", [])):
+                return pkey
+        # “去学校路上/前往私立中学途中”这种表达，当前物理地点是路上；
+        # 若明确在交通工具/车站，则落 transit，否则落 street。
+        if any(hint.lower() in lowered or hint in text for hint in ROUTE_STREET_HINTS):
+            if any(hint.lower() in lowered or hint in text for hint in ROUTE_TRANSIT_HINTS):
+                return "transit"
+            return "street"
+        for pkey, aliases in PLACE_TEXT_ALIASES.items():
+            if any(alias.lower() in lowered for alias in aliases):
+                return pkey
+        return ""
+
     async def tool_update_location(self, session_id: str, place: str = "") -> str:
         """聊天模型显式声明角色换到新地点时调用，持续生效，优先于时钟动线。"""
         place = (place or "").strip()
         if not place:
             return "未提供地点。"
-        key = ""
-        for pkey, pinfo in PLACE_TYPES.items():
-            if pinfo["label"] in place or place in pinfo["label"]:
-                key = pkey
-                break
-            if any(ex in place for ex in pinfo.get("examples", [])):
-                key = pkey
-                break
+        key = self._match_place_key(place)
         if not key:
             return f"无法识别地点「{place[:30]}」，位置未更新。可用：家/公司/学校/商场/咖啡店/餐厅/公园/街道/车站/便利店等。"
         # place 是模型给的完整地名（如"上海海军博物馆"），整段存为具体地名；key 仅作类别用于动线规则。
@@ -893,14 +949,7 @@ class WorldRuntimeMixin:
             self._apply_llm_user_location(session_id, "with_user", True, text=f"工具推断：与角色同处（{place[:40]}）", source="tool")
             self._ulog(session_id, "ULOC", f"聊天 LLM 判定用户与角色同处（{place[:30]}）")
             return "已记录用户与角色同处。"
-        key = ""
-        for pkey, pinfo in PLACE_TYPES.items():
-            if pinfo["label"] in place or place in pinfo["label"]:
-                key = pkey
-                break
-            if any(ex in place for ex in pinfo.get("examples", [])):
-                key = pkey
-                break
+        key = self._match_place_key(place)
         if not key:
             return f"无法识别用户地点「{place[:30]}」，未更新。可用：家/公司/学校/商场/咖啡店/餐厅/公园/街道/车站/便利店等。"
         self._apply_llm_user_location(session_id, key, False, text=f"工具推断：{place[:40]}", source="tool")

@@ -2457,6 +2457,27 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_tool_update_location_accepts_natural_route_and_aliases(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+
+            msg = await svc.tool_update_location(sid, "前往私立中学的路上")
+            self.assertIn("大街", msg)
+            state = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_character_place(state), "street")
+            self.assertEqual(session_schema.get_character_place_name(state), "前往私立中学的路上")
+
+            await svc.tool_update_location(sid, "私立中学")
+            self.assertEqual(session_schema.get_character_place(state), "school")
+            self.assertEqual(session_schema.get_character_place_name(state), "私立中学")
+
+            user_msg = await svc.tool_update_user_location(sid, "街道")
+            self.assertIn("大街", user_msg)
+            self.assertEqual(session_schema.get_user_place(state), "street")
+
+        asyncio.run(run())
+
     def test_llm_extract_preserves_specific_place_name(self):
         """LLM 从角色回复抽取地点时，带出的具体地名也被保留为显示名。"""
         async def run():
@@ -7202,6 +7223,62 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertFalse(any("LLM_FULL_LOG" in text for text in error_logs))
             warn_logs = [text for _sid, kind, text in logs if kind == "WARN"]
             self.assertTrue(any("chat-final returned tool_calls without content; retried text-only" in text for text in warn_logs))
+
+        asyncio.run(run())
+
+    def test_chat_final_recovers_when_retry_still_returns_tool_call(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "chat_llm_api_key": "k",
+                "chat_llm_model": "m",
+                "chat_llm_api_base": "http://x",
+                "selfie_frequency": "关闭",
+            })
+            sid = "telegram:1"
+            calls = []
+            logs = []
+
+            async def fake_msgs(messages, tools=None, tool_choice=None, **kw):
+                calls.append({
+                    "messages": list(messages),
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                    "tag": kw.get("tag"),
+                })
+                if len(calls) == 1:
+                    return {"choices": [{"message": {"content": "", "tool_calls": [
+                        {"id": "t1", "function": {"name": "update_location", "arguments": json.dumps({"place": "前往私立中学的路上"})}}
+                    ]}}]}
+                if len(calls) in (2, 3):
+                    return {"choices": [{"message": {"content": "", "tool_calls": [
+                        {"id": f"t{len(calls)}", "function": {"name": "update_location", "arguments": json.dumps({"place": "街道"})}}
+                    ]}}]}
+                self.assertEqual(kw.get("tag"), "chat-final-recovery")
+                self.assertIsNone(tools)
+                self.assertIsNone(tool_choice)
+                self.assertFalse(any(msg.get("role") == "tool" for msg in messages))
+                self.assertFalse(any(msg.get("tool_calls") for msg in messages))
+                return {"choices": [{"message": {"content": "（她把手往你掌心里收紧，跟着你一起往校门方向走。）\n\n「嗯，走吧。」"}}]}
+
+            svc._call_llm_messages = fake_msgs
+            svc._ensure_life_profile = AsyncMock(return_value={})
+            svc._update_character_place_from_text = AsyncMock()
+            svc._extract_long_term_memories = AsyncMock()
+            svc._judge_image_moment = AsyncMock(return_value=None)
+            svc._ulog = lambda session_id, kind, text="": logs.append((session_id, kind, text))
+
+            reply = await svc.run_roleplay_chat(1, sid, "牵着手一起出发去私立中学")
+
+            self.assertIn("走吧", reply)
+            self.assertEqual([call["tag"] for call in calls], ["chat", "chat-final", "chat-final-retry", "chat-final-recovery"])
+            state = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_character_place(state), "street")
+            self.assertEqual(session_schema.get_character_place_name(state), "前往私立中学的路上")
+            error_logs = [text for _sid, kind, text in logs if kind == "ERROR"]
+            self.assertFalse(any("LLM_FULL_LOG" in text for text in error_logs))
+            warn_logs = [text for _sid, kind, text in logs if kind == "WARN"]
+            self.assertTrue(any("recovered text-only" in text for text in warn_logs))
 
         asyncio.run(run())
 

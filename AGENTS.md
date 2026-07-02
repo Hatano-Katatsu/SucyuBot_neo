@@ -214,6 +214,10 @@ telegram_comfyui_selfie/
 
 1. **文爱/性爱聊天语言规则**：聊天静态前缀新增 `CHAT_INTIMATE_LANGUAGE_RULES`，仅在明确进入文爱、性爱、插入、抽插、高潮或同等性行为描写时启用；普通调情、拥抱、亲吻和日常亲密不套用。规则覆盖台词字数上限、兴奋度 1-6 对应的语言破碎度、拟声词优先、失语优先、回复结构不规则化，以及禁止评论员口吻、完整逻辑推演和“不是……而是……”句式。该段接在“回复格式规则”之后、“对话推进规则”之前，仍位于 `messages[0]` 静态槽，避免随穿搭、世界状态或动态尾部变化破坏 checkpoint/history 前缀形状。
 2. **本轮回归验证**：新增 `test_chat_system_static_has_intimate_language_rules`，锁定启用边界、阶段密度、拟声词要求、禁用句式和静态前缀内顺序；验证 `py -3 -m unittest tests.test_core.ServiceTestCase.test_chat_system_static_has_intimate_language_rules -v`、`py -3 -m compileall -q telegram_comfyui_selfie tests`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 330 tests in 6.615s`，`OK (skipped=1)`。
+3. **拉取远端更新**：本轮先从 `origin/main` 快进到 `cd08a7c`，包含 `Add intimate chat language rules`、主动推送节奏、生图规划缓存前缀和公开穿搭 guard 等更新。
+4. **地点工具自然语言归一**：`tool_update_location()` / `tool_update_user_location()` 新增统一 `_match_place_key()`，保留模型给出的原始地点文本作为显示名，但用 `PLACE_TEXT_ALIASES` 与“路上/途中/前往”等转场提示归一到固定 `PLACE_TYPES` key；`前往私立中学的路上` 会落到 `street/大街`，`私立中学` 会落到 `school/学校`，`街道` 不再因内置 label 是“大街”而被拒绝。
+5. **最终回复工具粘连恢复**：当 `chat-final` 因兼容端点在无 tools 请求中仍返回空 `tool_calls` 时，先按原逻辑追加禁止工具的 `chat-final-retry`；如果 retry 仍只有空工具调用，新增 `chat-final-recovery`，去掉 `role=tool` 和 `assistant.tool_calls` 协议消息，只保留普通上下文与工具结果摘要，要求模型直接输出自然语言回复，避免地点修正循环导致“回复生成失败”。
+6. **本轮追加验证**：新增测试覆盖自然语言地点别名/路上归一，以及 final+retry 连续返回 `update_location` 空工具调用时的 text-only recovery；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 332 tests in 7.880s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-07-01）
 
@@ -361,11 +365,12 @@ telegram_comfyui_selfie/
 ## 最新验证
 
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m compileall -q telegram_comfyui_selfie tests`
+- `node --check telegram_comfyui_selfie\static\app.js`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m py_compile scripts\compare_llm_chat_prompts.py`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core -v`
-- 最新结果：`Ran 330 tests in 6.615s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
+- 最新结果：`Ran 332 tests in 7.880s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
 - 工具 schema 当前紧凑 JSON 长度：`1898` 字符；chat 回复请求体 key 顺序为 `model, max_tokens, temperature, top_p, frequency_penalty, tools, tool_choice, messages`（`presence_penalty` 留空时不下发；checkpoint/dream/memory 等内部任务不下发采样参数）
-- 本轮未改 WebUI，未运行 `node --check`；未改 prompt 比对脚本逻辑，未重新生成 `.tmp\llm_chat_prompt_compare_current.md`。
+- 本轮未改 prompt 比对脚本逻辑，未重新生成 `.tmp\llm_chat_prompt_compare_current.md`。
 - 真实 API 缓存探针沿用上一轮结论：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。
 - 额外真实 API 缓存探针 `test_live_chat_context_cache_probe_uses_current_config_when_available`：默认跳过；设置 `SUCYUBOT_TEST_LIVE_CACHE_PROBE=1` 后才使用当前配置文件中的模型连接信息，通过真实 `handle_chat()` 链路连续回答三轮预设问题并输出缓存命中率。运行态 state / SQLite / 用户日志均隔离在测试临时目录；模型临时未返回可用回复时跳过。
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示
