@@ -4266,6 +4266,60 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_roleplay_image_planner_prioritizes_current_visible_appearance(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            state.update({
+                "custom_character": "oc",
+                "custom_positive_prefix": "silver hair, blue eyes, fox ears, fair skin",
+                "chat_history": [
+                    {"role": "user", "content": "The last photo still had black hair by the sofa."},
+                    {"role": "assistant", "content": "I keep brushing my black hair in the same room."},
+                ],
+                "sent_photos_history": [{
+                    "timestamp": time.time(),
+                    "scene": "black hair, sofa selfie",
+                    "nltag": "black hair, brown eyes, sofa selfie",
+                    "appearance": "black hair, brown eyes",
+                    "source_description": "intent: old black hair photo",
+                    "view": "selfie",
+                }],
+            })
+            session_schema.set_outfit(state, "white dress")
+            svc._fetch_weather = AsyncMock(return_value={"desc": "clear", "temp": "22"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "A quiet room scene.",
+                "view": "pov",
+                "aspect_ratio": "2:3",
+                "character_location": "home",
+                "user_location": "with_user",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            }, ensure_ascii=False))
+
+            await plan_roleplay_image(svc, sid, intent="draw the current scene")
+
+            system = svc._call_llm.await_args.args[0]
+            user = svc._call_llm.await_args.args[1]
+            self.assertIn("Current visible appearance is authoritative", system)
+            self.assertIn("当前可见外貌:", system)
+            self.assertIn("silver hair", system)
+            self.assertIn("blue eyes", system)
+            self.assertIn("white dress", system)
+            self.assertLess(system.index("当前可见外貌:"), system.index("当前附加外貌:"))
+            self.assertIn("black hair", user)
+            self.assertIn("最近已发图片摘要", user)
+
+        asyncio.run(run())
+
     def test_roleplay_image_planner_orders_stable_rules_before_dynamic_context(self):
         async def run():
             svc = self.make_service()
@@ -4290,12 +4344,14 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             await plan_roleplay_image(svc, sid, intent="看看你在干嘛")
 
             system = svc._call_llm.await_args.args[0]
+            appearance_index = system.index("当前可见外貌:")
             dynamic_index = system.index("当前附加外貌:")
-            self.assertLess(system.index("Scene boundary:"), dynamic_index)
-            self.assertLess(system.index("通用模式要求:"), dynamic_index)
-            self.assertLess(system.index("通用世界/地点判断规则:"), dynamic_index)
-            self.assertLess(system.index("场景类型自判:"), dynamic_index)
-            self.assertLess(system.index("必须输出严格 JSON:"), dynamic_index)
+            self.assertLess(system.index("Scene boundary:"), appearance_index)
+            self.assertLess(system.index("通用模式要求:"), appearance_index)
+            self.assertLess(system.index("通用世界/地点判断规则:"), appearance_index)
+            self.assertLess(system.index("场景类型自判:"), appearance_index)
+            self.assertLess(system.index("必须输出严格 JSON:"), appearance_index)
+            self.assertLess(appearance_index, dynamic_index)
             self.assertEqual(system.count("场景类型自判:"), 1)
             self.assertEqual(system.count("必须输出严格 JSON:"), 1)
 

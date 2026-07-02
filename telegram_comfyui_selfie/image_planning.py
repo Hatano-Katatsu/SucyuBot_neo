@@ -683,6 +683,11 @@ async def plan_roleplay_image(
     safety = service._get_effective_safety(session_id)
     purity = service._get_purity(session_id)
     dynamic = service._effective_dynamic_appearance(session_id) if hasattr(service, "_effective_dynamic_appearance") else (session_schema.get_outfit(state) or service.config.get("dynamic_appearance", ""))
+    visible_appearance = (
+        service._effective_visual_prompt_tags(session_id)
+        if hasattr(service, "_effective_visual_prompt_tags")
+        else ""
+    )
     prompt_prefs = service._prompt_scene_preferences(session_id) if hasattr(service, "_prompt_scene_preferences") else {}
     spatial = service._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])
     spatial_line = f"默认物理空间关系: {spatial}\n" if str(spatial).strip() else ""
@@ -784,7 +789,8 @@ async def plan_roleplay_image(
 
     scene_boundary_rules = (
         "Scene boundary: write scene as environment, camera framing, action, lighting, mood, and spatial context. "
-        "Do not restate stable character appearance that is already in persona/current appearance/photo memory, such as hair color, eye color, body traits, species traits, or permanent accessories. "
+        "Do not restate stable character appearance that is already in persona/current visible appearance, such as hair color, eye color, body traits, species traits, or permanent accessories. "
+        "Current visible appearance is authoritative; if short continuity or recent photo memory conflicts with it, treat the older visual detail as outdated. "
         "Only mention clothing/accessories in scene when they are a deliberate one-shot visual change for this image; put one-shot visual tags in new_appearance_tags.\n"
     )
     stable_mode_rules = (
@@ -946,6 +952,7 @@ async def plan_roleplay_image(
         )
     system = stable_front + "\n\n" + role_context + "\n" + service._get_effective_persona(session_id) + "\n\n"
     system += (
+        f"当前可见外貌: {visible_appearance or '无'}\n"
         f"当前附加外貌: {dynamic or '无'}\n"
         f"用户画面偏好: 场景偏好={prompt_prefs.get('scene_preference') or '无'}；自拍偏好={prompt_prefs.get('selfie_preference') or '无'}。\n"
         f"角色性观念: {service._purity_directive(purity)}\n"
