@@ -2389,10 +2389,12 @@ class TelegramComfyUIService(
                 "Do not turn the user into a second full character."
             )
         text = await self._call_llm(system, f"请翻译: {natural}", temp=float(self._get_llm_value("image", "temperature_translate", "0.3")), tag="translate", purpose="image")
+        natural_text = str(natural or "").strip()
         body = text.strip().strip(",")
         if opener:
-            return opener if not body or body == natural else f"{opener}, {body}"
-        return body
+            detail = body or natural_text
+            return opener if not detail else f"{opener}, {detail}"
+        return body or natural_text
 
     async def _translate_appearance_tags(self, text: str) -> str:
         if not self.has_llm_config("image"):

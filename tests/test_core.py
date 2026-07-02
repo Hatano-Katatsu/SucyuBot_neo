@@ -3301,6 +3301,34 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_translate_to_tags_fallback_preserves_scene_details_with_fixed_view(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            scene = "她背对着你坐在雨天客厅里，让你卷头发，尾巴悄悄绕上你的脚踝。"
+
+            svc._call_llm = AsyncMock(return_value=scene)
+            echoed = await svc._translate_to_tags(scene, session_id="telegram:123", view="pov")
+
+            self.assertTrue(echoed.startswith("First-person POV from the user's viewpoint"))
+            self.assertIn("背对着你", echoed)
+            self.assertIn("卷头发", echoed)
+            self.assertIn("尾巴悄悄绕上你的脚踝", echoed)
+
+            svc._call_llm = AsyncMock(return_value="")
+            empty = await svc._translate_to_tags(scene, session_id="telegram:123", view="pov")
+
+            self.assertTrue(empty.startswith("First-person POV from the user's viewpoint"))
+            self.assertIn("背对着你", empty)
+            self.assertIn("卷头发", empty)
+            self.assertIn("尾巴悄悄绕上你的脚踝", empty)
+
+        asyncio.run(run())
+
     def test_translate_to_tags_injects_current_weather(self):
         async def run():
             svc = self.make_service()
