@@ -36,9 +36,10 @@ from .world_runtime import WorldRuntimeMixin
 
 logger = logging.getLogger(__name__)
 
-# 日志脱敏：base64 data URL 与裸 base64 串会在调试/错误日志里占据大量篇幅，
-# 这里在序列化时统一替换为省略标记，只保留前缀和长度信息用于排查。
-_BASE64_DATA_URL_RE = re.compile(r"(data:[^;,]+;base64,)([A-Za-z0-9+/=]+)")
+# 日志脱敏：vision 请求会把图片编码成 base64 data_url 放进 messages，
+# 落盘到 llm_debug.json / 用户 ERROR 日志时会污染日志并放大体积。
+# _redact_base64 在序列化前递归扫描，把图片相关内容整体丢弃。
+_BASE64_DATA_URL_RE = re.compile(r"data:[^;,]+;base64,[A-Za-z0-9+/=]+")
 _BARE_BASE64_RE = re.compile(r"[A-Za-z0-9+/]{256,}={0,2}")
 
 _SIMPLE_LLM_CACHE_ANCHORS: dict[str, str] = {
@@ -1895,27 +1896,24 @@ class TelegramComfyUIService(
 
     @staticmethod
     def _redact_base64(value: Any) -> Any:
-        """递归遍历可序列化结构，把 base64 data URL / 裸 base64 串替换为省略标记。
+        """递归遍历可序列化结构，把图片相关内容整体丢弃，避免 base64 字节流进入日志。
 
-        用于 LLM 调试与错误日志落盘前对 request body / response 做脱敏，
-        避免图片 data_url 等大块 base64 内容污染 llm_debug.json 和用户日志。
+        处理策略（按优先级）：
+        1. OpenAI 多模态消息中的 image_url 元素
+           ``{"type": "image_url", "image_url": {...}}`` → 整体替换为 "<image omitted>"；
+        2. data URL（``data:<mime>;base64,...``）→ 替换为 "<image omitted>"；
+        3. 裸 base64 串（>=256 字符，排除短 hex/hash）→ 替换为 "<base64 omitted>"。
         """
-        if isinstance(value, str):
-            def _sub_data_url(m: "re.Match[str]") -> str:
-                prefix, payload = m.group(1), m.group(2)
-                return f"{prefix}<omitted len={len(payload)}>"
-
-            def _sub_bare(m: "re.Match[str]") -> str:
-                chunk = m.group(0)
-                return f"<base64 omitted len={len(chunk)}>"
-
-            redacted = _BASE64_DATA_URL_RE.sub(_sub_data_url, value)
-            redacted = _BARE_BASE64_RE.sub(_sub_bare, redacted)
-            return redacted
         if isinstance(value, dict):
+            if value.get("type") == "image_url" and isinstance(value.get("image_url"), (dict, str)):
+                return "<image omitted>"
             return {k: TelegramComfyUIService._redact_base64(v) for k, v in value.items()}
         if isinstance(value, (list, tuple)):
             return [TelegramComfyUIService._redact_base64(v) for v in value]
+        if isinstance(value, str):
+            redacted = _BASE64_DATA_URL_RE.sub("<image omitted>", value)
+            redacted = _BARE_BASE64_RE.sub("<base64 omitted>", redacted)
+            return redacted
         return value
 
     @staticmethod
