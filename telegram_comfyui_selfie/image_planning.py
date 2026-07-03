@@ -1073,7 +1073,8 @@ async def plan_roleplay_image(
             )
     if is_push:
         user = (
-            f"当前时段: {time_period}，星期: {weekday}，天气: {weather}，推送模式: {mode}。"
+            f"当前时段: {time_period}，星期: {weekday}，天气: {weather}，推送模式: {mode}。\n"
+            "请直接输出 JSON（以 { 开头），不要输出角色台词、叙述文本或括号包裹的场景描写。"
         )
     else:
         user = (
@@ -1093,6 +1094,8 @@ async def plan_roleplay_image(
     if memory_context:
         user += f"\n\n长期记忆:\n{memory_context}"
 
+    raw_text = ""
+    text = ""
     try:
         if is_push and hasattr(service, "_build_chat_context_messages_for_push") and hasattr(service, "_call_llm_messages"):
             planner_messages = service._build_chat_context_messages_for_push(session_id)
@@ -1107,11 +1110,14 @@ async def plan_roleplay_image(
                 purpose="image",
                 session_id=session_id,
             )
-            text = (result.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+            msg = result.get("choices", [{}])[0].get("message", {})
+            raw_text = (msg.get("content") or "").strip()
+            if not raw_text:
+                raw_text = (msg.get("reasoning_content") or "").strip()
         else:
             if push_dynamic_context:
                 system = system + "\n" + push_dynamic_context
-            text = await service._call_llm(
+            raw_text = await service._call_llm(
                 system,
                 user,
                 temp=float(service._get_llm_value("image", "temperature_scene", "0.95")),
@@ -1119,35 +1125,57 @@ async def plan_roleplay_image(
                 purpose="image",
                 session_id=session_id,
             )
-        parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
+        # 清理 thinking/reasoning 标签和 markdown 代码块标记
+        text = re.sub(r"^\s*<thinking>.*?</thinking>\s*", "", raw_text, flags=re.DOTALL).strip()
+        text = re.sub(r"^\s*<reasoning>.*?</reasoning>\s*", "", text, flags=re.DOTALL).strip()
+        text = re.sub(r"^\s*<analysis>.*?</analysis>\s*", "", text, flags=re.DOTALL).strip()
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text).strip()
+        text = re.sub(r"\n?```\s*$", "", text).strip()
+        parsed = json.loads(text)
     except Exception as exc:
-        logger.error("roleplay image planning failed: %s", exc)
-        fallback_view = _resolve_roleplay_view(
-            requested_view=requested_view,
-            planned_view="",
-            default_view="pov" if (intimate_hint or persisted_co_located) else "selfie",
-            derived_co_located=persisted_co_located,
-            two_person=intimate_hint,
-            free_composition=free_composition,
-            scene=fallback_scene,
-            intent=intent,
-            mood=mood,
-            prompt=prompt,
-            dialog_context=continuity_context or "",
-        )
-        if fallback_view == "portrait":
-            device_hint = False
-        return {
-            "scene": fallback_scene,
-            "view": fallback_view,
-            "aspect_ratio": "2:3",
-            "new_appearance_tags": None,
-            "clothing_off": clothing_off_hint,
-            "is_intimate": intimate_hint,
-            "partner_in_frame": False,
-            "device_in_frame": device_hint,
-            "caption": "",
-        }
+        # 尝试从纯文本中提取 JSON 子串（LLM 可能返回了 文本+JSON 混合内容）
+        parsed = None
+        if text:
+            start = text.find("{")
+            end = text.rfind("}")
+            if 0 <= start < end:
+                try:
+                    parsed = json.loads(text[start:end + 1])
+                except json.JSONDecodeError:
+                    pass
+        if parsed is not None:
+            logger.info("roleplay image plan: extracted JSON from mixed text, raw_len=%d", len(raw_text))
+        else:
+            logger.error("roleplay image planning failed: %s raw_excerpt=%.300s", exc, raw_text)
+            # LLM 返回了纯文本（非 JSON）时，将其作为 scene 兜底，避免推送完全失败。
+            # 推送模式下 fallback_scene 为空（不传 intent/prompt），不兜底会导致 scene="" → 推送规划为空。
+            text_scene = raw_text.strip() if raw_text.strip() else fallback_scene
+            fallback_view = _resolve_roleplay_view(
+                requested_view=requested_view,
+                planned_view="",
+                default_view="pov" if (intimate_hint or persisted_co_located) else "selfie",
+                derived_co_located=persisted_co_located,
+                two_person=intimate_hint,
+                free_composition=free_composition,
+                scene=text_scene,
+                intent=intent,
+                mood=mood,
+                prompt=prompt,
+                dialog_context=continuity_context or "",
+            )
+            if fallback_view == "portrait":
+                device_hint = False
+            return {
+                "scene": text_scene,
+                "view": fallback_view,
+                "aspect_ratio": "2:3",
+                "new_appearance_tags": None,
+                "clothing_off": clothing_off_hint,
+                "is_intimate": intimate_hint,
+                "partner_in_frame": False,
+                "device_in_frame": device_hint,
+                "caption": "",
+            }
 
     scene = _normalize_image_plan_scene(parsed, fallback_scene, strong_pin)
     if not free_composition:
