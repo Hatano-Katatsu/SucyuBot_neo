@@ -36,6 +36,29 @@ class SchedulerRuntimeMixin:
         r"一会回来|待会回来)"
     )
 
+    # 对话后续场推送门控：用户最后一条消息若命中这些告别/中止关键词，则不安排 followup 推送。
+    # 仅判定用户对 bot 的主动告别，不混入角色扮演情节里的转场词（如"出发""回家""下班"）。
+    _POST_CHAT_PUSH_END_KEYWORDS = (
+        # 明确告别
+        "拜拜", "拜拜了", "再见", "再聊", "byebye", "bye bye", "bye", "goodbye", "88",
+        # 晚安 / 睡眠
+        "晚安", "睡了", "去睡", "睡觉", "睡啦", "睡咯", "good night", "goodnight", "gnight", "gn",
+        "sleep well", "sweet dreams",
+        # 离开 / 下线
+        "下线", "走了", "先走了", "撤了", "溜了", "先撤", "gtg", "gotta go", "logging off",
+        # 改天聊
+        "回头聊", "下次聊", "改天聊", "以后聊", "明天聊", "see you", "see ya", "cya", "later", "ttyl",
+        # 休息
+        "休息了", "去休息", "先休息",
+    )
+
+    def _last_message_indicates_conversation_end(self, state: dict[str, Any]) -> bool:
+        """用户最后一条消息是否表示主动结束当前聊天会话（拜拜/晚安/走了等）。"""
+        text = (session_schema.get_last_message_text(state) or "").lower()
+        if not text:
+            return False
+        return any(word in text for word in self._POST_CHAT_PUSH_END_KEYWORDS)
+
     def _push_scene_transition_decision(
         self,
         state: dict[str, Any],
@@ -1016,6 +1039,9 @@ class SchedulerRuntimeMixin:
             return False
         state = self._get_session_state(session_id)
         if session_schema.get_frozen(state) or not self.has_llm_config("image", session_id):
+            return False
+        if self._last_message_indicates_conversation_end(state):
+            self._ulog(session_id, "PUSH", "跳过对话后续场推送: 用户消息含告别/中止信号")
             return False
         local_dt = self._session_now(session_id)
         counter_reset = self._reset_post_chat_push_counter_if_needed(session_id, state, local_dt)

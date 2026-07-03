@@ -2397,6 +2397,70 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertGreaterEqual(result["ignored"], 2)
         self.assertEqual(plan["today"]["events"][0]["related_mid_id"], "m2")
 
+    def test_life_plan_ops_apply_nested_goal_format(self):
+        # 模型可能返回 {"op":"add_long","long_goal":{...}} 嵌套格式，代码应展平后正确应用
+        svc = self.make_service()
+        sid = "telegram:123"
+        previous = {
+            "long_goals": [],
+            "mid_goals": [],
+            "today": {"date": "2026-07-03", "events": [], "texture": ""},
+        }
+        parsed = {
+            "ops": [
+                {"op": "add_long", "long_goal": {"id": "lg1", "dimension": "身份", "text": "弄清留下来的意义", "motivation": "逃避了一百年", "status": "active"}},
+                {"op": "add_long", "long_goal": {"id": "lg2", "dimension": "占有", "text": "把独食钉牢", "motivation": "领地本能", "status": "active"}},
+                {"op": "add_mid", "mid_goal": {"id": "mg1", "parent_id": "lg1", "text": "重新说离不开", "description": "等他清醒后重说"}},
+                {"op": "add_mid", "mid_goal": {"id": "mg2", "parent_id": "lg2", "text": "推进拉面之约", "description": "看他记不记得"}},
+            ],
+            "today_events": [],
+        }
+
+        plan, result = svc._life_plan_from_update(previous, parsed, today_date="2026-07-03", session_id=sid)
+
+        self.assertEqual(result["applied"], 4)
+        self.assertEqual(result["ignored"], 0)
+        self.assertEqual(len(plan["long_goals"]), 2)
+        self.assertEqual(plan["long_goals"][0]["id"], "lg1")
+        self.assertEqual(plan["long_goals"][0]["text"], "弄清留下来的意义")
+        self.assertEqual(plan["long_goals"][0]["dimension"], "身份")
+        self.assertEqual(plan["long_goals"][0]["motivation"], "逃避了一百年")
+        self.assertEqual(len(plan["mid_goals"]), 2)
+        self.assertEqual(plan["mid_goals"][0]["id"], "mg1")
+        self.assertEqual(plan["mid_goals"][0]["parent_id"], "lg1")
+        self.assertEqual(plan["mid_goals"][0]["progress_note"], "等他清醒后重说")
+        self.assertEqual(plan["mid_goals"][1]["parent_id"], "lg2")
+
+    def test_normalize_life_event_accepts_field_aliases(self):
+        # 模型可能用 summary/time/related_mid 别名，代码应兼容映射
+        svc = self.make_service()
+        event = svc._normalize_life_event({
+            "id": "ev1",
+            "summary": "为自己做了一杯花茶",
+            "time": "morning",
+            "place": "home",
+            "related_mid": ["mg1", "mg2"],
+            "status": "done",
+        }, today_date="2026-07-03", existing=[])
+        self.assertIsNotNone(event)
+        self.assertEqual(event["text"], "为自己做了一杯花茶")
+        self.assertEqual(event["time_hint"], "morning")
+        self.assertEqual(event["place_key"], "home")
+        self.assertEqual(event["related_mid_id"], "mg1")
+        self.assertEqual(event["status"], "done")
+
+        # related_mid 为字符串也应兼容
+        event2 = svc._normalize_life_event({
+            "id": "ev2",
+            "description": "随便吃点",
+            "time_hint": "evening",
+            "place_key": "cafe",
+            "related_mid": "mg3",
+        }, today_date="2026-07-03", existing=[])
+        self.assertIsNotNone(event2)
+        self.assertEqual(event2["text"], "随便吃点")
+        self.assertEqual(event2["related_mid_id"], "mg3")
+
     def test_life_plan_texture_retries_purpose_word_output(self):
         async def run():
             svc = self.make_service()
@@ -3515,6 +3579,40 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             ok = await svc._fire_post_chat_push(sid, expected, delay=600)
             self.assertFalse(ok)
             svc._sched_fire.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_post_chat_push_skipped_on_conversation_end_keywords(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+                "post_chat_push_delay_min_minutes": "5",
+                "post_chat_push_delay_max_minutes": "15",
+            })
+            state = svc._get_session_state(sid)
+            session_schema.set_last_message_time(state, time.time())
+            svc._save_session_state(sid, state)
+            for farewell in ("拜拜，下次聊", "晚安，睡了", "走了，先撤了", "bye, see you", "下线了休息了"):
+                state = svc._get_session_state(sid)
+                session_schema.set_last_message_text(state, farewell)
+                svc._save_session_state(sid, state)
+                self.assertFalse(svc._schedule_post_chat_push(sid), f"应跳过告别消息: {farewell}")
+                self.assertNotIn(sid, getattr(svc, "_post_chat_push_tasks", {}))
+
+            state = svc._get_session_state(sid)
+            session_schema.set_last_message_text(state, "今天天气不错呢")
+            svc._save_session_state(sid, state)
+            self.assertTrue(svc._schedule_post_chat_push(sid))
+            task = svc._post_chat_push_tasks[sid]
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
         asyncio.run(run())
 

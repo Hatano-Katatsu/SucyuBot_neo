@@ -167,25 +167,38 @@ class LifePlanMixin:
     def _normalize_life_event(self, item: Any, *, today_date: str, existing: list[dict[str, Any]]) -> dict[str, Any] | None:
         if not isinstance(item, dict):
             return None
-        text = _compact_text(item.get("text"), 220)
+        text = _compact_text(item.get("text") or item.get("summary") or item.get("description"), 220)
         if not text:
             return None
         eid = str(item.get("id") or "").strip() or self._life_next_id(existing, "e")
-        time_hint = str(item.get("time_hint") or "").strip().lower()
+        time_hint = str(item.get("time_hint") or item.get("time") or "").strip().lower()
         if time_hint not in LIFE_TIME_HINTS:
             time_hint = "afternoon"
-        place_key = str(item.get("place_key") or "").strip().lower()
+        place_key = str(item.get("place_key") or item.get("place") or "").strip().lower()
         if place_key not in PLACE_TYPES:
             place_key = "home"
         status = str(item.get("status") or "planned").strip()
         if status not in LIFE_EVENT_STATUSES:
             status = "planned"
+        # related_mid_id 兼容 related_mid（可能是列表）
+        related_raw = item.get("related_mid_id")
+        if related_raw is None:
+            related_raw = item.get("related_mid")
+        related_mid_id = ""
+        if isinstance(related_raw, list):
+            for candidate in related_raw:
+                candidate = str(candidate or "").strip()
+                if candidate:
+                    related_mid_id = candidate
+                    break
+        else:
+            related_mid_id = str(related_raw or "").strip()
         event = {
             "id": eid,
             "time_hint": time_hint,
             "text": text,
             "place_key": place_key,
-            "related_mid_id": str(item.get("related_mid_id") or "").strip() or None,
+            "related_mid_id": related_mid_id or None,
             "status": status,
         }
         side_note = _compact_text(item.get("side_note"), 180)
@@ -298,16 +311,42 @@ class LifePlanMixin:
                 result["ignored"] += 1
                 continue
             name = str(op.get("op") or "").strip().lower()
-            oid = str(op.get("id") or "").strip()
+            # 展平嵌套 goal/long_goal/mid_goal 字段：模型可能返回
+            # {"op":"add_long","long_goal":{"id":...,"text":...}} 而代码期望扁平结构。
+            # 顶层字段优先，缺失时从嵌套 payload 回退。
+            nested = None
+            for _nk in ("goal", "long_goal", "mid_goal"):
+                _cand = op.get(_nk)
+                if isinstance(_cand, dict):
+                    nested = _cand
+                    break
+
+            def _g(key: str, *aliases: str) -> Any:
+                val = op.get(key)
+                if val is None:
+                    for a in aliases:
+                        val = op.get(a)
+                        if val is not None:
+                            break
+                if val is None and nested:
+                    val = nested.get(key)
+                    if val is None:
+                        for a in aliases:
+                            val = nested.get(a)
+                            if val is not None:
+                                break
+                return val
+
+            oid = str(_g("id") or "").strip()
             applied = False
             if name in {"progress", "update_mid"} and oid:
                 for mid in mids:
                     if mid.get("id") == oid:
-                        note = _compact_text(op.get("note") or op.get("progress_note"), 240)
+                        note = _compact_text(_g("note", "progress_note", "description"), 240)
                         if note:
                             mid["progress_note"] = note
-                        if op.get("text"):
-                            mid["text"] = _compact_text(op.get("text"), 220)
+                        if _g("text"):
+                            mid["text"] = _compact_text(_g("text"), 220)
                         mid["updated_date"] = today_date
                         applied = True
                         break
@@ -317,24 +356,24 @@ class LifePlanMixin:
                         if item.get("id") == oid:
                             item["status"] = "achieved" if name == "achieve" else "abandoned"
                             item["updated_date"] = today_date
-                            if op.get("reason") and "progress_note" in item:
-                                item["progress_note"] = _compact_text(op.get("reason"), 240)
+                            if _g("reason") and "progress_note" in item:
+                                item["progress_note"] = _compact_text(_g("reason"), 240)
                             applied = True
                             break
                     if applied:
                         break
             elif name == "add_mid":
                 active_long_ids = [item.get("id") for item in longs if item.get("status") == "active"]
-                parent_id = str(op.get("parent_id") or "").strip()
+                parent_id = str(_g("parent_id") or "").strip()
                 if parent_id not in active_long_ids:
                     parent_id = active_long_ids[0] if active_long_ids else ""
                 if parent_id and len(mids) < limits["mid"]:
                     mid = self._normalize_life_goal(
                         {
-                            "id": op.get("id") or self._life_next_id(mids, "m"),
+                            "id": _g("id") or self._life_next_id(mids, "m"),
                             "parent_id": parent_id,
-                            "text": op.get("text"),
-                            "progress_note": op.get("note") or op.get("progress_note") or "",
+                            "text": _g("text"),
+                            "progress_note": _g("note", "progress_note", "description") or "",
                             "status": "active",
                             "created_date": today_date,
                             "updated_date": today_date,
@@ -349,10 +388,10 @@ class LifePlanMixin:
             elif name == "add_long" and len(longs) < limits["long"]:
                 long_goal = self._normalize_life_goal(
                     {
-                        "id": op.get("id") or self._life_next_id(longs, "l"),
-                        "text": op.get("text"),
-                        "motivation": op.get("motivation") or "",
-                        "dimension": op.get("dimension") or op.get("category") or "",
+                        "id": _g("id") or self._life_next_id(longs, "l"),
+                        "text": _g("text"),
+                        "motivation": _g("motivation") or "",
+                        "dimension": _g("dimension", "category", "domain") or "",
                         "status": "active",
                         "created_date": today_date,
                         "updated_date": today_date,
@@ -367,12 +406,12 @@ class LifePlanMixin:
             elif name == "update_long" and oid:
                 for goal in longs:
                     if goal.get("id") == oid:
-                        if op.get("text"):
-                            goal["text"] = _compact_text(op.get("text"), 220)
-                        if op.get("motivation"):
-                            goal["motivation"] = _compact_text(op.get("motivation"), 220)
-                        if op.get("dimension") or op.get("category"):
-                            dimension = _compact_dimension(op.get("dimension") or op.get("category"))
+                        if _g("text"):
+                            goal["text"] = _compact_text(_g("text"), 220)
+                        if _g("motivation"):
+                            goal["motivation"] = _compact_text(_g("motivation"), 220)
+                        if _g("dimension", "category", "domain"):
+                            dimension = _compact_dimension(_g("dimension", "category", "domain"))
                             if dimension:
                                 goal["dimension"] = dimension
                         goal["updated_date"] = today_date
@@ -669,7 +708,7 @@ class LifePlanMixin:
                     purpose=purpose,
                     disable_thinking=True if purpose == "chat" else None,
                     session_id=session_id,
-                    max_tokens=4096,
+                    max_tokens=6144,
                 )
                 parser = self._parse_llm_json if hasattr(self, "_parse_llm_json") else json.loads
                 return parser(raw)
@@ -709,6 +748,10 @@ class LifePlanMixin:
             "Each long_goals item should include {id, dimension, text, motivation, status}; dimension is a short natural label such as 生活、理想、爱好、事业、身份、家庭、关系、自由, but you may create a better one from the character.\n"
             "Ops: progress/update_mid/achieve/abandon/add_mid/update_long/add_long. Apply changes by stable id. "
             "Unknown ids are ignored by code, so use existing ids when possible.\n"
+            "Op fields are FLAT, not nested: e.g. {\"op\":\"add_long\",\"id\":\"l1\",\"dimension\":\"...\",\"text\":\"...\",\"motivation\":\"...\"} "
+            "and {\"op\":\"add_mid\",\"id\":\"m1\",\"parent_id\":\"l1\",\"text\":\"...\",\"note\":\"...\"}. "
+            "Do NOT wrap fields inside a goal/long_goal/mid_goal sub-object. Keep each motivation under 60 chars. "
+            "today_events item fields: {id, time_hint(morning/noon/afternoon/evening/night), text, place_key, related_mid_id, status(planned/done/skipped/derailed)}.\n"
             "Rules: long_goals max 3, mid_goals max 4, today_events max 5. Each mid goal must have a parent_id from active long_goals. "
             "If you output more than one long goal, they must come from genuinely different dimensions. Do not create three paraphrases of the same relationship/companionship need. "
             "Select only dimensions that fit the character; you do not need to cover every example dimension. "

@@ -2400,8 +2400,9 @@ async def api_test_llm(request: web.Request):
         return json_error("purpose 必须是 chat、image 或 vision")
     try:
         if purpose == "vision":
-            # 1x1 红色 PNG，用于测试视觉模型是否可用
-            image_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1YAAAAASUVORK5CYII="
+            # 32x32 红色 PNG，用于测试视觉模型是否可用。
+            # 部分视觉模型（如 qwen-vl）要求图片宽高均 > 10px，1x1 占位图会被 provider 拒绝。
+            image_b64 = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAANUlEQVR4nO3NMQEAMAjEwKe68K8CMZUQFracgKSmO5feaT0OFhwgB8gBcoAcIAfIAXKAHIR8qZcBlCKtHn4AAAAASUVORK5CYII="
             image_bytes = base64.b64decode(image_b64)
             description = await service._describe_image_for_chat(
                 "", image_bytes, "image/png", source_label="测试图片"
