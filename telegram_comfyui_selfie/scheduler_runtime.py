@@ -587,12 +587,19 @@ class SchedulerRuntimeMixin:
         *,
         reason: str = "",
         life_plan_context: str = "",
+        source_role_legend: str = "",
     ) -> str:
         if not source_text and existing_diary:
             return existing_diary
         if not self.has_llm_config("chat", session_id):
             return ((existing_diary.rstrip() + "\n\n") if existing_diary else "") + (source_text or "No new dialogue.")
         weekday = self._dream_diary_weekday(diary_date)
+        if not source_role_legend:
+            source_role_legend = (
+                self._dialog_role_legend()
+                if hasattr(self, "_dialog_role_legend")
+                else "User = human user; Assistant = the current bot roleplay character."
+            )
         overwrite_note = ""
         if str(existing_diary or "").strip():
             overwrite_note = (
@@ -612,6 +619,9 @@ class SchedulerRuntimeMixin:
             "Do not invent events, motives, promises, locations, or off-screen actions that are not supported by either source. "
             "Compress repeated physical actions or low-value banter, but keep concrete facts, explicit promises, unresolved tensions, "
             "relationship changes, and the character's emotional turning points recoverable. "
+            "Perspective contract: the diary's first-person 'I' is always the current bot roleplay character, never the human user. "
+            "In source dialogue, User means the human user, and Assistant means the bot character's own speech/actions. "
+            "Do not swap who felt, promised, touched, moved, or spoke; if ownership is unclear, write it neutrally or omit it. "
             "The first line must be a Markdown heading in this exact format: "
             f"# {diary_date} {weekday or '星期几'} 标题. Use a concise Chinese title after the weekday. "
             "Write the diary in the character's first-person private voice. "
@@ -622,6 +632,7 @@ class SchedulerRuntimeMixin:
         user = (
             f"Diary date: {diary_date}\nWeekday: {weekday or 'unknown'}\nWrite mode: {write_mode}\nReason: {reason}"
             f"\n\nExisting diary:\n{existing_diary or 'none'}"
+            f"\n\nDialogue role legend:\n{source_role_legend or 'User = human user; Assistant = the current bot roleplay character.'}"
             f"\n\nNew dialogue since last dream:\n{source_text or 'none'}"
             f"\n\nPrivate life background for diary:\n{life_plan_context or 'none'}"
         )
@@ -683,6 +694,7 @@ class SchedulerRuntimeMixin:
             limit_chars=12000,
             roles={"user", "assistant"},
         )
+        role_legend = self._dialog_role_legend() if hasattr(self, "_dialog_role_legend") else "User = human user; Assistant = the current bot roleplay character."
         limit = self._long_memory_limit()
         threshold = max(1, limit // 2)
         system = (
@@ -690,6 +702,8 @@ class SchedulerRuntimeMixin:
             "and checkpoint, decide how to update non-manual memories. Never modify manual memories. "
             f"Keep total non-manual memories under {threshold} items. Merge similar memories, remove outdated ones. "
             "Use diaries as archived evidence, checkpoint/current context as continuity evidence, and editable memories as the only mutable state. "
+            "Diary evidence is written from the bot character's first-person perspective: diary 'I' means the character, not the human user. "
+            "When reading current context, User is the human user and Assistant is the current bot roleplay character; never swap their actions, emotions, promises, or preferences. "
             "Do not create new memories from inference or roleplay taste unless the sources explicitly state a durable preference, boundary, promise, correction, or relationship change. "
             "For memories that are time nodes, deadlines, appointments, schedules, or countdowns, do not delete them "
             "only because the date or time has passed. Update or delete them only when the related event is clearly "
@@ -698,7 +712,7 @@ class SchedulerRuntimeMixin:
         )
         diary_text = "\n\n".join(f"[{d.get('diary_date')}]\n{d.get('content','')}" for d in (diaries or []))
         mem_text = "\n".join(f"{m['id']}. [{m.get('kind')}] {m.get('summary')}" for m in editable)
-        user = f"Recent diaries:\n{diary_text}\n\nCheckpoint:\n{checkpoint or 'none'}\n\nCurrent window:\n{current or 'none'}\n\nEditable memories:\n{mem_text or 'none'}"
+        user = f"Recent diaries:\n{diary_text}\n\nCheckpoint:\n{checkpoint or 'none'}\n\nCurrent dialogue role legend:\n{role_legend}\n\nCurrent window:\n{current or 'none'}\n\nEditable memories:\n{mem_text or 'none'}"
         try:
             raw, parsed, llm_purpose, attempts = await self._call_memory_json_llm(
                 session_id, system, user, tag="dream-memory", temp=0.1)
@@ -787,6 +801,7 @@ class SchedulerRuntimeMixin:
             "If the user prompt says some memories were omitted, those omitted memories remain unchanged and must not be invented or referenced. "
             "Merge similar items, drop outdated or trivial ones, keep the most important and durable information. "
             "Use only the supplied memories plus diary/checkpoint evidence; do not add new facts, motives, or commitments by inference. "
+            "Diary evidence is written from the bot character's first-person perspective: diary 'I' means the character, not the human user. "
             "For time nodes, deadlines, appointments, schedules, or countdowns, do not drop them merely because the "
             "date or time has passed; keep or merge them until the related event is resolved, canceled, superseded, "
             "or has fully faded from recent diaries and checkpoint. "
@@ -909,6 +924,8 @@ class SchedulerRuntimeMixin:
             "你是角色历史提要生成器。根据上一次的历史提要和最近两天的日记，"
             "生成一份简洁的角色发展脉络摘要。涵盖关系进展、情感变化、重要承诺、未解事件和角色成长。"
             "这是给聊天模型的长期背景参考，不是日记复述。"
+            "日记是当前 bot 角色的一人称记录；日记里的「我」指角色本人，「用户」「对方」指人类用户。"
+            "必须保持角色和用户的视角归属，不要把用户的动作、承诺、情绪写成角色的，也不要反过来。"
             "建议结构为「关系/剧情惯性」「角色心理与心情界定」「未解事件」「新一天演绎提示」四段，内容必须精炼。"
             "「新一天演绎提示」需要尊重剧情逻辑惯性，重点分析角色当前心理、防御/期待/羞耻/依恋等心情边界，"
             "给出顺着既有矛盾和情绪自然延展的扮演方向；不要写死具体台词、地点、日程或剧情分支。"
@@ -916,7 +933,7 @@ class SchedulerRuntimeMixin:
             "如果只能判断情绪倾向，必须写成倾向或可能性，不要包装成已发生事实。"
             f"字数控制在 {limit} 字以内。只输出中文摘要文本。"
         )
-        user = f"上次历史提要:\n{previous or '无'}\n\n最近日记:\n{diary_text}"
+        user = f"视角说明: 日记中的第一人称=当前 bot 角色；用户/对方=人类用户。\n\n上次历史提要:\n{previous or '无'}\n\n最近日记:\n{diary_text}"
         try:
             summary = await self._call_llm(
                 system, user, temp=0.2, tag="history-summary",

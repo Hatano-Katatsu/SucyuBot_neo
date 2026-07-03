@@ -24,7 +24,7 @@ from telegram_comfyui_selfie.commands import (
 )
 from telegram_comfyui_selfie.command_aliases import COMMAND_ALIAS_GROUPS, resolve_command_alias
 from telegram_comfyui_selfie.prompt_intake import heuristic_intake
-from telegram_comfyui_selfie.webui import api_character_avatar_image, api_diaries, api_generate_character_avatar, api_get_history_summary, api_organize_memories, api_save_character, api_save_diary, api_save_history_summary, api_system_error_log, api_test_push_selected_character, build_world_route_preview, cast_config_value, masked_config, serialize_prompt_slots, session_summary
+from telegram_comfyui_selfie.webui import api_character_avatar_image, api_diaries, api_generate_character_avatar, api_get_history_summary, api_organize_memories, api_save_character, api_save_diary, api_save_history_summary, api_system_error_log, api_test_push_selected_character, api_world_life_plan_generate, api_world_life_plan_goal_create, api_world_life_plan_goal_delete, api_world_life_plan_goal_update, build_world_route_preview, cast_config_value, masked_config, serialize_prompt_slots, session_summary
 
 
 os.environ.setdefault("SUCYUBOT_TEST_FAST_SQLITE", "1")
@@ -3620,9 +3620,14 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             session_schema.set_character_value(state, "custom_role_name", "见习画师")
             session_schema.set_character_value(state, "custom_character_occupation", "插画师")
             session_schema.set_character_value(state, "custom_scheduled_persona", "敏感、要强，害怕自己的作品没人看见。")
+            session_schema.set_chat_history(state, [
+                {"role": "user", "content": "你上次说想把画册做出来。"},
+                {"role": "assistant", "content": "「嗯，不能一直只存在草稿里。」"},
+            ])
             svc._call_life_plan_json = AsyncMock(return_value={
                 "long_goals": [{
                     "id": "l1",
+                    "dimension": "事业",
                     "text": "把自己的插画作品做出能被看见的风格",
                     "motivation": "不想一直躲在别人评价后面",
                     "status": "active",
@@ -3637,17 +3642,277 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "today_events": [],
             })
 
-            await svc._generate_life_plan_update(sid, "小雨", {}, today_date="2026-07-03", reason="test")
+            await svc._generate_life_plan_update(
+                sid,
+                "小雨",
+                {
+                    "long_goals": [{
+                        "id": "l1",
+                        "dimension": "关系",
+                        "text": "把照顾用户变成默认状态",
+                        "motivation": "害怕被替代",
+                        "status": "active",
+                    }],
+                    "mid_goals": [{
+                        "id": "m1",
+                        "parent_id": "l1",
+                        "text": "每天确认用户有没有想她",
+                        "status": "active",
+                    }],
+                },
+                today_date="2026-07-03",
+                reason="test",
+                goal_instruction="从事业、爱好和生活节奏拆开，不要都围着用户关系",
+                rewrite_goals=True,
+            )
 
             system = svc._call_life_plan_json.await_args.args[1]
             user = svc._call_life_plan_json.await_args.args[2]
             self.assertIn("core drive", system)
+            self.assertIn("dimension", system)
+            self.assertIn("genuinely different dimensions", system)
             self.assertIn("Infer that core drive yourself", system)
             self.assertIn("inside the character's point of view", system)
             self.assertIn("output JSON only", system)
             self.assertIn("维系感情", system)
+            self.assertIn("Manual goal rewrite mode", system)
+            self.assertIn("complete long_goals and complete mid_goals arrays", system)
             self.assertNotIn("Core drive candidates", user)
+            self.assertIn("Goal rewrite mode: full long_goals + mid_goals replacement", user)
+            self.assertIn("Original long/mid goals before this manual rewrite", user)
+            self.assertIn("把照顾用户变成默认状态", user)
+            self.assertIn("从事业、爱好和生活节奏拆开", user)
             self.assertIn("敏感、要强", user)
+            self.assertIn("想把画册做出来", user)
+            self.assertIn("user = human user; assistant = the current bot roleplay character", user)
+
+        asyncio.run(run())
+
+    def test_life_plan_goal_crud_preserves_dimensions_and_parent_links(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        session_schema.set_character_value(state, "custom_character", "小雨")
+        svc._save_session_state(sid, state)
+
+        svc._save_life_plan_payload(sid, "小雨", {
+            "long_goals": [{"id": "l1", "text": "把作品做出自己的方向", "status": "active"}],
+            "mid_goals": [],
+            "today": {"date": "2026-07-03", "events": [], "texture": ""},
+        })
+        loaded = svc._load_life_plan_row(sid, "小雨")["payload"]
+        self.assertTrue(loaded["long_goals"][0].get("dimension"))
+
+        svc.upsert_life_plan_goal(sid, "long", {
+            "id": "l2",
+            "dimension": "生活",
+            "text": "把日常节奏整理到能留出喘息",
+            "motivation": "不想只被白天推着走",
+        })
+        svc.upsert_life_plan_goal(sid, "mid", {
+            "id": "m1",
+            "parent_id": "l2",
+            "text": "这周先固定一个晚上给自己",
+            "progress_note": "刚开始试",
+        })
+        row = svc._load_life_plan_row(sid, "小雨")
+        payload = row["payload"]
+        self.assertEqual([goal["id"] for goal in payload["long_goals"]], ["l1", "l2"])
+        self.assertEqual(payload["long_goals"][1]["dimension"], "生活")
+        self.assertEqual(payload["mid_goals"][0]["parent_id"], "l2")
+
+        svc.delete_life_plan_goal(sid, "long", "l2")
+        payload = svc._load_life_plan_row(sid, "小雨")["payload"]
+        self.assertEqual([goal["id"] for goal in payload["long_goals"]], ["l1"])
+        self.assertEqual(payload["mid_goals"], [])
+
+    def test_life_plan_manual_rewrite_replaces_all_long_and_mid_goals_once(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        previous = {
+            "long_goals": [{
+                "id": "l1",
+                "dimension": "关系",
+                "text": "把陪伴用户变成生活中心",
+                "motivation": "旧版本太单一",
+                "status": "active",
+            }],
+            "mid_goals": [{
+                "id": "m1",
+                "parent_id": "l1",
+                "text": "每天等用户回复",
+                "status": "active",
+            }],
+            "today": {"date": "2026-07-02", "events": []},
+        }
+        parsed = {
+            "long_goals": [
+                {"id": "l1", "dimension": "事业", "text": "把插画作品做出自己的方向", "motivation": "想被看见", "status": "active"},
+                {"id": "l2", "dimension": "生活", "text": "把日常整理到能喘息", "motivation": "不想只被推着走", "status": "active"},
+            ],
+            "mid_goals": [
+                {"id": "m1", "parent_id": "l1", "text": "这周完成一张练习稿", "status": "active"},
+                {"id": "m2", "parent_id": "l2", "text": "固定一个晚上留给自己", "status": "active"},
+            ],
+            "ops": [{"op": "add_long", "id": "l3", "dimension": "关系", "text": "不应被增量追加"}],
+            "today_events": [],
+        }
+
+        plan, op_result = svc._life_plan_from_update(
+            previous,
+            parsed,
+            today_date="2026-07-03",
+            session_id=sid,
+            replace_goals=True,
+        )
+
+        self.assertEqual([item["id"] for item in plan["long_goals"]], ["l1", "l2"])
+        self.assertEqual([item["id"] for item in plan["mid_goals"]], ["m1", "m2"])
+        self.assertEqual(op_result.get("mode"), "replace_goals")
+        self.assertFalse(any(item.get("id") == "l3" for item in plan["long_goals"]))
+        self.assertEqual(plan["last_long_review_date"], "2026-07-03")
+
+    def test_world_life_plan_goal_apis_and_instruction_regenerate(self):
+        async def run():
+            from aiohttp import web
+
+            class JsonRequest(dict):
+                def __init__(self, app, match_info, payload=None):
+                    super().__init__()
+                    self.app = app
+                    self.match_info = match_info
+                    self.query = {}
+                    self._payload = payload or {}
+                    self["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+
+                async def json(self):
+                    return self._payload
+
+            svc = self.make_service()
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "小雨")
+            svc._save_session_state(sid, state)
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc.regenerate_life_plan_goals = AsyncMock(return_value={
+                "status": "updated",
+                "life_plan": svc._save_life_plan_payload(sid, "小雨", {
+                    "long_goals": [{
+                        "id": "l1",
+                        "dimension": "事业",
+                        "text": "把插画做出自己的方向",
+                        "motivation": "想被看见",
+                        "status": "active",
+                    }],
+                    "mid_goals": [],
+                    "today": {"date": "2026-07-03", "events": [], "texture": ""},
+                }),
+            })
+            app = web.Application()
+            app["service"] = svc
+
+            regen = JsonRequest(app, {"session_id": sid}, payload={"instruction": "分散到事业和生活", "regenerate_goals": True})
+            resp = await api_world_life_plan_generate(regen)
+            data = json.loads(resp.text)
+            self.assertTrue(data["ok"])
+            svc.regenerate_life_plan_goals.assert_awaited_once()
+            self.assertEqual(svc.regenerate_life_plan_goals.await_args.kwargs["instruction"], "分散到事业和生活")
+            self.assertEqual(data["life_plan"]["long_goals"][0]["dimension"], "事业")
+
+            svc.regenerate_life_plan_goals.reset_mock()
+            blank_regen = JsonRequest(app, {"session_id": sid}, payload={"instruction": "", "regenerate_goals": True})
+            blank_resp = await api_world_life_plan_generate(blank_regen)
+            blank_data = json.loads(blank_resp.text)
+            self.assertTrue(blank_data["ok"])
+            svc.regenerate_life_plan_goals.assert_awaited_once()
+            self.assertEqual(svc.regenerate_life_plan_goals.await_args.kwargs["reason"], "web-goal-regenerate")
+
+            create = JsonRequest(app, {"session_id": sid}, payload={
+                "kind": "long",
+                "id": "l2",
+                "dimension": "生活",
+                "text": "把住处和作息整理出自己的余裕",
+                "motivation": "想喘口气",
+            })
+            created = json.loads((await api_world_life_plan_goal_create(create)).text)
+            self.assertTrue(created["ok"])
+            self.assertTrue(any(goal["id"] == "l2" for goal in created["life_plan"]["long_goals"]))
+
+            update = JsonRequest(app, {"session_id": sid, "kind": "long", "goal_id": "l2"}, payload={
+                "dimension": "理想",
+                "text": "把生活整理成能支撑创作的样子",
+            })
+            updated = json.loads((await api_world_life_plan_goal_update(update)).text)
+            self.assertTrue(updated["ok"])
+            edited = [goal for goal in updated["life_plan"]["long_goals"] if goal["id"] == "l2"][0]
+            self.assertEqual(edited["dimension"], "理想")
+
+            delete = JsonRequest(app, {"session_id": sid, "kind": "long", "goal_id": "l2"})
+            deleted = json.loads((await api_world_life_plan_goal_delete(delete)).text)
+            self.assertTrue(deleted["ok"])
+            self.assertFalse(any(goal["id"] == "l2" for goal in deleted["life_plan"]["long_goals"]))
+
+        asyncio.run(run())
+
+    def test_create_oc_message_includes_generated_life_plan_summary(self):
+        async def run():
+            svc = self.make_service()
+            svc.send_message = AsyncMock()
+
+            await svc._create_oc_from_fields(
+                123,
+                "telegram:123",
+                "小雨，原创角色，插画师，敏感要强",
+                {
+                    "name": "小雨",
+                    "role": "原创角色",
+                    "persona": "敏感、要强，害怕作品没人看见",
+                    "appearance": "short black hair, blue eyes",
+                    "outfit": "white shirt",
+                    "occupation": "插画师",
+                },
+                {},
+            )
+
+            text = svc.send_message.await_args.args[1]
+            self.assertIn("OC 已创建: 小雨", text)
+            self.assertIn("生活主线", text)
+            self.assertIn("长期线", text)
+            self.assertIn("[", text)
+            self.assertIn("中期线", text)
+
+        asyncio.run(run())
+
+    def test_life_plan_goal_instruction_command_regenerates_and_displays_summary(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.send_message = AsyncMock()
+            row = svc._save_life_plan_payload(sid, "", {
+                "long_goals": [{
+                    "id": "l1",
+                    "dimension": "事业",
+                    "text": "把插画作品做出自己的方向",
+                    "motivation": "想被看见",
+                    "status": "active",
+                }],
+                "mid_goals": [{
+                    "id": "m1",
+                    "parent_id": "l1",
+                    "text": "这周完成一张练习稿",
+                    "status": "active",
+                }],
+                "today": {"date": "2026-07-03", "events": [], "texture": ""},
+            })
+            svc.regenerate_life_plan_goals = AsyncMock(return_value={"status": "updated", "life_plan": row})
+
+            await svc.dispatch_command(123, sid, "生活主线", "目标指示 从事业和爱好两个角度整理")
+
+            svc.regenerate_life_plan_goals.assert_awaited_once()
+            self.assertEqual(svc.regenerate_life_plan_goals.await_args.kwargs["instruction"], "从事业和爱好两个角度整理")
+            text = svc.send_message.await_args.args[1]
+            self.assertIn("已按目标指示更新生活主线", text)
+            self.assertIn("[事业]", text)
 
         asyncio.run(run())
 
@@ -8585,6 +8850,34 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("literally stated", src)
         self.assertIn("time anchors", src)
         self.assertIn("deadlines", src)
+        self.assertIn("_dialog_role_legend", src)
+        self.assertIn("Do not swap their perspective", src)
+
+    def test_checkpoint_summarizer_injects_role_legend(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "chat"
+            captured = {}
+
+            async def fake_call_llm(system, user, **kwargs):
+                captured["system"] = system
+                captured["user"] = user
+                return "角色正在等用户回复。"
+
+            svc._call_llm = fake_call_llm
+
+            await svc._summarize_checkpoint(sid, "", [
+                {"role": "user", "content": "我会晚点回来。"},
+                {"role": "assistant", "content": "「我等你。」"},
+            ])
+
+            self.assertIn("User = human user; Assistant = the current bot roleplay character", captured["system"])
+            self.assertIn("Dialogue role legend", captured["user"])
+            self.assertIn("User: 我会晚点回来。", captured["user"])
+            self.assertIn("Assistant: 「我等你。」", captured["user"])
+
+        asyncio.run(run())
 
     def test_memory_extractor_prompt_has_strong_grounding(self):
         """记忆提取 prompt 应包含明确的反编造规则约束。"""
@@ -8595,6 +8888,36 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("不要推断", src)
         self.assertIn("时间节点", src)
         self.assertIn("作为 event 记忆保存", src)
+        self.assertIn("不要把整段当成用户发言", src)
+        self.assertIn("User/用户 是人类用户", src)
+
+    def test_memory_extractor_checkpoint_dialog_keeps_user_assistant_roles(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.has_llm_config = lambda purpose, session_id="": True
+            captured = {}
+
+            async def fake_call_llm(system, user, **kwargs):
+                captured["system"] = system
+                captured["user"] = user
+                return json.dumps({"memories": []}, ensure_ascii=False)
+
+            svc._call_llm = fake_call_llm
+
+            await svc._extract_long_term_memories(
+                sid,
+                "[checkpoint]\nUser: 我会晚点回来。\nAssistant: 「我等你。」",
+                "",
+            )
+
+            self.assertIn("User/用户 是人类用户", captured["system"])
+            self.assertIn("来源对话（按行读取", captured["user"])
+            self.assertIn("User=人类用户，Assistant=当前 bot 角色", captured["user"])
+            self.assertIn("Assistant: 「我等你。」", captured["user"])
+            self.assertNotIn("本轮对话:\n用户: [checkpoint]", captured["user"])
+
+        asyncio.run(run())
 
     def test_history_summary_prompt_has_grounding(self):
         """角色历史提要 prompt 应包含反幻觉约束。"""
@@ -8606,6 +8929,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("剧情逻辑惯性", src)
         self.assertIn("角色心理", src)
         self.assertIn("心情界定", src)
+        self.assertIn("日记是当前 bot 角色的一人称记录", src)
+        self.assertIn("不要把用户的动作", src)
 
     def test_dream_memory_prompt_keeps_time_nodes_until_faded(self):
         """dream 记忆整理应软约束过时时间节点，不是一过期就删。"""
@@ -8801,9 +9126,15 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("preserve every concrete fact", captured["system"])
             self.assertIn("Treat Existing diary as the archived record", captured["system"])
             self.assertIn("Do not invent events", captured["system"])
+            self.assertIn("first-person 'I' is always the current bot roleplay character", captured["system"])
+            self.assertIn("User means the human user", captured["system"])
+            self.assertIn("Assistant means the bot character", captured["system"])
+            self.assertIn("Do not swap who felt, promised, touched, moved, or spoke", captured["system"])
             self.assertIn("Do not include roleplay advice", captured["system"])
             self.assertIn("Weekday: 星期五", captured["user"])
             self.assertIn("Write mode: overwrite existing diary", captured["user"])
+            self.assertIn("Dialogue role legend", captured["user"])
+            self.assertIn("User = human user; Assistant = the current bot roleplay character", captured["user"])
 
         asyncio.run(run())
 

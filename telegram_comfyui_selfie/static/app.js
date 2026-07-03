@@ -1527,15 +1527,25 @@ function renderLifePlan(plan) {
     skipped: "略过",
   }[value] || value || "-");
   const goalList = (items, kind) => {
-    if (!items.length) return `<div class="empty-state small">暂无${kind}。</div>`;
+    const isLong = kind === "long";
+    const title = isLong ? "长期线" : "中期线";
+    if (!items.length) return `<div class="empty-state small">暂无${title}。</div>`;
     return `<div class="life-goal-list">${items.map(item => `
       <article class="life-goal">
         <div>
           <strong>${escapeHtml(item.text || "")}</strong>
-          ${item.parent_text ? `<small>承接：${escapeHtml(item.parent_text)}</small>` : ""}
+          ${item.dimension ? `<small class="life-goal-meta">维度：${escapeHtml(item.dimension)}</small>` : ""}
+          ${item.motivation ? `<small>${escapeHtml(item.motivation)}</small>` : ""}
+          ${item.parent_text ? `<small>承接${item.parent_dimension ? `「${escapeHtml(item.parent_dimension)}」` : ""}：${escapeHtml(item.parent_text)}</small>` : ""}
           ${item.progress_note ? `<small>${escapeHtml(item.progress_note)}</small>` : ""}
         </div>
-        <span>${escapeHtml(statusLabel(item.status))}</span>
+        <div class="life-goal-side">
+          <span>${escapeHtml(statusLabel(item.status))}</span>
+          <div class="life-goal-actions">
+            <button class="mini-btn" data-life-action="edit" data-kind="${isLong ? "long" : "mid"}" data-id="${escapeHtml(item.id || "")}">编辑</button>
+            <button class="mini-btn danger" data-life-action="delete" data-kind="${isLong ? "long" : "mid"}" data-id="${escapeHtml(item.id || "")}">删除</button>
+          </div>
+        </div>
       </article>
     `).join("")}</div>`;
   };
@@ -1554,15 +1564,20 @@ function renderLifePlan(plan) {
       <span>角色：${escapeHtml(plan.character_key || "默认角色")}</span>
       <span>${escapeHtml(today.date || "未定日期")}${plan.updated_ago ? ` · ${escapeHtml(plan.updated_ago)}` : ""}</span>
     </div>
+    <div class="life-plan-tools">
+      <button class="mini-btn" data-life-action="regenerate">重生成目标</button>
+      <button class="mini-btn" data-life-action="add" data-kind="long">新增长期</button>
+      <button class="mini-btn" data-life-action="add" data-kind="mid">新增中期</button>
+    </div>
     ${today.texture ? `<p class="life-texture">${escapeHtml(today.texture)}</p>` : `<div class="empty-state small">暂无生活底色。</div>`}
     <div class="life-plan-grid">
       <div>
         <h5>长期线</h5>
-        ${goalList(plan.long_goals || [], "长期线")}
+        ${goalList(plan.long_goals || [], "long")}
       </div>
       <div>
         <h5>中期线</h5>
-        ${goalList(plan.mid_goals || [], "中期线")}
+        ${goalList(plan.mid_goals || [], "mid")}
       </div>
     </div>
     <div>
@@ -1570,6 +1585,114 @@ function renderLifePlan(plan) {
       ${eventList ? `<div class="life-event-list">${eventList}</div>` : `<div class="empty-state small">暂无今日片段。</div>`}
     </div>
   `;
+}
+
+function currentLifePlan() {
+  return (state.worldPreview && state.worldPreview.life_plan) || {};
+}
+
+function findLifeGoal(kind, id) {
+  const plan = currentLifePlan();
+  const items = kind === "long" ? (plan.long_goals || []) : (plan.mid_goals || []);
+  return items.find(item => String(item.id || "") === String(id || "")) || null;
+}
+
+function promptLifeGoalPayload(kind, existing = null) {
+  const isLong = kind === "long";
+  const label = isLong ? "长期目标" : "中期目标";
+  const text = window.prompt(`${label}文本：`, existing?.text || "");
+  if (text === null) return null;
+  const cleanText = text.trim();
+  if (!cleanText) {
+    toast("目标文本不能为空", "error");
+    return null;
+  }
+  const payload = { kind, text: cleanText };
+  if (existing?.id) payload.id = existing.id;
+  if (isLong) {
+    const dimension = window.prompt("目标维度（如生活、理想、爱好、事业；可自定义）：", existing?.dimension || "");
+    if (dimension === null) return null;
+    payload.dimension = dimension.trim();
+    const motivation = window.prompt("内在动机（可留空）：", existing?.motivation || "");
+    if (motivation === null) return null;
+    payload.motivation = motivation.trim();
+  } else {
+    const plan = currentLifePlan();
+    const activeLongs = (plan.long_goals || []).filter(item => (item.status || "active") === "active");
+    const parentHint = activeLongs.map(item => `${item.id}${item.dimension ? `(${item.dimension})` : ""}: ${item.text}`).join("\n");
+    const fallbackParent = existing?.parent_id || activeLongs[0]?.id || "";
+    const parentId = window.prompt(`承接的长期目标 ID：\n${parentHint || "暂无长期目标"}`, fallbackParent);
+    if (parentId === null) return null;
+    payload.parent_id = parentId.trim();
+    const progress = window.prompt("进展备注（可留空）：", existing?.progress_note || "");
+    if (progress === null) return null;
+    payload.progress_note = progress.trim();
+  }
+  const status = window.prompt("状态 active / achieved / abandoned：", existing?.status || "active");
+  if (status === null) return null;
+  payload.status = status.trim() || "active";
+  return payload;
+}
+
+async function applyLifePlanResponse(data) {
+  state.worldPreview = data.world;
+  renderWorldRoute(data.world);
+}
+
+async function handleLifePlanAction(event) {
+  const btn = event.target.closest("[data-life-action]");
+  if (!btn) return;
+  if (!state.selectedWorldSession) return;
+  const action = btn.dataset.lifeAction;
+  const kind = btn.dataset.kind || "";
+  const id = btn.dataset.id || "";
+  setBusy(btn, true);
+  try {
+    if (action === "regenerate") {
+      const instruction = window.prompt("目标指示（可留空）：", "");
+      if (instruction === null) return;
+      const data = await api(`/api/world/${encodeURIComponent(state.selectedWorldSession)}/life-plan`, {
+        method: "POST",
+        body: { instruction, regenerate_goals: true },
+      });
+      await applyLifePlanResponse(data);
+      toast("生活主线已重生成");
+    } else if (action === "add") {
+      const payload = promptLifeGoalPayload(kind);
+      if (!payload) return;
+      const data = await api(`/api/world/${encodeURIComponent(state.selectedWorldSession)}/life-plan/goals`, {
+        method: "POST",
+        body: payload,
+      });
+      await applyLifePlanResponse(data);
+      toast("目标已新增");
+    } else if (action === "edit") {
+      const existing = findLifeGoal(kind, id);
+      if (!existing) {
+        toast("目标不存在", "error");
+        return;
+      }
+      const payload = promptLifeGoalPayload(kind, existing);
+      if (!payload) return;
+      const data = await api(`/api/world/${encodeURIComponent(state.selectedWorldSession)}/life-plan/goals/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        body: payload,
+      });
+      await applyLifePlanResponse(data);
+      toast("目标已更新");
+    } else if (action === "delete") {
+      if (!window.confirm("确定删除这个目标？删除长期目标会同时删除承接它的中期目标。")) return;
+      const data = await api(`/api/world/${encodeURIComponent(state.selectedWorldSession)}/life-plan/goals/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      });
+      await applyLifePlanResponse(data);
+      toast("目标已删除");
+    }
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    setBusy(btn, false);
+  }
 }
 
 function renderWorldRoute(world) {
@@ -2033,6 +2156,7 @@ async function runPromptCleanup(applyChanges, button) {
 }
 
 async function initEvents() {
+  document.addEventListener("click", handleLifePlanAction);
   $all(".nav").forEach(btn => btn.onclick = () => switchView(btn.dataset.view));
   $("#refresh-btn").onclick = () => loadAll().then(() => toast("已刷新"));
   $("#restart-btn").onclick = async () => {
@@ -2063,12 +2187,16 @@ async function initEvents() {
   };
   $("#world-generate-life").onclick = async (event) => {
     if (!state.selectedWorldSession) return;
+    const instruction = window.prompt("目标指示（可留空）：", "");
+    if (instruction === null) return;
     const btn = event.currentTarget;
     setBusy(btn, true);
     try {
-      const data = await api(`/api/world/${encodeURIComponent(state.selectedWorldSession)}/life-plan`, { method: "POST" });
-      state.worldPreview = data.world;
-      renderWorldRoute(data.world);
+      const data = await api(`/api/world/${encodeURIComponent(state.selectedWorldSession)}/life-plan`, {
+        method: "POST",
+        body: { instruction, regenerate_goals: true },
+      });
+      await applyLifePlanResponse(data);
       toast("生活线已生成");
     } catch (err) {
       toast(err.message, "error");

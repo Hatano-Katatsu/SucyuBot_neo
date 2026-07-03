@@ -983,6 +983,13 @@ select {
   white-space: pre-wrap;
 }
 
+.life-plan-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
 .life-plan-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -1044,6 +1051,43 @@ select {
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
+}
+
+.life-goal-meta {
+  color: var(--accent-strong);
+}
+
+.life-goal-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.life-goal-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.mini-btn {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.mini-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.mini-btn.danger:hover {
+  color: var(--warn);
+  border-color: var(--warn);
 }
 
 .life-event p {

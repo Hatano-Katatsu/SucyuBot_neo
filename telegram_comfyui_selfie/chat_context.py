@@ -1554,6 +1554,7 @@ class ChatContextMixin:
     async def _summarize_checkpoint(self, session_id: str, previous: str, messages: list[dict[str, Any]]) -> str:
         soft = str(self.config.get("checkpoint_soft_limit_chars", "2000") or "2000")
         dialog = self._format_store_messages(messages, limit_chars=18000)
+        role_legend = self._dialog_role_legend()
         if not self.has_llm_config("image", session_id):
             if not self.has_llm_config("chat", session_id):
                 combined = (previous + "\n" if previous else "") + dialog
@@ -1571,9 +1572,11 @@ class ChatContextMixin:
                 f"Soft limit: {soft} Chinese characters. Output only the summary text. "
                 "Do not invent, infer, or add details not explicitly present in the source dialogue. "
                 "Only include rules, promises, constraints, or events that were literally stated by the user or character. "
-                "If uncertain, omit rather than fabricate."
+                "If uncertain, omit rather than fabricate. "
+                f"{role_legend} Keep ownership clear: Assistant is the bot character's speech/actions; User is the human user's speech/actions. "
+                "Do not swap their perspective, emotions, promises, or physical actions."
             )
-            user = f"Existing checkpoint:\n{previous or 'none'}\n\nOverflow dialogue:\n{dialog}"
+            user = f"Existing checkpoint:\n{previous or 'none'}\n\nDialogue role legend:\n{role_legend}\n\nOverflow dialogue:\n{dialog}"
             return await self._call_llm(system, user, temp=0.1, tag="checkpoint", purpose="chat", disable_thinking=True, session_id=session_id)
         system = (
             "You are a checkpoint summarizer for a long roleplay chat. Merge the existing checkpoint "
@@ -1587,10 +1590,16 @@ class ChatContextMixin:
             f"Soft limit: {soft} Chinese characters. Output only the summary text. "
             "Do not invent, infer, or add details not explicitly present in the source dialogue. "
             "Only include rules, promises, constraints, or events that were literally stated by the user or character. "
-            "If uncertain, omit rather than fabricate."
+            "If uncertain, omit rather than fabricate. "
+            f"{role_legend} Keep ownership clear: Assistant is the bot character's speech/actions; User is the human user's speech/actions. "
+            "Do not swap their perspective, emotions, promises, or physical actions."
         )
-        user = f"Existing checkpoint:\n{previous or 'none'}\n\nOverflow dialogue:\n{dialog}"
+        user = f"Existing checkpoint:\n{previous or 'none'}\n\nDialogue role legend:\n{role_legend}\n\nOverflow dialogue:\n{dialog}"
         return await self._call_llm(system, user, temp=0.1, tag="checkpoint", purpose="image", disable_thinking=True, session_id=session_id)
+
+    @staticmethod
+    def _dialog_role_legend() -> str:
+        return "User = human user; Assistant = the current bot roleplay character."
 
     @staticmethod
     def _format_store_messages(messages: list[dict[str, Any]], limit_chars: int = 50000, roles: set[str] | None = None) -> str:

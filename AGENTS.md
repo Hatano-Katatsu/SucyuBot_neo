@@ -144,7 +144,8 @@ telegram_comfyui_selfie/
 - 长期记忆只负责高重要度稳定事实、偏好、边界和纠正。
 - 用户明确提到的未来/待完成时间节点在 checkpoint 记忆提取阶段通过提示词软约束保存为 `event`；dream 整理过时时间节点时，只有事件已解决/取消/被替代，或已从近期日记、checkpoint 和当前窗口完全淡出，才删除或合并。
 - 手动记忆（`kind=manual`）不被自动整理删除。
-- 角色生活线保存在 SQLite `life_plans(session_id, character_key)`，结构化长线/中期线/今日片段只给 dream、WebUI 与推送 planner 后台使用；聊天 prompt 只注入渲染后的“生活底色”自然语言，不泄漏目标/计划/任务式结构。dream 后更新，首次聊天或手动推送缺当天生活线时会后台懒生成；当老角色已有当天生活线但缺少长期/中期目标时，也会刷新目标，并要求模型从角色视角自行根据原始人设、历史、记忆和日记推断核心驱动力。
+- 角色生活线保存在 SQLite `life_plans(session_id, character_key)`，结构化长线/中期线/今日片段只给 dream、WebUI 与推送 planner 后台使用；聊天 prompt 只注入渲染后的“生活底色”自然语言，不泄漏目标/计划/任务式结构。长期目标带 `dimension`，生成时要求从生活、理想、事业、爱好、身份、关系等不同维度拆开，不把同一条关系目标改写成多条。dream 后更新，首次聊天、手动推送或新建角色缺当天生活线时会后台/同步生成；当老角色已有当天生活线但缺少长期/中期目标时，也会刷新目标，并要求模型从角色视角自行根据原始人设、历史、记忆、近期上下文和日记推断核心驱动力。WebUI 支持长线/中期线增删改、按用户指示重生成；Telegram 支持 `/生活主线` 查看/生成和 `/生活主线 目标指示 <要求>`。按用户指示重生成目标时会把原长期/中期目标作为草案注入，并要求 LLM 一次性输出完整 `long_goals` + `mid_goals` 替换旧版本，不走零散 ops。
+- dream 日记、checkpoint、长期记忆提取、dream 记忆整理和角色历史提要都必须显式遵守视角映射：`User`/用户是人类用户，`Assistant`/角色是当前 bot 角色；日记第一人称“我”是 bot 角色，不得把用户和角色的动作、承诺、情绪或身体状态互换。checkpoint/current window 形式的多轮聊天不能被包成一整段“用户发言”交给记忆提取。
 
 ### 角色系统
 
@@ -224,6 +225,13 @@ telegram_comfyui_selfie/
 6. **纯图片输入等待配文**：Telegram 输入层新增 `photo_caption_wait_seconds`，无配文图片会先挂起等待后续纯文本；收到文本时消费为该图片的配文/附近上下文，不再单独触发一轮聊天，超时或配置为 0 时沿用旧的纯图片理解流程。该配置已接入默认配置、示例配置、YAML 分组和 WebUI 设置。
 7. **用户新消息抢占旧任务**：同一 session 的新消息会取消旧的可中断处理 task，包括 LLM 文本生成、1 秒分段发送间隔和待配文图片处理；`handle_chat()` 在取消时补写旧用户输入，且把已入库但未完全发出的 assistant 回复裁剪到 Telegram 已确认发送的部分。聊天工具生图和 `/自拍`、`/配图` 使用受保护生图 task，外层命令/聊天被取消后图片仍会继续生成、发送并记录照片历史。
 8. **本轮追加验证**：新增测试覆盖图片等待后续配文、等待超时旧逻辑、等待秒数 0 立即旧逻辑、新消息取消旧聊天并保留旧用户输入、分段发送被取消只保留已发送 assistant 文本、聊天工具生图不被取消、`/配图` 命令生图不被取消。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 352 tests in 20.542s`，`OK (skipped=1)`。
+9. **生活主线目标维度化**：长期目标新增 `dimension` 字段并在归一化时补齐旧数据；生成提示词要求模型从角色自身的不同维度拆分目标（如生活、理想、事业、爱好、身份、关系等，但不固定这些枚举），禁止把同一条陪伴/亲密关系诉求改写成多条。生成材料新增近期真实 `user/assistant` 上下文，并支持用户额外目标指示参与重生成。
+10. **生活主线编辑入口**：WebUI 动线页支持长线/中期线新增、编辑、删除和带指示重生成；Web API 新增 `/api/world/{session_id}/life-plan/goals` 的 create/update/delete 路径。Telegram 新增 `/生活主线` 查看/生成，以及 `/生活主线 目标指示 <要求>`，会把要求交给 LLM 辅助刷新目标。
+11. **新角色生活主线展示**：自然语言创建新角色卡后会同步生成当天生活主线，并把长期线/中期线摘要追加在 bot 返回消息里，用户可以直接看到角色的理想、追求或生活底色，不需要进 WebUI 才发现。
+12. **本轮生活线验证**：新增测试覆盖目标维度去重与父子关联、Web 目标 CRUD 与指示重生成、新角色创建展示生活主线、`/生活主线 目标指示` 命令，以及生活线提示词读取近期上下文和用户目标指示。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 356 tests in 7.956s`，`OK (skipped=1)`。
+13. **目标指示全量重写**：`regenerate_life_plan_goals()` 进入手动目标重写模式，会把原始长期/中期目标单独作为草案注入，并要求 LLM 同一次返回完整 `long_goals` 与 `mid_goals`；解析层以 `replace_goals` 忽略增量 goal ops，原子替换全部长期/中期目标。WebUI 空指示“重生成目标”也走该模式，不再退回只刷新今日生活线。
+14. **日记与摘要视角归属**：dream 日记 prompt 强化“第一人称=当前 bot 角色”；checkpoint prompt 注入 `User = human user; Assistant = current bot roleplay character` 映射；长期记忆提取修复 checkpoint 多轮对话被整体包成“用户”输入的问题；角色历史提要和 dream 记忆整理也明确日记/聊天的用户与角色归属，降低摘要里 bot/用户视角混淆。
+15. **本轮视角与目标重写验证**：新增测试覆盖目标指示旧版本草案注入、长期/中期目标一次性替换且忽略增量 ops、Web 空指示目标重生成、dream 日记视角规则、checkpoint 角色映射注入、checkpoint 对话进入长期记忆提取时不被包成用户发言。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 359 tests in 9.026s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-07-02）
 

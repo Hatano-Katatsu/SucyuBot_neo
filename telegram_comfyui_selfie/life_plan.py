@@ -18,11 +18,17 @@ LIFE_PLAN_PURPOSE_WORDS = ("目标", "计划", "任务", "为了", "争取", "�
 LIFE_PLAN_STATUSES = {"active", "achieved", "abandoned"}
 LIFE_EVENT_STATUSES = {"planned", "done", "derailed", "skipped"}
 LIFE_TIME_HINTS = {"morning", "noon", "afternoon", "evening", "night"}
+LIFE_GOAL_DIMENSION_FALLBACKS = ("理想", "生活", "事业", "爱好", "身份", "关系", "家庭", "自由")
 
 
 def _compact_text(value: Any, limit: int = 400) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     return text[:limit].rstrip() + ("..." if len(text) > limit else "")
+
+
+def _compact_dimension(value: Any) -> str:
+    text = _compact_text(value, 24)
+    return text.strip("[]【】（）()：:，,。；; ")
 
 
 class LifePlanMixin:
@@ -150,6 +156,9 @@ class LifePlanMixin:
         }
         if prefix == "l":
             goal["motivation"] = _compact_text(item.get("motivation"), 220)
+            dimension = _compact_dimension(item.get("dimension") or item.get("category") or item.get("domain"))
+            if dimension:
+                goal["dimension"] = dimension
         else:
             goal["parent_id"] = str(item.get("parent_id") or "").strip()
             goal["progress_note"] = _compact_text(item.get("progress_note"), 240)
@@ -229,6 +238,7 @@ class LifePlanMixin:
             plan["today"]["event_sides"] = {str(k): str(v).strip() for k, v in today["event_sides"].items() if str(v).strip()}
         plan["last_long_review_date"] = str(raw.get("last_long_review_date") or today_date)
         plan["npcs"] = raw.get("npcs") if isinstance(raw.get("npcs"), list) else []
+        self._ensure_life_long_goal_dimensions(plan)
         return plan
 
     def _load_life_plan_row(self, session_id: str, character_key: str | None = None) -> dict[str, Any] | None:
@@ -342,6 +352,7 @@ class LifePlanMixin:
                         "id": op.get("id") or self._life_next_id(longs, "l"),
                         "text": op.get("text"),
                         "motivation": op.get("motivation") or "",
+                        "dimension": op.get("dimension") or op.get("category") or "",
                         "status": "active",
                         "created_date": today_date,
                         "updated_date": today_date,
@@ -360,6 +371,10 @@ class LifePlanMixin:
                             goal["text"] = _compact_text(op.get("text"), 220)
                         if op.get("motivation"):
                             goal["motivation"] = _compact_text(op.get("motivation"), 220)
+                        if op.get("dimension") or op.get("category"):
+                            dimension = _compact_dimension(op.get("dimension") or op.get("category"))
+                            if dimension:
+                                goal["dimension"] = dimension
                         goal["updated_date"] = today_date
                         applied = True
                         break
@@ -388,9 +403,17 @@ class LifePlanMixin:
                 break
         return events
 
-    def _life_plan_from_update(self, previous: dict[str, Any], parsed: dict[str, Any], *, today_date: str, session_id: str = "") -> tuple[dict[str, Any], dict[str, Any]]:
+    def _life_plan_from_update(
+        self,
+        previous: dict[str, Any],
+        parsed: dict[str, Any],
+        *,
+        today_date: str,
+        session_id: str = "",
+        replace_goals: bool = False,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         plan = self._normalize_life_plan_payload(previous, today_date=today_date, session_id=session_id)
-        long_review_touched = isinstance(parsed.get("long_goals"), list)
+        long_review_touched = replace_goals or isinstance(parsed.get("long_goals"), list)
         if isinstance(parsed.get("long_goals"), list):
             plan["long_goals"] = []
             for item in parsed.get("long_goals") or []:
@@ -408,14 +431,17 @@ class LifePlanMixin:
                 if len(plan["mid_goals"]) >= self._life_plan_limits(session_id)["mid"]:
                     break
         long_ids = {str(item.get("id") or "") for item in plan.get("long_goals") or [] if isinstance(item, dict)}
-        for op in parsed.get("ops") or []:
+        ops = [] if replace_goals else (parsed.get("ops") or [])
+        for op in ops:
             if not isinstance(op, dict):
                 continue
             name = str(op.get("op") or "").strip().lower()
             oid = str(op.get("id") or "").strip()
             if name in {"add_long", "update_long"} or (name in {"achieve", "abandon"} and oid in long_ids):
                 long_review_touched = True
-        op_result = self._apply_life_plan_ops(plan, parsed.get("ops") or [], today_date=today_date, session_id=session_id)
+        op_result = self._apply_life_plan_ops(plan, ops, today_date=today_date, session_id=session_id)
+        if replace_goals:
+            op_result["mode"] = "replace_goals"
         events = self._life_plan_events_from_update(parsed, today_date=today_date, mids=plan.get("mid_goals") or [], session_id=session_id)
         if not events:
             events = self._heuristic_life_events(plan, today_date=today_date)
@@ -464,8 +490,17 @@ class LifePlanMixin:
         plan = {
             "long_goals": [{
                 "id": "l1",
+                "dimension": "事业" if anchor in {"company", "factory", "construction", "medical", "retail", "delivery", "driver"} else "理想",
                 "text": long_text,
                 "motivation": "想让自己的生活不像只是被时间推着走",
+                "status": "active",
+                "created_date": today_date,
+                "updated_date": today_date,
+            }, {
+                "id": "l2",
+                "dimension": "生活",
+                "text": "把日常节奏整理到能喘口气，也能留下自己的余裕",
+                "motivation": "不想让白天的身份把全部生活挤满",
                 "status": "active",
                 "created_date": today_date,
                 "updated_date": today_date,
@@ -485,6 +520,43 @@ class LifePlanMixin:
         }
         plan["today"]["events"] = self._heuristic_life_events(plan, today_date=today_date)
         return self._normalize_life_plan_payload(plan, today_date=today_date, session_id=session_id)
+
+    def _life_goal_dimension_fallback(self, used: set[str]) -> str:
+        for dimension in LIFE_GOAL_DIMENSION_FALLBACKS:
+            if dimension not in used:
+                used.add(dimension)
+                return dimension
+        return "自我"
+
+    def _ensure_life_long_goal_dimensions(self, plan: dict[str, Any]) -> None:
+        used: set[str] = set()
+        for goal in plan.get("long_goals") or []:
+            if not isinstance(goal, dict):
+                continue
+            dimension = _compact_dimension(goal.get("dimension"))
+            if not dimension:
+                text = str(goal.get("text") or "")
+                motivation = str(goal.get("motivation") or "")
+                source = f"{text} {motivation}"
+                if re.search(r"工作|职业|事业|公司|作品|专业|能力|收入|项目", source):
+                    dimension = "事业"
+                elif re.search(r"画|唱|写|音乐|作品|兴趣|爱好|练习|创作", source):
+                    dimension = "爱好"
+                elif re.search(r"家|家庭|亲人|父母|照顾|责任", source):
+                    dimension = "家庭"
+                elif re.search(r"关系|亲密|用户|恋人|朋友|陪伴", source):
+                    dimension = "关系"
+                elif re.search(r"生活|日常|住|房|空间|节奏|稳定", source):
+                    dimension = "生活"
+                elif re.search(r"理想|成为|证明|自我|身份|自由|选择", source):
+                    dimension = "理想"
+                else:
+                    dimension = self._life_goal_dimension_fallback(used)
+            if dimension in used:
+                dimension = self._life_goal_dimension_fallback(used)
+            else:
+                used.add(dimension)
+            goal["dimension"] = dimension
 
     def _heuristic_life_events(self, plan: dict[str, Any], *, today_date: str) -> list[dict[str, Any]]:
         mids = [item for item in plan.get("mid_goals") or [] if item.get("status") == "active"]
@@ -534,10 +606,21 @@ class LifePlanMixin:
             memories = self.memory.list_memories(session_id, character=character_key, limit=10, include_inactive=False)
         except Exception:
             memories = []
+        recent_context = []
+        try:
+            for msg in session_schema.get_chat_history(state)[-12:]:
+                if msg.get("role") in {"user", "assistant"} and str(msg.get("content") or "").strip():
+                    recent_context.append({
+                        "role": msg.get("role"),
+                        "content": _compact_text(msg.get("content"), 300),
+                    })
+        except Exception:
+            recent_context = []
         return {
             "persona": self._get_effective_persona(session_id, include_appearance=False) if hasattr(self, "_get_effective_persona") else "",
             "life_profile": self._life_profile(session_id) if hasattr(self, "_life_profile") else {},
             "history_summary": history_summary,
+            "recent_context": recent_context,
             "diaries": diaries,
             "fresh_diary": {"date": diary_date, "content": diary},
             "memories": memories,
@@ -560,6 +643,8 @@ class LifePlanMixin:
             f"Persona:\n{materials.get('persona') or 'none'}\n\n"
             f"Life profile:\n{json.dumps(materials.get('life_profile') or {}, ensure_ascii=False)}\n\n"
             f"Character history summary:\n{materials.get('history_summary') or 'none'}\n\n"
+            "Recent chat context (role legend: user = human user; assistant = the current bot roleplay character):\n"
+            f"{json.dumps(materials.get('recent_context') or [], ensure_ascii=False, indent=2)}\n\n"
             f"Recent diaries:\n{chr(10).join(diary_lines) or 'none'}\n\n"
             f"High-importance memories:\n{chr(10).join(memory_lines) or 'none'}"
         )
@@ -603,6 +688,8 @@ class LifePlanMixin:
         diary_date: str = "",
         diary: str = "",
         reason: str = "",
+        goal_instruction: str = "",
+        rewrite_goals: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         if not self.has_llm_config("chat", session_id) and not self.has_llm_config("image", session_id):
             plan = self._heuristic_life_plan(session_id, today_date=today_date)
@@ -610,14 +697,21 @@ class LifePlanMixin:
         materials = self._life_plan_materials(session_id, character_key, diary_date=diary_date, diary=diary)
         place_keys = ", ".join(sorted(PLACE_TYPES))
         review_days = self._life_plan_limit(session_id, "life_plan_long_review_days", 10)
-        long_review_due = self._life_long_review_due(session_id, previous or {}, today_date)
+        long_review_due = True if rewrite_goals else self._life_long_review_due(session_id, previous or {}, today_date)
+        previous_goals = {
+            "long_goals": (previous or {}).get("long_goals") or [],
+            "mid_goals": (previous or {}).get("mid_goals") or [],
+        }
         system = (
             "You maintain a private structured life plan for a roleplay character. The chat model will never see this JSON. "
             "Update it from diary evidence without making the character sound task-driven. Output strict JSON only.\n"
-            "Schema: {\"ops\":[...],\"today_events\":[...]}. You may include full long_goals/mid_goals for cold start or when existing goals are empty/misaligned.\n"
+            "Schema: {\"ops\":[...],\"today_events\":[...]}. You may include full long_goals/mid_goals for cold start, manual goal regeneration, or when existing goals are empty/misaligned. "
+            "Each long_goals item should include {id, dimension, text, motivation, status}; dimension is a short natural label such as 生活、理想、爱好、事业、身份、家庭、关系、自由, but you may create a better one from the character.\n"
             "Ops: progress/update_mid/achieve/abandon/add_mid/update_long/add_long. Apply changes by stable id. "
             "Unknown ids are ignored by code, so use existing ids when possible.\n"
             "Rules: long_goals max 3, mid_goals max 4, today_events max 5. Each mid goal must have a parent_id from active long_goals. "
+            "If you output more than one long goal, they must come from genuinely different dimensions. Do not create three paraphrases of the same relationship/companionship need. "
+            "Select only dimensions that fit the character; you do not need to cover every example dimension. "
             "Long goals must come from the character's own core drive: ideals, obsession, fear, ambition, identity pressure, career/artistic pursuit, "
             "defect compensation, family/social conflict, or worldview position. Be creative but compatible with persona, history, memories, and diaries. "
             "Infer that core drive yourself from the source materials; do not rely on pre-extracted candidate labels. "
@@ -631,15 +725,38 @@ class LifePlanMixin:
             "Do not carry derailed events forward as debt. Do not invent facts that contradict diaries, memories, or history.\n"
             f"Allowed place_key values: {place_keys}."
         )
+        if rewrite_goals:
+            system += (
+                "\nManual goal rewrite mode: the user is asking to revise the goal structure with LLM help. "
+                "Use the original long/mid goals as an editable draft, but regenerate the complete long_goals and complete mid_goals arrays in one response. "
+                "Do not output goal-edit ops for this mode; output full long_goals and full mid_goals together so code can replace all old long/mid goals atomically. "
+                "Preserve useful ids only when the meaning still matches; otherwise create clean l*/m* ids. "
+                "Every active mid goal must point to one of the regenerated active long goals."
+            )
+        instruction = _compact_text(goal_instruction, 1200)
         user = (
-            f"Today: {today_date}\nReason: {reason}\nPrevious plan JSON:\n"
+            f"Today: {today_date}\nReason: {reason}\n"
+            f"Goal rewrite mode: {'full long_goals + mid_goals replacement' if rewrite_goals else 'incremental update allowed'}\n"
+            f"User goal instruction for this regeneration/update:\n{instruction or 'none'}\n\n"
+            "Treat the user instruction as steering for long/mid goals, but still obey persona, memories, history, and dimension-diversity rules.\n\n"
+            "Original long/mid goals before this manual rewrite:\n"
+            f"{json.dumps(previous_goals, ensure_ascii=False, indent=2)}\n\n"
+            "Previous plan JSON:\n"
             f"{json.dumps(previous or {}, ensure_ascii=False, indent=2)}\n\n"
             f"Evidence and character materials:\n{self._format_life_plan_materials(materials)}"
         )
         parsed = await self._call_life_plan_json(session_id, system, user, tag="life-plan", temp=0.2)
         if not isinstance(parsed, dict):
             raise ValueError("life-plan output must be JSON object")
-        return self._life_plan_from_update(previous, parsed, today_date=today_date, session_id=session_id)
+        if rewrite_goals and not (isinstance(parsed.get("long_goals"), list) and isinstance(parsed.get("mid_goals"), list)):
+            raise ValueError("manual goal rewrite must return full long_goals and mid_goals arrays")
+        return self._life_plan_from_update(
+            previous,
+            parsed,
+            today_date=today_date,
+            session_id=session_id,
+            replace_goals=bool(rewrite_goals),
+        )
 
     def _select_life_texture_mid_goals(self, plan: dict[str, Any], *, today_date: str, session_id: str) -> list[dict[str, Any]]:
         active = [item for item in plan.get("mid_goals") or [] if item.get("status") == "active"]
@@ -729,6 +846,8 @@ class LifePlanMixin:
         diary: str = "",
         reason: str = "",
         force: bool = False,
+        goal_instruction: str = "",
+        rewrite_goals: bool = False,
     ) -> dict[str, Any]:
         if not self._life_plan_enabled(session_id):
             return {"status": "skipped", "reason": "disabled"}
@@ -747,6 +866,8 @@ class LifePlanMixin:
                 diary_date=diary_date,
                 diary=diary,
                 reason=reason,
+                goal_instruction=goal_instruction,
+                rewrite_goals=rewrite_goals,
             )
             plan = await self._render_life_plan_texture(session_id, character_key, plan, today_date=today_date)
             saved = self._save_life_plan_payload(session_id, character_key, plan)
@@ -788,6 +909,160 @@ class LifePlanMixin:
         )
         row = self._load_life_plan_row(session_id, character_key)
         return {"status": result.get("status"), "result": result, "life_plan": row}
+
+    async def regenerate_life_plan_goals(
+        self,
+        session_id: str,
+        *,
+        instruction: str = "",
+        character_key: str | None = None,
+        reason: str = "manual-goal-regenerate",
+    ) -> dict[str, Any]:
+        if not self._life_plan_enabled(session_id):
+            return {"status": "skipped", "reason": "disabled"}
+        local_dt = self._session_now(session_id)
+        key = self._life_plan_character_key(session_id) if character_key is None else (character_key or "")
+        row = self._load_life_plan_row(session_id, key)
+        result = await self._update_life_plan_after_dream(
+            session_id,
+            key,
+            local_dt,
+            diary_date=(local_dt.date() - timedelta(days=1)).isoformat(),
+            diary="",
+            reason=reason,
+            force=True,
+            goal_instruction=instruction,
+            rewrite_goals=True,
+        )
+        latest = self._load_life_plan_row(session_id, key)
+        before = row.get("payload") if row else {}
+        return {
+            "status": result.get("status"),
+            "result": result,
+            "life_plan": latest,
+            "previous": before,
+        }
+
+    def upsert_life_plan_goal(
+        self,
+        session_id: str,
+        kind: str,
+        data: dict[str, Any],
+        *,
+        character_key: str | None = None,
+    ) -> dict[str, Any]:
+        key = self._life_plan_character_key(session_id) if character_key is None else (character_key or "")
+        today_date = self._life_today_date(session_id)
+        row = self._load_life_plan_row(session_id, key)
+        plan = self._normalize_life_plan_payload(row.get("payload") if row else {}, today_date=today_date, session_id=session_id)
+        kind = str(kind or "").strip().lower()
+        if kind in {"long", "long_goal", "long_goals", "长期", "长期线"}:
+            bucket_key = "long_goals"
+            prefix = "l"
+        elif kind in {"mid", "mid_goal", "mid_goals", "中期", "中期线", "短期", "短期线"}:
+            bucket_key = "mid_goals"
+            prefix = "m"
+        else:
+            raise ValueError("kind must be long or mid")
+        bucket = plan.setdefault(bucket_key, [])
+        goal_id = str(data.get("id") or "").strip()
+        existing_idx = next((idx for idx, item in enumerate(bucket) if str(item.get("id") or "") == goal_id), -1) if goal_id else -1
+        if not goal_id:
+            goal_id = self._life_next_id(bucket, prefix)
+        payload = dict(bucket[existing_idx]) if existing_idx >= 0 else {}
+        payload.update(data)
+        payload["id"] = goal_id
+        payload.setdefault("status", "active")
+        payload.setdefault("created_date", today_date)
+        payload["updated_date"] = today_date
+        if prefix == "m":
+            active_long_ids = [item.get("id") for item in plan.get("long_goals") or [] if item.get("status") == "active"]
+            if payload.get("parent_id") not in active_long_ids:
+                payload["parent_id"] = active_long_ids[0] if active_long_ids else ""
+            if not payload["parent_id"]:
+                raise ValueError("mid goal requires an active long goal")
+        normalized = self._normalize_life_goal(payload, prefix=prefix, today_date=today_date, existing=bucket)
+        if not normalized:
+            raise ValueError("goal text is required")
+        if existing_idx >= 0:
+            old = bucket[existing_idx]
+            normalized["created_date"] = str(old.get("created_date") or normalized.get("created_date") or today_date)
+            bucket[existing_idx] = normalized
+        else:
+            limit = self._life_plan_limits(session_id)["long" if prefix == "l" else "mid"]
+            if len(bucket) >= limit:
+                raise ValueError("goal limit reached")
+            bucket.append(normalized)
+        saved = self._save_life_plan_payload(session_id, key, plan)
+        return saved
+
+    def delete_life_plan_goal(
+        self,
+        session_id: str,
+        kind: str,
+        goal_id: str,
+        *,
+        character_key: str | None = None,
+    ) -> dict[str, Any]:
+        key = self._life_plan_character_key(session_id) if character_key is None else (character_key or "")
+        today_date = self._life_today_date(session_id)
+        row = self._load_life_plan_row(session_id, key)
+        plan = self._normalize_life_plan_payload(row.get("payload") if row else {}, today_date=today_date, session_id=session_id)
+        kind = str(kind or "").strip().lower()
+        goal_id = str(goal_id or "").strip()
+        if not goal_id:
+            raise ValueError("goal id is required")
+        if kind in {"long", "long_goal", "long_goals", "长期", "长期线"}:
+            before = len(plan.get("long_goals") or [])
+            plan["long_goals"] = [item for item in plan.get("long_goals") or [] if str(item.get("id") or "") != goal_id]
+            deleted = len(plan["long_goals"]) != before
+            removed_mid_ids = {
+                str(item.get("id") or "")
+                for item in plan.get("mid_goals") or []
+                if str(item.get("parent_id") or "") == goal_id
+            }
+            if removed_mid_ids:
+                plan["mid_goals"] = [item for item in plan.get("mid_goals") or [] if str(item.get("id") or "") not in removed_mid_ids]
+                today = plan.get("today") or {}
+                today["events"] = [
+                    event for event in today.get("events") or []
+                    if str(event.get("related_mid_id") or "") not in removed_mid_ids
+                ]
+        elif kind in {"mid", "mid_goal", "mid_goals", "中期", "中期线", "短期", "短期线"}:
+            before = len(plan.get("mid_goals") or [])
+            plan["mid_goals"] = [item for item in plan.get("mid_goals") or [] if str(item.get("id") or "") != goal_id]
+            deleted = len(plan["mid_goals"]) != before
+            today = plan.get("today") or {}
+            for event in today.get("events") or []:
+                if str(event.get("related_mid_id") or "") == goal_id:
+                    event["related_mid_id"] = None
+        else:
+            raise ValueError("kind must be long or mid")
+        if not deleted:
+            raise KeyError("goal not found")
+        return self._save_life_plan_payload(session_id, key, plan)
+
+    def format_life_plan_summary(self, row_or_payload: Any, *, limit: int = 6) -> str:
+        payload = row_or_payload.get("payload") if isinstance(row_or_payload, dict) and isinstance(row_or_payload.get("payload"), dict) else row_or_payload
+        plan = self._normalize_life_plan_payload(payload if isinstance(payload, dict) else {})
+        lines: list[str] = []
+        longs = [item for item in plan.get("long_goals") or [] if isinstance(item, dict)][:limit]
+        mids = [item for item in plan.get("mid_goals") or [] if isinstance(item, dict)][:limit]
+        if longs:
+            lines.append("长期线：")
+            for item in longs:
+                dimension = str(item.get("dimension") or "").strip()
+                prefix = f"[{dimension}] " if dimension else ""
+                lines.append(f"- {prefix}{item.get('text')}")
+        if mids:
+            long_by_id = {str(item.get("id") or ""): item for item in plan.get("long_goals") or [] if isinstance(item, dict)}
+            lines.append("中期线：")
+            for item in mids:
+                parent = long_by_id.get(str(item.get("parent_id") or "")) or {}
+                parent_dimension = str(parent.get("dimension") or "").strip()
+                suffix = f"（承接{parent_dimension}）" if parent_dimension else ""
+                lines.append(f"- {item.get('text')}{suffix}")
+        return "\n".join(lines)
 
     def queue_life_plan_refresh_if_needed(self, session_id: str, *, reason: str = "lazy-chat") -> bool:
         if not self._life_plan_enabled(session_id):

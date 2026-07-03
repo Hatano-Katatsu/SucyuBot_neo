@@ -230,6 +230,7 @@ class CommandHandlersMixin:
             "衣橱": self.cmd_closet,
             "外貌自动": self.cmd_auto_appearance,
             "记忆": self.cmd_memory,
+            "生活主线": self.cmd_life_plan,
             "记住": self.cmd_remember,
             "忘记": self.cmd_forget,
             "新场景": self.cmd_new_scene,
@@ -887,11 +888,80 @@ class CommandHandlersMixin:
             lines.append(f"自动归档: {summary[:300]}")
         if city_note:
             lines.append(city_note)
+        if hasattr(self, "ensure_life_plan_for_today") and getattr(self, "_life_plan_enabled", lambda *_: False)(session_id):
+            try:
+                life_result = await self.ensure_life_plan_for_today(session_id, force=True, reason="character-create")
+                life_row = life_result.get("life_plan") if isinstance(life_result, dict) else None
+                life_summary = self.format_life_plan_summary(life_row) if life_row and hasattr(self, "format_life_plan_summary") else ""
+                if life_summary:
+                    lines.append("\n生活主线:\n" + life_summary)
+                else:
+                    lines.append("\n生活主线: 已尝试生成，但暂时没有可展示的目标。之后可用 /生活主线 目标指示 <要求> 重新整理。")
+            except Exception as exc:
+                self._ulog(session_id, "WARN", f"创建角色后生成生活主线失败: {exc}")
+                lines.append("\n生活主线: 暂未生成，之后可用 /生活主线 生成 或 WebUI 动线页生成。")
         hint = self._slot_fill_hint(self._missing_character_slots(state))
         if hint:
             lines.append("\n" + hint)
         lines.append("\n现在可以直接开始聊天，或发送 /自拍 看第一张图。")
         await self.send_message(chat_id, "\n".join(lines))
+
+    async def cmd_life_plan(self, chat_id, session_id, arg):
+        text = (arg or "").strip()
+        if not hasattr(self, "ensure_life_plan_for_today"):
+            await self.send_message(chat_id, "生活主线功能不可用。")
+            return
+        if not text or text in ("查看", "show", "list", "ls"):
+            row = self._load_life_plan_row(session_id) if hasattr(self, "_load_life_plan_row") else None
+            if not row:
+                result = await self.ensure_life_plan_for_today(session_id, force=False, reason="command-show")
+                row = result.get("life_plan") if isinstance(result, dict) else None
+            summary = self.format_life_plan_summary(row) if row and hasattr(self, "format_life_plan_summary") else ""
+            await self.send_message(
+                chat_id,
+                "当前生活主线：\n\n" + (summary or "暂无生活主线。可发送 /生活主线 生成 或 /生活主线 目标指示 <要求>。")
+            )
+            return
+
+        action, _, rest = text.partition(" ")
+        action = action.strip().lower()
+        rest = rest.strip()
+        if action in ("生成", "重生成", "重新生成", "regen", "regenerate"):
+            instruction = rest
+            result = await self.regenerate_life_plan_goals(
+                session_id,
+                instruction=instruction,
+                reason="command-regenerate",
+            ) if hasattr(self, "regenerate_life_plan_goals") else await self.ensure_life_plan_for_today(session_id, force=True, reason="command")
+            row = result.get("life_plan") if isinstance(result, dict) else None
+            summary = self.format_life_plan_summary(row) if row and hasattr(self, "format_life_plan_summary") else ""
+            await self.send_message(chat_id, "生活主线已重新生成：\n\n" + (summary or "已更新，但没有可展示的目标。"))
+            return
+
+        if action in ("目标指示", "指示", "目标", "goal", "goals"):
+            if not rest:
+                await self.send_message(chat_id, "用法: /生活主线 目标指示 从事业、兴趣和自我证明三个角度重新整理目标")
+                return
+            if not hasattr(self, "regenerate_life_plan_goals"):
+                await self.send_message(chat_id, "生活主线目标指示功能不可用。")
+                return
+            result = await self.regenerate_life_plan_goals(
+                session_id,
+                instruction=rest,
+                reason="command-goal-instruction",
+            )
+            row = result.get("life_plan") if isinstance(result, dict) else None
+            summary = self.format_life_plan_summary(row) if row and hasattr(self, "format_life_plan_summary") else ""
+            await self.send_message(chat_id, "已按目标指示更新生活主线：\n\n" + (summary or "已更新，但没有可展示的目标。"))
+            return
+
+        await self.send_message(
+            chat_id,
+            "生活主线用法:\n"
+            "/生活主线 查看\n"
+            "/生活主线 生成\n"
+            "/生活主线 目标指示 <你希望角色目标参考的方向>",
+        )
 
     async def cmd_memory(self, chat_id, session_id, arg):
         text = (arg or "").strip()

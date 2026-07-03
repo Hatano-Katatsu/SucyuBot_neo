@@ -193,6 +193,9 @@ def create_web_app(service) -> web.Application:
     app.router.add_get("/api/prompt-slots/{session_id:.+}", api_prompt_slots)
     app.router.add_post("/api/world/{session_id:.+}/places/refresh", api_world_refresh_places)
     app.router.add_post("/api/world/{session_id:.+}/life-plan", api_world_life_plan_generate)
+    app.router.add_post("/api/world/{session_id:.+}/life-plan/goals", api_world_life_plan_goal_create)
+    app.router.add_patch("/api/world/{session_id:.+}/life-plan/goals/{kind:[^/]+}/{goal_id:[^/]+}", api_world_life_plan_goal_update)
+    app.router.add_delete("/api/world/{session_id:.+}/life-plan/goals/{kind:[^/]+}/{goal_id:[^/]+}", api_world_life_plan_goal_delete)
     app.router.add_get("/api/world/{session_id:.+}", api_world_route)
     app.router.add_post("/api/bot/start", api_bot_start)
     app.router.add_post("/api/bot/stop", api_bot_stop)
@@ -747,9 +750,11 @@ def serialize_life_plan_preview(service, session_id: str) -> dict[str, Any]:
             parent_id = str(item.get("parent_id") or "")
             result["parent_id"] = parent_id
             result["parent_text"] = str((long_by_id.get(parent_id) or {}).get("text") or "")
+            result["parent_dimension"] = str((long_by_id.get(parent_id) or {}).get("dimension") or "")
             result["progress_note"] = str(item.get("progress_note") or "")
         else:
             result["motivation"] = str(item.get("motivation") or "")
+            result["dimension"] = str(item.get("dimension") or "")
         return result
 
     events = []
@@ -1778,8 +1783,21 @@ async def api_world_life_plan_generate(request: web.Request):
         return json_error("无权访问此会话", status=403)
     if not hasattr(service, "ensure_life_plan_for_today"):
         return json_error("生活线功能不可用", status=409)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    instruction = str(payload.get("instruction") or "").strip() if isinstance(payload, dict) else ""
+    regenerate_goals = bool(isinstance(payload, dict) and payload.get("regenerate_goals"))
     async with character_operation_lock(service, sid):
-        result = await service.ensure_life_plan_for_today(sid, force=True, reason="web")
+        if (instruction or regenerate_goals) and hasattr(service, "regenerate_life_plan_goals"):
+            result = await service.regenerate_life_plan_goals(
+                sid,
+                instruction=instruction,
+                reason="web-instruction" if instruction else "web-goal-regenerate",
+            )
+        else:
+            result = await service.ensure_life_plan_for_today(sid, force=True, reason="web")
         try:
             weather = await service._fetch_weather("", sid)
         except Exception:
@@ -1789,6 +1807,77 @@ async def api_world_life_plan_generate(request: web.Request):
             "world": build_world_route_preview(service, sid, weather=weather),
             "life_plan": serialize_life_plan_preview(service, sid),
         })
+
+
+async def _world_life_plan_response(service, sid: str, extra: dict[str, Any] | None = None):
+    try:
+        weather = await service._fetch_weather("", sid)
+    except Exception:
+        weather = None
+    payload = {
+        "world": build_world_route_preview(service, sid, weather=weather),
+        "life_plan": serialize_life_plan_preview(service, sid),
+    }
+    if extra:
+        payload.update(extra)
+    return json_ok(payload)
+
+
+async def api_world_life_plan_goal_create(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    if not hasattr(service, "upsert_life_plan_goal"):
+        return json_error("生活线功能不可用", status=409)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    kind = str(payload.get("kind") or "").strip()
+    if not kind:
+        return json_error("缺少目标类型")
+    try:
+        row = service.upsert_life_plan_goal(sid, kind, payload)
+    except ValueError as exc:
+        return json_error(str(exc))
+    return await _world_life_plan_response(service, sid, {"life_plan_row": row})
+
+
+async def api_world_life_plan_goal_update(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    if not hasattr(service, "upsert_life_plan_goal"):
+        return json_error("生活线功能不可用", status=409)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    payload = payload if isinstance(payload, dict) else {}
+    payload["id"] = request.match_info["goal_id"]
+    try:
+        row = service.upsert_life_plan_goal(sid, request.match_info["kind"], payload)
+    except ValueError as exc:
+        return json_error(str(exc))
+    return await _world_life_plan_response(service, sid, {"life_plan_row": row})
+
+
+async def api_world_life_plan_goal_delete(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    if not hasattr(service, "delete_life_plan_goal"):
+        return json_error("生活线功能不可用", status=409)
+    try:
+        row = service.delete_life_plan_goal(sid, request.match_info["kind"], request.match_info["goal_id"])
+    except KeyError:
+        return json_error("目标不存在", status=404)
+    except ValueError as exc:
+        return json_error(str(exc))
+    return await _world_life_plan_response(service, sid, {"life_plan_row": row})
 
 
 async def api_bot_start(request: web.Request):

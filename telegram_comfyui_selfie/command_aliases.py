@@ -69,6 +69,9 @@ COMMAND_ALIAS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("记忆", (
         "memory", "mem", "查看记忆", "记忆查看",
     )),
+    ("生活主线", (
+        "life", "life-plan", "lifeplan", "生活线", "主线", "目标", "生活目标",
+    )),
     ("记住", (
         "remember", "记忆写入", "写入记忆",
     )),

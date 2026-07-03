@@ -134,6 +134,8 @@ class MemoryPolicyMixin:
             "除非用户明确表达了长期偏好、边界、约定、纠正或重要关系变化。\n"
             "当输入来自 checkpoint，用户明确提到未来或待完成的时间节点（日期、几点、期限、倒计时、约定时间、相对时间）时，"
             "如果该节点会跨场景影响后续互动，可以作为 event 记忆保存，并写清时间节点、关联事件与已知状态；不要为未明确的时间自行换算或补全。\n"
+            "视角映射：User/用户 是人类用户；Assistant/角色 是当前 bot 角色。不要把双方的动作、情绪、承诺、偏好或身体状态互换。"
+            "如果输入是 checkpoint/current window 形式的多轮对话，必须按其中每行的 User/Assistant 标签判断归属，不要把整段当成用户发言。\n"
             "不要保存普通寒暄、临时情绪、重复信息、无长期价值的台词。\n"
             "严格来源约束（最重要）：只从对话原文提取信息，不要推断、补充、联想或编造对话中没有明确出现的规则、约定、偏好或事件。"
             "例如：用户说「我迟到了」→ 不要推断出「迟到要请吃东西」；用户说「送你一个发卡」→ 不要推断出「发卡是某种约定的象征」。\n"
@@ -141,10 +143,17 @@ class MemoryPolicyMixin:
             "必须输出严格 JSON: {\"memories\":[{\"kind\":\"profile|preference|relationship|setting|boundary|visual|event|correction\","
             "\"summary\":\"一句中文记忆摘要\",\"importance\":1-5,\"tags\":[\"标签\"]}]}。没有值得保存的内容时 memories 为空数组。"
         )
+        if assistant_text:
+            source_block = f"本轮对话:\n用户/User: {user_text}\n角色/Assistant: {assistant_text or '（无文字回复）'}"
+        else:
+            source_block = (
+                "来源对话（按行读取；User=人类用户，Assistant=当前 bot 角色；不要把整段当成用户发言）:\n"
+                f"{user_text or '无'}"
+            )
         user = (
             f"当前结构化状态（不要作为长期记忆重复保存）:\n{structured or '无'}\n\n"
             f"已有高重要度记忆（避免重复，必要时只输出真正新增/修正的信息）:\n{existing or '无'}\n\n"
-            f"本轮对话:\n用户: {user_text}\n角色: {assistant_text or '（无文字回复）'}"
+            f"{source_block}"
         )
         try:
             text = await self._call_llm(system, user, temp=0.1, tag="memory-extract", purpose="chat", session_id=session_id)
@@ -173,7 +182,10 @@ class MemoryPolicyMixin:
             except Exception:
                 logger.debug("long memory extraction invalid result log failed", exc_info=True)
             return
-        source = f"用户: {user_text[:240]}\n角色: {(assistant_text or '')[:240]}"
+        if assistant_text:
+            source = f"用户: {user_text[:240]}\n角色: {(assistant_text or '')[:240]}"
+        else:
+            source = f"来源对话(User=用户, Assistant=角色): {user_text[:360]}"
         for item in memories[:8]:
             if not isinstance(item, dict):
                 continue
