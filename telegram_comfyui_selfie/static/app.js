@@ -2275,6 +2275,7 @@ async function initEvents() {
   document.querySelector("[data-action=test-comfyui]").onclick = () => runTest("/api/actions/test-comfyui");
   document.querySelector("[data-action=test-chat-llm]").onclick = () => runTest("/api/actions/test-llm", { purpose: "chat" });
   document.querySelector("[data-action=test-image-llm]").onclick = () => runTest("/api/actions/test-llm", { purpose: "image" });
+  document.querySelector("[data-action=test-vision-llm]").onclick = () => runTest("/api/actions/test-llm", { purpose: "vision" });
 
   $("#command-form").onsubmit = async (event) => {
     event.preventDefault();

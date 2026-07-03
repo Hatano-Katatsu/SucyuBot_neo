@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import json
 import secrets
@@ -2395,9 +2396,17 @@ async def api_test_llm(request: web.Request):
     except Exception:
         payload = {}
     purpose = payload.get("purpose", "chat")
-    if purpose not in ("chat", "image"):
-        return json_error("purpose 必须是 chat 或 image")
+    if purpose not in ("chat", "image", "vision"):
+        return json_error("purpose 必须是 chat、image 或 vision")
     try:
+        if purpose == "vision":
+            # 1x1 红色 PNG，用于测试视觉模型是否可用
+            image_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1YAAAAASUVORK5CYII="
+            image_bytes = base64.b64decode(image_b64)
+            description = await service._describe_image_for_chat(
+                "", image_bytes, "image/png", source_label="测试图片"
+            )
+            return json_ok({"reply": description})
         text = await service._call_llm("只输出 OK 两个字母。", "ping", temp=0.0, tag=f"gui-test-{purpose}", purpose=purpose)
         return json_ok({"reply": text})
     except Exception as exc:
