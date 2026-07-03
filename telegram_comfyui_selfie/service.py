@@ -36,6 +36,11 @@ from .world_runtime import WorldRuntimeMixin
 
 logger = logging.getLogger(__name__)
 
+# 日志脱敏：base64 data URL 与裸 base64 串会在调试/错误日志里占据大量篇幅，
+# 这里在序列化时统一替换为省略标记，只保留前缀和长度信息用于排查。
+_BASE64_DATA_URL_RE = re.compile(r"(data:[^;,]+;base64,)([A-Za-z0-9+/=]+)")
+_BARE_BASE64_RE = re.compile(r"[A-Za-z0-9+/]{256,}={0,2}")
+
 _SIMPLE_LLM_CACHE_ANCHORS: dict[str, str] = {
     "roleplay-image-plan": (
         "Stable prefix for roleplay-image-plan v1.\n"
@@ -1889,10 +1894,39 @@ class TelegramComfyUIService(
         return max(0, cached_tokens)
 
     @staticmethod
+    def _redact_base64(value: Any) -> Any:
+        """递归遍历可序列化结构，把 base64 data URL / 裸 base64 串替换为省略标记。
+
+        用于 LLM 调试与错误日志落盘前对 request body / response 做脱敏，
+        避免图片 data_url 等大块 base64 内容污染 llm_debug.json 和用户日志。
+        """
+        if isinstance(value, str):
+            def _sub_data_url(m: "re.Match[str]") -> str:
+                prefix, payload = m.group(1), m.group(2)
+                return f"{prefix}<omitted len={len(payload)}>"
+
+            def _sub_bare(m: "re.Match[str]") -> str:
+                chunk = m.group(0)
+                return f"<base64 omitted len={len(chunk)}>"
+
+            redacted = _BASE64_DATA_URL_RE.sub(_sub_data_url, value)
+            redacted = _BARE_BASE64_RE.sub(_sub_bare, redacted)
+            return redacted
+        if isinstance(value, dict):
+            return {k: TelegramComfyUIService._redact_base64(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [TelegramComfyUIService._redact_base64(v) for v in value]
+        return value
+
+    @staticmethod
     def _json_safe(value: Any) -> Any:
-        """把调试数据压成可 JSON 序列化结构，避免日志写入影响主请求。"""
+        """把调试数据压成可 JSON 序列化结构，避免日志写入影响主请求。
+
+        会递归脱敏 base64 内容（data URL 与裸 base64 串），防止图片字节流进入日志。
+        """
         try:
-            return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+            cleaned = TelegramComfyUIService._redact_base64(value)
+            return json.loads(json.dumps(cleaned, ensure_ascii=False, default=str))
         except Exception:
             return str(value)
 
