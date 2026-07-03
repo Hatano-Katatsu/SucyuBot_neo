@@ -961,6 +961,111 @@ class SchedulerRuntimeMixin:
             self._save_session_state(session_id, state)
         self._ulog(session_id, "PUSH", f"早安推送已处理 reason={reason}")
 
+    def _post_chat_push_enabled(self, session_id: str) -> bool:
+        value = self._get_session_cfg(session_id, "post_chat_push_enabled", self.config.get("post_chat_push_enabled", True))
+        if isinstance(value, str):
+            return value.strip().lower() in ("true", "1", "yes", "on", "开启", "启用")
+        return bool(value)
+
+    def _post_chat_push_number(self, session_id: str, key: str, default: float) -> float:
+        try:
+            return float(self._get_session_cfg(session_id, key, self.config.get(key, default)) or default)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _reset_post_chat_push_counter_if_needed(self, session_id: str, state: dict[str, Any], local_dt: datetime | None = None) -> bool:
+        today = (local_dt or self._session_now(session_id)).strftime("%Y-%m-%d")
+        if session_schema.get_post_chat_push_date(state) != today:
+            session_schema.set_post_chat_push_date(state, today)
+            session_schema.set_post_chat_push_count(state, 0)
+            return True
+        return False
+
+    def _post_chat_push_quota_ok(self, session_id: str, state: dict[str, Any], local_dt: datetime | None = None) -> bool:
+        if not self._post_chat_push_enabled(session_id):
+            return False
+        self._reset_post_chat_push_counter_if_needed(session_id, state, local_dt)
+        daily_limit = int(max(0, self._post_chat_push_number(session_id, "post_chat_push_daily_limit", 3)))
+        if daily_limit <= 0:
+            return False
+        if session_schema.get_post_chat_push_count(state) >= daily_limit:
+            return False
+        cooldown = max(0.0, self._post_chat_push_number(session_id, "post_chat_push_cooldown_minutes", 60)) * 60
+        last = session_schema.get_last_post_chat_push_time(state)
+        return not last or time.time() - last >= cooldown
+
+    def _schedule_post_chat_push(self, session_id: str) -> bool:
+        if not session_id or not self._post_chat_push_enabled(session_id):
+            return False
+        state = self._get_session_state(session_id)
+        if session_schema.get_frozen(state) or not self.has_llm_config("image", session_id):
+            return False
+        local_dt = self._session_now(session_id)
+        counter_reset = self._reset_post_chat_push_counter_if_needed(session_id, state, local_dt)
+        if not self._post_chat_push_quota_ok(session_id, state, local_dt):
+            if counter_reset:
+                self._save_session_state(session_id, state)
+            return False
+        if counter_reset:
+            self._save_session_state(session_id, state)
+        min_minutes = max(0.1, self._post_chat_push_number(session_id, "post_chat_push_delay_min_minutes", 5))
+        max_minutes = max(min_minutes, self._post_chat_push_number(session_id, "post_chat_push_delay_max_minutes", 15))
+        delay = random.uniform(min_minutes, max_minutes) * 60
+        expected_message_time = session_schema.get_last_message_time(state)
+        tasks = getattr(self, "_post_chat_push_tasks", None)
+        if not isinstance(tasks, dict):
+            tasks = {}
+            self._post_chat_push_tasks = tasks
+        old = tasks.get(session_id)
+        if old and not old.done():
+            old.cancel()
+
+        async def runner():
+            try:
+                await asyncio.sleep(delay)
+                await self._fire_post_chat_push(session_id, expected_message_time, delay)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._ulog(session_id, "PUSH", f"对话后续场推送任务异常: {exc}")
+                logger.error("post-chat push task failed: %s", exc, exc_info=True)
+            finally:
+                cur = getattr(self, "_post_chat_push_tasks", {}).get(session_id)
+                if cur is asyncio.current_task():
+                    getattr(self, "_post_chat_push_tasks", {}).pop(session_id, None)
+
+        tasks[session_id] = asyncio.create_task(runner(), name=f"post-chat-push:{session_id}")
+        self._ulog(session_id, "PUSH", f"已安排对话后续场推送 delay={delay / 60:.1f}min")
+        return True
+
+    async def _fire_post_chat_push(self, session_id: str, expected_message_time: float, delay: float = 0.0) -> bool:
+        if not session_id:
+            return False
+        state = self._get_session_state(session_id)
+        local_dt = self._session_now(session_id)
+        if session_schema.get_frozen(state):
+            self._ulog(session_id, "PUSH", "跳过对话后续场推送: frozen")
+            return False
+        if abs(session_schema.get_last_message_time(state) - float(expected_message_time or 0)) > 0.001:
+            self._ulog(session_id, "PUSH", "跳过对话后续场推送: 用户已有新消息")
+            return False
+        if self._check_goodnight_inhibition(state):
+            self._ulog(session_id, "PUSH", "跳过对话后续场推送: goodnight inhibition")
+            return False
+        if session_id in self._active_pushes:
+            self._ulog(session_id, "PUSH", "跳过对话后续场推送: active push")
+            return False
+        if not self._post_chat_push_quota_ok(session_id, state, local_dt):
+            self._ulog(session_id, "PUSH", "跳过对话后续场推送: quota/cooldown")
+            return False
+        ok = await self._sched_fire(session_id, local_dt, mode_override="followup", skip_active_check=True)
+        if ok:
+            session_schema.set_post_chat_push_count(state, session_schema.get_post_chat_push_count(state) + 1)
+            session_schema.set_last_post_chat_push_time(state, time.time())
+            self._save_session_state(session_id, state)
+            self._ulog(session_id, "PUSH", f"对话后续场推送已发送 delay={delay / 60:.1f}min")
+        return ok
+
     def _create_scheduled_push_task(
         self,
         session_id: str,
@@ -1173,7 +1278,16 @@ class SchedulerRuntimeMixin:
                     intent=f"{mode} 模式自动推送，时段: {time_period}，天气: {weather}",
                     prompt=caption or "",
                 )
-                self._record_sent_photo(session_id, scene, caption or "", appearance=new_app or None, view=view, source_description=source)
+                source_kind = "followup_push" if mode == "followup" else ("manual_push" if skip_active_check else "scheduled_push")
+                self._record_sent_photo(
+                    session_id,
+                    scene,
+                    caption or "",
+                    appearance=new_app or None,
+                    view=view,
+                    source_description=source,
+                    source_kind=source_kind,
+                )
                 return True
             else:
                 self._ulog(session_id, "PUSH", f"生图失败 mode={mode}: {err}")

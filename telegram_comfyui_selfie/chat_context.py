@@ -104,6 +104,113 @@ def _sanitize_judge_view_hint(view: str | None, *sources: str) -> str:
     return ""
 
 class ChatContextMixin:
+    def _append_chat_history_messages(self, session_id: str, messages: list[dict[str, str]]) -> None:
+        if not session_id or not messages:
+            return
+        state = self._get_session_state(session_id)
+        history = session_schema.get_chat_history(state)
+        clean = [
+            {"role": str(msg.get("role") or ""), "content": str(msg.get("content") or "").strip()}
+            for msg in messages
+            if str(msg.get("role") or "").strip() and str(msg.get("content") or "").strip()
+        ]
+        if not clean:
+            return
+        history.extend(clean)
+        try:
+            self.app_store.append_messages(session_id, self._context_character_key(session_id), clean)
+        except Exception:
+            logger.warning("chat message sqlite append failed", exc_info=True)
+        full_snapshot = list(history)
+        self._apply_history_trim(state, self._history_storage_cap())
+        self._save_session_state(session_id, state)
+        self._queue_checkpoint_if_needed(session_id, full_snapshot)
+
+    def _ensure_user_history_committed(self, session_id: str, user_text: str) -> None:
+        """取消发生在 LLM 返回前时，仍保留已经收到的用户输入。"""
+        text = self._sanitize_user_history_text(user_text)
+        if not text:
+            return
+        state = self._get_session_state(session_id)
+        for msg in reversed(session_schema.get_chat_history(state)[-6:]):
+            if msg.get("role") == "user" and msg.get("content") == text:
+                return
+        self._append_chat_history_messages(session_id, [{"role": "user", "content": text}])
+
+    def _flush_pending_photo_history_messages(self, session_id: str) -> None:
+        if not hasattr(self, "_take_pending_photo_history_messages"):
+            return
+        pending = self._take_pending_photo_history_messages(session_id)
+        if not pending:
+            return
+        state = self._get_session_state(session_id)
+        for msg in pending:
+            self._append_photo_history_message(session_id, msg, state=state)
+        self._save_session_state(session_id, state)
+
+    def _trim_last_assistant_history_to_sent(self, session_id: str, full_text: str, sent_text: str) -> None:
+        """发送被取消时，只保留 Telegram 已确认发出的 assistant 内容。"""
+        full_text = str(full_text or "").strip()
+        sent_text = str(sent_text or "").strip()
+        if not full_text:
+            return
+        state = self._get_session_state(session_id)
+        history = session_schema.get_chat_history(state)
+        changed = False
+        for idx in range(len(history) - 1, -1, -1):
+            msg = history[idx]
+            if msg.get("role") == "assistant" and str(msg.get("content") or "").strip() == full_text:
+                if sent_text:
+                    history[idx] = {"role": "assistant", "content": sent_text}
+                else:
+                    del history[idx]
+                changed = True
+                break
+        if changed:
+            session_schema.set_chat_history(state, history)
+            try:
+                self.app_store.update_latest_matching_message(
+                    session_id,
+                    self._context_character_key(session_id),
+                    "assistant",
+                    full_text,
+                    sent_text,
+                )
+            except Exception:
+                logger.warning("chat message sqlite trim failed", exc_info=True)
+            self._save_session_state(session_id, state)
+
+    async def _send_chat_reply_tracked(
+        self,
+        chat_id: int | str,
+        text: str,
+        *,
+        split_paragraphs: bool,
+        on_progress,
+    ) -> None:
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()] if split_paragraphs else [text]
+        sent_paragraphs: list[str] = []
+        current_chunks: list[str] = []
+
+        def report() -> None:
+            parts = list(sent_paragraphs)
+            if current_chunks:
+                parts.append("\n".join(current_chunks))
+            on_progress("\n\n".join(part for part in parts if part).strip())
+
+        for i, para in enumerate(paragraphs):
+            if i > 0:
+                await asyncio.sleep(1)
+            current_chunks = []
+            for chunk in self._split_text(para, 3900):
+                await self.tg_api("sendMessage", {"chat_id": str(chat_id), "text": chunk})
+                current_chunks.append(chunk)
+                report()
+            if current_chunks:
+                sent_paragraphs.append("\n".join(current_chunks))
+                current_chunks = []
+                report()
+
     def _build_chat_final_recovery_messages(
         self,
         messages: list[dict[str, Any]],
@@ -151,49 +258,71 @@ class ChatContextMixin:
         return recovered
 
     async def handle_chat(self, chat_id: int | str, session_id: str, text: str):
-        state = self._get_session_state(session_id)
-        previous_interaction = session_schema.get_last_interaction(state)
-        reset_reason = self._short_context_reset_reason(text, previous_interaction)
-        self._touch(session_id)
-        if self._should_include_chat_world_context(text):
-            self._schedule_weather_refresh(session_id)  # 只在本轮可能用到天气/动线时后台刷新
-        if reset_reason:
-            self._reset_short_context(state, reset_reason, session_id=session_id)
-        session_schema.set_last_message_text(state, text)
-        session_schema.set_last_message_time(state, time.time())
-        session_schema.set_recent_message_history(state, (session_schema.get_recent_message_history(state) + [{"text": text, "time": time.time()}])[-5:])
+        sent_reply = ""
+        reply = ""
+        try:
+            state = self._get_session_state(session_id)
+            previous_interaction = session_schema.get_last_interaction(state)
+            reset_reason = self._short_context_reset_reason(text, previous_interaction)
+            self._touch(session_id)
+            if self._should_include_chat_world_context(text):
+                self._schedule_weather_refresh(session_id)  # 只在本轮可能用到天气/动线时后台刷新
+            if reset_reason:
+                self._reset_short_context(state, reset_reason, session_id=session_id)
+            session_schema.set_last_message_text(state, text)
+            session_schema.set_last_message_time(state, time.time())
+            session_schema.set_recent_message_history(state, (session_schema.get_recent_message_history(state) + [{"text": text, "time": time.time()}])[-5:])
 
-        if session_schema.get_last_sent_selfie_time(state) and not session_schema.get_last_sent_selfie_replied(state):
-            if self._within(session_schema.get_last_sent_selfie_time(state), 12 * 3600):
-                session_schema.set_replying_to_selfie(state, True)
-            session_schema.set_last_sent_selfie_replied(state, True)
+            if session_schema.get_last_sent_selfie_time(state) and not session_schema.get_last_sent_selfie_replied(state):
+                if self._within(session_schema.get_last_sent_selfie_time(state), 12 * 3600):
+                    session_schema.set_replying_to_selfie(state, True)
+                session_schema.set_last_sent_selfie_replied(state, True)
 
-        session_schema.set_rounds_since_image(state, session_schema.get_rounds_since_image(state) + 1)
-        # "距上次确认位置的轮数"：每轮 +1，由 _set_character_place（角色再次明确位置时）清零。
-        # 用来给陈旧 pin 降权——多轮没再提及地点时，该 pin 不再锁死生图。
-        session_schema.increment_rounds_since_location(state)
-        if session_schema.get_ntr_affection_reset(state):
-            self._tick_ntr_reconcile(state)
+            session_schema.set_rounds_since_image(state, session_schema.get_rounds_since_image(state) + 1)
+            # "距上次确认位置的轮数"：每轮 +1，由 _set_character_place（角色再次明确位置时）清零。
+            # 用来给陈旧 pin 降权——多轮没再提及地点时，该 pin 不再锁死生图。
+            session_schema.increment_rounds_since_location(state)
+            if session_schema.get_ntr_affection_reset(state):
+                self._tick_ntr_reconcile(state)
 
-        self._save_session_state(session_id, state)
-        if hasattr(self, "queue_life_plan_refresh_if_needed"):
-            try:
-                self.queue_life_plan_refresh_if_needed(session_id, reason="lazy-chat")
-            except Exception:
-                logger.debug("queue life plan refresh failed", exc_info=True)
+            self._save_session_state(session_id, state)
+            if hasattr(self, "queue_life_plan_refresh_if_needed"):
+                try:
+                    self.queue_life_plan_refresh_if_needed(session_id, reason="lazy-chat")
+                except Exception:
+                    logger.debug("queue life plan refresh failed", exc_info=True)
+            if hasattr(self, "_schedule_post_chat_push"):
+                try:
+                    self._schedule_post_chat_push(session_id)
+                except Exception:
+                    logger.debug("schedule post-chat push failed", exc_info=True)
 
-        if not self.has_llm_config("chat", session_id):
-            await self.send_message(chat_id, "聊天与角色扮演模型未配置，聊天和工具触发不可用。命令功能仍可使用。")
-            return
+            if not self.has_llm_config("chat", session_id):
+                await self.send_message(chat_id, "聊天与角色扮演模型未配置，聊天和工具触发不可用。命令功能仍可使用。")
+                return
 
-        await self.send_action(chat_id, "typing")
-        reply = await self.run_roleplay_chat(chat_id, session_id, text)
-        if reply:
-            self._ulog(session_id, "BOT", reply)
-            split = str(self.config.get("chat_split_paragraphs", "true")).lower() in ("true", "1", "yes")
-            await self.send_message(chat_id, reply, split_paragraphs=split)
-        else:
-            await self.send_message(chat_id, "回复生成失败，请稍后重试。")
+            await self.send_action(chat_id, "typing")
+            reply = await self.run_roleplay_chat(chat_id, session_id, text)
+            if reply:
+                self._ulog(session_id, "BOT", reply)
+                split = str(self.config.get("chat_split_paragraphs", "true")).lower() in ("true", "1", "yes")
+                def update_sent(value: str) -> None:
+                    nonlocal sent_reply
+                    sent_reply = value
+                await self._send_chat_reply_tracked(
+                    chat_id,
+                    reply,
+                    split_paragraphs=split,
+                    on_progress=update_sent,
+                )
+            else:
+                await self.send_message(chat_id, "回复生成失败，请稍后重试。")
+        except asyncio.CancelledError:
+            self._ensure_user_history_committed(session_id, text)
+            self._flush_pending_photo_history_messages(session_id)
+            if reply:
+                self._trim_last_assistant_history_to_sent(session_id, reply, sent_reply)
+            raise
 
     async def run_roleplay_chat(self, chat_id: int | str, session_id: str, user_text: str) -> str:
         state = self._get_session_state(session_id)
@@ -668,6 +797,17 @@ class ChatContextMixin:
         )
         return messages
 
+    def _build_chat_context_messages_for_push(self, session_id: str, marker: str = "【系统事件】后台上下文前缀占位") -> list[dict[str, Any]]:
+        """复用聊天 prompt 分层构造推送上下文，并去掉占位 user。
+
+        推送图片规划需要吃到 checkpoint 锚定的正式上下文和照片 system 记录；
+        但真正的推送任务说明放在后续动态 system/user 中，避免把占位文本当成用户发言。
+        """
+        messages = self._build_chat_messages(session_id, marker)
+        if messages and messages[-1].get("role") == "user" and messages[-1].get("content") == marker:
+            messages = messages[:-1]
+        return messages
+
     @staticmethod
     def _slot_hash(text: str) -> str:
         """常驻前缀槽的稳定短哈希；只用于缓存作废点定位（Tier 3 计测）。"""
@@ -834,15 +974,20 @@ class ChatContextMixin:
         except json.JSONDecodeError:
             args = {}
         if fn == "generate_roleplay_image":
-            return await self.tool_generate_image(
-                chat_id,
+            return await self._await_protected_image_task(
                 session_id,
-                prompt=args.get("prompt", ""),
-                view=args.get("view", ""),
-                intent=args.get("intent", ""),
-                mood=args.get("mood", ""),
-                must_include=args.get("must_include", ""),
-                defer_photo_history=True,
+                self.tool_generate_image(
+                    chat_id,
+                    session_id,
+                    prompt=args.get("prompt", ""),
+                    view=args.get("view", ""),
+                    intent=args.get("intent", ""),
+                    mood=args.get("mood", ""),
+                    must_include=args.get("must_include", ""),
+                    defer_photo_history=True,
+                ),
+                label="聊天生图任务",
+                after_cancel_done=lambda: self._flush_pending_photo_history_messages(session_id),
             )
         if fn == "change_appearance":
             return await self.tool_change_appearance(session_id, args.get("description", ""), args.get("mode", "merge"))

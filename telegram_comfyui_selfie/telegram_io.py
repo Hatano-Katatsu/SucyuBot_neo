@@ -15,6 +15,58 @@ logger = logging.getLogger(__name__)
 
 
 class TelegramIOMixin:
+    def _caption_wait_seconds(self) -> float:
+        try:
+            raw = self.config.get("photo_caption_wait_seconds", 30)
+            if raw is None or raw == "":
+                raw = 30
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            return 30.0
+
+    def _interrupt_session_tasks(self, session_id: str, *, reason: str = "", exclude: asyncio.Task | None = None) -> int:
+        tasks = getattr(self, "_interruptible_tasks", None)
+        if not isinstance(tasks, dict) or not session_id:
+            return 0
+        current = exclude or asyncio.current_task()
+        cancelled = 0
+        bucket = tasks.get(session_id) or set()
+        for task in list(bucket):
+            if task is current or task.done():
+                bucket.discard(task)
+                continue
+            task.cancel()
+            cancelled += 1
+        if not bucket:
+            tasks.pop(session_id, None)
+        if cancelled:
+            self._ulog(session_id, "INTERRUPT", reason or f"取消旧任务 {cancelled} 个")
+        return cancelled
+
+    def _register_interruptible_task(self, session_id: str, task: asyncio.Task | None = None) -> None:
+        if not session_id:
+            return
+        task = task or asyncio.current_task()
+        if task is None:
+            return
+        tasks = getattr(self, "_interruptible_tasks", None)
+        if not isinstance(tasks, dict):
+            tasks = {}
+            self._interruptible_tasks = tasks
+        tasks.setdefault(session_id, set()).add(task)
+
+    def _unregister_interruptible_task(self, session_id: str, task: asyncio.Task | None = None) -> None:
+        task = task or asyncio.current_task()
+        tasks = getattr(self, "_interruptible_tasks", None)
+        if not isinstance(tasks, dict) or not session_id or task is None:
+            return
+        bucket = tasks.get(session_id)
+        if not bucket:
+            return
+        bucket.discard(task)
+        if not bucket:
+            tasks.pop(session_id, None)
+
     async def tg_api(self, method: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
         if self.http is None:
             raise RuntimeError("HTTP session not initialized")
@@ -127,6 +179,30 @@ class TelegramIOMixin:
             self._ulog(session_id, "UNFREEZE", "用户发消息，自动解冻")
             logger.info("session %s auto-unfrozen by user message", session_id)
 
+        if self._consume_pending_photo_caption(session_id, msg, text):
+            return
+
+        if self._should_wait_for_photo_caption(session_id, msg, text):
+            cancelled = self._interrupt_session_tasks(session_id, reason="用户发送图片，取消旧的文字生成/发送任务")
+            if cancelled:
+                await asyncio.sleep(0)
+            self._schedule_pending_photo_input(chat_id, session_id, msg)
+            return
+
+        current_task = asyncio.current_task()
+        cancelled = self._interrupt_session_tasks(session_id, reason="用户发来新消息，取消旧的文字生成/发送任务", exclude=current_task)
+        if cancelled:
+            await asyncio.sleep(0)
+        self._register_interruptible_task(session_id, current_task)
+        try:
+            await self._process_incoming_message(chat_id, session_id, msg, text)
+        except asyncio.CancelledError:
+            self._ulog(session_id, "INTERRUPT", "当前消息处理被新的用户输入打断")
+            raise
+        finally:
+            self._unregister_interruptible_task(session_id, current_task)
+
+    async def _process_incoming_message(self, chat_id: int | str, session_id: str, msg: dict[str, Any], text: str):
         cmd, arg = self.parse_command(text) if text else (None, "")
         try:
             if cmd is not None:
@@ -141,9 +217,91 @@ class TelegramIOMixin:
                     return
                 self._ulog(session_id, "USER", augmented_text)
                 await self.handle_chat(chat_id, session_id, augmented_text)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             self._ulog(session_id, "ERROR", f"处理消息异常: {exc}")
             logger.error("message handling failed: %s", exc, exc_info=True)
+            await self.send_message(chat_id, f"发生异常: {exc}")
+
+    def _should_wait_for_photo_caption(self, session_id: str, msg: dict[str, Any], text: str) -> bool:
+        if text or not msg.get("photo"):
+            return False
+        if msg.get("reply_to_message") or msg.get("external_reply") or msg.get("quote"):
+            return False
+        if not self.has_llm_config("vision", session_id):
+            return False
+        return self._caption_wait_seconds() > 0
+
+    def _consume_pending_photo_caption(self, session_id: str, msg: dict[str, Any], text: str) -> bool:
+        if not session_id or not text or msg.get("photo") or msg.get("caption"):
+            return False
+        if msg.get("reply_to_message") or msg.get("external_reply") or msg.get("quote"):
+            return False
+        pending = getattr(self, "_pending_photo_inputs", None)
+        if not isinstance(pending, dict):
+            return False
+        entry = pending.get(session_id)
+        if not entry:
+            return False
+        future = entry.get("future")
+        if future and not future.done():
+            future.set_result(text)
+            self._ulog(session_id, "PHOTO", "收到图片后续配文，合并后处理")
+            return True
+        return False
+
+    def _schedule_pending_photo_input(self, chat_id: int | str, session_id: str, msg: dict[str, Any]) -> None:
+        pending = getattr(self, "_pending_photo_inputs", None)
+        if not isinstance(pending, dict):
+            pending = {}
+            self._pending_photo_inputs = pending
+        old = pending.get(session_id)
+        if old:
+            old_future = old.get("future")
+            if old_future and not old_future.done():
+                old_future.set_result("")
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        task = asyncio.create_task(
+            self._process_pending_photo_input(chat_id, session_id, dict(msg), future),
+            name=f"pending-photo-caption:{session_id}",
+        )
+        pending[session_id] = {"future": future, "task": task}
+        self._ulog(session_id, "PHOTO", f"图片无配文，等待 {self._caption_wait_seconds():.1f}s 合并后续输入")
+
+    async def _process_pending_photo_input(
+        self,
+        chat_id: int | str,
+        session_id: str,
+        msg: dict[str, Any],
+        future: asyncio.Future,
+    ) -> None:
+        caption = ""
+        try:
+            try:
+                caption = str(await asyncio.wait_for(future, timeout=self._caption_wait_seconds()) or "").strip()
+            except asyncio.TimeoutError:
+                caption = ""
+            pending = getattr(self, "_pending_photo_inputs", {})
+            if isinstance(pending, dict):
+                entry = pending.get(session_id)
+                if entry and entry.get("future") is future:
+                    pending.pop(session_id, None)
+            current_task = asyncio.current_task()
+            cancelled = self._interrupt_session_tasks(session_id, reason="处理等待配文后的图片，取消旧的文字生成/发送任务", exclude=current_task)
+            if cancelled:
+                await asyncio.sleep(0)
+            self._register_interruptible_task(session_id, current_task)
+            try:
+                await self._process_incoming_message(chat_id, session_id, msg, caption)
+            finally:
+                self._unregister_interruptible_task(session_id, current_task)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._ulog(session_id, "ERROR", f"处理待配文图片异常: {exc}")
+            logger.error("pending photo handling failed: %s", exc, exc_info=True)
             await self.send_message(chat_id, f"发生异常: {exc}")
 
     def parse_command(self, text: str) -> tuple[str | None, str]:

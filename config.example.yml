@@ -46,6 +46,7 @@ models:
   default_fast_model_profile: "deepseek-flash"
   # 留空表示不处理用户图片/引用图片；需要时可指向支持 image_url 的 OpenAI 兼容视觉模型 profile。
   default_vision_model_profile: ""
+  photo_caption_wait_seconds: "30"
   global_model_profiles:
     deepseek-pro:
       name: "DeepSeek V4 Pro"
@@ -104,6 +105,11 @@ memory:
   life_plan_max_long: "3"
   life_plan_max_mid: "4"
   life_plan_max_events: "5"
+  post_chat_push_enabled: true
+  post_chat_push_delay_min_minutes: "5"
+  post_chat_push_delay_max_minutes: "15"
+  post_chat_push_daily_limit: "3"
+  post_chat_push_cooldown_minutes: "60"
   short_context_reset_gap_hours: "2"
 
 role_defaults:

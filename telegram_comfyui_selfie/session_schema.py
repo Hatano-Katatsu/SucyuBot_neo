@@ -71,6 +71,9 @@ STATE_SCHEMA: dict[str, Field] = {
     "daily_trigger_times": Field(G, default=[]),
     "daily_trigger_date": Field(G, default=""),
     "daily_triggered_times": Field(G, default=[]),
+    "post_chat_push_date": Field(G, default=""),
+    "post_chat_push_count": Field(G, default=0),
+    "last_post_chat_push_time": Field(G, default=0.0),
     # —— 会话全局：角色池容器 / 初始化流程 ——
     "saved_characters": Field(G, default={}),
     "character_contexts": Field(G, default={}),
@@ -81,13 +84,16 @@ STATE_SCHEMA: dict[str, Field] = {
     "ntr_affection_reset": Field(G),  # 动态写入，不进默认表
     "frozen": Field(G, default=False),
     "frozen_at": Field(G, default=0),
-    # —— session box：会话全局字段的嵌套容器（非破坏共存，保留上方 13 个 G 注册）——
+    # —— session box：会话全局字段的嵌套容器（非破坏共存，保留上方 G 字段注册）——
     "session": Field(G, default={
         "last_interaction": 0,
         "last_morning_greet_date": "",
         "daily_trigger_times": [],
         "daily_trigger_date": "",
         "daily_triggered_times": [],
+        "post_chat_push_date": "",
+        "post_chat_push_count": 0,
+        "last_post_chat_push_time": 0.0,
         "saved_characters": {},
         "character_contexts": {},
         "init_flow": {},
@@ -926,7 +932,7 @@ def set_life_plan_payload(state, value: Any) -> None:
 # session box：第四个切换的盒。把会话全局字段（计时/调度/NTR/frozen/角色池容器）
 # 从扁平顶层收进 state["session"]。
 # 与 context 盒同构：非破坏共存（扁平键保留不弹出）+ 双写。
-# 但保留 13 个 Field(G) 注册——扁平键继续被分类器归为全局，永不随角色冻结。
+# 但保留 Field(G) 注册——扁平键继续被分类器归为全局，永不随角色冻结。
 # ──────────────────────────────────────────────────────────────────────────
 
 _SESSION_DEFAULT: dict[str, Any] = {
@@ -935,6 +941,9 @@ _SESSION_DEFAULT: dict[str, Any] = {
     "daily_trigger_times": [],
     "daily_trigger_date": "",
     "daily_triggered_times": [],
+    "post_chat_push_date": "",
+    "post_chat_push_count": 0,
+    "last_post_chat_push_time": 0.0,
     "saved_characters": {},
     "character_contexts": {},
     "init_flow": {},
@@ -947,6 +956,7 @@ _SESSION_DEFAULT: dict[str, Any] = {
 _LEGACY_SESSION_FLAT_KEYS = (
     "last_interaction", "last_morning_greet_date",
     "daily_trigger_times", "daily_trigger_date", "daily_triggered_times",
+    "post_chat_push_date", "post_chat_push_count", "last_post_chat_push_time",
     "saved_characters", "character_contexts", "init_flow",
     "ntr_stage_reached", "ntr_reconcile_count", "ntr_affection_reset",
     "frozen", "frozen_at",
@@ -1055,6 +1065,31 @@ def get_daily_triggered_times(state):
 
 def set_daily_triggered_times(state, value):
     _session_set(state, "daily_triggered_times", list(value or []))
+
+
+def get_post_chat_push_date(state):
+    return (_session_get(state, "post_chat_push_date") or "").strip()
+
+def set_post_chat_push_date(state, value):
+    _session_set(state, "post_chat_push_date", str(value or ""))
+
+def get_post_chat_push_count(state):
+    try:
+        return int(_session_get(state, "post_chat_push_count", coerce=int) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+def set_post_chat_push_count(state, value):
+    _session_set(state, "post_chat_push_count", int(value or 0))
+
+def get_last_post_chat_push_time(state):
+    try:
+        return float(_session_get(state, "last_post_chat_push_time", coerce=float) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+def set_last_post_chat_push_time(state, value):
+    _session_set(state, "last_post_chat_push_time", float(value or 0))
 
 
 # ── NTR ──

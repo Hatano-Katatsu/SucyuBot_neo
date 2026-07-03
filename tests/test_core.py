@@ -90,6 +90,13 @@ class ServiceFixtureMixin:
         svc.config["user_log_dir"] = str(root / "logs")
         return svc
 
+    def mock_image_planner_messages(self, svc, payload):
+        svc._call_llm_messages = AsyncMock(return_value={
+            "choices": [{"message": {"content": json.dumps(payload, ensure_ascii=False)}}],
+            "usage": {},
+        })
+        return svc._call_llm_messages
+
 
 class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
@@ -251,6 +258,88 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_photo_only_waits_for_followup_caption_before_vision(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["photo_caption_wait_seconds"] = "1"
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "vision"
+            svc.handle_chat = AsyncMock()
+            captured = {}
+
+            async def fake_describe(session_id, photo_sizes, **kwargs):
+                captured["nearby"] = kwargs.get("nearby_text", "")
+                return "图片里是一杯放在木桌上的咖啡。"
+
+            svc._describe_telegram_photo_sizes_for_chat = fake_describe
+            await svc.handle_update({
+                "message": {
+                    "chat": {"id": 123},
+                    "photo": [{"file_id": "p1", "width": 100, "height": 100}],
+                }
+            })
+            svc.handle_chat.assert_not_awaited()
+
+            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "这是什么？"}})
+            await asyncio.sleep(0.05)
+
+            svc.handle_chat.assert_awaited_once()
+            text = svc.handle_chat.await_args.args[2]
+            self.assertIn("这是什么？", captured["nearby"])
+            self.assertIn("【图片描述】", text)
+            self.assertIn("图片里是一杯放在木桌上的咖啡。", text)
+            self.assertIn("【用户当前输入】\n这是什么？", text)
+
+        asyncio.run(run())
+
+    def test_photo_only_timeout_uses_old_image_only_logic(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["photo_caption_wait_seconds"] = "0.01"
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "vision"
+            svc.handle_chat = AsyncMock()
+            captured = {}
+
+            async def fake_describe(session_id, photo_sizes, **kwargs):
+                captured["nearby"] = kwargs.get("nearby_text", "")
+                return "图片里是一只杯子。"
+
+            svc._describe_telegram_photo_sizes_for_chat = fake_describe
+            await svc.handle_update({
+                "message": {
+                    "chat": {"id": 123},
+                    "photo": [{"file_id": "p1", "width": 100, "height": 100}],
+                }
+            })
+            await asyncio.sleep(0.05)
+
+            svc.handle_chat.assert_awaited_once()
+            text = svc.handle_chat.await_args.args[2]
+            self.assertEqual(captured["nearby"], "")
+            self.assertIn("【图片描述】", text)
+            self.assertIn("【用户当前输入】\n用户发送了一张图片。", text)
+
+        asyncio.run(run())
+
+    def test_photo_caption_wait_zero_uses_old_logic_immediately(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["photo_caption_wait_seconds"] = 0
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "vision"
+            svc.handle_chat = AsyncMock()
+            svc._describe_telegram_photo_sizes_for_chat = AsyncMock(return_value="图片里是一只杯子。")
+
+            await svc.handle_update({
+                "message": {
+                    "chat": {"id": 123},
+                    "photo": [{"file_id": "p1", "width": 100, "height": 100}],
+                }
+            })
+
+            svc.handle_chat.assert_awaited_once()
+            self.assertNotIn("telegram:123", getattr(svc, "_pending_photo_inputs", {}))
+
+        asyncio.run(run())
+
     def test_photo_only_message_is_ignored_when_vision_model_is_empty(self):
         async def run():
             svc = self.make_service()
@@ -265,6 +354,173 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             })
 
             svc.handle_chat.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_new_user_message_cancels_previous_chat_and_keeps_old_user_input(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({"chat_llm_api_key": "k", "chat_llm_model": "m", "chat_llm_api_base": "http://x"})
+            svc.config["life_plan_enabled"] = False
+            sid = "telegram:123"
+            first_started = asyncio.Event()
+
+            async def fake_msgs(messages, **kwargs):
+                user = messages[-1]["content"]
+                if "第一句" in user:
+                    first_started.set()
+                    await asyncio.sleep(10)
+                return {"choices": [{"message": {"content": "第二句回复"}}]}
+
+            sent = []
+            svc._call_llm_messages = fake_msgs
+            svc._ensure_life_profile = AsyncMock(return_value={})
+            svc._judge_image_moment = AsyncMock(return_value=None)
+            svc._update_character_place_from_text = AsyncMock()
+            svc.send_action = AsyncMock()
+            svc.tg_api = AsyncMock(side_effect=lambda method, data=None: sent.append((method, data)) or {"ok": True})
+
+            first = asyncio.create_task(svc.handle_update({"message": {"chat": {"id": 123}, "text": "第一句"}}))
+            await asyncio.wait_for(first_started.wait(), timeout=1)
+            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "第二句"}})
+            try:
+                await first
+            except asyncio.CancelledError:
+                pass
+
+            history = session_schema.get_chat_history(svc._get_session_state(sid))
+            self.assertEqual([m["role"] for m in history], ["user", "user", "assistant"])
+            self.assertEqual(history[0]["content"], "第一句")
+            self.assertEqual(history[1]["content"], "第二句")
+            self.assertEqual(history[2]["content"], "第二句回复")
+            self.assertTrue(any(item[1].get("text") == "第二句回复" for item in sent if item[0] == "sendMessage"))
+
+        asyncio.run(run())
+
+    def test_cancel_during_split_send_keeps_only_sent_assistant_text(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "chat_llm_api_key": "k",
+                "chat_llm_model": "m",
+                "chat_llm_api_base": "http://x",
+                "chat_split_paragraphs": "true",
+            })
+            svc.config["life_plan_enabled"] = False
+            sid = "telegram:123"
+            first_sent = asyncio.Event()
+
+            async def fake_msgs(messages, **kwargs):
+                user = messages[-1]["content"]
+                if "旧问题" in user:
+                    return {"choices": [{"message": {"content": "第一段\n\n第二段未发送"}}]}
+                return {"choices": [{"message": {"content": "新回复"}}]}
+
+            async def fake_tg(method, data=None):
+                if method == "sendMessage" and data.get("text") == "第一段":
+                    first_sent.set()
+                return {"ok": True}
+
+            svc._call_llm_messages = fake_msgs
+            svc._ensure_life_profile = AsyncMock(return_value={})
+            svc._judge_image_moment = AsyncMock(return_value=None)
+            svc._update_character_place_from_text = AsyncMock()
+            svc.send_action = AsyncMock()
+            svc.tg_api = AsyncMock(side_effect=fake_tg)
+
+            first = asyncio.create_task(svc.handle_update({"message": {"chat": {"id": 123}, "text": "旧问题"}}))
+            await asyncio.wait_for(first_sent.wait(), timeout=1)
+            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "新问题"}})
+            try:
+                await first
+            except asyncio.CancelledError:
+                pass
+
+            history = session_schema.get_chat_history(svc._get_session_state(sid))
+            self.assertEqual([m["content"] for m in history], ["旧问题", "第一段", "新问题", "新回复"])
+            rows = svc.app_store.list_messages(sid, svc._context_character_key(sid))
+            self.assertEqual([row["content"] for row in rows], ["旧问题", "第一段", "新问题", "新回复"])
+
+        asyncio.run(run())
+
+    def test_cancel_during_tool_image_generation_does_not_cancel_image_task(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({"chat_llm_api_key": "k", "chat_llm_model": "m", "chat_llm_api_base": "http://x"})
+            svc.config["life_plan_enabled"] = False
+            image_started = asyncio.Event()
+            image_release = asyncio.Event()
+            image_finished = asyncio.Event()
+            calls = {"n": 0}
+
+            async def fake_msgs(messages, tools=None, tool_choice=None, **kwargs):
+                calls["n"] += 1
+                user = messages[-1]["content"]
+                if "给我看看" in user and calls["n"] == 1:
+                    return {"choices": [{"message": {"content": "", "tool_calls": [
+                        {"id": "img1", "function": {"name": "generate_roleplay_image", "arguments": json.dumps({"intent": "看你"})}}
+                    ]}}]}
+                return {"choices": [{"message": {"content": "新的文字回复"}}]}
+
+            async def fake_image(*args, **kwargs):
+                image_started.set()
+                await image_release.wait()
+                image_finished.set()
+                return "图片已生成并发送。"
+
+            svc._call_llm_messages = fake_msgs
+            svc._ensure_life_profile = AsyncMock(return_value={})
+            svc._judge_image_moment = AsyncMock(return_value=None)
+            svc._update_character_place_from_text = AsyncMock()
+            svc.tool_generate_image = AsyncMock(side_effect=fake_image)
+            svc.send_action = AsyncMock()
+            svc.tg_api = AsyncMock(return_value={"ok": True})
+
+            first = asyncio.create_task(svc.handle_update({"message": {"chat": {"id": 123}, "text": "给我看看你"}}))
+            await asyncio.wait_for(image_started.wait(), timeout=1)
+            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "新消息"}})
+            image_release.set()
+            await asyncio.wait_for(image_finished.wait(), timeout=1)
+            try:
+                await first
+            except asyncio.CancelledError:
+                pass
+
+            self.assertTrue(image_finished.is_set())
+            svc.tool_generate_image.assert_awaited_once()
+
+        asyncio.run(run())
+
+    def test_cancel_during_scene_image_command_keeps_image_task_running(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["life_plan_enabled"] = False
+            image_started = asyncio.Event()
+            image_release = asyncio.Event()
+            image_finished = asyncio.Event()
+
+            async def fake_image(*args, **kwargs):
+                image_started.set()
+                await image_release.wait()
+                image_finished.set()
+                return "图片已生成并发送。"
+
+            svc.tool_generate_image = AsyncMock(side_effect=fake_image)
+            svc.handle_chat = AsyncMock()
+
+            first = asyncio.create_task(svc.handle_update({"message": {"chat": {"id": 123}, "text": "配图 窗边"}}))
+            await asyncio.wait_for(image_started.wait(), timeout=1)
+            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "先别说这个"}})
+            image_release.set()
+            await asyncio.wait_for(image_finished.wait(), timeout=1)
+            try:
+                await first
+            except asyncio.CancelledError:
+                pass
+
+            self.assertTrue(image_finished.is_set())
+            svc.tool_generate_image.assert_awaited_once()
+            svc.handle_chat.assert_awaited_once_with(123, "telegram:123", "【用户当前输入】\n先别说这个")
 
         asyncio.run(run())
 
@@ -1156,7 +1412,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         history_message = session_schema.get_chat_history(state)[-1]["content"]
         self.assertIn("nltag: A final natural-language nltag sentence", history_message)
         self.assertIn("意图: 用户想看窗边照片", history_message)
-        self.assertIn("配文: 给你看一眼。", history_message)
+        self.assertIn("caption: 给你看一眼。", history_message)
         self.assertNotIn("原始意图", history_message)
         self.assertNotIn("all slot appearance", history_message)
 
@@ -2989,11 +3245,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 return session_state["life_profile"]
 
             svc._ensure_life_profile = AsyncMock(side_effect=ensure_profile)
-            svc._call_llm = AsyncMock(return_value=json.dumps({
+            self.mock_image_planner_messages(svc, {
                 "scene": "在办公室茶水间发来一张自拍",
                 "caption": "忙里偷闲给你看一眼。",
                 "view": "selfie",
-            }, ensure_ascii=False))
+            })
 
             scene, caption, _, view, _ = await svc._llm_write_scene(
                 "normal",
@@ -3008,8 +3264,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("办公室", scene)
             self.assertEqual(caption, "忙里偷闲给你看一眼。")
             self.assertEqual(view, "selfie")
-            # plan_roleplay_image handles system prompt internally; verify _call_llm was used.
-            svc._call_llm.assert_awaited()
+            svc._call_llm_messages.assert_awaited()
 
         asyncio.run(run())
 
@@ -3031,14 +3286,14 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "persona_hash": "test",
             }
             session_schema.set_outfit(state, "black lace camisole nightgown")
-            svc._call_llm = AsyncMock(return_value=json.dumps({
+            self.mock_image_planner_messages(svc, {
                 "scene": "standing by a university classroom window in modest casual clothes",
                 "caption": "课间给你看一眼。",
                 "view": "selfie",
                 "character_location": "school",
                 "user_location": "unknown",
                 "new_appearance_tags": "modest casual clothes",
-            }, ensure_ascii=False))
+            })
 
             await plan_roleplay_image(
                 svc,
@@ -3048,7 +3303,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 weather_data={"desc": "晴", "temp": "25", "code": "113"},
             )
 
-            system_prompt = svc._call_llm.await_args.args[0]
+            system_prompt = "\n".join(
+                m.get("content", "")
+                for m in svc._call_llm_messages.await_args.args[0]
+                if m.get("role") == "system"
+            )
             self.assertIn("公开场合穿搭约束", system_prompt)
             self.assertIn("black lace camisole nightgown", system_prompt)
             self.assertIn("modest casual clothes", system_prompt)
@@ -3085,15 +3344,18 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "source_description": "意图: 咖啡店告别，约定晚上见面",
             }]
             svc._ensure_life_profile = AsyncMock(return_value={})
-            svc._call_llm = AsyncMock(return_value=json.dumps({
+            self.mock_image_planner_messages(svc, {
                 "scene": "还坐在咖啡店窗边，收起冰拿铁准备去车站",
                 "caption": "晚上见~",
                 "view": "selfie",
-            }, ensure_ascii=False))
+            })
 
             await svc._llm_write_scene("normal", "晴 30 C", "星期五", "下午", None, sid, now=fixed_now)
-            # plan_roleplay_image handles continuity internally; verify _call_llm was called.
-            svc._call_llm.assert_awaited()
+            svc._call_llm_messages.assert_awaited()
+            messages = svc._call_llm_messages.await_args.args[0]
+            joined = "\n".join(m.get("content", "") for m in messages)
+            self.assertIn("切，不和姐姐扯了", joined)
+            self.assertIn("主动推送避重规则", joined)
 
         asyncio.run(run())
 
@@ -3122,12 +3384,12 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._ulog = lambda session_id, kind, text: logs.append((kind, text))
             svc._ensure_life_profile = AsyncMock(side_effect=ensure_profile)
             svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22", "code": "113"})
-            svc._call_llm = AsyncMock(return_value=json.dumps({
+            self.mock_image_planner_messages(svc, {
                 "scene": "在办公室茶水间发来一张自拍",
                 "caption": "忙里偷闲给你看一眼。",
                 "view": "selfie",
                 "new_appearance_tags": "white dress",
-            }, ensure_ascii=False))
+            })
             svc._translate_to_tags = AsyncMock(return_value="english prompt")
             svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
             svc.send_photo = AsyncMock()
@@ -3148,6 +3410,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             )
             self.assertEqual(session_schema.get_outfit(state), "black hoodie")
             svc.send_photo.assert_awaited_once()
+            photo = session_schema.get_sent_photos_history(state)[-1]
+            self.assertEqual(photo["source_kind"], "manual_push")
 
         asyncio.run(run())
 
@@ -3189,6 +3453,201 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             task = svc._create_scheduled_push_task(sid, fixed_now, mode_override="normal", trigger_time="10:30")
             await task
             self.assertIn("10:30", session_schema.get_daily_triggered_times(state))
+
+        asyncio.run(run())
+
+    def test_post_chat_push_schedule_replaces_pending_task(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+                "post_chat_push_delay_min_minutes": "5",
+                "post_chat_push_delay_max_minutes": "15",
+            })
+            state = svc._get_session_state(sid)
+            session_schema.set_last_message_time(state, time.time())
+
+            self.assertTrue(svc._schedule_post_chat_push(sid))
+            first = svc._post_chat_push_tasks[sid]
+            session_schema.set_last_message_time(state, time.time() + 1)
+            self.assertTrue(svc._schedule_post_chat_push(sid))
+            second = svc._post_chat_push_tasks[sid]
+            await asyncio.sleep(0)
+
+            self.assertIsNot(first, second)
+            self.assertTrue(first.cancelled())
+            second.cancel()
+            try:
+                await second
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(run())
+
+    def test_post_chat_push_fire_requires_quiet_and_counts_success(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({
+                "post_chat_push_daily_limit": "2",
+                "post_chat_push_cooldown_minutes": "0",
+            })
+            state = svc._get_session_state(sid)
+            expected = time.time()
+            session_schema.set_last_message_time(state, expected)
+            svc._sched_fire = AsyncMock(return_value=True)
+
+            ok = await svc._fire_post_chat_push(sid, expected, delay=600)
+
+            self.assertTrue(ok)
+            svc._sched_fire.assert_awaited_once()
+            kwargs = svc._sched_fire.await_args.kwargs
+            self.assertEqual(kwargs["mode_override"], "followup")
+            self.assertTrue(kwargs["skip_active_check"])
+            self.assertEqual(session_schema.get_post_chat_push_count(state), 1)
+            self.assertGreater(session_schema.get_last_post_chat_push_time(state), 0)
+
+            svc._sched_fire.reset_mock()
+            session_schema.set_last_message_time(state, expected + 1)
+            ok = await svc._fire_post_chat_push(sid, expected, delay=600)
+            self.assertFalse(ok)
+            svc._sched_fire.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_record_sent_photo_marks_source_kind_in_system_history(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+
+        svc._record_sent_photo(
+            sid,
+            "A quiet window selfie.",
+            "给你看一眼。",
+            view="selfie",
+            source_description="意图: 自动推送",
+            source_kind="scheduled_push",
+            nltag="A compact final nltag.",
+        )
+
+        state = svc._get_session_state(sid)
+        photo = session_schema.get_sent_photos_history(state)[-1]
+        history_message = session_schema.get_chat_history(state)[-1]["content"]
+        self.assertEqual(photo["source_kind"], "scheduled_push")
+        self.assertIn("source_kind: scheduled_push", history_message)
+        self.assertIn("view: selfie", history_message)
+        self.assertIn("nltag: A compact final nltag.", history_message)
+        self.assertIn("caption: 给你看一眼。", history_message)
+
+    def test_followup_push_planner_uses_formal_chat_context_messages(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            state = svc._get_session_state(sid)
+            session_schema.set_chat_history(state, [
+                {"role": "user", "content": "我先去洗个杯子。"},
+                {"role": "assistant", "content": "「嗯，我在沙发这边等你。」"},
+                {
+                    "role": "system",
+                    "content": "照片历史（系统记录，保留到 checkpoint/历史溢出统一裁剪；低权重连续性参考）:\nsource_kind: scheduled_push\nview: selfie\nnltag: A sofa selfie.",
+                },
+            ])
+            self.mock_image_planner_messages(svc, {
+                "scene": "A soft follow-up pov moment on the same sofa.",
+                "view": "pov",
+                "character_location": "home",
+                "user_location": "with_user",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            })
+            svc._call_llm = AsyncMock()
+
+            await plan_roleplay_image(svc, sid, mode="followup", weather_data={"desc": "晴", "temp": "22"})
+
+            svc._call_llm.assert_not_awaited()
+            messages = svc._call_llm_messages.await_args.args[0]
+            joined = "\n".join(m.get("content", "") for m in messages)
+            self.assertIn("我先去洗个杯子", joined)
+            self.assertIn("source_kind: scheduled_push", joined)
+            self.assertIn("对话后续场规则", messages[-2]["content"])
+            self.assertIn("推送模式: followup", messages[-1]["content"])
+            self.assertNotIn("短期连续性:", messages[-1]["content"])
+            self.assertNotIn("长期记忆:", messages[-1]["content"])
+
+        asyncio.run(run())
+
+    def test_life_plan_bootstraps_empty_current_plan(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            today = svc._life_today_date(sid)
+            svc._save_life_plan_payload(sid, "", {
+                "long_goals": [],
+                "mid_goals": [],
+                "today": {"date": today, "events": [], "texture": ""},
+            })
+
+            result = await svc.ensure_life_plan_for_today(sid, force=False, reason="test")
+
+            self.assertEqual(result["status"], "updated")
+            row = svc._load_life_plan_row(sid, "")
+            payload = row["payload"]
+            self.assertTrue(payload["long_goals"])
+            self.assertTrue(payload["mid_goals"])
+            self.assertFalse(svc._life_plan_needs_bootstrap(payload))
+
+        asyncio.run(run())
+
+    def test_life_plan_prompt_requires_self_inferred_core_drive_not_hollow_relationship(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({
+                "chat_llm_api_key": "chat-key",
+                "chat_llm_model": "chat-model",
+                "chat_llm_api_base": "https://chat.example",
+            })
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "小雨")
+            session_schema.set_character_value(state, "custom_role_name", "见习画师")
+            session_schema.set_character_value(state, "custom_character_occupation", "插画师")
+            session_schema.set_character_value(state, "custom_scheduled_persona", "敏感、要强，害怕自己的作品没人看见。")
+            svc._call_life_plan_json = AsyncMock(return_value={
+                "long_goals": [{
+                    "id": "l1",
+                    "text": "把自己的插画作品做出能被看见的风格",
+                    "motivation": "不想一直躲在别人评价后面",
+                    "status": "active",
+                }],
+                "mid_goals": [{
+                    "id": "m1",
+                    "parent_id": "l1",
+                    "text": "这周完成一张能代表当前方向的练习稿",
+                    "progress_note": "",
+                    "status": "active",
+                }],
+                "today_events": [],
+            })
+
+            await svc._generate_life_plan_update(sid, "小雨", {}, today_date="2026-07-03", reason="test")
+
+            system = svc._call_life_plan_json.await_args.args[1]
+            user = svc._call_life_plan_json.await_args.args[2]
+            self.assertIn("core drive", system)
+            self.assertIn("Infer that core drive yourself", system)
+            self.assertIn("inside the character's point of view", system)
+            self.assertIn("output JSON only", system)
+            self.assertIn("维系感情", system)
+            self.assertNotIn("Core drive candidates", user)
+            self.assertIn("敏感、要强", user)
 
         asyncio.run(run())
 
@@ -4809,7 +5268,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             }])
             svc._set_character_place(sid, "cafe", "还在咖啡店窗边", 0.95, source="tool")
             svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
-            svc._call_llm = AsyncMock(return_value=json.dumps({
+            self.mock_image_planner_messages(svc, {
                 "scene": "A vertical selfie while walking toward the station after leaving the cafe.",
                 "view": "selfie",
                 "character_location": "transit",
@@ -4817,11 +5276,12 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "is_intimate": False,
                 "partner_in_frame": False,
                 "device_in_frame": False,
-            }, ensure_ascii=False))
+            })
 
             await plan_roleplay_image(svc, sid, mode="normal", weather_data={"desc": "晴", "temp": "22"}, now=now)
 
-            system = svc._call_llm.await_args.args[0]
+            messages = svc._call_llm_messages.await_args.args[0]
+            system = "\n".join(m.get("content", "") for m in messages if m.get("role") == "system")
             self.assertIn("推送场景转换判定", system)
             self.assertIn("距离上次互动已超过场景断档阈值", system)
             self.assertNotIn("45 分钟", system)
@@ -4867,7 +5327,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             }])
             session_schema.set_nudity(state, "completely nude", at=time.time())
             svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
-            svc._call_llm = AsyncMock(return_value=json.dumps({
+            photo_message = svc._format_photo_history_system_message(session_schema.get_sent_photos_history(state)[-1])
+            session_schema.set_chat_history(state, session_schema.get_chat_history(state) + [photo_message])
+            self.mock_image_planner_messages(svc, {
                 "scene": "A quiet morning pov in the kitchen, greeting the user after waking up.",
                 "view": "pov",
                 "character_location": "home",
@@ -4875,17 +5337,19 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "is_intimate": False,
                 "partner_in_frame": False,
                 "device_in_frame": False,
-            }, ensure_ascii=False))
+            })
 
             plan = await plan_roleplay_image(svc, sid, mode="morning", weather_data={"desc": "晴", "temp": "22"}, now=now)
 
-            system = svc._call_llm.await_args.args[0]
-            user = svc._call_llm.await_args.args[1]
+            messages = svc._call_llm_messages.await_args.args[0]
+            system = messages[-2]["content"]
+            user = messages[-1]["content"]
+            joined = "\n".join(m.get("content", "") for m in messages)
             self.assertIn("早安推送开启新一天", system)
             self.assertNotIn("短期连续性", user)
             self.assertNotIn("最近已发图片摘要", user)
-            self.assertNotIn("衣服脱了", user)
-            self.assertNotIn("loose cotton knit cardigan", user)
+            self.assertIn("衣服脱了", joined)
+            self.assertIn("loose cotton knit cardigan", joined)
             self.assertEqual(plan["clothing_off"], "")
             self.assertEqual(session_schema.get_nudity(state), "")
 
@@ -4945,7 +5409,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 {"role": "assistant", "content": "好呀，姐姐把蜂蜜茶端过来。"},
             ])
             svc._set_character_place(sid, "home", "家中客厅", 0.95, source="tool")
-            svc._call_llm = AsyncMock(return_value=json.dumps({
+            self.mock_image_planner_messages(svc, {
                 "scene": "A pov living-room moment after the tea has been set down on the table.",
                 "view": "pov",
                 "character_location": "home",
@@ -4953,11 +5417,15 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "is_intimate": False,
                 "partner_in_frame": False,
                 "device_in_frame": False,
-            }, ensure_ascii=False))
+            })
 
             await plan_roleplay_image(svc, sid, mode="normal", weather_data={"desc": "雨", "temp": "22"}, now=now)
 
-            system = svc._call_llm.await_args.args[0]
+            system = "\n".join(
+                m.get("content", "")
+                for m in svc._call_llm_messages.await_args.args[0]
+                if m.get("role") == "system"
+            )
             self.assertIn("推送场景节拍推进", system)
             self.assertNotIn("推送场景转换判定", system)
             self.assertIn("不要把上一幕的短动作", system)
@@ -5969,6 +6437,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(set(ss.SESSION_GLOBAL_STATE_KEYS), {
             "last_interaction", "last_morning_greet_date",
             "daily_trigger_times", "daily_trigger_date", "daily_triggered_times",
+            "post_chat_push_date", "post_chat_push_count", "last_post_chat_push_time",
             "saved_characters", "character_contexts", "init_flow",
             "ntr_stage_reached", "ntr_reconcile_count", "ntr_affection_reset",
             "frozen", "frozen_at",

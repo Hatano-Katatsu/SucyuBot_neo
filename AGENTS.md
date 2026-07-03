@@ -129,6 +129,7 @@ telegram_comfyui_selfie/
 - checkpoint 裁剪后第一条必须是 `user`；多余的孤立 `assistant` / `system` 会进入 checkpoint 摘要。
 - dream 和 dream 记忆整理只读取实际 `user/assistant` 对话，不消费照片历史 system。
 - 照片历史是真正的历史 `system` 消息，位于 checkpoint 锚定的未折叠历史段中，保留到被正常历史裁剪为止，并参与 checkpoint 摘要；内容只保留最终生图 `nltag/tags` 与瘦身后的短意图/情绪/必须包含，不再写入完整原始草案、外观槽位或全部 PromptSlots，避免照片记录污染后续前缀缓存。
+- 主动推送和对话后续场推送的生图 planner 复用 `_build_chat_messages()` 生成的正式聊天上下文前缀，去掉占位 user 后再追加 planner 稳定 system、本次动态 system 和当前时段 user；照片历史 system 也在这个正式前缀内，推送路径不再额外拼一份“最近照片摘要”或重复的短期连续性。
 - 外观/衣柜、低频世界规则、世界当前条件或动态尾部结构变化时，如果未折叠历史达到 `context_window_message_limit / 2`，会异步强制 checkpoint 一次，近似恢复后续前缀稳定；动态签名不包含精确分钟，避免时钟滚动触发无意义 checkpoint。
 - 普通聊天保留固定位置的世界规则槽和世界当前条件槽；只有本轮出现地点/天气/时间/发图等信号时，才展开本轮用户位置/动线/空间关系动态尾部，避免每句普通对话都跑高频世界判断。
 - `/新场景` / `/上下文重置` 会先对切换前未折叠上下文跑一次 checkpoint 摘要和记忆提取，再清空当前模型侧 `chat_history` 和 checkpoint 摘要，并把 checkpoint 边界推进到当前最新消息；SQLite `chat_messages` 不删除，后续 dream 仍会读取真实 `user/assistant` 对话。
@@ -143,7 +144,7 @@ telegram_comfyui_selfie/
 - 长期记忆只负责高重要度稳定事实、偏好、边界和纠正。
 - 用户明确提到的未来/待完成时间节点在 checkpoint 记忆提取阶段通过提示词软约束保存为 `event`；dream 整理过时时间节点时，只有事件已解决/取消/被替代，或已从近期日记、checkpoint 和当前窗口完全淡出，才删除或合并。
 - 手动记忆（`kind=manual`）不被自动整理删除。
-- 角色生活线保存在 SQLite `life_plans(session_id, character_key)`，结构化长线/中期线/今日片段只给 dream、WebUI 与推送 planner 后台使用；聊天 prompt 只注入渲染后的“生活底色”自然语言，不泄漏目标/计划/任务式结构。dream 后更新，首次聊天或手动推送缺当天生活线时会后台懒生成。
+- 角色生活线保存在 SQLite `life_plans(session_id, character_key)`，结构化长线/中期线/今日片段只给 dream、WebUI 与推送 planner 后台使用；聊天 prompt 只注入渲染后的“生活底色”自然语言，不泄漏目标/计划/任务式结构。dream 后更新，首次聊天或手动推送缺当天生活线时会后台懒生成；当老角色已有当天生活线但缺少长期/中期目标时，也会刷新目标，并要求模型从角色视角自行根据原始人设、历史、记忆和日记推断核心驱动力。
 
 ### 角色系统
 
@@ -183,10 +184,12 @@ telegram_comfyui_selfie/
 ### Telegram 输入增强
 
 - Telegram 当前图片、`reply_to_message` 图片、`external_reply` 图片只进入视觉模型描述任务。
+- 单独发送无配文图片时，如果视觉模型可用，会按 `photo_caption_wait_seconds`（默认 30 秒，设为 0 关闭）等待用户下一条纯文本；等到则把该文本作为图片配文/附近上下文一起送入视觉模型，超时则按旧的纯图片逻辑处理。
 - 视觉模型可参考最近两轮实际 `user/assistant` 对话和当前文字/引用线索。
 - chat 模型最终只收到纯文本：引用内容、图片描述、用户当前输入。
 - 引用文本支持 `quote.text`、`reply_to_message.text/caption`、`external_reply.text/caption`。
 - Telegram 文件下载走 `getFile`，遵守 Bot API 20MB 文件下载限制。
+- 同一会话新用户消息会取消旧的可中断文字生成/分段发送/等待配文任务，并立即处理新输入；取消前已收到的旧用户输入和 Telegram 已确认发送的 assistant 片段会写回正式上下文。生图链路使用受保护 task，聊天工具生图和 `/自拍`、`/配图` 已进入生成/发图阶段时不会被新消息取消，完成后仍会发图并记录照片历史。
 
 ### WebUI 与运维
 
@@ -210,6 +213,17 @@ telegram_comfyui_selfie/
 - 长期记忆不写临时服装、上一轮场景台词、一次性道具；这些属于短期上下文、衣柜或照片历史。
 - fire-and-forget `asyncio.create_task` 内异常可能被静默吞掉；排查生图/推送失败优先看 service log。
 - `_get_llm_value("chat", "temperature")` 的 legacy 回退会落到 `llm_temperature_scene`，除非 `chat_llm_temperature` 显式设置。
+
+## 今日变更（2026-07-03）
+
+1. **对话后续场推送**：新增 `post_chat_push_enabled`、`post_chat_push_delay_min_minutes`、`post_chat_push_delay_max_minutes`、`post_chat_push_daily_limit`、`post_chat_push_cooldown_minutes` 配置，并接入 WebUI/示例配置/会话 schema。普通聊天收到用户消息后会安排一次 5-15 分钟随机 followup 推送；若用户期间继续说话，会取消旧任务并按最新消息重排；发送前仍检查 frozen、goodnight inhibition、active push、每日上限和冷却。
+2. **主动推送上下文链路重构**：`plan_roleplay_image()` 的推送路径改用 `_build_chat_context_messages_for_push()` 复用正式聊天 prompt 前缀，再追加 planner system、动态 system 和当前时段 user。followup 不跑硬转场判定，不主动切场景；推送临时规则、避重规则、空间硬约束和生活线侧面提示都放在动态 system，user 段不再重复塞短期连续性/长期记忆，提升 prefix cache 命中并降低语义复读。
+3. **推送图片写回正式上下文**：`_record_sent_photo()` 新增 `source_kind`，聊天配图、漏图兜底、定时推送、手动推送、followup 推送分别标记为 `chat_image` / `auto_chat_image` / `scheduled_push` / `manual_push` / `followup_push`。照片历史 system 统一写入正式 `chat_history`，内容拼接 `source_kind`、`view`、最终 `nltag`、瘦身后的 `source_intent` 和 caption；不主动清理图片上下文，只随 checkpoint 和历史溢出统一折叠/裁剪。
+4. **生活线目标补齐**：life plan 增加空长期/中期目标 bootstrap 判定，老角色当天已有生活线但没有长期/中期目标时也会刷新。LLM 提示词只给核心驱动力判断规则，不再由代码预提取候选；要求模型私下从角色视角根据原始人设、历史、记忆和日记自行推断角色想追求、逃避、证明、修复、保护或成为的东西，并禁止默认生成“维系感情”这类空泛关系目标。
+5. **本轮回归验证**：新增/更新测试覆盖 followup 调度替换、静默发送与计数、推送图片 `source_kind` 写回 system 历史、followup planner 复用正式聊天上下文且不重复注入短期连续性/长期记忆、空 life plan bootstrap、生活线核心驱动力规则提示词、推送硬转场保留照片 system 历史但清理临时裸体态，以及 schema 新字段单一来源。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 345 tests in 8.399s`，`OK (skipped=1)`。
+6. **纯图片输入等待配文**：Telegram 输入层新增 `photo_caption_wait_seconds`，无配文图片会先挂起等待后续纯文本；收到文本时消费为该图片的配文/附近上下文，不再单独触发一轮聊天，超时或配置为 0 时沿用旧的纯图片理解流程。该配置已接入默认配置、示例配置、YAML 分组和 WebUI 设置。
+7. **用户新消息抢占旧任务**：同一 session 的新消息会取消旧的可中断处理 task，包括 LLM 文本生成、1 秒分段发送间隔和待配文图片处理；`handle_chat()` 在取消时补写旧用户输入，且把已入库但未完全发出的 assistant 回复裁剪到 Telegram 已确认发送的部分。聊天工具生图和 `/自拍`、`/配图` 使用受保护生图 task，外层命令/聊天被取消后图片仍会继续生成、发送并记录照片历史。
+8. **本轮追加验证**：新增测试覆盖图片等待后续配文、等待超时旧逻辑、等待秒数 0 立即旧逻辑、新消息取消旧聊天并保留旧用户输入、分段发送被取消只保留已发送 assistant 文本、聊天工具生图不被取消、`/配图` 命令生图不被取消。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 352 tests in 20.542s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-07-02）
 

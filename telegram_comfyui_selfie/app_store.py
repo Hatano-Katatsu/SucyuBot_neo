@@ -244,6 +244,44 @@ class AppStateStore:
             conn.commit()
         return ids
 
+    def update_latest_matching_message(
+        self,
+        session_id: str,
+        character_key: str,
+        role: str,
+        old_content: str,
+        new_content: str,
+    ) -> bool:
+        """更新或删除最近一条匹配内容的聊天消息。
+
+        用于 Telegram 分段发送被新用户消息打断时，把已入库但尚未全部发出的 assistant
+        内容裁剪到真实已发送部分；new_content 为空时删除该 assistant 行。
+        """
+        if not session_id or not role:
+            return False
+        old_content = str(old_content or "").strip()
+        if not old_content:
+            return False
+        new_content = str(new_content or "").strip()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT id, content FROM chat_messages
+                WHERE session_id = ? AND character_key = ? AND role = ? AND content = ?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (session_id, character_key or "", role, old_content),
+            ).fetchone()
+            if not row:
+                return False
+            msg_id = int(row["id"])
+            if new_content:
+                conn.execute("UPDATE chat_messages SET content = ? WHERE id = ?", (new_content, msg_id))
+            else:
+                conn.execute("DELETE FROM chat_messages WHERE id = ?", (msg_id,))
+            conn.commit()
+        return True
+
     def list_messages(
         self,
         session_id: str,

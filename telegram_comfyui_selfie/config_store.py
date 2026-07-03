@@ -8,6 +8,7 @@ from typing import Any
 CONFIG_GROUPS: dict[str, list[str]] = {
     "telegram": [
         "telegram_bot_token", "allowed_chat_ids", "telegram_proxy_enabled", "telegram_proxy_url",
+        "photo_caption_wait_seconds",
     ],
     "web": [
         "web_enabled", "web_host", "web_port", "web_public_host", "web_admin_username", "web_admin_password",
@@ -52,6 +53,9 @@ CONFIG_GROUPS: dict[str, list[str]] = {
         "amap_api_key", "amap_poi_enabled", "amap_poi_per_type",
         "google_places_api_key", "google_places_enabled", "google_places_language",
         "push_continuity_hours", "image_min_gap_rounds", "scene_stale_minutes",
+        "post_chat_push_enabled", "post_chat_push_delay_min_minutes",
+        "post_chat_push_delay_max_minutes", "post_chat_push_daily_limit",
+        "post_chat_push_cooldown_minutes",
     ],
 }
 

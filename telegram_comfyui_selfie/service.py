@@ -175,6 +175,10 @@ class TelegramComfyUIService(
         self._checkpoint_tasks: dict[str, asyncio.Task] = {}
         self._dream_tasks: dict[str, asyncio.Task] = {}
         self._life_plan_tasks: dict[str, asyncio.Task] = {}
+        self._post_chat_push_tasks: dict[str, asyncio.Task] = {}
+        self._interruptible_tasks: dict[str, set[asyncio.Task]] = {}
+        self._pending_photo_inputs: dict[str, dict[str, Any]] = {}
+        self._protected_image_tasks: set[asyncio.Task] = set()
         self._llm_debug_buffer: list[dict[str, Any]] = []
         self._llm_debug_flush_threshold = 10
         self._web_runner: Any = None
@@ -1098,6 +1102,7 @@ class TelegramComfyUIService(
         view: str = "",
         source_description: str = "",
         nltag: str = "",
+        source_kind: str = "",
         defer_history_message: bool = False,
     ):
         state = self._get_session_state(session_id)
@@ -1117,6 +1122,7 @@ class TelegramComfyUIService(
             "caption": caption,
             "appearance": appearance_snapshot,
             "view": (view or "").strip().lower(),
+            "source_kind": (source_kind or "unknown").strip().lower() or "unknown",
             "source_description": source_description,
             "source_intent": source_intent,
             "nltag": nltag_text,
@@ -1185,16 +1191,17 @@ class TelegramComfyUIService(
             or TelegramComfyUIService._compact_photo_source_intent(str(photo.get("source_description") or ""))
         )
         view = str(photo.get("view") or "").strip()
+        source_kind = str(photo.get("source_kind") or "unknown").strip()
         lines = [
-            "照片历史（系统记录，保留到对话历史裁剪；用户明确提到照片/刚才画面时再引用，不要主动复述；视觉内容只保留最终 nltag）：",
+            "照片历史（系统记录，保留到 checkpoint/历史溢出统一裁剪；低权重连续性参考，用户明确提到照片/刚才画面时再引用，不要主动复述）：",
+            f"source_kind: {source_kind or 'unknown'}",
+            f"view: {view or '未知视角'}",
             f"nltag: {nltag or '未记录'}",
         ]
         if source_intent:
-            lines.append(source_intent)
+            lines.append(f"source_intent: {source_intent}")
         if caption and caption != scene:
-            lines.append(f"配文: {caption}")
-        if view:
-            lines.append(f"视角: {view}")
+            lines.append(f"caption: {caption}")
         return {"role": "system", "content": "\n".join(lines)}
 
     def _pending_photo_history_bucket(self) -> dict[str, list[dict[str, str]]]:
@@ -2522,6 +2529,54 @@ class TelegramComfyUIService(
             clothing_off=clothing_off, orientation=orientation,
         )
 
+    async def _await_protected_image_task(
+        self,
+        session_id: str,
+        coro,
+        *,
+        label: str = "生图任务",
+        on_outer_cancel=None,
+        after_cancel_done=None,
+    ):
+        """等待一个生图/发图协程；外层消息处理取消时让图片链路继续完成。"""
+        task = asyncio.create_task(coro, name=f"protected-image:{session_id or 'unknown'}")
+        protected = getattr(self, "_protected_image_tasks", None)
+        if isinstance(protected, set):
+            protected.add(task)
+
+        def _discard(done_task: asyncio.Task) -> None:
+            protected_tasks = getattr(self, "_protected_image_tasks", None)
+            if isinstance(protected_tasks, set):
+                protected_tasks.discard(done_task)
+
+        task.add_done_callback(_discard)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if callable(on_outer_cancel):
+                try:
+                    on_outer_cancel()
+                except Exception:
+                    logger.debug("protected image cancel callback failed", exc_info=True)
+
+            def _finish_after_cancel(done_task: asyncio.Task) -> None:
+                try:
+                    done_task.result()
+                except asyncio.CancelledError:
+                    self._ulog(session_id, "WARN", f"被打断后的{label}被取消")
+                except Exception as exc:
+                    self._ulog(session_id, "ERROR", f"被打断后{label}失败: {exc}")
+                    logger.error("protected image task failed after cancellation: %s", exc, exc_info=True)
+                finally:
+                    if callable(after_cancel_done):
+                        try:
+                            after_cancel_done()
+                        except Exception:
+                            logger.debug("protected image done callback failed", exc_info=True)
+
+            task.add_done_callback(_finish_after_cancel)
+            raise
+
     # ---------------------------------------------------------------------
     # Tools
     # ---------------------------------------------------------------------
@@ -2601,6 +2656,7 @@ class TelegramComfyUIService(
             appearance=new_app or session_schema.get_outfit(state),
             view=final_view,
             source_description=source_description,
+            source_kind="chat_image",
             defer_history_message=defer_photo_history,
         )
         return f"图片已生成并发送。画面: {scene}"
@@ -2744,6 +2800,7 @@ class TelegramComfyUIService(
                     scene,
                     "",
                     source_description=self._format_image_source_description(intent="聊天模型文字中泄漏出的配图描述", prompt=scene),
+                    source_kind="auto_chat_image",
                 )
             else:
                 logger.error("leak fallback generate failed: %s", err)

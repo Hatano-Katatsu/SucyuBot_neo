@@ -77,6 +77,15 @@ class LifePlanMixin:
             return True
         return (today - last).days >= review_days
 
+    def _life_plan_needs_bootstrap(self, payload: dict[str, Any] | None) -> bool:
+        if not isinstance(payload, dict) or not payload:
+            return True
+        longs = [item for item in payload.get("long_goals") or [] if isinstance(item, dict)]
+        mids = [item for item in payload.get("mid_goals") or [] if isinstance(item, dict)]
+        active_longs = [item for item in longs if item.get("status") == "active"]
+        active_mids = [item for item in mids if item.get("status") == "active"]
+        return not active_longs or not active_mids
+
     @staticmethod
     def _life_time_hint_for_dt(dt: datetime) -> str:
         hour = dt.hour
@@ -423,26 +432,35 @@ class LifePlanMixin:
     def _heuristic_life_plan(self, session_id: str, *, today_date: str) -> dict[str, Any]:
         profile = self._life_profile(session_id) if hasattr(self, "_life_profile") else {}
         anchor = (profile or {}).get("day_anchor") or "unknown"
+        state = self._get_session_state(session_id)
+        role = session_schema.get_character_value(state, "custom_role_name", "")
+        if not role and hasattr(self, "_get_session_cfg"):
+            role = self._get_session_cfg(session_id, "role_name", "")
+        occupation = session_schema.get_character_value(state, "custom_character_occupation", "")
+        persona = session_schema.get_character_value(state, "custom_scheduled_persona", "")
+        drive_seed = "、".join(part for part in (role, occupation, persona[:60]) if part) or "自己的身份和生活压力"
         long_text = {
-            "company": "在工作和私人时间之间找到更舒服的节奏",
-            "school": "把学业和自己的小世界慢慢稳住",
-            "factory": "让重复的白天不至于把自己磨空",
-            "farm": "把眼前的生活过得踏实一点",
-            "construction": "在辛苦的日子里留住一点自己的余地",
-            "medical": "在照顾别人之外也照顾好自己",
-            "retail": "在忙碌班次里攒出一点安稳感",
-            "delivery": "让奔波的日子有一点自己的节奏",
-            "driver": "在路上和休息之间找到平衡",
-            "home": "把自己的生活空间整理得更自在",
-            "flexible": "把松散的时间重新握回手里一点",
-        }.get(anchor, "把自己的日子过得更安稳一点")
+            "company": f"在{occupation or '白天的工作'}里证明自己的能力，同时不被职责耗空",
+            "school": "把学业、同龄关系和真正想成为的人慢慢对齐",
+            "factory": "在重复班次里守住自己的手艺、自尊和未来出路",
+            "farm": "把眼前土地、家计和自己想要的自由都慢慢稳住",
+            "construction": "靠辛苦攒出能选择下一步生活的底气",
+            "medical": "在照顾别人和专业责任之外，守住自己的精神边界",
+            "retail": "在被顾客和班次推着走的日子里攒出独立选择的余地",
+            "delivery": "从奔波路线里攒出稳定收入和不被生活牵着跑的节奏",
+            "driver": "在路上、休息和责任之间找到能长久撑下去的方向",
+            "home": f"围绕{drive_seed}，把生活空间变成能承载自己愿望的地方",
+            "flexible": f"围绕{drive_seed}，把松散时间变成真正属于自己的作品、技能或选择",
+        }.get(anchor, f"围绕{drive_seed}，找到一个值得长期追下去的自我方向")
         mid_text = {
-            "company": "这周把手头白天的麻烦收拾顺一点",
-            "school": "这周把拖着的课程和作业压下去一点",
-            "medical": "这周让值班后的疲惫别一直积着",
-            "delivery": "这周少被路上的琐事牵着情绪走",
-            "driver": "这周把路上的奔波和休息调匀一点",
-        }.get(anchor, "这周把几件压在心里的小事往前挪一点")
+            "company": "这周先把一个棘手任务处理到能被看见的程度",
+            "school": "这周先把最拖着自己的课程、作业或社交压力往前推一步",
+            "factory": "这周先把一个反复出错或压心的班次问题处理顺",
+            "medical": "这周先把值班后的疲惫和一个专业压力点分开消化",
+            "retail": "这周先从一个班次、人际或库存小麻烦里找回主动感",
+            "delivery": "这周先优化一段最消耗情绪的路线或收入节奏",
+            "driver": "这周先把一段路上的疲惫和休息安排调匀",
+        }.get(anchor, "这周先选一个能贴近长期追求的小突破口")
         plan = {
             "long_goals": [{
                 "id": "l1",
@@ -596,10 +614,16 @@ class LifePlanMixin:
         system = (
             "You maintain a private structured life plan for a roleplay character. The chat model will never see this JSON. "
             "Update it from diary evidence without making the character sound task-driven. Output strict JSON only.\n"
-            "Schema: {\"ops\":[...],\"today_events\":[...]}. You may include full long_goals/mid_goals only for cold start.\n"
+            "Schema: {\"ops\":[...],\"today_events\":[...]}. You may include full long_goals/mid_goals for cold start or when existing goals are empty/misaligned.\n"
             "Ops: progress/update_mid/achieve/abandon/add_mid/update_long/add_long. Apply changes by stable id. "
             "Unknown ids are ignored by code, so use existing ids when possible.\n"
             "Rules: long_goals max 3, mid_goals max 4, today_events max 5. Each mid goal must have a parent_id from active long_goals. "
+            "Long goals must come from the character's own core drive: ideals, obsession, fear, ambition, identity pressure, career/artistic pursuit, "
+            "defect compensation, family/social conflict, or worldview position. Be creative but compatible with persona, history, memories, and diaries. "
+            "Infer that core drive yourself from the source materials; do not rely on pre-extracted candidate labels. "
+            "Privately reason from inside the character's point of view about what they would want, avoid, prove, repair, protect, or become, but output JSON only and do not expose that reasoning. "
+            "Do not default to hollow relationship maintenance such as '维系感情', '和用户更亲密', or '把生活过安稳一点' unless the character setting explicitly makes that the central drive. "
+            "Mid goals must be concrete stages toward long goals, not generic chores or daily relationship upkeep. "
             f"Review long_goals roughly every {review_days} days. Long-goal review is {'due' if long_review_due else 'not due'} today; "
             "when it is not due, avoid long_goals/add_long/update_long unless diary evidence forces a major stable change. "
             "At least 1 today event should relate to a mid goal when any active mid goal exists. "
@@ -711,7 +735,8 @@ class LifePlanMixin:
         today_date = self._life_today_date(session_id, local_dt)
         row = self._load_life_plan_row(session_id, character_key)
         previous = row.get("payload") if row else {}
-        if not force and previous and (previous.get("today") or {}).get("date") == today_date:
+        needs_bootstrap = self._life_plan_needs_bootstrap(previous)
+        if not force and previous and (previous.get("today") or {}).get("date") == today_date and not needs_bootstrap:
             return {"status": "skipped", "reason": "already_current", "date": today_date}
         try:
             plan, op_result = await self._generate_life_plan_update(
@@ -745,7 +770,12 @@ class LifePlanMixin:
         character_key = self._life_plan_character_key(session_id)
         row = self._load_life_plan_row(session_id, character_key)
         today_date = self._life_today_date(session_id, local_dt)
-        if not force and row and (row.get("payload", {}).get("today") or {}).get("date") == today_date:
+        if (
+            not force
+            and row
+            and (row.get("payload", {}).get("today") or {}).get("date") == today_date
+            and not self._life_plan_needs_bootstrap(row.get("payload") or {})
+        ):
             return {"status": "current", "life_plan": row}
         result = await self._update_life_plan_after_dream(
             session_id,

@@ -1130,26 +1130,44 @@ class CommandHandlersMixin:
         # /自拍 命令明确要求自拍视角，强制 view=selfie，不受场景生成器偶然返回的 third 影响。
         view = "selfie"
         english = await self._translate_to_tags(scene, session_id=session_id, view=view)
-        ok, imgs, err = await self._do_generate(english, session_id=session_id, one_shot_appearance=new_app or "", orientation=orientation or "")
-        if not ok or not imgs:
-            self._ulog(session_id, "ERROR", f"自拍生图失败: {err}")
-            await self.send_message(chat_id, f"生图失败: {err}")
-            return
-        await self.send_photo(chat_id, imgs[0], caption or "")
-        for extra in imgs[1:]:
-            await self.send_photo(chat_id, extra)
-        state = self._get_session_state(session_id)
-        source = self._format_image_source_description(
-            intent=f"自拍命令生成的 normal 模式画面，时段: {time_period}，天气: {weather}",
-            prompt=caption or "",
-        )
-        self._record_sent_photo(
+        cancelled = {"value": False}
+
+        async def generate_and_send_selfie():
+            ok, imgs, err = await self._do_generate(
+                english,
+                session_id=session_id,
+                one_shot_appearance=new_app or "",
+                orientation=orientation or "",
+            )
+            if not ok or not imgs:
+                self._ulog(session_id, "ERROR", f"自拍生图失败: {err}")
+                if not cancelled["value"]:
+                    await self.send_message(chat_id, f"生图失败: {err}")
+                return False
+            await self.send_photo(chat_id, imgs[0], caption or "")
+            for extra in imgs[1:]:
+                await self.send_photo(chat_id, extra)
+            state = self._get_session_state(session_id)
+            source = self._format_image_source_description(
+                intent=f"自拍命令生成的 normal 模式画面，时段: {time_period}，天气: {weather}",
+                prompt=caption or "",
+            )
+            self._record_sent_photo(
+                session_id,
+                scene,
+                caption or "",
+                appearance=new_app or session_schema.get_outfit(state),
+                view=view,
+                source_description=source,
+                source_kind="chat_image",
+            )
+            return True
+
+        await self._await_protected_image_task(
             session_id,
-            scene,
-            caption or "",
-            appearance=new_app or session_schema.get_outfit(state),
-            view=view,
-            source_description=source,
+            generate_and_send_selfie(),
+            label="自拍生图任务",
+            on_outer_cancel=lambda: cancelled.__setitem__("value", True),
         )
 
     async def cmd_scene_image(self, chat_id, session_id, arg):
@@ -1160,13 +1178,17 @@ class CommandHandlersMixin:
         intent = "根据当前聊天场景配一张图"
         if text:
             intent = "根据当前聊天场景配图，并优先满足用户输入的画面参数"
-        result = await self.tool_generate_image(
-            chat_id,
+        result = await self._await_protected_image_task(
             session_id,
-            prompt=text,
-            intent=intent,
-            must_include=text,
-            planning_mode="illustration",
+            self.tool_generate_image(
+                chat_id,
+                session_id,
+                prompt=text,
+                intent=intent,
+                must_include=text,
+                planning_mode="illustration",
+            ),
+            label="配图生图任务",
         )
         if result.startswith("生图失败") or result == "缺少图片意图":
             await self.send_message(chat_id, result)

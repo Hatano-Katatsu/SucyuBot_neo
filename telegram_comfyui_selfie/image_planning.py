@@ -697,12 +697,13 @@ async def plan_roleplay_image(
         bot_name = service._get_session_cfg(session_id, "bot_name", "蕾伊")
         bot_self_name = service._get_session_cfg(session_id, "bot_self_name", "我")
         role_name = service._get_session_cfg(session_id, "role_name", "魅魔")
-    is_push = mode in ("normal", "morning", "ntr")
+    is_push = mode in ("normal", "morning", "ntr", "followup")
+    is_followup = mode == "followup"
     push_transition_decision: dict[str, Any] = {}
     push_transition_context = ""
     push_advance_context = ""
     life_push_context = ""
-    if is_push and hasattr(service, "_push_scene_transition_decision"):
+    if is_push and not is_followup and hasattr(service, "_push_scene_transition_decision"):
         try:
             push_transition_decision = service._push_scene_transition_decision(
                 state,
@@ -731,12 +732,17 @@ async def plan_roleplay_image(
             life_push_context = service._life_plan_push_context(session_id, now=now)
         except Exception:
             logger.debug("life plan push context failed", exc_info=True)
-    hard_scene_transition = bool(push_transition_decision.get("should_transition"))
+    hard_scene_transition = bool(push_transition_decision.get("should_transition")) and not is_followup
     if hard_scene_transition:
         session_schema.clear_nudity(state)
-    continuity_context = format_planning_continuity_context(service, state, session_id)
+    continuity_context = (
+        format_dialog_context(service, state, session_id, limit=16)
+        if is_push
+        else format_planning_continuity_context(service, state, session_id)
+    )
     if hard_scene_transition or push_transition_decision.get("drop_continuity"):
         continuity_context = None
+    prompt_continuity_context = None if is_push else continuity_context
     spatial_context = format_planning_spatial_context(
         service,
         state,
@@ -745,10 +751,11 @@ async def plan_roleplay_image(
         must_include=must_include,
         prompt=prompt,
     ) if not hard_scene_transition else None
-    photo_context = None if hard_scene_transition else format_recent_photo_dedup_context(service, state, session_id)
+    prompt_spatial_context = None if is_push else spatial_context
+    photo_context = None if is_push else format_recent_photo_dedup_context(service, state, session_id)
     memory_query = "\n".join(part for part in (intent, mood, must_include, prompt, continuity_context or "") if part)
     memory_context = ""
-    if hasattr(service, "_long_term_memory_context"):
+    if not is_push and hasattr(service, "_long_term_memory_context"):
         memory_context = service._long_term_memory_context(session_id, memory_query, limit=8)
     world_query = "\n".join(part for part in (intent, mood, must_include, prompt) if part)
     world_context = ""
@@ -802,6 +809,7 @@ async def plan_roleplay_image(
     stable_mode_rules = (
         "通用模式要求:\n"
         "morning: 必须使用 pov，刚睡醒、厨房或卧室早安场景。\n"
+        "followup: 用户刚结束对话后的短时间续场推送，保持最近地点、关系、情绪和相邻动作，不主动开新场景。\n"
         f"normal: 根据{spatial_label}和近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror。\n"
         "ntr: 用户长时间未互动的冷落惩罚推送，强烈 NTR 危机感，通常 portrait（他人帮角色拍）、selfie 或分屏。\n"
         "推送转场通用规则: 最近对话/照片只能作为情绪、约定和避免重复的参考；判定应转场时，不要把上一幕地点、姿势或话题强行续写成此刻仍在发生。\n"
@@ -913,7 +921,7 @@ async def plan_roleplay_image(
     if is_push:
         role_context = (
             f"你是角色扮演推送图片导演。当前推送模式: {mode}。\n"
-            "主动推送时把画面写成角色日常动线里的自然片段，不要无理由瞬移到用户身边；短期连续性上下文可用于承接，但必须先服从场景转换判定。\n"
+            "主动推送时把画面写成角色日常动线里的自然片段，不要无理由瞬移到用户身边；正式聊天上下文可用于承接，但必须先服从场景转换判定。\n"
             f"角色身份: 当前角色是「{bot_name}」（{role_name}），优先使用「{bot_self_name}」作为自称；不要写成其他默认角色。\n"
         )
         temporal = time_period
@@ -970,12 +978,33 @@ async def plan_roleplay_image(
         "输出适合发给用户的一张图。不要输出英文画图标签。\n"
         "公开场合必须穿着得体；私密场合可以更放松。避免和最近照片重复。"
     )
+    push_dynamic_parts: list[str] = []
     if push_transition_context:
-        system += "\n" + push_transition_context
+        push_dynamic_parts.append(push_transition_context)
     if push_advance_context:
-        system += "\n" + push_advance_context
+        push_dynamic_parts.append(push_advance_context)
+    if is_followup:
+        push_dynamic_parts.append(
+            "对话后续场规则（动态，仅本次推送生效）: 这是用户刚结束对话 5-15 分钟后的轻量续场。"
+            "请使用正式聊天上下文中的最近地点、情绪、未完成动作和照片历史作为低权重参考，"
+            "让画面自然推进一小步；不要突然换地点、开新冲突、重置关系或复述上一条主动推送。"
+            "如果上一条照片也是主动推送，只把它当作避重参考，而不是必须接着演。"
+        )
+    elif is_push:
+        push_dynamic_parts.append(
+            "主动推送避重规则（动态，仅本次推送生效）: 正式聊天上下文中的照片历史是低权重系统记录。"
+            "可以用来保持连续性和避免重复，但不要主动复述系统记录、上一条 caption 或同一动作结构。"
+            "若上一条照片来自 scheduled_push/followup_push/manual_push，只把它当作避重参考；"
+            "同一地点内应推进到相邻动作或另一个生活细节，而不是复制上一张的语义。"
+        )
+    if is_push and spatial_context:
+        push_dynamic_parts.append(
+            "空间/身体关系硬约束（动态，仅本次推送生效）:\n"
+            f"{spatial_context}"
+        )
     if life_push_context:
-        system += "\n" + life_push_context
+        push_dynamic_parts.append(life_push_context)
+    push_dynamic_context = "\n".join(part for part in push_dynamic_parts if part)
     public_outfit_context = public_outfit_guard_context(
         service,
         session_id,
@@ -1055,24 +1084,41 @@ async def plan_roleplay_image(
             f"聊天模型画面草案: {prompt or '无'}\n"
             f"用户指定视角: {requested_view or '未指定'}"
         )
-    if continuity_context:
-        user += f"\n\n短期连续性:\n{continuity_context}"
-    if spatial_context:
-        user += f"\n\n空间/身体关系硬约束（scene 主句必须保留，不要改成相反站位）:\n{spatial_context}"
+    if prompt_continuity_context:
+        user += f"\n\n短期连续性:\n{prompt_continuity_context}"
+    if prompt_spatial_context:
+        user += f"\n\n空间/身体关系硬约束（scene 主句必须保留，不要改成相反站位）:\n{prompt_spatial_context}"
     if photo_context:
         user += f"\n\n最近已发图片摘要:\n{photo_context}"
     if memory_context:
         user += f"\n\n长期记忆:\n{memory_context}"
 
     try:
-        text = await service._call_llm(
-            system,
-            user,
-            temp=float(service._get_llm_value("image", "temperature_scene", "0.95")),
-            tag="roleplay-image-plan",
-            purpose="image",
-            session_id=session_id,
-        )
+        if is_push and hasattr(service, "_build_chat_context_messages_for_push") and hasattr(service, "_call_llm_messages"):
+            planner_messages = service._build_chat_context_messages_for_push(session_id)
+            planner_messages.append({"role": "system", "content": system})
+            if push_dynamic_context:
+                planner_messages.append({"role": "system", "content": push_dynamic_context})
+            planner_messages.append({"role": "user", "content": user})
+            result = await service._call_llm_messages(
+                planner_messages,
+                temp=float(service._get_llm_value("image", "temperature_scene", "0.95")),
+                tag="roleplay-image-plan",
+                purpose="image",
+                session_id=session_id,
+            )
+            text = (result.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+        else:
+            if push_dynamic_context:
+                system = system + "\n" + push_dynamic_context
+            text = await service._call_llm(
+                system,
+                user,
+                temp=float(service._get_llm_value("image", "temperature_scene", "0.95")),
+                tag="roleplay-image-plan",
+                purpose="image",
+                session_id=session_id,
+            )
         parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
     except Exception as exc:
         logger.error("roleplay image planning failed: %s", exc)
