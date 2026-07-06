@@ -291,6 +291,113 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_media_group_photos_are_described_once_as_group(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["telegram_media_group_wait_seconds"] = "0.05"
+            svc.config["photo_caption_wait_seconds"] = "0"
+            svc.handle_chat = AsyncMock()
+            captured = {}
+
+            async def fake_describe_group(session_id, photo_groups, **kwargs):
+                captured["count"] = len(photo_groups)
+                captured["nearby"] = kwargs.get("nearby_text", "")
+                captured["source_label"] = kwargs.get("source_label", "")
+                return "两张图是一组连续照片。"
+
+            svc._describe_telegram_photo_groups_for_chat = fake_describe_group
+            await svc.handle_update({
+                "message": {
+                    "chat": {"id": 123},
+                    "message_id": 1,
+                    "media_group_id": "album-1",
+                    "caption": "看这组",
+                    "photo": [{"file_id": "p1", "width": 100, "height": 100}],
+                }
+            })
+            await svc.handle_update({
+                "message": {
+                    "chat": {"id": 123},
+                    "message_id": 2,
+                    "media_group_id": "album-1",
+                    "photo": [{"file_id": "p2", "width": 100, "height": 100}],
+                }
+            })
+            await asyncio.sleep(0.12)
+
+            svc.handle_chat.assert_awaited_once()
+            text = svc.handle_chat.await_args.args[2]
+            self.assertEqual(captured["count"], 2)
+            self.assertIn("2张图片", captured["source_label"])
+            self.assertIn("看这组", captured["nearby"])
+            self.assertIn("用户发送的多张图片", text)
+            self.assertIn("两张图是一组连续照片。", text)
+
+        asyncio.run(run())
+
+    def test_consecutive_single_photos_share_caption_wait_and_cap_at_five(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["photo_caption_wait_seconds"] = "1"
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "vision"
+            svc.handle_chat = AsyncMock()
+            captured = {}
+
+            async def fake_describe_group(session_id, photo_groups, **kwargs):
+                captured["count"] = len(photo_groups)
+                captured["nearby"] = kwargs.get("nearby_text", "")
+                return "五张以内统一识别。"
+
+            svc._describe_telegram_photo_groups_for_chat = fake_describe_group
+            for idx in range(6):
+                await svc.handle_update({
+                    "message": {
+                        "chat": {"id": 123},
+                        "message_id": idx + 1,
+                        "photo": [{"file_id": f"p{idx}", "width": 100, "height": 100}],
+                    }
+                })
+            svc.handle_chat.assert_not_awaited()
+
+            await svc.handle_update({"message": {"chat": {"id": 123}, "message_id": 20, "text": "一起看"}})
+            await asyncio.sleep(0.05)
+
+            svc.handle_chat.assert_awaited_once()
+            text = svc.handle_chat.await_args.args[2]
+            self.assertEqual(captured["count"], 5)
+            self.assertIn("一起看", captured["nearby"])
+            self.assertIn("用户发送的多张图片", text)
+            self.assertIn("五张以内统一识别。", text)
+
+        asyncio.run(run())
+
+    def test_grouped_photo_without_caption_uses_multi_image_input_fallback(self):
+        async def run():
+            svc = self.make_service()
+
+            async def fake_describe_group(session_id, photo_groups, **kwargs):
+                return "两张图属于同一组。"
+
+            svc._describe_telegram_photo_groups_for_chat = fake_describe_group
+            text = await svc._augment_chat_text_from_message(
+                "telegram:123",
+                "",
+                {
+                    "photo": [{"file_id": "p1"}],
+                    "_grouped_photos": [
+                        [{"file_id": "p1", "width": 100, "height": 100}],
+                        [{"file_id": "p2", "width": 100, "height": 100}],
+                    ],
+                    "_media_group_message_count": 2,
+                },
+            )
+
+            self.assertIn("用户发送的多张图片", text)
+            self.assertIn("用户发送了多张图片。", text)
+            self.assertNotIn("用户发送了一张图片。", text)
+
+        asyncio.run(run())
+
     def test_photo_only_timeout_uses_old_image_only_logic(self):
         async def run():
             svc = self.make_service()
@@ -2431,6 +2538,72 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(plan["mid_goals"][0]["progress_note"], "等他清醒后重说")
         self.assertEqual(plan["mid_goals"][1]["parent_id"], "lg2")
 
+    def test_life_plan_ignores_long_goal_updates_when_review_not_due(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        previous = {
+            "long_goals": [{
+                "id": "l1",
+                "dimension": "身份",
+                "text": "守住自己的创作身份",
+                "motivation": "不想被日常磨平",
+                "status": "active",
+                "created_date": "2026-07-01",
+                "updated_date": "2026-07-01",
+            }],
+            "mid_goals": [{
+                "id": "m1",
+                "parent_id": "l1",
+                "text": "整理一段作品草稿",
+                "progress_note": "",
+                "status": "active",
+                "created_date": "2026-07-01",
+                "updated_date": "2026-07-01",
+            }],
+            "today": {"date": "2026-07-01", "events": [], "texture": ""},
+            "last_long_review_date": "2026-07-01",
+        }
+        parsed = {
+            "long_goals": [{
+                "id": "l2",
+                "dimension": "关系",
+                "text": "这条长期目标不应替换旧目标",
+                "motivation": "模型误输出",
+                "status": "active",
+            }],
+            "mid_goals": [{
+                "id": "m1",
+                "parent_id": "l1",
+                "text": "根据昨天状态重排今天的中期推进",
+                "progress_note": "今天先收小口",
+                "status": "active",
+            }],
+            "ops": [
+                {"op": "update_long", "id": "l1", "text": "不应改写"},
+                {"op": "add_long", "id": "l3", "dimension": "自由", "text": "不应新增", "motivation": "未到 review"},
+                {"op": "achieve", "id": "l1", "reason": "不应完成长期目标"},
+            ],
+            "today_events": [],
+        }
+
+        plan, result = svc._life_plan_from_update(
+            previous,
+            parsed,
+            today_date="2026-07-02",
+            session_id=sid,
+            allow_long_goal_update=False,
+        )
+
+        self.assertEqual(len(plan["long_goals"]), 1)
+        self.assertEqual(plan["long_goals"][0]["id"], "l1")
+        self.assertEqual(plan["long_goals"][0]["text"], "守住自己的创作身份")
+        self.assertEqual(plan["long_goals"][0]["status"], "active")
+        self.assertEqual(plan["last_long_review_date"], "2026-07-01")
+        self.assertEqual(plan["mid_goals"][0]["text"], "根据昨天状态重排今天的中期推进")
+        self.assertEqual(result["applied"], 0)
+        self.assertEqual(result["ignored"], 3)
+        self.assertTrue(all(item.get("reason") == "long_review_not_due" for item in result["details"]))
+
     def test_normalize_life_event_accepts_field_aliases(self):
         # 模型可能用 summary/time/related_mid 别名，代码应兼容映射
         svc = self.make_service()
@@ -3551,6 +3724,31 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_post_chat_push_schedule_uses_session_scoped_image_config(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            seen = []
+
+            def fake_has_llm_config(purpose, session_id=""):
+                seen.append((purpose, session_id))
+                return purpose == "image" and session_id == sid
+
+            svc.has_llm_config = fake_has_llm_config
+            state = svc._get_session_state(sid)
+            session_schema.set_last_message_time(state, time.time())
+
+            self.assertTrue(svc._schedule_post_chat_push(sid))
+            self.assertIn(("image", sid), seen)
+            task = svc._post_chat_push_tasks[sid]
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(run())
+
     def test_post_chat_push_fire_requires_quiet_and_counts_success(self):
         async def run():
             svc = self.make_service()
@@ -4270,6 +4468,26 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertTrue(result.startswith("First-person POV from the user's viewpoint"))
             self.assertIn("She sits close on the edge of the bed", result)
             self.assertIn("black camisole dress", result)
+
+        asyncio.run(run())
+
+    def test_translate_to_tags_passes_session_id_to_image_llm(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "image" and session_id == sid
+            captured = {}
+
+            async def fake_call_llm(system, user, **kwargs):
+                captured.update(kwargs)
+                return "She waits by the window. soft light"
+
+            svc._call_llm = fake_call_llm
+
+            await svc._translate_to_tags("在窗边等你", session_id=sid, view="selfie")
+
+            self.assertEqual(captured.get("purpose"), "image")
+            self.assertEqual(captured.get("session_id"), sid)
 
         asyncio.run(run())
 
@@ -8950,6 +9168,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("deadlines", src)
         self.assertIn("_dialog_role_legend", src)
         self.assertIn("Do not swap their perspective", src)
+        self.assertIn("Stable user facts, preferences, boundaries, and corrections belong to long-term memory", src)
+        self.assertIn("macro relationship arcs, major event ledger, character trajectory", src)
+        self.assertIn("Drop expired, resolved, superseded", src)
 
     def test_checkpoint_summarizer_injects_role_legend(self):
         async def run():
@@ -9023,12 +9244,53 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         import inspect
         src = inspect.getsource(svc._generate_character_history_summary)
         self.assertIn("不要编造", src)
-        self.assertIn("只基于日记原文", src)
+        self.assertIn("只基于提供的日记", src)
         self.assertIn("剧情逻辑惯性", src)
         self.assertIn("角色心理", src)
         self.assertIn("心情界定", src)
         self.assertIn("日记是当前 bot 角色的一人称记录", src)
         self.assertIn("不要把用户的动作", src)
+        self.assertIn("长期记忆已经负责稳定事实", src)
+        self.assertIn("checkpoint 和当前窗口只负责近期连续性", src)
+        self.assertIn("已经过期、解决、被替代", src)
+
+    def test_history_summary_uses_long_memory_checkpoint_and_current_window(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = svc._context_character_key(sid)
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "chat"
+            svc._long_term_memory_context = lambda session_id, query="", limit=None: "长期记忆: 用户怕冷。"
+            svc.app_store.upsert_checkpoint(sid, key, "checkpoint: 还在门口等一句回答", 1)
+            state = svc._get_session_state(sid)
+            session_schema.set_chat_history(state, [
+                {"role": "user", "content": "当前窗口重大转折"},
+                {"role": "assistant", "content": "角色承认自己在犹豫"},
+            ])
+            svc._save_session_state(sid, state)
+            captured = {}
+
+            async def fake_call_llm(system, user, **kwargs):
+                captured["system"] = system
+                captured["user"] = user
+                return "新版历史提要"
+
+            svc._call_llm = fake_call_llm
+            await svc._generate_character_history_summary(
+                sid,
+                key,
+                [{"diary_date": "2026-07-06", "content": "我在日记里记下今天的转折。"}],
+            )
+
+            self.assertIn("长期记忆模块", captured["user"])
+            self.assertIn("用户怕冷", captured["user"])
+            self.assertIn("Checkpoint", captured["user"])
+            self.assertIn("还在门口等一句回答", captured["user"])
+            self.assertIn("当前窗口", captured["user"])
+            self.assertIn("当前窗口重大转折", captured["user"])
+            self.assertIn("已经过期、解决、被替代", captured["system"])
+
+        asyncio.run(run())
 
     def test_dream_memory_prompt_keeps_time_nodes_until_faded(self):
         """dream 记忆整理应软约束过时时间节点，不是一过期就删。"""
@@ -9495,6 +9757,57 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(order[0][1], "2026-06-24")
             self.assertEqual(order[0][2], "dream:manual")
             self.assertEqual(order[0][3], max(ids))
+
+        asyncio.run(run())
+
+    def test_dream_summary_chain_extracts_memory_before_history_and_checkpoint(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = svc._context_character_key(sid)
+            svc.app_store.append_messages(sid, key, [
+                {"role": "user", "content": "今天发生了重要转折"},
+                {"role": "assistant", "content": "我会记住这件事"},
+            ])
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "chat"
+            order = []
+            svc.write_character_checkpoint = lambda *args, **kwargs: Path("fake-checkpoint.json")
+
+            async def fake_diary(*args, **kwargs):
+                order.append("diary")
+                return "梦境日记"
+
+            async def fake_extract(*args, **kwargs):
+                order.append("extract-long-memory")
+
+            async def fake_organize(*args, **kwargs):
+                order.append("organize-long-memory")
+                return {"status": "ok"}
+
+            async def fake_life(*args, **kwargs):
+                order.append("life-plan")
+                return {"status": "ok"}
+
+            async def fake_history(*args, **kwargs):
+                order.append("character-history")
+
+            async def fake_checkpoint(*args, **kwargs):
+                order.append(("checkpoint", kwargs.get("extract_memory")))
+
+            svc._write_dream_diary = fake_diary
+            svc._extract_long_term_memories_from_messages = fake_extract
+            svc._organize_memories_after_dream = fake_organize
+            svc._update_life_plan_after_dream = fake_life
+            svc._generate_character_history_summary = fake_history
+            svc._run_context_checkpoint = fake_checkpoint
+
+            await svc._dream_once(sid, key, datetime(2026, 7, 6, tzinfo=timezone.utc), reason="manual")
+
+            self.assertLess(order.index("extract-long-memory"), order.index("organize-long-memory"))
+            self.assertLess(order.index("organize-long-memory"), order.index("character-history"))
+            checkpoint_index = next(i for i, item in enumerate(order) if isinstance(item, tuple) and item[0] == "checkpoint")
+            self.assertLess(order.index("character-history"), checkpoint_index)
+            self.assertEqual(order[checkpoint_index], ("checkpoint", False))
 
         asyncio.run(run())
 

@@ -646,7 +646,7 @@ async def plan_roleplay_image(
     persisted_co_located = session_schema.get_user_co_located(state)
     if now is None:
         now = service._session_now(session_id)
-    if not service.has_llm_config("image"):
+    if not service.has_llm_config("image", session_id):
         fallback_view = _resolve_roleplay_view(
             requested_view=requested_view,
             planned_view="",
@@ -1280,7 +1280,7 @@ async def plan_animatool_slots(
     返回 dict（可直接 POST /anima/generate_turbo + seed/steps/cfg/filename_prefix），
     失败时返回 None，调用方应回退到旧逻辑。
     """
-    if not service.has_llm_config("image"):
+    if not service.has_llm_config("image", session_id):
         return None
 
     try:

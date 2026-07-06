@@ -301,7 +301,15 @@ class LifePlanMixin:
             pass
         return count
 
-    def _apply_life_plan_ops(self, plan: dict[str, Any], ops: list[Any], *, today_date: str, session_id: str = "") -> dict[str, Any]:
+    def _apply_life_plan_ops(
+        self,
+        plan: dict[str, Any],
+        ops: list[Any],
+        *,
+        today_date: str,
+        session_id: str = "",
+        allow_long_ops: bool = True,
+    ) -> dict[str, Any]:
         result = {"applied": 0, "ignored": 0, "details": []}
         longs = plan.setdefault("long_goals", [])
         mids = plan.setdefault("mid_goals", [])
@@ -339,6 +347,12 @@ class LifePlanMixin:
 
             oid = str(_g("id") or "").strip()
             applied = False
+            long_ids = {str(item.get("id") or "") for item in longs if isinstance(item, dict)}
+            touches_long = name in {"add_long", "update_long"} or (name in {"achieve", "abandon"} and oid in long_ids)
+            if touches_long and not allow_long_ops:
+                result["ignored"] += 1
+                result["details"].append({"op": name, "id": oid, "applied": False, "reason": "long_review_not_due"})
+                continue
             if name in {"progress", "update_mid"} and oid:
                 for mid in mids:
                     if mid.get("id") == oid:
@@ -450,10 +464,12 @@ class LifePlanMixin:
         today_date: str,
         session_id: str = "",
         replace_goals: bool = False,
+        allow_long_goal_update: bool = True,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         plan = self._normalize_life_plan_payload(previous, today_date=today_date, session_id=session_id)
-        long_review_touched = replace_goals or isinstance(parsed.get("long_goals"), list)
-        if isinstance(parsed.get("long_goals"), list):
+        long_review_touched = bool(replace_goals)
+        if allow_long_goal_update and isinstance(parsed.get("long_goals"), list):
+            long_review_touched = True
             plan["long_goals"] = []
             for item in parsed.get("long_goals") or []:
                 goal = self._normalize_life_goal(item, prefix="l", today_date=today_date, existing=plan["long_goals"])
@@ -477,8 +493,14 @@ class LifePlanMixin:
             name = str(op.get("op") or "").strip().lower()
             oid = str(op.get("id") or "").strip()
             if name in {"add_long", "update_long"} or (name in {"achieve", "abandon"} and oid in long_ids):
-                long_review_touched = True
-        op_result = self._apply_life_plan_ops(plan, ops, today_date=today_date, session_id=session_id)
+                long_review_touched = allow_long_goal_update
+        op_result = self._apply_life_plan_ops(
+            plan,
+            ops,
+            today_date=today_date,
+            session_id=session_id,
+            allow_long_ops=allow_long_goal_update,
+        )
         if replace_goals:
             op_result["mode"] = "replace_goals"
         events = self._life_plan_events_from_update(parsed, today_date=today_date, mids=plan.get("mid_goals") or [], session_id=session_id)
@@ -737,6 +759,7 @@ class LifePlanMixin:
         place_keys = ", ".join(sorted(PLACE_TYPES))
         review_days = self._life_plan_limit(session_id, "life_plan_long_review_days", 10)
         long_review_due = True if rewrite_goals else self._life_long_review_due(session_id, previous or {}, today_date)
+        allow_long_goal_update = bool(rewrite_goals or long_review_due or self._life_plan_needs_bootstrap(previous or {}))
         previous_goals = {
             "long_goals": (previous or {}).get("long_goals") or [],
             "mid_goals": (previous or {}).get("mid_goals") or [],
@@ -762,7 +785,8 @@ class LifePlanMixin:
             "Do not default to hollow relationship maintenance such as '维系感情', '和用户更亲密', or '把生活过安稳一点' unless the character setting explicitly makes that the central drive. "
             "Mid goals must be concrete stages toward long goals, not generic chores or daily relationship upkeep. "
             f"Review long_goals roughly every {review_days} days. Long-goal review is {'due' if long_review_due else 'not due'} today; "
-            "when it is not due, avoid long_goals/add_long/update_long unless diary evidence forces a major stable change. "
+            "when it is not due, do not output long_goals, add_long, update_long, or achieve/abandon for long-goal ids. "
+            "Mid goals may be regenerated or adjusted every day from the active long goals, yesterday's diary state, recent context, and current evidence. "
             "At least 1 today event should relate to a mid goal when any active mid goal exists. "
             "If an event did not happen, that is normal; mark yesterday as derailed/skipped only when diary evidence says so. "
             "Do not carry derailed events forward as debt. Do not invent facts that contradict diaries, memories, or history.\n"
@@ -799,6 +823,7 @@ class LifePlanMixin:
             today_date=today_date,
             session_id=session_id,
             replace_goals=bool(rewrite_goals),
+            allow_long_goal_update=allow_long_goal_update,
         )
 
     def _select_life_texture_mid_goals(self, plan: dict[str, Any], *, today_date: str, session_id: str) -> list[dict[str, Any]]:

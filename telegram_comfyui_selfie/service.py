@@ -184,6 +184,7 @@ class TelegramComfyUIService(
         self._post_chat_push_tasks: dict[str, asyncio.Task] = {}
         self._interruptible_tasks: dict[str, set[asyncio.Task]] = {}
         self._pending_photo_inputs: dict[str, dict[str, Any]] = {}
+        self._pending_media_group_inputs: dict[str, dict[str, Any]] = {}
         self._protected_image_tasks: set[asyncio.Task] = set()
         self._llm_debug_buffer: list[dict[str, Any]] = []
         self._llm_debug_flush_threshold = 10
@@ -2328,6 +2329,56 @@ class TelegramComfyUIService(
         text = re.sub(r"\n```$", "", text).strip()
         return text
 
+    async def _describe_images_for_chat(
+        self,
+        session_id: str,
+        images: list[tuple[bytes, str]],
+        *,
+        source_label: str = "多张图片",
+        nearby_text: str = "",
+    ) -> str:
+        """把 Telegram 相册作为一个整体转成纯文本描述，保留跨图关系。"""
+        if not images or not self.has_llm_config("vision", session_id):
+            return ""
+        recent = self._recent_dialogue_text_for_vision(session_id)
+        context_parts = []
+        if recent:
+            context_parts.append("最近两轮对话:\n" + recent)
+        if nearby_text:
+            context_parts.append("用户当前文字/引用线索:\n" + nearby_text.strip()[:1200])
+        context = "\n\n".join(context_parts) or "无额外上下文。"
+        system = (
+            "你是聊天输入的图片理解器。用户可能一次发送多张图片；请把这些图片作为同一组相册整体理解，"
+            "输出一段中文纯文本供后续角色聊天模型阅读。可以参考最近两轮对话理解代词、场景和用户意图，"
+            "但不要编造图片里没有的内容。优先描述每张图的主体差异、共同主题、顺序关系、文字信息、环境和与对话相关的细节。"
+            "不要输出 JSON、Markdown 标题或解释。"
+        )
+        content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": f"{context}\n\n请统一描述这组{source_label}，180 字以内；如多图之间有对比、连续动作或同一物体的不同角度，请明确说明。",
+            }
+        ]
+        for idx, (image_bytes, mime_type) in enumerate(images[:5], start=1):
+            if not image_bytes:
+                continue
+            mime_type = (mime_type or "image/jpeg").strip() or "image/jpeg"
+            data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+            content.append({"type": "text", "text": f"第 {idx} 张图片:"})
+            content.append({"type": "image_url", "image_url": {"url": data_url}})
+        if len(content) <= 1:
+            return ""
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": content},
+        ]
+        data = await self._call_llm_messages(messages, tag="describe-images", temp=0.2, purpose="vision", session_id=session_id)
+        msg = data.get("choices", [{}])[0].get("message", {})
+        text = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+        text = re.sub(r"^```[a-zA-Z]*\n", "", text)
+        text = re.sub(r"\n```$", "", text).strip()
+        return text
+
     async def _translate_to_tags(
         self,
         natural: str,
@@ -2336,7 +2387,7 @@ class TelegramComfyUIService(
         is_intimate: bool = False,
         free_composition: bool = False,
     ) -> str:
-        if not self.has_llm_config("image"):
+        if not self.has_llm_config("image", session_id):
             return natural
         view = (view or "").strip().lower()
         if view not in VALID_VIEWS:
@@ -2430,7 +2481,14 @@ class TelegramComfyUIService(
                 f"Chinese 你的手/你的胸/你的背/你的腿 must become visible partial {body} body parts of the partner, not a second person. "
                 "Do not turn the user into a second full character."
             )
-        text = await self._call_llm(system, f"请翻译: {natural}", temp=float(self._get_llm_value("image", "temperature_translate", "0.3")), tag="translate", purpose="image")
+        text = await self._call_llm(
+            system,
+            f"请翻译: {natural}",
+            temp=float(self._get_llm_value("image", "temperature_translate", "0.3")),
+            tag="translate",
+            purpose="image",
+            session_id=session_id,
+        )
         natural_text = str(natural or "").strip()
         body = text.strip().strip(",")
         if opener:

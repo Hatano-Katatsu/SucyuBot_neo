@@ -215,6 +215,15 @@ telegram_comfyui_selfie/
 - fire-and-forget `asyncio.create_task` 内异常可能被静默吞掉；排查生图/推送失败优先看 service log。
 - `_get_llm_value("chat", "temperature")` 的 legacy 回退会落到 `llm_temperature_scene`，除非 `chat_llm_temperature` 显式设置。
 
+## 今日变更（2026-07-06）
+
+1. **拉取远端更新**：本轮先从 `origin/main` 快进到 `22a3fbf`，在最新代码上继续处理 Telegram 图片输入、续场推送、life plan 和 dream 摘要链路。
+2. **多图输入统一识别**：Telegram 相册 `media_group_id` 会先短暂聚合，再作为一组图片交给视觉模型统一描述；无配文相册会继续进入“图片后等待文字”窗口。连续发送多张单图时也复用同一个等待窗口，用户随后发来的纯文本会作为这组图的配文/附近上下文；窗口内最多保留前 5 张，超出的图片丢弃。聊天模型仍只收到纯文本图片描述，不直接接收多模态 payload。
+3. **续场/生图 image profile 作用域修复**：续场推送调度、推送/生图 planner、Anima slots、场景 tag 翻译等 image LLM 判断改为带 `session_id`，避免用户私有 image profile 配好但全局 image 配置为空时误判不可用；不改 `_schedule_post_chat_push()` / `_fire_post_chat_push()` 的 skip reason 结构。
+4. **生活线长期/中期节奏**：`life_plan_long_review_days` 默认不变；长期目标现在有代码层硬门控，只有首次补齐、手动重写或 review 到期时才允许替换/新增/更新/完成长期目标。中期目标仍允许每天根据长期目标、前一天日记状态和近期材料重排；即使模型误输出 long ops，未到期也会忽略。
+5. **dream 摘要链路分层**：dream 日记落库后先抽取长期记忆，再整理长期记忆，再用长期记忆、checkpoint 和当前窗口生成角色历史提要，最后以最新长期/历史依据更新 checkpoint。提示词明确长期记忆负责稳定事实/偏好/边界，角色历史负责重大事件台账、个人轨迹和扮演计划，checkpoint 只承接近期连续性，并丢弃已过期、解决或被替代的短期事实，降低三层互相重叠和事实断裂。
+6. **本轮回归验证**：新增测试覆盖 Telegram 相册统一识别、连续单图等待配文合并且最多 5 张、多图无配文兜底文本、续场推送使用 session 级 image 配置、`_translate_to_tags()` 传递 session、长期目标未到 review 时忽略 long 更新、角色历史读取长期记忆/checkpoint/current window、dream 摘要链路顺序。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 370 tests in 9.753s`，`OK (skipped=1)`。
+
 ## 今日变更（2026-07-03）
 
 1. **对话后续场推送**：新增 `post_chat_push_enabled`、`post_chat_push_delay_min_minutes`、`post_chat_push_delay_max_minutes`、`post_chat_push_daily_limit`、`post_chat_push_cooldown_minutes` 配置，并接入 WebUI/示例配置/会话 schema。普通聊天收到用户消息后会安排一次 5-15 分钟随机 followup 推送；若用户期间继续说话，会取消旧任务并按最新消息重排；发送前仍检查 frozen、goodnight inhibition、active push、每日上限和冷却。

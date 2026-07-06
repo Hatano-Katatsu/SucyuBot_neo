@@ -1330,6 +1330,21 @@ class ChatContextMixin:
         state = self._get_session_state(session_id)
         return session_schema.get_character_history_summary(state)
 
+    def _checkpoint_summary_durable_context(self, session_id: str) -> str:
+        """给 checkpoint 摘要器看的长期依据，只用于去重和归属判断。"""
+        parts: list[str] = []
+        history_summary = self._character_history_summary_context(session_id)
+        if history_summary:
+            parts.append(f"角色历史提要（宏观关系/重大事件/个人轨迹，不要在 checkpoint 中复述）:\n{history_summary}")
+        try:
+            memory_context = self._long_term_memory_context(session_id)
+        except Exception:
+            memory_context = ""
+            logger.debug("long memory context lookup for checkpoint failed", exc_info=True)
+        if memory_context:
+            parts.append(f"长期记忆（稳定事实/偏好/边界/纠正，不要在 checkpoint 中复述）:\n{memory_context}")
+        return "\n\n".join(parts)
+
     def _build_scene_system_prompt(self, session_id: str, *, weather: Any = None, mode: str = "image", now: Any = None) -> str:
         """构建场景生成用的完整 system prompt，复用聊天侧的静态 + 稳定 + 动态上下文。
 
@@ -1509,7 +1524,15 @@ class ChatContextMixin:
         # 只排后台任务，不 await；checkpoint 摘要和记忆提取不能阻塞本轮聊天回复。
         self._checkpoint_tasks[scope] = asyncio.create_task(self._run_context_checkpoint(session_id, key, keep))
 
-    async def _run_context_checkpoint(self, session_id: str, character_key: str, keep: int, *, force: bool = False):
+    async def _run_context_checkpoint(
+        self,
+        session_id: str,
+        character_key: str,
+        keep: int,
+        *,
+        force: bool = False,
+        extract_memory: bool = True,
+    ):
         try:
             checkpoint = self.app_store.get_checkpoint(session_id, character_key)
             pending = self.app_store.list_messages(session_id, character_key, after_id=int(checkpoint.get("source_until_id") or 0))
@@ -1529,10 +1552,11 @@ class ChatContextMixin:
                 merged = merged[-hard:]
             until_id = int(overflow[-1]["id"])
             # Extract stable long-term memories from the overflow before committing checkpoint.
-            try:
-                await self._extract_long_term_memories_from_messages(session_id, overflow, source_type="checkpoint")
-            except Exception:
-                logger.warning("checkpoint memory extraction failed", exc_info=True)
+            if extract_memory:
+                try:
+                    await self._extract_long_term_memories_from_messages(session_id, overflow, source_type="checkpoint")
+                except Exception:
+                    logger.warning("checkpoint memory extraction failed", exc_info=True)
             self.app_store.upsert_checkpoint(session_id, character_key, merged, until_id)
             state = self._get_session_state(session_id)
             session_schema.set_checkpoint_summary(state, merged)
@@ -1555,6 +1579,15 @@ class ChatContextMixin:
         soft = str(self.config.get("checkpoint_soft_limit_chars", "2000") or "2000")
         dialog = self._format_store_messages(messages, limit_chars=18000)
         role_legend = self._dialog_role_legend()
+        durable_context = self._checkpoint_summary_durable_context(session_id)
+        durable_rules = (
+            "Use durable context only as a de-duplication and ownership reference. "
+            "Stable user facts, preferences, boundaries, and corrections belong to long-term memory; "
+            "macro relationship arcs, major event ledger, character trajectory, and acting direction belong to character history. "
+            "Checkpoint should keep only short-term current-scene continuity, unresolved near-term actions, latest explicit state, and immediate promises. "
+            "Drop expired, resolved, superseded, or no-longer-actionable short-term facts. "
+            "Do not restate durable context unless a tiny pointer is necessary for continuity. "
+        )
         if not self.has_llm_config("image", session_id):
             if not self.has_llm_config("chat", session_id):
                 combined = (previous + "\n" if previous else "") + dialog
@@ -1567,6 +1600,7 @@ class ChatContextMixin:
                 "current places, and the latest photo only when the dialogue is directly responding to it. "
                 "Actively preserve explicit time anchors mentioned by the user, such as dates, clock times, deadlines, "
                 "appointments, countdowns, and relative time nodes, with their related event and status when stated. "
+                f"{durable_rules}"
                 "Do not duplicate character-history arcs, durable relationship progress, permanent profile facts, "
                 "stable preferences, boundaries, corrections, or memory-worthy facts. "
                 f"Soft limit: {soft} Chinese characters. Output only the summary text. "
@@ -1576,7 +1610,11 @@ class ChatContextMixin:
                 f"{role_legend} Keep ownership clear: Assistant is the bot character's speech/actions; User is the human user's speech/actions. "
                 "Do not swap their perspective, emotions, promises, or physical actions."
             )
-            user = f"Existing checkpoint:\n{previous or 'none'}\n\nDialogue role legend:\n{role_legend}\n\nOverflow dialogue:\n{dialog}"
+            user = (
+                f"Durable context for de-duplication only:\n{durable_context or 'none'}\n\n"
+                f"Existing checkpoint:\n{previous or 'none'}\n\n"
+                f"Dialogue role legend:\n{role_legend}\n\nOverflow dialogue:\n{dialog}"
+            )
             return await self._call_llm(system, user, temp=0.1, tag="checkpoint", purpose="chat", disable_thinking=True, session_id=session_id)
         system = (
             "You are a checkpoint summarizer for a long roleplay chat. Merge the existing checkpoint "
@@ -1585,6 +1623,7 @@ class ChatContextMixin:
             "current places, and the latest photo only when the dialogue is directly responding to it. "
             "Actively preserve explicit time anchors mentioned by the user, such as dates, clock times, deadlines, "
             "appointments, countdowns, and relative time nodes, with their related event and status when stated. "
+            f"{durable_rules}"
             "Do not duplicate character-history arcs, durable relationship progress, permanent profile facts, "
             "stable preferences, boundaries, corrections, or memory-worthy facts. "
             f"Soft limit: {soft} Chinese characters. Output only the summary text. "
@@ -1594,7 +1633,11 @@ class ChatContextMixin:
             f"{role_legend} Keep ownership clear: Assistant is the bot character's speech/actions; User is the human user's speech/actions. "
             "Do not swap their perspective, emotions, promises, or physical actions."
         )
-        user = f"Existing checkpoint:\n{previous or 'none'}\n\nDialogue role legend:\n{role_legend}\n\nOverflow dialogue:\n{dialog}"
+        user = (
+            f"Durable context for de-duplication only:\n{durable_context or 'none'}\n\n"
+            f"Existing checkpoint:\n{previous or 'none'}\n\n"
+            f"Dialogue role legend:\n{role_legend}\n\nOverflow dialogue:\n{dialog}"
+        )
         return await self._call_llm(system, user, temp=0.1, tag="checkpoint", purpose="image", disable_thinking=True, session_id=session_id)
 
     @staticmethod

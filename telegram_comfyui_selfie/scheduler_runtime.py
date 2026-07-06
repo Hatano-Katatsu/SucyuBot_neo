@@ -216,7 +216,7 @@ class SchedulerRuntimeMixin:
 
     async def _llm_write_scene(self, mode, weather, weekday, time_period, recent_chat=None, session_id="", now=None, weather_data=None):
         from .image_planning import plan_roleplay_image
-        if not self.has_llm_config("image"):
+        if not self.has_llm_config("image", session_id):
             return None, None, None, None, None
         plan = await plan_roleplay_image(
             self, session_id, mode=mode or "normal",
@@ -526,6 +526,11 @@ class SchedulerRuntimeMixin:
             f"日记更新 reason={reason} date={diary_date} messages={len(messages)} "
             f"source_chars={len(source_text)} diary_chars={len(diary or '')} output={self._log_excerpt(diary)}",
         )
+        if messages and self.has_llm_config("chat", session_id) and hasattr(self, "_extract_long_term_memories_from_messages"):
+            try:
+                await self._extract_long_term_memories_from_messages(session_id, messages, source_type="dream")
+            except Exception:
+                logger.warning("dream memory extraction failed", exc_info=True)
         memory_result = await self._organize_memories_after_dream(session_id, character_key)
         if isinstance(memory_result, dict):
             self._ulog(session_id, "MEMORY", f"dream整理结果 {json.dumps(memory_result, ensure_ascii=False, default=str)}")
@@ -542,6 +547,14 @@ class SchedulerRuntimeMixin:
                 self._ulog(session_id, "LIFE", f"dream生活线结果 {json.dumps(life_result, ensure_ascii=False, default=str)}")
         diaries = self.app_store.recent_diaries(session_id, character_key, limit=2)
         await self._generate_character_history_summary(session_id, character_key, diaries)
+        if hasattr(self, "_run_context_checkpoint"):
+            await self._run_context_checkpoint(
+                session_id,
+                character_key,
+                self._checkpoint_keep_message_limit(),
+                force=True,
+                extract_memory=False,
+            )
         self.app_store.mark_dream(session_id, character_key, to_id)
         state = self._get_session_state(session_id)
         session_schema.set_last_dream_at(state, time.time())
@@ -943,20 +956,50 @@ class SchedulerRuntimeMixin:
         meta = self.app_store.get_context_meta(session_id, key)
         previous = (meta.get("character_history_summary") or "").strip()
         diary_text = "\n\n".join(f"[{d.get('diary_date')}]\n{d.get('content','')}" for d in diaries)
+        long_memory = ""
+        try:
+            long_memory = self._long_term_memory_context(session_id, limit=10)
+        except Exception:
+            logger.debug("history summary long memory lookup failed", exc_info=True)
+        checkpoint = ""
+        try:
+            checkpoint = (self.app_store.get_checkpoint(session_id, key).get("summary") or "").strip()
+        except Exception:
+            logger.debug("history summary checkpoint lookup failed", exc_info=True)
+        current = ""
+        try:
+            current = self._format_store_messages(
+                self._active_chat_history(self._get_session_state(session_id), self._checkpoint_keep_message_limit()),
+                limit_chars=8000,
+                roles={"user", "assistant"},
+            )
+        except Exception:
+            logger.debug("history summary current context lookup failed", exc_info=True)
         system = (
             "你是角色历史提要生成器。根据上一次的历史提要和最近两天的日记，"
-            "生成一份简洁的角色发展脉络摘要。涵盖关系进展、情感变化、重要承诺、未解事件和角色成长。"
+            "并参考已经整理过的长期记忆、当前 checkpoint 和当前窗口，生成一份简洁的角色发展脉络摘要。"
+            "涵盖关系进展、重大事件台账、情感变化、重要承诺、未解事件、角色个人轨迹和扮演计划。"
             "这是给聊天模型的长期背景参考，不是日记复述。"
+            "长期记忆已经负责稳定事实、偏好、边界和纠正；角色历史不要把它们改写成第二份记忆列表。"
+            "checkpoint 和当前窗口只负责近期连续性；角色历史只提升会改变长期剧情惯性、人物轨迹或后续扮演方向的内容。"
+            "已经过期、解决、被替代或只服务当下场景的短期事实必须舍弃，不要因为它们在 checkpoint/current window 里出现就写入历史。"
             "日记是当前 bot 角色的一人称记录；日记里的「我」指角色本人，「用户」「对方」指人类用户。"
             "必须保持角色和用户的视角归属，不要把用户的动作、承诺、情绪写成角色的，也不要反过来。"
             "建议结构为「关系/剧情惯性」「角色心理与心情界定」「未解事件」「新一天演绎提示」四段，内容必须精炼。"
             "「新一天演绎提示」需要尊重剧情逻辑惯性，重点分析角色当前心理、防御/期待/羞耻/依恋等心情边界，"
             "给出顺着既有矛盾和情绪自然延展的扮演方向；不要写死具体台词、地点、日程或剧情分支。"
-            "只基于日记原文内容，不要编造、推断或补充日记中没有明确提到的事件、规则、约定或承诺。"
+            "只基于提供的日记、长期记忆、checkpoint 和当前窗口，不要编造、推断或补充来源中没有明确提到的事件、规则、约定或承诺。"
             "如果只能判断情绪倾向，必须写成倾向或可能性，不要包装成已发生事实。"
             f"字数控制在 {limit} 字以内。只输出中文摘要文本。"
         )
-        user = f"视角说明: 日记中的第一人称=当前 bot 角色；用户/对方=人类用户。\n\n上次历史提要:\n{previous or '无'}\n\n最近日记:\n{diary_text}"
+        user = (
+            "视角说明: 日记中的第一人称=当前 bot 角色；用户/对方=人类用户。\n\n"
+            f"上次历史提要:\n{previous or '无'}\n\n"
+            f"长期记忆模块（稳定事实依据，只用于校准和去重）:\n{long_memory or '无'}\n\n"
+            f"Checkpoint（近期连续性，只提炼重大轨迹，不要复述短期状态）:\n{checkpoint or '无'}\n\n"
+            f"当前窗口（只用于防止遗漏最近重大转折）:\n{current or '无'}\n\n"
+            f"最近日记:\n{diary_text}"
+        )
         try:
             summary = await self._call_llm(
                 system, user, temp=0.2, tag="history-summary",

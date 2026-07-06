@@ -24,6 +24,15 @@ class TelegramIOMixin:
         except (TypeError, ValueError):
             return 30.0
 
+    def _media_group_wait_seconds(self) -> float:
+        try:
+            raw = self.config.get("telegram_media_group_wait_seconds", 1.0)
+            if raw is None or raw == "":
+                raw = 1.0
+            return max(0.05, float(raw))
+        except (TypeError, ValueError):
+            return 1.0
+
     def _interrupt_session_tasks(self, session_id: str, *, reason: str = "", exclude: asyncio.Task | None = None) -> int:
         tasks = getattr(self, "_interruptible_tasks", None)
         if not isinstance(tasks, dict) or not session_id:
@@ -179,6 +188,12 @@ class TelegramIOMixin:
             self._ulog(session_id, "UNFREEZE", "用户发消息，自动解冻")
             logger.info("session %s auto-unfrozen by user message", session_id)
 
+        if self._consume_pending_media_group_caption(session_id, msg, text):
+            return
+
+        if self._schedule_media_group_input(chat_id, session_id, msg, text):
+            return
+
         if self._consume_pending_photo_caption(session_id, msg, text):
             return
 
@@ -225,13 +240,135 @@ class TelegramIOMixin:
             await self.send_message(chat_id, f"发生异常: {exc}")
 
     def _should_wait_for_photo_caption(self, session_id: str, msg: dict[str, Any], text: str) -> bool:
-        if text or not msg.get("photo"):
+        if text or not (msg.get("photo") or msg.get("_grouped_photos")):
             return False
         if msg.get("reply_to_message") or msg.get("external_reply") or msg.get("quote"):
             return False
         if not self.has_llm_config("vision", session_id):
             return False
         return self._caption_wait_seconds() > 0
+
+    def _media_group_bucket(self) -> dict[str, dict[str, Any]]:
+        bucket = getattr(self, "_pending_media_group_inputs", None)
+        if not isinstance(bucket, dict):
+            bucket = {}
+            self._pending_media_group_inputs = bucket
+        return bucket
+
+    def _schedule_media_group_input(self, chat_id: int | str, session_id: str, msg: dict[str, Any], text: str) -> bool:
+        group_id = str(msg.get("media_group_id") or "").strip()
+        if not group_id or not msg.get("photo"):
+            return False
+        cancelled = self._interrupt_session_tasks(session_id, reason="用户发送图片组，取消旧的文字生成/发送任务")
+        if cancelled:
+            # 当前函数是同步入口；把取消交还事件循环即可，无需阻塞相册聚合。
+            pass
+        key = f"{session_id}\n{group_id}"
+        bucket = self._media_group_bucket()
+        entry = bucket.get(key)
+        if not entry:
+            entry = {
+                "chat_id": chat_id,
+                "session_id": session_id,
+                "media_group_id": group_id,
+                "messages": [],
+                "caption_parts": [],
+            }
+            bucket[key] = entry
+        entry["messages"].append(dict(msg))
+        if text:
+            entry["caption_parts"].append(text)
+        old_task = entry.get("task")
+        if old_task and not old_task.done():
+            old_task.cancel()
+        entry["task"] = asyncio.create_task(
+            self._process_media_group_input_after_delay(key),
+            name=f"media-group:{session_id}:{group_id}",
+        )
+        self._ulog(session_id, "PHOTO", f"收到相册图片 media_group_id={group_id} count={len(entry['messages'])}")
+        return True
+
+    def _consume_pending_media_group_caption(self, session_id: str, msg: dict[str, Any], text: str) -> bool:
+        if not session_id or not text or msg.get("photo") or msg.get("caption"):
+            return False
+        if msg.get("reply_to_message") or msg.get("external_reply") or msg.get("quote"):
+            return False
+        bucket = getattr(self, "_pending_media_group_inputs", None)
+        if not isinstance(bucket, dict):
+            return False
+        candidates = [
+            entry for key, entry in bucket.items()
+            if key.startswith(session_id + "\n") and isinstance(entry, dict)
+        ]
+        if not candidates:
+            return False
+        entry = candidates[-1]
+        entry.setdefault("caption_parts", []).append(text)
+        old_task = entry.get("task")
+        if old_task and not old_task.done():
+            old_task.cancel()
+        key = f"{entry.get('session_id')}\n{entry.get('media_group_id')}"
+        entry["task"] = asyncio.create_task(
+            self._process_media_group_input_after_delay(key),
+            name=f"media-group:{entry.get('session_id')}:{entry.get('media_group_id')}",
+        )
+        self._ulog(session_id, "PHOTO", "收到相册后续配文，合并后处理")
+        return True
+
+    async def _process_media_group_input_after_delay(self, key: str) -> None:
+        entry: dict[str, Any] | None = None
+        chat_id: int | str | None = None
+        session_id = ""
+        try:
+            await asyncio.sleep(self._media_group_wait_seconds())
+            bucket = self._media_group_bucket()
+            entry = bucket.pop(key, None)
+            if not entry:
+                return
+            chat_id = entry.get("chat_id")
+            session_id = str(entry.get("session_id") or "")
+            messages = [m for m in entry.get("messages") or [] if isinstance(m, dict) and m.get("photo")]
+            if not messages:
+                return
+            messages.sort(key=lambda m: int(m.get("message_id") or 0))
+            base = dict(messages[0])
+            grouped_photos = [m.get("photo") for m in messages if m.get("photo")]
+            if len(grouped_photos) > 5:
+                self._ulog(session_id, "PHOTO", f"相册图片超过 5 张，仅保留前 5 张 media_group_id={entry.get('media_group_id')}")
+            base["_grouped_photos"] = grouped_photos[:5]
+            base["_media_group_message_count"] = len(base["_grouped_photos"])
+            caption_parts = []
+            seen: set[str] = set()
+            for part in entry.get("caption_parts") or []:
+                part = str(part or "").strip()
+                if part and part not in seen:
+                    seen.add(part)
+                    caption_parts.append(part)
+            caption = "\n".join(caption_parts).strip()
+            chat_id = entry.get("chat_id")
+            session_id = str(entry.get("session_id") or "")
+            if self._should_wait_for_photo_caption(session_id, base, caption):
+                self._schedule_pending_photo_input(chat_id, session_id, base)
+                return
+            current_task = asyncio.current_task()
+            cancelled = self._interrupt_session_tasks(session_id, reason="处理相册图片，取消旧的文字生成/发送任务", exclude=current_task)
+            if cancelled:
+                await asyncio.sleep(0)
+            self._register_interruptible_task(session_id, current_task)
+            try:
+                await self._process_incoming_message(chat_id, session_id, base, caption)
+            finally:
+                self._unregister_interruptible_task(session_id, current_task)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            try:
+                if session_id:
+                    self._ulog(session_id, "ERROR", f"处理相册图片异常: {exc}")
+                if chat_id is not None:
+                    await self.send_message(chat_id, f"发生异常: {exc}")
+            finally:
+                logger.error("media group handling failed: %s", exc, exc_info=True)
 
     def _consume_pending_photo_caption(self, session_id: str, msg: dict[str, Any], text: str) -> bool:
         if not session_id or not text or msg.get("photo") or msg.get("caption"):
@@ -251,30 +388,83 @@ class TelegramIOMixin:
             return True
         return False
 
+    @staticmethod
+    def _pending_photo_unit_count(messages: list[dict[str, Any]]) -> int:
+        count = 0
+        for msg in messages:
+            grouped = msg.get("_grouped_photos")
+            if isinstance(grouped, list) and grouped:
+                count += len(grouped)
+            elif msg.get("photo"):
+                count += 1
+        return count
+
+    @classmethod
+    def _pending_photo_grouped_message(cls, messages: list[dict[str, Any]]) -> dict[str, Any]:
+        clean = [m for m in messages if isinstance(m, dict) and (m.get("photo") or m.get("_grouped_photos"))]
+        if not clean:
+            return {}
+        photo_groups: list[Any] = []
+        for msg in clean:
+            grouped = msg.get("_grouped_photos")
+            if isinstance(grouped, list) and grouped:
+                photo_groups.extend(grouped)
+            elif msg.get("photo"):
+                photo_groups.append(msg.get("photo"))
+            if len(photo_groups) >= 5:
+                photo_groups = photo_groups[:5]
+                break
+        if len(photo_groups) <= 1 and not clean[0].get("_grouped_photos"):
+            return dict(clean[0])
+        base = dict(clean[0])
+        base["_grouped_photos"] = photo_groups
+        base["_media_group_message_count"] = len(photo_groups)
+        if photo_groups:
+            base["photo"] = photo_groups[0]
+        return base
+
     def _schedule_pending_photo_input(self, chat_id: int | str, session_id: str, msg: dict[str, Any]) -> None:
         pending = getattr(self, "_pending_photo_inputs", None)
         if not isinstance(pending, dict):
             pending = {}
             self._pending_photo_inputs = pending
         old = pending.get(session_id)
-        if old:
-            old_future = old.get("future")
-            if old_future and not old_future.done():
-                old_future.set_result("")
         loop = asyncio.get_running_loop()
-        future = loop.create_future()
+        messages = []
+        future = None
+        if old:
+            old_task = old.get("task")
+            if old_task and not old_task.done():
+                old_task.cancel()
+            if old.get("future") and not old["future"].done():
+                future = old["future"]
+                messages = list(old.get("messages") or [])
+        if future is None:
+            future = loop.create_future()
+        unit_count = self._pending_photo_unit_count(messages)
+        incoming_units = self._pending_photo_unit_count([msg])
+        if unit_count >= 5:
+            self._ulog(session_id, "PHOTO", "图片等待窗口已满 5 张，丢弃后续图片")
+        elif unit_count + incoming_units > 5:
+            messages.append(msg)
+            self._ulog(session_id, "PHOTO", "图片等待窗口超过 5 张，仅保留前 5 张")
+        else:
+            messages.append(msg)
         task = asyncio.create_task(
-            self._process_pending_photo_input(chat_id, session_id, dict(msg), future),
+            self._process_pending_photo_input(chat_id, session_id, future),
             name=f"pending-photo-caption:{session_id}",
         )
-        pending[session_id] = {"future": future, "task": task}
-        self._ulog(session_id, "PHOTO", f"图片无配文，等待 {self._caption_wait_seconds():.1f}s 合并后续输入")
+        pending[session_id] = {"future": future, "task": task, "messages": messages}
+        self._ulog(
+            session_id,
+            "PHOTO",
+            f"图片无配文，等待 {self._caption_wait_seconds():.1f}s 合并后续输入 count={min(5, self._pending_photo_unit_count(messages))}",
+        )
 
     async def _process_pending_photo_input(
         self,
         chat_id: int | str,
         session_id: str,
-        msg: dict[str, Any],
         future: asyncio.Future,
     ) -> None:
         caption = ""
@@ -284,10 +474,15 @@ class TelegramIOMixin:
             except asyncio.TimeoutError:
                 caption = ""
             pending = getattr(self, "_pending_photo_inputs", {})
+            entry = None
             if isinstance(pending, dict):
                 entry = pending.get(session_id)
                 if entry and entry.get("future") is future:
                     pending.pop(session_id, None)
+            messages = list((entry or {}).get("messages") or [])
+            msg = self._pending_photo_grouped_message(messages)
+            if not msg:
+                return
             current_task = asyncio.current_task()
             cancelled = self._interrupt_session_tasks(session_id, reason="处理等待配文后的图片，取消旧的文字生成/发送任务", exclude=current_task)
             if cancelled:
@@ -390,6 +585,15 @@ class TelegramIOMixin:
             mime_type = resp.headers.get("Content-Type") or mimetypes.guess_type(file_path)[0] or "image/jpeg"
         return data, mime_type
 
+    async def _download_telegram_photo_sizes(self, photo_sizes: Any) -> tuple[bytes, str] | None:
+        photo = self._largest_photo_size(photo_sizes)
+        file_id = str(photo.get("file_id") or "")
+        if not file_id:
+            return None
+        if int(photo.get("file_size") or 0) > 20 * 1024 * 1024:
+            return None
+        return await self._download_telegram_file(file_id)
+
     async def _describe_telegram_photo_sizes_for_chat(
         self,
         session_id: str,
@@ -400,17 +604,49 @@ class TelegramIOMixin:
     ) -> str:
         if not hasattr(self, "_describe_image_for_chat") or not self.has_llm_config("vision", session_id):
             return ""
-        photo = self._largest_photo_size(photo_sizes)
-        file_id = str(photo.get("file_id") or "")
-        if not file_id:
+        downloaded = await self._download_telegram_photo_sizes(photo_sizes)
+        if not downloaded:
             return ""
-        if int(photo.get("file_size") or 0) > 20 * 1024 * 1024:
-            return ""
-        image_bytes, mime_type = await self._download_telegram_file(file_id)
+        image_bytes, mime_type = downloaded
         return await self._describe_image_for_chat(
             session_id,
             image_bytes,
             mime_type,
+            source_label=source_label,
+            nearby_text=nearby_text,
+        )
+
+    async def _describe_telegram_photo_groups_for_chat(
+        self,
+        session_id: str,
+        photo_groups: Any,
+        *,
+        source_label: str,
+        nearby_text: str = "",
+    ) -> str:
+        if not hasattr(self, "_describe_images_for_chat") or not self.has_llm_config("vision", session_id):
+            return ""
+        if not isinstance(photo_groups, list) or not photo_groups:
+            return ""
+        images: list[tuple[bytes, str]] = []
+        for photo_sizes in photo_groups[:5]:
+            downloaded = await self._download_telegram_photo_sizes(photo_sizes)
+            if downloaded:
+                images.append(downloaded)
+        if not images:
+            return ""
+        if len(images) == 1:
+            image_bytes, mime_type = images[0]
+            return await self._describe_image_for_chat(
+                session_id,
+                image_bytes,
+                mime_type,
+                source_label=source_label,
+                nearby_text=nearby_text,
+            )
+        return await self._describe_images_for_chat(
+            session_id,
+            images,
             source_label=source_label,
             nearby_text=nearby_text,
         )
@@ -421,14 +657,25 @@ class TelegramIOMixin:
         reply_context = self._format_telegram_reply_context(msg)
         nearby = "\n".join(part for part in (reply_context, text) if part).strip()
         image_blocks: list[str] = []
-        current_desc = await self._describe_telegram_photo_sizes_for_chat(
-            session_id,
-            msg.get("photo"),
-            source_label="用户发送的图片",
-            nearby_text=nearby,
-        )
+        grouped = msg.get("_grouped_photos")
+        if grouped:
+            count = int(msg.get("_media_group_message_count") or len(grouped) or 0)
+            current_desc = await self._describe_telegram_photo_groups_for_chat(
+                session_id,
+                grouped,
+                source_label=f"用户发送的{count}张图片",
+                nearby_text=nearby,
+            )
+        else:
+            current_desc = await self._describe_telegram_photo_sizes_for_chat(
+                session_id,
+                msg.get("photo"),
+                source_label="用户发送的图片",
+                nearby_text=nearby,
+            )
         if current_desc:
-            image_blocks.append(f"用户发送的图片: {current_desc}")
+            label = "用户发送的多张图片" if grouped else "用户发送的图片"
+            image_blocks.append(f"{label}: {current_desc}")
         reply = msg.get("reply_to_message") or {}
         if isinstance(reply, dict):
             reply_desc = await self._describe_telegram_photo_sizes_for_chat(
@@ -458,5 +705,6 @@ class TelegramIOMixin:
         if text:
             blocks.append("【用户当前输入】\n" + text)
         elif image_blocks:
-            blocks.append("【用户当前输入】\n用户发送了一张图片。")
+            fallback = "用户发送了多张图片。" if grouped else "用户发送了一张图片。"
+            blocks.append("【用户当前输入】\n" + fallback)
         return "\n\n".join(blocks).strip()
