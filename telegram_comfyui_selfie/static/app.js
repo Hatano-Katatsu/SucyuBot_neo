@@ -183,8 +183,8 @@ const commandHelp = {
   "关系": ["设置你和角色的关系/空间设定，作为高级覆盖项，不替代自动动线。", "同城暧昧对象，周末经常一起出门"],
   "纯良度": ["查看或设置角色边界；数字越高越保守。", "0~10 / auto"],
   "新场景": ["开启新的短期场景，避免上一轮话题继续串进来。", ""],
-  "回滚": ["回退最近 N 轮对话（删掉角色回复和对应的你的消息），默认 1 轮，方便测试。", "2"],
-  "重答": ["删掉上一条角色回复，用同一句话重新生成。", ""],
+  "回滚": ["回退最近 N 轮对话；输入非数字时按扮演提示撤回并重生成上一轮回复。", "2 / 语气更冷一点"],
+  "重答": ["删掉上一条角色回复，用同一句话重新生成；可附加本次扮演提示。", "更主动一点"],
   "记忆": ["查看、搜索、删除或清空当前角色长期记忆。", "查看 / 搜索 关键词 / 删除 ID / 清空 确认"],
   "记住": ["手动写入一条当前角色长期记忆。", "我喜欢你用温柔一点的语气"],
   "忘记": ["删除指定长期记忆，关键词会先列候选。", "ID / 关键词"],
@@ -732,7 +732,12 @@ function renderCharacterForm() {
     characterPill("自动换装", autoChange),
   ].join("");
   overview.innerHTML = `
-    ${characterAvatarMarkup(char, state.selectedCharacter, "character-profile-avatar")}
+    <div class="character-profile-media">
+      ${characterAvatarMarkup(char, state.selectedCharacter, "character-profile-avatar")}
+      <div class="character-profile-actions">
+        <button type="button" id="character-avatar-generate">${char.avatar_path ? "重新生成头像" : "生成头像"}</button>
+      </div>
+    </div>
     <div class="character-profile-main">
       <div class="character-profile-title">
         <strong>${escapeHtml(overviewTitle)}</strong>
@@ -742,9 +747,6 @@ function renderCharacterForm() {
       <div class="character-profile-subtitle">${escapeHtml(overviewSubtitle || "基础身份未完整填写")}</div>
       <p>${escapeHtml(overviewSummary)}</p>
       <div class="character-profile-pills">${overviewPills}</div>
-    </div>
-    <div class="character-profile-actions">
-      <button type="button" id="character-avatar-generate">${char.avatar_path ? "重新生成头像" : "生成头像"}</button>
     </div>
     <input type="hidden" name="avatar_path" value="${escapeHtml(char.avatar_path || "")}">
     <input type="hidden" name="avatar_updated_at" value="${escapeHtml(char.avatar_updated_at || "")}">

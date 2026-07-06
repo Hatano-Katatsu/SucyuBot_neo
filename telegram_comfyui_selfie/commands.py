@@ -1074,6 +1074,9 @@ class CommandHandlersMixin:
             await self.send_message(chat_id, "当前没有可回滚的对话。")
             return
         arg = (arg or "").strip()
+        if arg and not re.fullmatch(r"\d+", arg):
+            await self._regenerate_last_reply(chat_id, session_id, instruction=arg, source="ROLLBACK_REGEN")
+            return
         try:
             n = max(1, int(arg)) if arg else 1
         except ValueError:
@@ -1103,31 +1106,58 @@ class CommandHandlersMixin:
             note += f"\n当前末尾用户消息: {tail[:80]}"
         await self.send_message(chat_id, note)
 
-    async def cmd_regenerate(self, chat_id, session_id, arg):
-        """重答：删掉上一条角色回复，用同一条用户消息重新生成。方便测试对比。"""
+    def _pop_last_user_for_regenerate(self, session_id: str) -> str:
         state = self._get_session_state(session_id)
         history = session_schema.get_chat_history(state)
+        changed = False
         if history and history[-1].get("role") == "assistant":
             history.pop()
+            changed = True
         if not history or history[-1].get("role") != "user":
-            await self.send_message(chat_id, "没有可重答的上一条用户消息。")
-            return
+            if changed:
+                session_schema.set_chat_history(state, history)
+                session_schema.set_replying_to_selfie(state, False)
+                self._save_session_state(session_id, state)
+            return ""
         last_user = (history.pop().get("content") or "").strip()
         session_schema.set_chat_history(state, history)
         session_schema.set_replying_to_selfie(state, False)
         self._save_session_state(session_id, state)
+        return last_user
+
+    async def _regenerate_last_reply(self, chat_id, session_id, *, instruction: str = "", source: str = "REGEN"):
+        last_user = self._pop_last_user_for_regenerate(session_id)
         if not last_user:
-            await self.send_message(chat_id, "上一条用户消息为空，无法重答。")
+            await self.send_message(chat_id, "没有可重答的上一条用户消息。")
             return
-        if not self.has_llm_config("chat"):
+        if not self.has_llm_config("chat", session_id):
             await self.send_message(chat_id, "聊天模型未配置，无法重答。")
             return
+        instruction = (instruction or "").strip()
+        extra_system = ""
+        if instruction:
+            extra_system = (
+                "【本次撤回重答提示】用户要求撤回上一轮角色回复，并根据下面的扮演提示重新生成上一轮回复。"
+                "这段提示只影响本次重答，不是新的剧情事实或用户台词；不要在回复中提到撤回、重答、提示或系统。"
+                "保持角色身份、关系、当前场景连续性和上一条用户消息不变，只调整上一轮回复的演绎方式。\n"
+                f"扮演提示: {instruction[:1200]}"
+            )
         await self.send_action(chat_id, "typing")
-        reply = await self.run_roleplay_chat(chat_id, session_id, last_user)
+        reply = await self.run_roleplay_chat(
+            chat_id,
+            session_id,
+            last_user,
+            extra_system_prompt=extra_system,
+            history_user_text=last_user,
+        )
         if reply:
-            self._ulog(session_id, "REGEN", reply)
+            self._ulog(session_id, source, reply)
             split = str(self.config.get("chat_split_paragraphs", "true")).lower() in ("true", "1", "yes")
             await self.send_message(chat_id, reply, split_paragraphs=split)
+
+    async def cmd_regenerate(self, chat_id, session_id, arg):
+        """重答：删掉上一条角色回复，用同一条用户消息重新生成。方便测试对比。"""
+        await self._regenerate_last_reply(chat_id, session_id, instruction=(arg or "").strip(), source="REGEN")
 
     async def cmd_weather(self, chat_id, session_id, arg):
         city = arg.strip()

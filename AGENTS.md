@@ -223,6 +223,8 @@ telegram_comfyui_selfie/
 4. **生活线长期/中期节奏**：`life_plan_long_review_days` 默认不变；长期目标现在有代码层硬门控，只有首次补齐、手动重写或 review 到期时才允许替换/新增/更新/完成长期目标。中期目标仍允许每天根据长期目标、前一天日记状态和近期材料重排；即使模型误输出 long ops，未到期也会忽略。
 5. **dream 摘要链路分层**：dream 日记落库后先抽取长期记忆，再整理长期记忆，再用长期记忆、checkpoint 和当前窗口生成角色历史提要，最后以最新长期/历史依据更新 checkpoint。提示词明确长期记忆负责稳定事实/偏好/边界，角色历史负责重大事件台账、个人轨迹和扮演计划，checkpoint 只承接近期连续性，并丢弃已过期、解决或被替代的短期事实，降低三层互相重叠和事实断裂。
 6. **本轮回归验证**：新增测试覆盖 Telegram 相册统一识别、连续单图等待配文合并且最多 5 张、多图无配文兜底文本、续场推送使用 session 级 image 配置、`_translate_to_tags()` 传递 session、长期目标未到 review 时忽略 long 更新、角色历史读取长期记忆/checkpoint/current window、dream 摘要链路顺序。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 370 tests in 9.753s`，`OK (skipped=1)`。
+7. **WebUI 角色头像布局修复**：角色详情顶部概览中，头像生成/重新生成按钮移到头像下方，头像和按钮组成独立窄列，右侧只保留角色文本与标签，避免窄宽度或长人设文本时按钮挤压正文列。验证 `node --check telegram_comfyui_selfie\static\app.js` 通过。
+8. **撤回带提示重答**：`/撤回` 无参数和数字参数仍走原回滚逻辑；`/撤回 <扮演提示>` 会撤掉上一条角色回复，用上一条用户消息重新生成，并把提示作为仅本次生效的 system 指令注入，不写入 `chat_history`。`/重答 [扮演提示]` 复用同一重答链路。顺手固定 `clothing_off` 单测的私有地点，避免白天公开动线触发公开穿搭 guard 干扰该用例。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 372 tests in 9.604s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-07-03）
 

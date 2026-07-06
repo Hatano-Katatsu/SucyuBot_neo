@@ -1700,6 +1700,7 @@ button:disabled .spinner {
 .character-profile-avatar {
   width: 96px;
   height: 128px;
+  align-self: center;
 }
 
 .character-profile-avatar.is-clickable {
@@ -1871,7 +1872,7 @@ button:disabled .spinner {
 
 .character-profile-strip {
   display: grid;
-  grid-template-columns: 96px minmax(0, 1fr) auto;
+  grid-template-columns: 112px minmax(0, 1fr);
   gap: 16px;
   align-items: start;
   padding: 14px;
@@ -1880,6 +1881,14 @@ button:disabled .spinner {
   border-radius: var(--radius-lg);
   background: linear-gradient(180deg, #ffffff, #f8fafc);
   box-shadow: var(--shadow-xs);
+}
+
+.character-profile-media {
+  width: 112px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
 }
 
 .character-profile-main {
@@ -1929,8 +1938,17 @@ button:disabled .spinner {
 
 .character-profile-actions {
   display: flex;
-  justify-content: flex-end;
-  align-items: flex-start;
+  justify-content: stretch;
+  align-items: stretch;
+}
+
+.character-profile-actions button {
+  width: 100%;
+  min-height: 34px;
+  padding: 8px 10px;
+  font-size: 12px;
+  white-space: normal;
+  line-height: 1.25;
 }
 
 .avatar-preview {
@@ -2261,15 +2279,15 @@ button:disabled .spinner {
     max-height: 240px;
   }
   .character-profile-strip {
-    grid-template-columns: 72px minmax(0, 1fr);
+    grid-template-columns: 88px minmax(0, 1fr);
+  }
+  .character-profile-media {
+    width: 88px;
   }
   .character-profile-avatar {
     width: 72px;
     height: 96px;
-  }
-  .character-profile-actions {
-    grid-column: 1 / -1;
-    justify-content: flex-start;
+    align-self: center;
   }
   .diary-compose,
   .diary-note-grid {

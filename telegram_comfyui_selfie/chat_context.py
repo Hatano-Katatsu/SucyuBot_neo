@@ -324,7 +324,15 @@ class ChatContextMixin:
                 self._trim_last_assistant_history_to_sent(session_id, reply, sent_reply)
             raise
 
-    async def run_roleplay_chat(self, chat_id: int | str, session_id: str, user_text: str) -> str:
+    async def run_roleplay_chat(
+        self,
+        chat_id: int | str,
+        session_id: str,
+        user_text: str,
+        *,
+        extra_system_prompt: str = "",
+        history_user_text: str | None = None,
+    ) -> str:
         state = self._get_session_state(session_id)
         if hasattr(self, "_ensure_life_profile"):
             # 角色生活档案（年龄段/白天职场）按人设推断并缓存：命中缓存时无开销，仅人设变动才重算。
@@ -333,6 +341,9 @@ class ChatContextMixin:
             except Exception:
                 logger.debug("ensure life profile failed", exc_info=True)
         messages = self._build_chat_messages(session_id, user_text)
+        extra_system_prompt = str(extra_system_prompt or "").strip()
+        if extra_system_prompt:
+            messages.insert(max(0, len(messages) - 1), {"role": "system", "content": extra_system_prompt})
         tools = self._chat_tools_schema()
         chat_request_body = {
             "messages": messages,
@@ -585,8 +596,8 @@ class ChatContextMixin:
             asyncio.create_task(_bg_extract())
 
         history = session_schema.get_chat_history(state)
-        history_user_text = self._sanitize_user_history_text(user_text)
-        new_messages = [{"role": "user", "content": history_user_text}]
+        stored_user_text = self._sanitize_user_history_text(history_user_text if history_user_text is not None else user_text)
+        new_messages = [{"role": "user", "content": stored_user_text}]
         if content:
             new_messages.append({"role": "assistant", "content": content})
         if hasattr(self, "_take_pending_photo_history_messages"):

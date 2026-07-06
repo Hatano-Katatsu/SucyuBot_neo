@@ -1036,6 +1036,78 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_rollback_with_prompt_regenerates_previous_reply(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.send_message = AsyncMock()
+            svc.send_action = AsyncMock()
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "chat" and session_id == sid
+            state = svc._get_session_state(sid)
+            session_schema.set_chat_history(state, [
+                {"role": "user", "content": "你刚才看见什么？"},
+                {"role": "assistant", "content": "旧回复"},
+            ])
+            svc._save_session_state(sid, state)
+            captured = {}
+
+            async def fake_run_roleplay(chat_id, session_id, user_text, **kwargs):
+                captured["chat_id"] = chat_id
+                captured["session_id"] = session_id
+                captured["user_text"] = user_text
+                captured["kwargs"] = kwargs
+                return "新回复"
+
+            svc.run_roleplay_chat = fake_run_roleplay
+
+            await svc.cmd_rollback(1, sid, "语气更冷一点，不要解释")
+
+            self.assertEqual(captured["user_text"], "你刚才看见什么？")
+            self.assertEqual(captured["kwargs"]["history_user_text"], "你刚才看见什么？")
+            self.assertIn("语气更冷一点", captured["kwargs"]["extra_system_prompt"])
+            self.assertIn("只影响本次重答", captured["kwargs"]["extra_system_prompt"])
+            self.assertEqual(session_schema.get_chat_history(svc._get_session_state(sid)), [])
+            svc.send_action.assert_awaited_once_with(1, "typing")
+            svc.send_message.assert_awaited_once()
+            self.assertEqual(svc.send_message.await_args.args[1], "新回复")
+
+        asyncio.run(run())
+
+    def test_roleplay_regenerate_hint_is_not_saved_as_user_history(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.config.update({"chat_llm_api_key": "k", "chat_llm_model": "m", "chat_llm_api_base": "http://x"})
+            svc._ensure_life_profile = AsyncMock(return_value={})
+            svc._judge_image_moment = AsyncMock(return_value=None)
+            svc._update_character_place_from_text = AsyncMock()
+            captured = {}
+
+            async def fake_call_llm_messages(messages, **kwargs):
+                captured["messages"] = messages
+                return {"choices": [{"message": {"content": "新的角色回复"}}], "usage": {}}
+
+            svc._call_llm_messages = fake_call_llm_messages
+
+            reply = await svc.run_roleplay_chat(
+                1,
+                sid,
+                "上一条用户消息",
+                extra_system_prompt="一次性扮演提示：更克制。",
+                history_user_text="上一条用户消息",
+            )
+
+            self.assertEqual(reply, "新的角色回复")
+            self.assertEqual(captured["messages"][-2]["role"], "system")
+            self.assertIn("一次性扮演提示", captured["messages"][-2]["content"])
+            self.assertEqual(captured["messages"][-1], {"role": "user", "content": "上一条用户消息"})
+            history = session_schema.get_chat_history(svc._get_session_state(sid))
+            self.assertEqual(history[0], {"role": "user", "content": "上一条用户消息"})
+            self.assertEqual(history[1], {"role": "assistant", "content": "新的角色回复"})
+            self.assertNotIn("一次性扮演提示", "\n".join(msg["content"] for msg in history))
+
+        asyncio.run(run())
+
     def test_weather_refresh_scheduled_only_when_stale(self):
         async def run():
             svc = self.make_service()
@@ -7852,6 +7924,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         sid = "telegram:1"
         state = svc._get_session_state(sid)
         session_schema.set_outfit(state, "cotton knit cardigan, black silk slip dress")
+        svc._set_character_place(sid, "home", "家里", 0.95, source="test")
         pos, _ = svc._build_prompt("standing by the window", session_id=sid, clothing_off="cardigan")
         self.assertNotIn("cardigan", pos.lower())   # 脱掉的开衫被剥离
         self.assertIn("slip dress", pos.lower())     # 没脱的还在
