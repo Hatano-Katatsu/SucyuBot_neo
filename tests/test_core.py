@@ -1615,6 +1615,48 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("visible clothing: nude / not properly dressed", format_sent_photo_context(svc, state, sid))
         self.assertIn("visible clothing: nude / not properly dressed", format_recent_photo_dedup_context(svc, state, sid))
 
+    def test_record_sent_photo_captures_visible_outfit_without_full_appearance(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+
+        svc._record_sent_photo(
+            sid,
+            "standing by a window",
+            appearance="silver hair, blue eyes, black dress, white cotton knit cardigan",
+            view="selfie",
+            nltag="A woman stands by a window. no text, no logo",
+        )
+
+        state = svc._get_session_state(sid)
+        history_message = session_schema.get_chat_history(state)[-1]["content"]
+        self.assertIn("visual_state: visible outfit: black dress, white cotton knit cardigan", history_message)
+        self.assertNotIn("silver hair", history_message)
+        self.assertNotIn("blue eyes", history_message)
+
+    def test_record_sent_photo_prefers_last_prompt_slots_appearance(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        svc._last_prompt_slots = PromptSlots(
+            session_id=sid,
+            effective_appearance="silver hair, blue eyes, modest casual clothes",
+            one_shot_appearance="red scarf",
+        )
+
+        svc._record_sent_photo(
+            sid,
+            "school hallway scene",
+            appearance="black lace camisole nightgown",
+            view="selfie",
+            nltag="A woman stands in a school hallway. no text, no logo",
+        )
+
+        state = svc._get_session_state(sid)
+        history_message = session_schema.get_chat_history(state)[-1]["content"]
+        self.assertIn("visual_state: visible outfit: modest casual clothes, red scarf", history_message)
+        self.assertNotIn("black lace camisole nightgown", history_message)
+        self.assertNotIn("silver hair", history_message)
+        self.assertNotIn("blue eyes", history_message)
+
     def test_sent_photo_context_prefers_nltag_without_source_or_appearance(self):
         svc = self.make_service()
         sid = "telegram:1"
@@ -6509,7 +6551,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("快回来，我给你留了灯。", injected)
         self.assertIn("意图: 用户想看角色下班后在家等自己的样子", injected)
         self.assertIn("必须包含: 玄关灯", injected)
-        self.assertNotIn("black dress", injected)
+        self.assertIn("visual_state: visible outfit: black dress", injected)
 
         messages = svc._build_chat_messages(sid, "刚才那张照片很好看")
         contents = [m.get("content", "") for m in messages]

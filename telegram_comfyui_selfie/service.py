@@ -1117,7 +1117,7 @@ class TelegramComfyUIService(
         source_description = (source_description or "").strip()
         nltag_text = (nltag or self._last_generated_photo_nltag(session_id) or scene or "").strip()
         source_intent = self._compact_photo_source_intent(source_description)
-        appearance_snapshot = (appearance or "").strip()
+        appearance_snapshot = self._last_prompt_visual_appearance(session_id) or (appearance or "").strip()
         if not appearance_snapshot:
             try:
                 appearance_snapshot = self._effective_visual_prompt_tags(session_id)
@@ -1166,6 +1166,22 @@ class TelegramComfyUIService(
         except Exception:
             return ""
 
+    def _last_prompt_visual_appearance(self, session_id: str = "") -> str:
+        try:
+            slots = getattr(self, "_last_prompt_slots", None)
+            if not slots:
+                return ""
+            slot_sid = str(getattr(slots, "session_id", "") or "")
+            if session_id and slot_sid and slot_sid != session_id:
+                return ""
+            parts = [
+                str(getattr(slots, "effective_appearance", "") or "").strip(),
+                str(getattr(slots, "one_shot_appearance", "") or "").strip(),
+            ]
+            return ", ".join(part for part in parts if part)
+        except Exception:
+            return ""
+
     @staticmethod
     def _compact_photo_source_intent(source_description: str, max_chars: int = 180) -> str:
         text = re.sub(r"\s+", " ", str(source_description or "")).strip()
@@ -1209,7 +1225,10 @@ class TelegramComfyUIService(
         outfit = [tag for tag in outfit if tag]
         if not outfit:
             return ""
-        return "visible clothing: clothed"
+        result = "visible outfit: " + ", ".join(outfit[:6])
+        if len(result) > max_chars:
+            result = result[:max_chars].rstrip() + "..."
+        return result
 
     @staticmethod
     def _format_photo_history_system_message(photo: dict[str, Any]) -> dict[str, str]:

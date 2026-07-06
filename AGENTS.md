@@ -251,6 +251,8 @@ telegram_comfyui_selfie/
 3. **收紧 planner 一次性外观入口**：`roleplay-image-plan` 返回的 `new_appearance_tags` 只有在用户本轮意图/必须包含/原始提示明确要求穿、换、戴、脱、发型发色等视觉变更时才会进入最终生图；普通推送、早安/日常配图、续场图里 planner 自行发散出的白衬衫、短裤、睡衣、临时发色等会被丢弃，最终仍以当前可见外貌和衣柜为准。
 4. **照片历史补充裸露状态但不污染外观槽**：发送图片后记录 `visual_state`，从最终 `nltag/scene` 检测 `nude/topless/bottomless/no underwear` 等“未好好穿衣”状态，并注入照片历史 system 消息及后续 planner 的最近图片摘要；普通穿着只标记为 `clothed`，不把完整衣柜、发型或 PromptSlots 外观重新塞回聊天前缀。
 5. **本轮验证**：新增/更新测试覆盖全裸保留发型特征、未请求 one-shot 服装被丢弃、用户明确要求 one-shot 服装仍保留、照片历史携带裸露状态且不回灌完整外观。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 376 tests in 7.899s`，`OK (skipped=1)`。
+6. **照片回传补足可见穿搭**：排查“语言模型能不能完整理解自己发出的图”后，照片历史 `visual_state` 从只标记 `clothed/nude` 改为记录最终可见衣物/配饰的短摘要（如 `visible outfit: black dress, white cotton knit cardigan`）；来源优先读取刚刚实际生成的 `PromptSlots.effective_appearance + one_shot_appearance`，再回退调用方传入 appearance 和当前可见外貌，避免 public guard / clothing_off 改写后仍把旧衣柜当成照片内容。该摘要只保留 outfit/accessory，不回灌发色、瞳色、体型、兽耳或完整 PromptSlots。
+7. **追加验证**：新增 `test_record_sent_photo_captures_visible_outfit_without_full_appearance` 与 `test_record_sent_photo_prefers_last_prompt_slots_appearance`，覆盖照片历史能告诉聊天模型具体穿搭，同时不泄漏发色/瞳色，也能优先使用最终生图槽位而不是旧衣柜；定向验证通过。
 
 ## 今日变更（2026-07-02）
 
