@@ -1595,6 +1595,26 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("原始意图", history_message)
         self.assertNotIn("all slot appearance", history_message)
 
+    def test_record_sent_photo_captures_visible_clothing_state(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+
+        svc._record_sent_photo(
+            sid,
+            "bathroom mirror scene",
+            appearance="black silk slip dress, white cotton knit cardigan",
+            view="pov",
+            nltag="A woman is completely nude in the bathroom. no text, no logo",
+        )
+
+        state = svc._get_session_state(sid)
+        photo = state["sent_photos_history"][-1]
+        self.assertEqual(photo["visual_state"], "visible clothing: nude / not properly dressed")
+        history_message = session_schema.get_chat_history(state)[-1]["content"]
+        self.assertIn("visual_state: visible clothing: nude / not properly dressed", history_message)
+        self.assertIn("visible clothing: nude / not properly dressed", format_sent_photo_context(svc, state, sid))
+        self.assertIn("visible clothing: nude / not properly dressed", format_recent_photo_dedup_context(svc, state, sid))
+
     def test_sent_photo_context_prefers_nltag_without_source_or_appearance(self):
         svc = self.make_service()
         sid = "telegram:1"
@@ -3623,6 +3643,64 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_planner_drops_unrequested_one_shot_appearance_tags(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 7, 4, 12, 30, tzinfo=timezone.utc)
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            state = svc._get_session_state(sid)
+            session_schema.set_outfit(state, "black silk slip dress, white cotton knit cardigan")
+            self.mock_image_planner_messages(svc, {
+                "scene": "角色背对用户在客厅卷头发",
+                "caption": "给你看一下。",
+                "view": "pov",
+                "new_appearance_tags": "white oversized t-shirt, black lounge shorts, towel on shoulder",
+            })
+
+            plan = await plan_roleplay_image(
+                svc,
+                sid,
+                mode="normal",
+                now=fixed_now,
+                weather_data={"desc": "雨", "temp": "22", "code": "305"},
+            )
+
+            self.assertEqual(plan["new_appearance_tags"], "")
+
+        asyncio.run(run())
+
+    def test_planner_keeps_explicit_user_requested_one_shot_appearance_tags(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            self.mock_image_planner_messages(svc, {
+                "scene": "角色穿着白裙子站在窗边自拍",
+                "caption": "给你看新裙子。",
+                "view": "selfie",
+                "new_appearance_tags": "white dress",
+            })
+
+            plan = await plan_roleplay_image(
+                svc,
+                sid,
+                intent="想看你穿白裙子自拍",
+                weather_data={"desc": "晴", "temp": "24", "code": "113"},
+            )
+
+            self.assertEqual(plan["new_appearance_tags"], "white dress")
+
+        asyncio.run(run())
+
     def test_scheduler_scene_injects_recent_photo_continuity(self):
         async def run():
             svc = self.make_service()
@@ -3714,7 +3792,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "english prompt",
                 is_ntr=False,
                 session_id=sid,
-                one_shot_appearance="white dress",
+                one_shot_appearance="",
                 orientation="2:3",
             )
             self.assertEqual(session_schema.get_outfit(state), "black hoodie")
@@ -7945,6 +8023,30 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("cardigan", neg.lower())
         self.assertIn("slip dress", neg.lower())
         self.assertEqual(session_schema.get_outfit(state), "cotton knit cardigan, black silk slip dress")
+
+    def test_clothing_off_nude_preserves_hair_features(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        session_schema.set_outfit(
+            state,
+            "upper back length black hair, voluminous curls, middle part bangs, "
+            "black silk slip dress, white cotton knit cardigan",
+        )
+
+        pos, neg = svc._build_prompt("bathroom scene", session_id=sid, clothing_off="completely nude")
+        pos_lower = pos.lower()
+        neg_lower = neg.lower()
+        self.assertIn("upper back length black hair", pos_lower)
+        self.assertIn("voluminous curls", pos_lower)
+        self.assertIn("middle part bangs", pos_lower)
+        self.assertNotIn("slip dress", pos_lower)
+        self.assertNotIn("cardigan", pos_lower)
+        self.assertIn("slip dress", neg_lower)
+        self.assertIn("cardigan", neg_lower)
+        self.assertNotIn("upper back length black hair", neg_lower)
+        self.assertNotIn("voluminous curls", neg_lower)
+        self.assertNotIn("middle part bangs", neg_lower)
 
     def test_clothing_off_panties_frees_underwear_negative(self):
         svc = self.make_service()

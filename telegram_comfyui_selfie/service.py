@@ -1123,6 +1123,7 @@ class TelegramComfyUIService(
                 appearance_snapshot = self._effective_visual_prompt_tags(session_id)
             except Exception:
                 appearance_snapshot = session_schema.get_outfit(state)
+        visual_state = self._compact_photo_visual_state(scene, nltag_text, appearance_snapshot)
         photo = {
             "timestamp": time.time(),
             "scene": scene,
@@ -1133,6 +1134,7 @@ class TelegramComfyUIService(
             "source_description": source_description,
             "source_intent": source_intent,
             "nltag": nltag_text,
+            "visual_state": visual_state,
         }
         history.append(photo)
         session_schema.set_sent_photos_history(state, history[-10:])
@@ -1188,6 +1190,27 @@ class TelegramComfyUIService(
             result = result[:max_chars].rstrip() + "..."
         return result
 
+    def _compact_photo_visual_state(self, scene: str, nltag: str = "", appearance: str = "", max_chars: int = 180) -> str:
+        visual = re.sub(r"\s+", " ", " ".join([str(nltag or ""), str(scene or "")])).strip()
+        visual_lower = visual.lower()
+        if re.search(
+            r"\b(nude|naked|completely nude|fully undressed|undressed|no clothes|topless|bottomless|no panties|no underwear|exposed breasts|exposed nipples)\b",
+            visual_lower,
+        ):
+            return "visible clothing: nude / not properly dressed"
+        try:
+            parsed = self._parse_appearance(appearance or "")
+        except Exception:
+            parsed = {}
+        outfit: list[str] = []
+        if isinstance(parsed, dict):
+            for key in ("outfit", "accessory"):
+                outfit.extend(str(tag or "").strip() for tag in parsed.get(key, []) or [])
+        outfit = [tag for tag in outfit if tag]
+        if not outfit:
+            return ""
+        return "visible clothing: clothed"
+
     @staticmethod
     def _format_photo_history_system_message(photo: dict[str, Any]) -> dict[str, str]:
         scene = str(photo.get("scene") or "").strip()
@@ -1205,6 +1228,9 @@ class TelegramComfyUIService(
             f"view: {view or '未知视角'}",
             f"nltag: {nltag or '未记录'}",
         ]
+        visual_state = str(photo.get("visual_state") or "").strip()
+        if visual_state:
+            lines.append(f"visual_state: {visual_state}")
         if source_intent:
             lines.append(f"source_intent: {source_intent}")
         if caption and caption != scene:

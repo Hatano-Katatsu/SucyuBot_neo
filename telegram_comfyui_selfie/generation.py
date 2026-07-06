@@ -608,6 +608,25 @@ _BOTTOM_CLOTHING_OFF_WORDS = (
 )
 
 
+def _removable_appearance_tags(service: Any, appearance: str) -> list[str]:
+    text = str(appearance or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = service._parse_appearance(text)
+    except Exception:
+        parsed = {}
+    removable: list[str] = []
+    if not isinstance(parsed, dict):
+        return removable
+    for key in ("outfit", "accessory"):
+        for tag in parsed.get(key, []) or []:
+            tag = str(tag or "").strip()
+            if tag and tag not in removable:
+                removable.append(tag)
+    return removable
+
+
 def _apply_clothing_off(service: Any, clothing_off: str, effective_appearance: str, neg: str, worn_tags: list[str]) -> tuple[str, str]:
     """按规划器的一次性"脱衣/裸露"指令，从本次渲染的外观里剥离服装。
 
@@ -1209,7 +1228,7 @@ def build_prompt(
     one_shot_effective = (one_shot_appearance or "").strip()
     # 当前衣柜标签单独传给公开场合兜底，避免误删角色 base 里的标志性暴露服装/装甲/原皮造型。
     worn_src = service._effective_dynamic_appearance(session_id) if session_id else session_schema.get_outfit(state)
-    current_outfit_tags = [t.strip() for t in str(worn_src).split(",") if t.strip()]
+    current_outfit_tags = _removable_appearance_tags(service, worn_src)
     effective_appearance, one_shot_effective, neg, _public_outfit_removed = _guard_public_outfit(
         service,
         state,
@@ -1226,7 +1245,7 @@ def build_prompt(
     # "当前所穿"标签取自生效的 dynamic_appearance + 本次一次性外观，按标签匹配剥离。
     worn_tags = list(current_outfit_tags)
     if one_shot_effective:
-        worn_tags += [t.strip() for t in str(one_shot_effective).split(",") if t.strip()]
+        worn_tags += _removable_appearance_tags(service, one_shot_effective)
     effective_appearance, neg = _apply_clothing_off(service, clothing_off, effective_appearance, neg, worn_tags)
     slots = PromptSlots(
         raw_scene=raw_scene_desc,

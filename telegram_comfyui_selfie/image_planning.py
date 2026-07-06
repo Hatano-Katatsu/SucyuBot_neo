@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 
 VALID_VIEWS = {"selfie", "mirror", "pov", "third", "portrait"}
 DEVICE_FREE_VIEWS = {"selfie", "portrait", "pov"}
+EXPLICIT_ONE_SHOT_APPEARANCE_RE = re.compile(
+    r"(穿|换|戴|摘|脱|衣|裙|裤|袜|鞋|外套|开衫|衬衫|睡衣|内衣|泳衣|发型|发色|染发|剪发|瞳色|眼镜|项链|耳环|发夹|"
+    r"\b(?:wear|wearing|change into|put on|take off|remove|dress|shirt|t-shirt|tee|blouse|skirt|pants|trousers|shorts|"
+    r"cardigan|coat|jacket|hoodie|pajamas|pyjamas|lingerie|underwear|swimsuit|bikini|glasses|necklace|earrings?|haircut|hair color|dye)\b)",
+    re.IGNORECASE,
+)
 
 # AnimaTool turbo knowledge/schema 缓存（按 comfyui_url 分键）
 _animatool_turbo_knowledge_cache: dict[str, tuple[dict[str, Any], float]] = {}
@@ -34,6 +40,32 @@ def _sanitize_nltag_for_view(text: str, view: str) -> str:
     if view not in DEVICE_FREE_VIEWS:
         return str(text or "").strip()
     return _strip_non_mirror_camera_artifacts(str(text or "")).strip()
+
+
+def _sanitize_planned_one_shot_appearance(
+    service: Any,
+    tags: str,
+    *,
+    intent: str = "",
+    mood: str = "",
+    must_include: str = "",
+    prompt: str = "",
+) -> str:
+    text = str(tags or "").strip()
+    if not text:
+        return ""
+    request_text = "\n".join(str(x or "") for x in (intent, mood, must_include, prompt))
+    if EXPLICIT_ONE_SHOT_APPEARANCE_RE.search(request_text):
+        return text
+    try:
+        parsed = service._parse_appearance(text)
+    except Exception:
+        parsed = {}
+    if not isinstance(parsed, dict):
+        return ""
+    if any(parsed.get(key) for key in ("hair", "eyes", "outfit", "accessory", "other")):
+        return ""
+    return ""
 
 
 async def _fetch_animatool_turbo_knowledge(service: Any, ttl: float = _ANIMATOOL_KNOWLEDGE_TTL) -> dict[str, Any]:
@@ -584,6 +616,9 @@ def format_sent_photo_context(service: Any, state: dict[str, Any], session_id: s
         view = (photo.get("view") or "").strip() or "未知视角"
         source_intent = (photo.get("source_intent") or "").strip() or _compact_photo_source_intent(photo.get("source_description"))
         line = f"[{stamp}] {view}: {visual or '未记录'}"
+        visual_state = str(photo.get("visual_state") or "").strip()
+        if visual_state:
+            line += f" | {visual_state}"
         if source_intent:
             line += f"；{source_intent}"
         lines.append(line)
@@ -616,6 +651,9 @@ def format_recent_photo_dedup_context(
             max_chars=max_chars,
         )
         line = f"[{stamp}] {view}: {scene}"
+        visual_state = _compact_context_text(photo.get("visual_state"), max_chars=max_chars)
+        if visual_state:
+            line += f" | {visual_state}"
         if source_intent:
             line += f"；{source_intent}"
         lines.append(line)
@@ -1254,12 +1292,20 @@ async def plan_roleplay_image(
     # aspect_ratio 校验：只允许 2:3 和 3:2，默认 2:3
     raw_ar = (parsed.get("aspect_ratio") or "").strip()
     aspect_ratio = "3:2" if raw_ar == "3:2" else "2:3"
+    new_appearance_tags = _sanitize_planned_one_shot_appearance(
+        service,
+        (parsed.get("new_appearance_tags") or "").strip(),
+        intent=intent,
+        mood=mood,
+        must_include=must_include,
+        prompt=prompt,
+    )
     return {
         "scene": scene,
         "view": final_view,
         "aspect_ratio": aspect_ratio,
         "caption": (parsed.get("caption") or "").strip(),
-        "new_appearance_tags": (parsed.get("new_appearance_tags") or "").strip(),
+        "new_appearance_tags": new_appearance_tags,
         "clothing_off": clothing_off,
         "is_intimate": is_intimate,
         "partner_in_frame": partner_in_frame,

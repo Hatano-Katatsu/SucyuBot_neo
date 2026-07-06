@@ -244,6 +244,14 @@ telegram_comfyui_selfie/
 14. **日记与摘要视角归属**：dream 日记 prompt 强化“第一人称=当前 bot 角色”；checkpoint prompt 注入 `User = human user; Assistant = current bot roleplay character` 映射；长期记忆提取修复 checkpoint 多轮对话被整体包成“用户”输入的问题；角色历史提要和 dream 记忆整理也明确日记/聊天的用户与角色归属，降低摘要里 bot/用户视角混淆。
 15. **本轮视角与目标重写验证**：新增测试覆盖目标指示旧版本草案注入、长期/中期目标一次性替换且忽略增量 ops、Web 空指示目标重生成、dream 日记视角规则、checkpoint 角色映射注入、checkpoint 对话进入长期记忆提取时不被包成用户发言。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 359 tests in 9.026s`，`OK (skipped=1)`。
 
+## 今日变更（2026-07-07）
+
+1. **远端同步与本地回退**：本轮先将本地未推送提交 `5517763 Fix life plan cold start silently failing to create goals` 备份到 `codex/backup-unpushed-life-plan-5517763`，随后把 `main` 硬重置到 `origin/main` 的 `7218c26 Add prompted rollback regeneration`；未跟踪设计文档移到 `.tmp/rollback-backup/20260707/life_plan_design.md`，同步后工作树保持干净再继续修复。
+2. **裸体/脱衣不再误删角色特征**：`clothing_off` 处理前先用外观分类器把可脱项限定为 `outfit/accessory`，全裸或局部脱衣只从本图渲染外观里剥离衣物/配饰并把刚脱掉的衣物压入负向；发型、发色、瞳色、兽耳等角色特征继续留在正向，也不会再被写入负向，避免“黑色中长卷发”在裸体图后漂成白色短发。
+3. **收紧 planner 一次性外观入口**：`roleplay-image-plan` 返回的 `new_appearance_tags` 只有在用户本轮意图/必须包含/原始提示明确要求穿、换、戴、脱、发型发色等视觉变更时才会进入最终生图；普通推送、早安/日常配图、续场图里 planner 自行发散出的白衬衫、短裤、睡衣、临时发色等会被丢弃，最终仍以当前可见外貌和衣柜为准。
+4. **照片历史补充裸露状态但不污染外观槽**：发送图片后记录 `visual_state`，从最终 `nltag/scene` 检测 `nude/topless/bottomless/no underwear` 等“未好好穿衣”状态，并注入照片历史 system 消息及后续 planner 的最近图片摘要；普通穿着只标记为 `clothed`，不把完整衣柜、发型或 PromptSlots 外观重新塞回聊天前缀。
+5. **本轮验证**：新增/更新测试覆盖全裸保留发型特征、未请求 one-shot 服装被丢弃、用户明确要求 one-shot 服装仍保留、照片历史携带裸露状态且不回灌完整外观。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 376 tests in 7.899s`，`OK (skipped=1)`。
+
 ## 今日变更（2026-07-02）
 
 1. **文爱/性爱聊天语言规则**：聊天静态前缀新增 `CHAT_INTIMATE_LANGUAGE_RULES`，仅在明确进入文爱、性爱、插入、抽插、高潮或同等性行为描写时启用；普通调情、拥抱、亲吻和日常亲密不套用。规则覆盖台词字数上限、兴奋度 1-6 对应的语言破碎度、拟声词优先、失语优先、回复结构不规则化，以及禁止评论员口吻、完整逻辑推演和“不是……而是……”句式。该段接在“回复格式规则”之后、“对话推进规则”之前，仍位于 `messages[0]` 静态槽，避免随穿搭、世界状态或动态尾部变化破坏 checkpoint/history 前缀形状。
