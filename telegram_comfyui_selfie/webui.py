@@ -21,7 +21,7 @@ from .world_runtime import PLACE_TYPES
 
 SECRET_KEYS = {
     "telegram_bot_token", "llm_api_key", "chat_llm_api_key", "image_llm_api_key",
-    "amap_api_key", "google_places_api_key",
+    "amap_api_key", "google_places_api_key", "tavily_api_key",
 }
 MODEL_SECRET_PLACEHOLDER = "********"
 MODEL_SECRET_KEYS = {"api_key", "api_key_no_think"}

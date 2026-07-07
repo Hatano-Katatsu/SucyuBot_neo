@@ -57,6 +57,9 @@ CONFIG_GROUPS: dict[str, list[str]] = {
         "post_chat_push_delay_max_minutes", "post_chat_push_daily_limit",
         "post_chat_push_cooldown_minutes",
     ],
+    "search": [
+        "tavily_api_key", "web_search_enabled", "web_search_daily_limit",
+    ],
 }
 
 

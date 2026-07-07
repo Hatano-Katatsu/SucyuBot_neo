@@ -900,7 +900,7 @@ class ChatContextMixin:
         return calls, cls._strip_dsml_tool_markup(text)
 
     def _chat_tools_schema(self) -> list[dict[str, Any]]:
-        return [
+        tools = [
             {
                 "type": "function",
                 "function": {
@@ -976,6 +976,30 @@ class ChatContextMixin:
                 },
             },
         ]
+        # 搜索工具只在配置开启且有 API Key 时挂载：模型看不到就不会尝试调用。
+        # 注意 tools schema 属于请求静态前缀，开关切换会一次性作废旧前缀缓存（可接受）。
+        if self._web_search_enabled():
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "search_web",
+                    "description": (
+                        "角色遇到自己确实不了解、或需要最新信息的话题时调用联网搜索：新闻时事、"
+                        "最新的游戏/番剧/影视/产品、赛事、价格行情等时效性内容，或用户明确让你去查的资料。"
+                        "角色扮演剧情、情感交流、常识和人设内已有的话题不要调用。"
+                        "query 写简短的搜索关键词（中文或英文皆可），不要写整句对话。"
+                        "结果会以资料形式返回，之后由你用角色口吻自然转述，不要照抄。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "搜索关键词，如「英雄联盟 S16 冠军」「东京 樱花 见顷 2026」。"},
+                        },
+                        "required": ["query"],
+                    },
+                },
+            })
+        return tools
 
     async def _execute_tool_call(self, chat_id: int | str, session_id: str, call: dict[str, Any]) -> str:
         fn = (call.get("function") or {}).get("name", "")
@@ -1006,6 +1030,8 @@ class ChatContextMixin:
             return await self.tool_update_location(session_id, args.get("place", ""))
         if fn == "update_user_location":
             return await self.tool_update_user_location(session_id, args.get("place", ""))
+        if fn == "search_web":
+            return await self.tool_search_web(session_id, args.get("query", ""))
         return f"未知工具: {fn}"
 
     async def _run_background_roleplay_image(self, chat_id: int | str, session_id: str, **kwargs):

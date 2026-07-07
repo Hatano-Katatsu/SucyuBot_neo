@@ -17,6 +17,7 @@ from . import character_card
 from . import generation as image_generation
 from . import prompt_intake
 from . import session_schema
+from . import web_search
 from .app_store import AppStateStore
 from .character_checkpoint import CharacterCheckpointMixin
 from .config_store import dump_simple_yaml, flatten_config, load_simple_yaml
@@ -2941,6 +2942,62 @@ class TelegramComfyUIService(
             return "临时脱衣/裸体不需要调用 change_appearance——配图系统会自动处理，场景结束后角色会自动恢复原着装。只有换上不同衣服时才调用。"
         result = await self._apply_wardrobe(session_id, description, replace=(mode == "replace"))
         return f"外貌已改变: {result}"
+
+    # ── 联网搜索（Tavily）──────────────────────────────────────────────────
+
+    def _web_search_enabled(self) -> bool:
+        return self._bool_config("web_search_enabled", False) and bool(
+            str(self.config.get("tavily_api_key", "") or "").strip()
+        )
+
+    def _web_search_daily_limit(self) -> int:
+        try:
+            return max(0, int(str(self.config.get("web_search_daily_limit", "5")).strip() or "5"))
+        except ValueError:
+            return 5
+
+    async def tool_search_web(self, session_id: str, query: str = "") -> str:
+        """聊天工具：角色遇到不熟悉/时效性话题时联网查资料。
+
+        所有失败路径都返回可扮演的软失败文案（不抛异常穿透聊天回合）；
+        缓存命中不扣每日限额，资料只进对话动态尾部。
+        """
+        query = (query or "").strip()
+        self._ulog(session_id, "SEARCH", f'模型调用 search_web query="{query[:100]}"')
+        if not query:
+            return "搜索关键词为空，没有执行搜索。"
+        if not self._web_search_enabled():
+            return "联网搜索功能未开启，查不到外部资料。用角色口吻坦然承认不了解这个话题或把话题引回对话，不要编造事实。"
+        cached = web_search.cache_get(query)
+        if cached is not None:
+            self._ulog(session_id, "SEARCH", f"命中缓存 {len(cached)} 条")
+            return web_search.format_results_for_roleplay(query, cached)
+        state = self._get_session_state(session_id)
+        today = self._session_now(session_id).strftime("%Y-%m-%d")
+        if session_schema.get_web_search_date(state) != today:
+            session_schema.set_web_search_date(state, today)
+            session_schema.set_web_search_count(state, 0)
+        limit = self._web_search_daily_limit()
+        used = session_schema.get_web_search_count(state)
+        if used >= limit:
+            self._save_session_state(session_id, state)
+            self._ulog(session_id, "SEARCH", f"跳过: 每日搜索限额已用完 {used}/{limit}")
+            return "今天的联网搜索次数已用完，查不了资料。用角色口吻自然带过这个话题，不要编造事实。"
+        try:
+            results = await web_search.tavily_search(
+                str(self.config.get("tavily_api_key", "") or "").strip(), query
+            )
+        except Exception as exc:
+            self._ulog(session_id, "SEARCH", f"搜索失败: {exc}")
+            return "联网搜索暂时失败了，没查到资料。用角色口吻自然带过，不要编造事实。"
+        session_schema.set_web_search_count(state, used + 1)
+        self._save_session_state(session_id, state)
+        if not results:
+            self._ulog(session_id, "SEARCH", f"无结果 {used + 1}/{limit}")
+            return f"没有搜到关于「{query}」的资料。用角色口吻自然带过，不要编造事实。"
+        web_search.cache_put(query, results)
+        self._ulog(session_id, "SEARCH", f"返回 {len(results)} 条 {used + 1}/{limit}")
+        return web_search.format_results_for_roleplay(query, results)
 
     async def _push_image_from_text(self, session_id: str, scene: str):
         chat_id = self.chat_id_from_session(session_id)

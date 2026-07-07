@@ -64,6 +64,11 @@ const configSections = [
     ["turbo_mode", "Turbo", "bool"],
     ["turbo_strength", "Turbo 强度", "text"],
   ]],
+  ["联网搜索", [
+    ["tavily_api_key", "Tavily API Key", "secret"],
+    ["web_search_enabled", "启用聊天联网搜索", "bool"],
+    ["web_search_daily_limit", "每会话每日搜索上限", "number"],
+  ]],
   ["推送与本地控制台", [
     ["selfie_frequency", "聊天生图频率", "select:极频繁,频繁,适度,偶尔,关闭"],
     ["daily_selfie_limit", "每日随机推送", "number"],

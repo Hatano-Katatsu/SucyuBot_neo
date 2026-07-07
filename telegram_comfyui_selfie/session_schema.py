@@ -74,6 +74,8 @@ STATE_SCHEMA: dict[str, Field] = {
     "post_chat_push_date": Field(G, default=""),
     "post_chat_push_count": Field(G, default=0),
     "last_post_chat_push_time": Field(G, default=0.0),
+    "web_search_date": Field(G, default=""),
+    "web_search_count": Field(G, default=0),
     # —— 会话全局：角色池容器 / 初始化流程 ——
     "saved_characters": Field(G, default={}),
     "character_contexts": Field(G, default={}),
@@ -94,6 +96,8 @@ STATE_SCHEMA: dict[str, Field] = {
         "post_chat_push_date": "",
         "post_chat_push_count": 0,
         "last_post_chat_push_time": 0.0,
+        "web_search_date": "",
+        "web_search_count": 0,
         "saved_characters": {},
         "character_contexts": {},
         "init_flow": {},
@@ -959,6 +963,8 @@ _SESSION_DEFAULT: dict[str, Any] = {
     "post_chat_push_date": "",
     "post_chat_push_count": 0,
     "last_post_chat_push_time": 0.0,
+    "web_search_date": "",
+    "web_search_count": 0,
     "saved_characters": {},
     "character_contexts": {},
     "init_flow": {},
@@ -972,6 +978,7 @@ _LEGACY_SESSION_FLAT_KEYS = (
     "last_interaction", "last_morning_greet_date",
     "daily_trigger_times", "daily_trigger_date", "daily_triggered_times",
     "post_chat_push_date", "post_chat_push_count", "last_post_chat_push_time",
+    "web_search_date", "web_search_count",
     "saved_characters", "character_contexts", "init_flow",
     "ntr_stage_reached", "ntr_reconcile_count", "ntr_affection_reset",
     "frozen", "frozen_at",
@@ -1105,6 +1112,21 @@ def get_last_post_chat_push_time(state):
 
 def set_last_post_chat_push_time(state, value):
     _session_set(state, "last_post_chat_push_time", float(value or 0))
+
+def get_web_search_date(state):
+    return (_session_get(state, "web_search_date") or "").strip()
+
+def set_web_search_date(state, value):
+    _session_set(state, "web_search_date", str(value or ""))
+
+def get_web_search_count(state):
+    try:
+        return int(_session_get(state, "web_search_count", coerce=int) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+def set_web_search_count(state, value):
+    _session_set(state, "web_search_count", int(value or 0))
 
 
 # ── NTR ──
