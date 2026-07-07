@@ -254,7 +254,7 @@ def wardrobe_summary(wardrobe: dict[str, str]) -> str:
 CLOSET_CAP = 30
 
 
-def closet_add(closet: dict[str, Any], name: str, slot: str, tags: str, *, now: float = 0.0, cap: int = CLOSET_CAP) -> dict[str, Any]:
+def closet_add(closet: dict[str, Any], name: str, slot: str, tags: str, *, now: float = 0.0, cap: int = CLOSET_CAP, worn: bool = True) -> dict[str, Any]:
     tags = normalize_appearance_text(tags or "")
     name = (name or "").strip() or tags
     if not name or not tags or slot not in WARDROBE_CLOTHING_SLOTS:
@@ -268,8 +268,13 @@ def closet_add(closet: dict[str, Any], name: str, slot: str, tags: str, *, now: 
     entry["slot"] = slot
     entry["tags"] = tags
     entry["added_at"] = entry.get("added_at") or now
-    entry["times_worn"] = int(entry.get("times_worn", 0)) + 1
-    entry["last_worn"] = now
+    if worn:
+        entry["times_worn"] = int(entry.get("times_worn", 0)) + 1
+        entry["last_worn"] = now
+    else:
+        # 只收藏、暂不穿：不算穿过（淘汰/排序回退 added_at）。
+        entry["times_worn"] = int(entry.get("times_worn", 0))
+        entry["last_worn"] = entry.get("last_worn") or 0.0
     closet[name] = entry
     if len(closet) > cap:
         # 超额淘汰最久没穿的（按 last_worn/added_at）。

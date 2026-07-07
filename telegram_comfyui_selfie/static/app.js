@@ -432,33 +432,67 @@ function wardrobeRows(items = {}, options = {}) {
     <div class="wardrobe-row">
       <span>${escapeHtml(wardrobeSlotLabels[slot] || slot)}</span>
       <strong title="${escapeHtml(value)}">${escapeHtml(wardrobeDisplayText(slot, value, displayNames))}</strong>
-      ${options.removable ? `<button class="ghost tiny" type="button" data-wardrobe-action="remove-slot" data-slot="${escapeHtml(slot)}">脱下</button>` : ""}
     </div>
   `).join("")}</div>`;
 }
 
-function closetRows(closet = {}) {
-  const entries = Object.entries(closet || {})
-    .filter(([, entry]) => entry && String(entry.tags || "").trim())
-    .sort((a, b) => Number(b[1].last_worn || b[1].added_at || 0) - Number(a[1].last_worn || a[1].added_at || 0));
-  if (!entries.length) return `<div class="empty-state small">还没有收藏。角色穿过的衣服会自动出现在这里。</div>`;
+function normalizeTagsForCompare(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/_/g, " ")
+    .split(",")
+    .map(part => part.trim().replace(/\s+/g, " "))
+    .filter(Boolean)
+    .join(", ");
+}
+
+function closetRows(clothing = {}) {
+  const closet = clothing.closet || {};
+  const wardrobe = clothing.wardrobe || {};
+  const displayNames = clothing.wardrobe_display || {};
   const bySlot = new Map();
-  entries.forEach(([name, entry]) => {
-    const slot = closetSlotOrder.includes(entry.slot) ? entry.slot : "other";
-    if (!bySlot.has(slot)) bySlot.set(slot, []);
-    bySlot.get(slot).push([name, entry]);
-  });
+  Object.entries(closet)
+    .filter(([, entry]) => entry && String(entry.tags || "").trim())
+    .sort((a, b) => Number(b[1].last_worn || b[1].added_at || 0) - Number(a[1].last_worn || a[1].added_at || 0))
+    .forEach(([name, entry]) => {
+      const slot = closetSlotOrder.includes(entry.slot) ? entry.slot : "other";
+      if (!bySlot.has(slot)) bySlot.set(slot, []);
+      bySlot.get(slot).push([name, entry]);
+    });
   const slotOrder = [...closetSlotOrder, ...[...bySlot.keys()].filter(slot => !closetSlotOrder.includes(slot)).sort()];
-  return `<div class="closet-picker">${slotOrder.filter(slot => bySlot.has(slot)).map(slot => `
-    <div class="closet-type">${escapeHtml(wardrobeSlotLabels[slot] || slot)}</div>
-    <div class="closet-options">
-      ${bySlot.get(slot).slice(0, 12).map(([name, entry]) => `
-        <button class="closet-choice" type="button" data-wardrobe-action="wear-closet" data-name="${escapeHtml(name)}" title="${escapeHtml(entry.tags || "")}">
-          ${escapeHtml(closetDisplayName(name, entry))}
-        </button>
-      `).join("")}
-    </div>
-  `).join("")}</div>`;
+  const openSlots = state.closetOpenSlots instanceof Set ? state.closetOpenSlots : new Set();
+  return `<div class="closet-list">${slotOrder.map(slot => {
+    const items = bySlot.get(slot) || [];
+    const wornTags = normalizeTagsForCompare(wardrobe[slot]);
+    const namedActive = String(displayNames[slot] || "").trim();
+    const matched = items.find(([name, entry]) => name === namedActive || normalizeTagsForCompare(entry.tags) === wornTags);
+    const activeName = wornTags ? (matched ? matched[0] : "") : "";
+    const currentLabel = wornTags ? (activeName || namedActive || localizeClothingTags(wardrobe[slot])) : "空";
+    return `
+    <details class="closet-slot" data-closet-slot="${escapeHtml(slot)}"${openSlots.has(slot) ? " open" : ""}>
+      <summary>
+        <span class="closet-slot-name">${escapeHtml(wardrobeSlotLabels[slot] || slot)}</span>
+        <strong class="closet-slot-current${wornTags ? "" : " is-empty"}" title="${escapeHtml(wardrobe[slot] || "")}">${escapeHtml(currentLabel)}</strong>
+      </summary>
+      <div class="closet-slot-options">
+        <div class="closet-option${wornTags ? "" : " is-active"}">
+          <button class="closet-choice" type="button" data-wardrobe-action="remove-slot" data-slot="${escapeHtml(slot)}"${wornTags ? "" : " disabled"}>空（这个槽位不穿）</button>
+        </div>
+        ${items.map(([name, entry]) => {
+          const isActive = Boolean(wornTags) && (name === activeName || normalizeTagsForCompare(entry.tags) === wornTags);
+          return `
+        <div class="closet-option${isActive ? " is-active" : ""}">
+          <button class="closet-choice" type="button" data-wardrobe-action="wear-closet" data-name="${escapeHtml(name)}" title="${escapeHtml(entry.tags || "")}"${isActive ? " disabled" : ""}>${escapeHtml(closetDisplayName(name, entry))}</button>
+          <span class="closet-option-tools">
+            <button class="ghost tiny" type="button" data-wardrobe-action="edit-closet" data-name="${escapeHtml(name)}" data-tags="${escapeHtml(entry.tags || "")}">改</button>
+            <button class="ghost tiny danger" type="button" data-wardrobe-action="delete-closet" data-name="${escapeHtml(name)}">删</button>
+          </span>
+        </div>`;
+        }).join("")}
+        ${items.length ? "" : `<div class="empty-state small">这一类还没有收藏。</div>`}
+      </div>
+    </details>`;
+  }).join("")}</div>`;
 }
 
 function renderRuntimeClothingPanel(char, isActive) {
@@ -478,21 +512,21 @@ function renderRuntimeClothingPanel(char, isActive) {
       <div class="wardrobe-editor">
         <textarea id="wardrobe-description" rows="2" placeholder="输入换装：例如 黑色丝绸睡裙，白色棉质针织开衫"></textarea>
         <div class="wardrobe-editor-actions">
-          <button class="primary" type="button" data-wardrobe-action="apply">更新穿搭</button>
-          <button class="ghost" type="button" data-wardrobe-action="replace">整套替换</button>
+          <button class="primary" type="button" data-wardrobe-action="apply">直接换上</button>
+          <button class="ghost" type="button" data-wardrobe-action="save-closet">存进衣橱（暂不换）</button>
         </div>
       </div>
       <div class="runtime-clothing-layout">
         <section class="runtime-clothing-pane is-current">
           <div class="pane-title">
             <h4>身上穿着</h4>
-            <span>当前真源</span>
+            <span>只读 · 换装去「衣橱收藏」操作</span>
           </div>
           <div class="runtime-clothing-current">
             <span>当前摘要</span>
             <strong title="${escapeHtml(current)}">${escapeHtml(currentSummary || "未设置")}</strong>
           </div>
-          ${wardrobeRows(clothing.wardrobe || {}, { removable: true, displayNames: clothing.wardrobe_display || {} })}
+          ${wardrobeRows(clothing.wardrobe || {}, { displayNames: clothing.wardrobe_display || {} })}
         </section>
         <section class="runtime-clothing-pane is-fallback">
           <div class="pane-title">
@@ -507,34 +541,95 @@ function renderRuntimeClothingPanel(char, isActive) {
         <section class="runtime-clothing-pane is-closet">
           <div class="pane-title">
             <h4>衣橱收藏</h4>
-            <span>穿过的单件，可一键复穿</span>
+            <span>点开槽位换穿、改名或删除；「空」= 该槽位不穿</span>
           </div>
-          ${closetRows(clothing.closet || {})}
+          ${closetRows(clothing)}
         </section>
       </div>
     </section>
   `;
 }
 
+function startClosetEdit(button) {
+  const row = button.closest(".closet-option");
+  if (!row || row.classList.contains("is-editing")) return;
+  row._closetOriginal = row.innerHTML;
+  row.classList.add("is-editing");
+  row.innerHTML = `
+    <div class="closet-edit-form">
+      <input type="text" data-closet-edit="name" placeholder="名称（衣橱里显示的名字）">
+      <input type="text" data-closet-edit="tags" placeholder="英文标签（生图用，逗号分隔）">
+      <div class="closet-edit-actions">
+        <button class="primary tiny" type="button" data-wardrobe-action="save-edit-closet">保存</button>
+        <button class="ghost tiny" type="button" data-wardrobe-action="cancel-edit-closet">取消</button>
+      </div>
+    </div>`;
+  row.querySelector('[data-closet-edit="name"]').value = button.dataset.name || "";
+  row.querySelector('[data-closet-edit="tags"]').value = button.dataset.tags || "";
+  row.querySelector('[data-wardrobe-action="save-edit-closet"]').dataset.name = button.dataset.name || "";
+}
+
+function cancelClosetEdit(button) {
+  const row = button.closest(".closet-option");
+  if (!row || row._closetOriginal == null) return;
+  row.innerHTML = row._closetOriginal;
+  row.classList.remove("is-editing");
+  delete row._closetOriginal;
+}
+
 function bindRuntimeClothingHandlers(container) {
   const panel = container.querySelector(".runtime-clothing-section");
   if (!panel) return;
+  state.closetOpenSlots = state.closetOpenSlots instanceof Set ? state.closetOpenSlots : new Set();
+  // details 的 toggle 不冒泡，用捕获阶段记录展开状态，重渲染后保持不收起。
+  panel.addEventListener("toggle", event => {
+    const slot = event.target?.dataset?.closetSlot;
+    if (!slot) return;
+    if (event.target.open) state.closetOpenSlots.add(slot);
+    else state.closetOpenSlots.delete(slot);
+  }, true);
   panel.addEventListener("click", async event => {
     const button = event.target.closest("[data-wardrobe-action]");
     if (!button || !panel.contains(button)) return;
     const action = button.dataset.wardrobeAction;
+    if (action === "edit-closet") {
+      startClosetEdit(button);
+      return;
+    }
+    if (action === "cancel-edit-closet") {
+      cancelClosetEdit(button);
+      return;
+    }
     const body = { action };
     const editor = panel.querySelector("#wardrobe-description");
-    if (action === "apply" || action === "replace") {
+    if (action === "apply" || action === "save-closet") {
       body.description = String(editor?.value || "").trim();
       if (!body.description) {
-        toast("先输入要换成什么衣服。", "error");
+        toast(action === "apply" ? "先输入要换成什么衣服。" : "先输入要收藏的衣物。", "error");
         return;
       }
     } else if (action === "remove-slot") {
       body.slot = button.dataset.slot || "";
     } else if (action === "wear-closet") {
       body.name = button.dataset.name || "";
+    } else if (action === "save-edit-closet") {
+      const row = button.closest(".closet-option");
+      body.action = "closet-edit";
+      body.name = button.dataset.name || "";
+      body.new_name = String(row?.querySelector('[data-closet-edit="name"]')?.value || "").trim();
+      body.tags = String(row?.querySelector('[data-closet-edit="tags"]')?.value || "").trim();
+      if (!body.new_name) {
+        toast("名称不能为空。", "error");
+        return;
+      }
+      if (!body.tags) {
+        toast("英文标签不能为空。", "error");
+        return;
+      }
+    } else if (action === "delete-closet") {
+      body.action = "closet-delete";
+      body.name = button.dataset.name || "";
+      if (!window.confirm(`确定从衣橱删除「${body.name}」吗？正穿在身上的不会被脱下。`)) return;
     } else if (action === "clear") {
       if (!window.confirm("确定清空当前穿搭吗？衣橱收藏不会删除。")) return;
     }
@@ -543,7 +638,7 @@ function bindRuntimeClothingHandlers(container) {
       const sid = encodeURIComponent(state.selectedSession);
       await api(`/api/sessions/${sid}/wardrobe`, { method: "POST", body });
       await loadCharacters();
-      toast("衣柜已更新");
+      toast(action === "save-closet" ? "已存进衣橱" : "衣柜已更新");
     } catch (err) {
       toast(err.message, "error");
     } finally {

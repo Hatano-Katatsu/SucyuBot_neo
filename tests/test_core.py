@@ -1534,9 +1534,14 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("当前衣柜", app_js)
             self.assertIn("身上穿着", app_js)
             self.assertIn("衣橱收藏", app_js)
-            self.assertIn("closet-picker", app_js)
+            self.assertIn("closet-slot", app_js)
             self.assertIn("closet-choice", app_js)
             self.assertIn('data-wardrobe-action="apply"', app_js)
+            self.assertIn('data-wardrobe-action="save-closet"', app_js)
+            self.assertIn('data-wardrobe-action="edit-closet"', app_js)
+            self.assertIn('data-wardrobe-action="delete-closet"', app_js)
+            # 身上穿着只读：不再有逐槽“脱下”按钮，槽位清空走衣橱的“空”选项
+            self.assertNotIn(">脱下</button>", app_js)
             self.assertIn("棉质针织", app_js)
             self.assertIn("wardrobe_display", app_js)
             self.assertNotIn('<span>${escapeHtml(entry.tags || "")}</span>', app_js)
@@ -1608,6 +1613,37 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             wardrobe = data["current_clothing"]["wardrobe"]
             self.assertEqual(wardrobe["top"], "white blouse")
             self.assertNotIn("dress", wardrobe)
+
+            # 存进衣橱（暂不换上）：只进收藏、不动当前穿搭；action 连字符会被规范成下划线
+            svc._classify_wardrobe_items = AsyncMock(return_value={"dress": "red qipao", "names": {"dress": "红旗袍"}})
+            resp = await api_update_wardrobe(req({"action": "save-closet", "description": "红色旗袍"}))
+            data = json.loads(resp.text)
+            self.assertTrue(data["ok"])
+            closet = data["current_clothing"]["closet"]
+            self.assertIn("红旗袍", closet)
+            self.assertEqual(closet["红旗袍"]["times_worn"], 0)  # 没穿过
+            wardrobe = data["current_clothing"]["wardrobe"]
+            self.assertNotIn("dress", wardrobe)
+            self.assertEqual(wardrobe["top"], "white blouse")
+
+            # 编辑收藏：改名 + 改标签；正穿在身上的同步更新当前穿搭
+            resp = await api_update_wardrobe(req({
+                "action": "closet_edit", "name": "白衬衫",
+                "new_name": "露脐白衬衫", "tags": "white crop shirt",
+            }))
+            data = json.loads(resp.text)
+            self.assertTrue(data["ok"])
+            closet = data["current_clothing"]["closet"]
+            self.assertNotIn("白衬衫", closet)
+            self.assertEqual(closet["露脐白衬衫"]["tags"], "white crop shirt")
+            self.assertEqual(data["current_clothing"]["wardrobe"]["top"], "white crop shirt")
+
+            # 删除收藏：只删衣橱条目，不影响身上穿着
+            resp = await api_update_wardrobe(req({"action": "closet_delete", "name": "红旗袍"}))
+            data = json.loads(resp.text)
+            self.assertTrue(data["ok"])
+            self.assertNotIn("红旗袍", data["current_clothing"]["closet"])
+            self.assertEqual(data["current_clothing"]["wardrobe"]["top"], "white crop shirt")
 
             resp = await api_update_wardrobe(req({"action": "clear"}))
             data = json.loads(resp.text)

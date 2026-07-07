@@ -2839,6 +2839,24 @@ class TelegramComfyUIService(
             raise ValueError("wardrobe classify did not return an object")
         return parsed
 
+    async def _classify_wardrobe_items(self, state: dict, description: str) -> dict:
+        """把一段衣物描述拆成 槽位→英文标签（不改动 state），给 WebUI「只存衣橱、暂不换上」用。
+        LLM 分槽失败时回退关键词分槽，与 _wardrobe_apply_to_state 的兜底一致。"""
+        desc = (description or "").strip()
+        try:
+            return await self._classify_wardrobe_change(
+                desc,
+                appearance_rules.wardrobe_summary(self._get_wardrobe(state)),
+                appearance_rules.closet_brief_for_llm(session_schema.get_closet(state)),
+            )
+        except Exception as exc:
+            logger.warning("wardrobe classify failed, fallback to keyword slotting: %s", exc)
+            if re.search(r"[a-zA-Z]{3,}", desc) and not _HAS_CJK(desc):
+                tags = desc
+            else:
+                tags = await self._translate_appearance_tags(desc)
+            return appearance_rules.seed_wardrobe_from_text(tags, self._outfit_kw, self._accessory_kw)
+
     async def _wardrobe_apply_to_state(self, state: dict, description: str, *, replace: bool = False, session_id: str = "") -> str:
         """把一次换装应用到 state（改 wardrobe + dynamic_appearance），不落盘——由调用方保存。"""
         desc = (description or "").strip()

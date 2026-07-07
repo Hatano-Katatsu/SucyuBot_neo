@@ -979,7 +979,8 @@ async def api_update_wardrobe(request: web.Request):
     if not isinstance(payload, dict):
         return json_error("衣柜操作必须是 JSON 对象")
 
-    action = str(payload.get("action") or "apply").strip()
+    # 前端 data-* 属性用连字符命名，统一成下划线再分发。
+    action = str(payload.get("action") or "apply").strip().replace("-", "_")
     state = service._get_session_state(sid)
     result = ""
 
@@ -989,6 +990,61 @@ async def api_update_wardrobe(request: web.Request):
             return json_error("请输入要修改的穿搭")
         result = await service._apply_wardrobe(sid, description, replace=(action == "replace"))
         state = service._get_session_state(sid)
+    elif action == "save_closet":
+        description = str(payload.get("description") or "").strip()
+        if not description:
+            return json_error("请输入要收藏的衣物")
+        change = await service._classify_wardrobe_items(state, description)
+        names = change.get("names") if isinstance(change.get("names"), dict) else {}
+        closet = session_schema.get_closet(state)
+        now = time.time()
+        added = []
+        for slot in appearance_rules.WARDROBE_CLOTHING_SLOTS:
+            tags = appearance_rules.normalize_appearance_text(change.get(slot) or "")
+            if not tags:
+                continue
+            closet = appearance_rules.closet_add(closet, str(names.get(slot) or ""), slot, tags, now=now, worn=False)
+            added.append(slot)
+        if not added:
+            return json_error("没识别出可收藏的衣物（发型/瞳色/配饰不进衣橱）")
+        session_schema.set_closet(state, closet)
+        service._save_session_state(sid, state)
+        result = session_schema.get_outfit(state)
+    elif action == "closet_edit":
+        name = str(payload.get("name") or "").strip()
+        closet = dict(session_schema.get_closet(state))
+        entry = closet.get(name)
+        if not isinstance(entry, dict):
+            return json_error("衣橱里没有这件衣服", status=404)
+        new_name = str(payload.get("new_name") or "").strip() or name
+        tags_raw = str(payload.get("tags") or "").strip()
+        new_tags = appearance_rules.normalize_appearance_text(tags_raw) if tags_raw else str(entry.get("tags") or "").strip()
+        if not new_tags:
+            return json_error("衣物标签不能为空")
+        if new_name != name and new_name in closet:
+            return json_error("衣橱里已有同名衣物")
+        slot = str(entry.get("slot") or "").strip()
+        old_tags = str(entry.get("tags") or "")
+        closet.pop(name, None)
+        closet[new_name] = dict(entry, tags=new_tags)
+        session_schema.set_closet(state, closet)
+        wardrobe = dict(service._get_wardrobe(state))
+        if slot and appearance_rules.normalize_appearance_text(wardrobe.get(slot) or "") == appearance_rules.normalize_appearance_text(old_tags):
+            # 这件正穿在身上 → 同步更新当前穿搭标签。
+            wardrobe[slot] = new_tags
+            result = _apply_wardrobe_direct(service, sid, state, wardrobe)
+        else:
+            service._save_session_state(sid, state)
+            result = session_schema.get_outfit(state)
+    elif action == "closet_delete":
+        name = str(payload.get("name") or "").strip()
+        closet = dict(session_schema.get_closet(state))
+        if name not in closet:
+            return json_error("衣橱里没有这件衣服", status=404)
+        closet.pop(name, None)
+        session_schema.set_closet(state, closet)
+        service._save_session_state(sid, state)
+        result = session_schema.get_outfit(state)
     elif action == "clear":
         result = await service._apply_wardrobe(sid, "reset")
         state = service._get_session_state(sid)

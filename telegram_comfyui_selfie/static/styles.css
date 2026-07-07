@@ -1619,8 +1619,8 @@ select {
   .nav { flex: 1; min-width: 80px; justify-content: center; }
   .status-grid { grid-template-columns: repeat(2, 1fr); }
   .session-layout, .split { grid-template-columns: 1fr; }
-  .kv, .slot-row, .catalog-row, .note-line, .wardrobe-row, .closet-picker { grid-template-columns: 1fr; gap: 6px; }
-  .closet-type { padding-top: 10px; font-weight: 600; }
+  .kv, .slot-row, .catalog-row, .note-line, .wardrobe-row { grid-template-columns: 1fr; gap: 6px; }
+  .closet-slot summary { grid-template-columns: 64px minmax(0, 1fr) auto; }
   .runtime-clothing-head, .wardrobe-editor-actions { flex-direction: column; align-items: stretch; }
   .runtime-clothing-head { display: grid; }
   .wardrobe-editor { grid-template-columns: 1fr; }
@@ -2274,31 +2274,116 @@ button:disabled .spinner {
   overflow-wrap: anywhere;
 }
 
-.closet-picker {
+.closet-list {
   display: grid;
-  grid-template-columns: 76px minmax(0, 1fr);
-  gap: 8px 10px;
-  align-items: start;
+  gap: 6px;
 }
 
-.closet-type {
-  padding-top: 6px;
+.closet-slot {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-subtle);
+}
+
+.closet-slot summary {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.closet-slot summary::-webkit-details-marker {
+  display: none;
+}
+
+.closet-slot summary::after {
+  content: "▾";
+  color: var(--muted);
+  font-size: 11px;
+  transition: transform 0.15s ease;
+}
+
+.closet-slot[open] summary::after {
+  transform: rotate(180deg);
+}
+
+.closet-slot-name {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.4;
 }
 
-.closet-options {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  min-width: 0;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--line);
+.closet-slot-current {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
-.closet-options:last-child {
-  border-bottom: 0;
+.closet-slot-current.is-empty {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.closet-slot-options {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+}
+
+.closet-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.closet-option .closet-choice {
+  flex: 1 1 auto;
+  text-align: left;
+}
+
+.closet-option.is-active .closet-choice {
+  border-color: rgba(13, 148, 136, 0.55);
+  background: rgba(13, 148, 136, 0.1);
+  color: var(--text);
+  cursor: default;
+  opacity: 1;
+}
+
+.closet-option.is-active .closet-choice::after {
+  content: " ✓";
+  color: #0d9488;
+  font-weight: 700;
+}
+
+.closet-option-tools {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.closet-edit-form {
+  display: grid;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.closet-edit-form input {
+  width: 100%;
+}
+
+.closet-edit-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .closet-choice {
@@ -2307,6 +2392,7 @@ button:disabled .spinner {
   justify-content: flex-start;
   padding: 5px 10px;
   border-radius: 999px;
+  border: 1px solid var(--line);
   background: var(--surface-subtle);
   color: var(--text);
   font-size: 13px;
