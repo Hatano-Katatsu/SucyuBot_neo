@@ -1533,8 +1533,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("当前衣柜", app_js)
             self.assertIn("身上穿着", app_js)
             self.assertIn("衣橱收藏", app_js)
+            self.assertIn("closet-picker", app_js)
+            self.assertIn("closet-choice", app_js)
             self.assertIn('data-wardrobe-action="apply"', app_js)
-            self.assertIn("穿上", app_js)
+            self.assertIn("棉质针织", app_js)
+            self.assertNotIn('<span>${escapeHtml(entry.tags || "")}</span>', app_js)
             self.assertIn("state.characterData?.style_pool", app_js)
             self.assertIn("留空表示本角色不注入画风", app_js)
 

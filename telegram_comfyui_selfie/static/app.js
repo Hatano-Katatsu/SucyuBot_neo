@@ -314,12 +314,92 @@ const wardrobeSlotLabels = {
 };
 
 const wardrobeSlotOrder = Object.keys(wardrobeSlotLabels);
+const closetSlotOrder = ["dress", "top", "bottom", "outerwear", "bra", "panties", "legwear", "footwear"];
+const clothingColorWords = [
+  ["dark blue", "深蓝色"],
+  ["light blue", "浅蓝色"],
+  ["black", "黑色"],
+  ["white", "白色"],
+  ["blue", "蓝色"],
+  ["red", "红色"],
+  ["pink", "粉色"],
+  ["purple", "紫色"],
+  ["green", "绿色"],
+  ["yellow", "黄色"],
+  ["brown", "棕色"],
+  ["gray", "灰色"],
+  ["grey", "灰色"],
+];
+const clothingMaterialWords = [
+  ["cotton knit", "棉质针织"],
+  ["silk", "丝绸"],
+  ["cotton", "棉质"],
+  ["knit", "针织"],
+  ["lace", "蕾丝"],
+  ["denim", "牛仔"],
+  ["leather", "皮质"],
+  ["wool", "羊毛"],
+];
+const clothingItemWords = [
+  ["sleep dress", "睡裙"],
+  ["nightgown", "睡裙"],
+  ["nightdress", "睡裙"],
+  ["slip dress", "吊带裙"],
+  ["cardigan", "开衫"],
+  ["t-shirt", "T恤"],
+  ["shirt", "衬衫"],
+  ["blouse", "衬衫"],
+  ["jeans", "牛仔裤"],
+  ["skirt", "裙子"],
+  ["dress", "连衣裙"],
+  ["shorts", "短裤"],
+  ["pants", "长裤"],
+  ["trousers", "长裤"],
+  ["bra", "胸罩"],
+  ["panties", "内裤"],
+  ["stockings", "长袜"],
+  ["socks", "袜子"],
+  ["sneakers", "运动鞋"],
+  ["heels", "高跟鞋"],
+  ["shoes", "鞋"],
+];
+
+function hasCjk(value) {
+  return /[\u3400-\u9fff]/.test(String(value || ""));
+}
+
+function localizeClothingTag(value, fallback = "衣物") {
+  const raw = String(value || "").trim();
+  if (!raw) return fallback;
+  if (hasCjk(raw)) return raw;
+  const text = raw.toLowerCase().replace(/_/g, " ");
+  const parts = [];
+  clothingColorWords.forEach(([key, label]) => {
+    if (key === "blue" && (text.includes("dark blue") || text.includes("light blue"))) return;
+    if (text.includes(key) && !parts.includes(label)) parts.push(label);
+  });
+  clothingMaterialWords.forEach(([key, label]) => {
+    if ((key === "cotton" || key === "knit") && text.includes("cotton knit")) return;
+    if (text.includes(key) && !parts.includes(label)) parts.push(label);
+  });
+  const item = clothingItemWords.find(([key]) => text.includes(key));
+  if (item) parts.push(item[1]);
+  if (parts.length) return parts.join("");
+  return raw.replace(/_/g, " ");
+}
+
+function localizeClothingTags(value) {
+  const raw = String(value || "").trim();
+  if (!raw || hasCjk(raw)) return raw;
+  return raw.split(",").map(part => localizeClothingTag(part)).filter(Boolean).join("，");
+}
 
 function closetDisplayName(name, entry = {}) {
   const raw = String(name || "").trim();
   if (raw === "public fallback top") return "公开兜底上衣";
   if (raw === "public fallback bottom") return "公开兜底下装";
-  return raw || String(entry.tags || "衣物");
+  if (raw && hasCjk(raw)) return raw;
+  return localizeClothingTag(entry.tags || raw || "", wardrobeSlotLabels[entry.slot] || "衣物");
 }
 
 function wardrobeRows(items = {}, options = {}) {
@@ -337,7 +417,7 @@ function wardrobeRows(items = {}, options = {}) {
   return `<div class="wardrobe-rows">${entries.map(([slot, value]) => `
     <div class="wardrobe-row">
       <span>${escapeHtml(wardrobeSlotLabels[slot] || slot)}</span>
-      <strong>${escapeHtml(value)}</strong>
+      <strong title="${escapeHtml(value)}">${escapeHtml(localizeClothingTags(value) || value)}</strong>
       ${options.removable ? `<button class="ghost tiny" type="button" data-wardrobe-action="remove-slot" data-slot="${escapeHtml(slot)}">脱下</button>` : ""}
     </div>
   `).join("")}</div>`;
@@ -348,15 +428,22 @@ function closetRows(closet = {}) {
     .filter(([, entry]) => entry && String(entry.tags || "").trim())
     .sort((a, b) => Number(b[1].last_worn || b[1].added_at || 0) - Number(a[1].last_worn || a[1].added_at || 0));
   if (!entries.length) return `<div class="empty-state small">还没有收藏。角色穿过的衣服会自动出现在这里。</div>`;
-  return `<div class="closet-list">${entries.slice(0, 12).map(([name, entry]) => `
-    <article class="closet-item">
-      <div>
-        <strong>${escapeHtml(closetDisplayName(name, entry))}</strong>
-        <small>${escapeHtml(wardrobeSlotLabels[entry.slot] || entry.slot || "衣物")}</small>
-      </div>
-      <span>${escapeHtml(entry.tags || "")}</span>
-      <button class="ghost tiny" type="button" data-wardrobe-action="wear-closet" data-name="${escapeHtml(name)}">穿上</button>
-    </article>
+  const bySlot = new Map();
+  entries.forEach(([name, entry]) => {
+    const slot = closetSlotOrder.includes(entry.slot) ? entry.slot : "other";
+    if (!bySlot.has(slot)) bySlot.set(slot, []);
+    bySlot.get(slot).push([name, entry]);
+  });
+  const slotOrder = [...closetSlotOrder, ...[...bySlot.keys()].filter(slot => !closetSlotOrder.includes(slot)).sort()];
+  return `<div class="closet-picker">${slotOrder.filter(slot => bySlot.has(slot)).map(slot => `
+    <div class="closet-type">${escapeHtml(wardrobeSlotLabels[slot] || slot)}</div>
+    <div class="closet-options">
+      ${bySlot.get(slot).slice(0, 12).map(([name, entry]) => `
+        <button class="closet-choice" type="button" data-wardrobe-action="wear-closet" data-name="${escapeHtml(name)}" title="${escapeHtml(entry.tags || "")}">
+          ${escapeHtml(closetDisplayName(name, entry))}
+        </button>
+      `).join("")}
+    </div>
   `).join("")}</div>`;
 }
 
@@ -374,7 +461,7 @@ function renderRuntimeClothingPanel(char, isActive) {
         <button class="ghost danger" type="button" data-wardrobe-action="clear">清空当前穿搭</button>
       </div>
       <div class="wardrobe-editor">
-        <textarea id="wardrobe-description" rows="2" placeholder="输入换装：例如 black silk slip dress, white cotton knit cardigan"></textarea>
+        <textarea id="wardrobe-description" rows="2" placeholder="输入换装：例如 黑色丝绸睡裙，白色棉质针织开衫"></textarea>
         <div class="wardrobe-editor-actions">
           <button class="primary" type="button" data-wardrobe-action="apply">更新穿搭</button>
           <button class="ghost" type="button" data-wardrobe-action="replace">整套替换</button>
@@ -387,8 +474,8 @@ function renderRuntimeClothingPanel(char, isActive) {
             <span>当前真源</span>
           </div>
           <div class="runtime-clothing-current">
-            <span>最终标签</span>
-            <strong>${escapeHtml(current || "未设置")}</strong>
+            <span>当前摘要</span>
+            <strong title="${escapeHtml(current)}">${escapeHtml(localizeClothingTags(current) || "未设置")}</strong>
           </div>
           ${wardrobeRows(clothing.wardrobe || {}, { removable: true })}
         </section>

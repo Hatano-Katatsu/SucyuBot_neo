@@ -1619,7 +1619,8 @@ select {
   .nav { flex: 1; min-width: 80px; justify-content: center; }
   .status-grid { grid-template-columns: repeat(2, 1fr); }
   .session-layout, .split { grid-template-columns: 1fr; }
-  .kv, .slot-row, .catalog-row, .note-line, .wardrobe-row, .closet-item { grid-template-columns: 1fr; gap: 6px; }
+  .kv, .slot-row, .catalog-row, .note-line, .wardrobe-row, .closet-picker { grid-template-columns: 1fr; gap: 6px; }
+  .closet-type { padding-top: 10px; font-weight: 600; }
   .runtime-clothing-head, .wardrobe-editor-actions { flex-direction: column; align-items: stretch; }
   .runtime-clothing-head { display: grid; }
   .wardrobe-editor { grid-template-columns: 1fr; }
@@ -2242,14 +2243,12 @@ button:disabled .spinner {
   overflow-wrap: anywhere;
 }
 
-.wardrobe-rows,
-.closet-list {
+.wardrobe-rows {
   display: grid;
   gap: 6px;
 }
 
-.wardrobe-row,
-.closet-item {
+.wardrobe-row {
   display: grid;
   grid-template-columns: 92px minmax(0, 1fr) auto;
   gap: 8px;
@@ -2258,19 +2257,16 @@ button:disabled .spinner {
   border-bottom: 1px solid var(--line);
 }
 
-.wardrobe-row:last-child,
-.closet-item:last-child {
+.wardrobe-row:last-child {
   border-bottom: 0;
 }
 
-.wardrobe-row span,
-.closet-item small {
+.wardrobe-row span {
   color: var(--muted);
   font-size: 12px;
 }
 
-.wardrobe-row strong,
-.closet-item span {
+.wardrobe-row strong {
   color: var(--text-secondary);
   font-size: 13px;
   font-weight: 500;
@@ -2278,14 +2274,43 @@ button:disabled .spinner {
   overflow-wrap: anywhere;
 }
 
-.closet-item div {
-  min-width: 0;
+.closet-picker {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 8px 10px;
+  align-items: start;
 }
 
-.closet-item strong {
-  display: block;
+.closet-type {
+  padding-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.closet-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.closet-options:last-child {
+  border-bottom: 0;
+}
+
+.closet-choice {
+  max-width: 100%;
+  min-height: 30px;
+  justify-content: flex-start;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: var(--surface-subtle);
   color: var(--text);
   font-size: 13px;
+  font-weight: 500;
   overflow-wrap: anywhere;
 }
 
