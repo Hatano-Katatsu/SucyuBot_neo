@@ -912,12 +912,44 @@ def _public_fallback_in_current(wardrobe: dict[str, Any], public_fallback: dict[
     return False
 
 
+def _wardrobe_display_names(wardrobe: dict[str, Any], closet: dict[str, Any]) -> dict[str, str]:
+    """当前穿搭用英文 tags 做 prompt 真源，但 WebUI 展示优先用衣橱里的中文短名。"""
+    display: dict[str, str] = {}
+    if not isinstance(wardrobe, dict) or not isinstance(closet, dict):
+        return display
+    for slot, tags in wardrobe.items():
+        slot_text = str(slot or "").strip()
+        norm_tags = appearance_rules.normalize_appearance_text(tags or "")
+        if not slot_text or not norm_tags:
+            continue
+        best_name = ""
+        best_time = -1.0
+        for name, entry in closet.items():
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("slot") or "").strip() != slot_text:
+                continue
+            if appearance_rules.normalize_appearance_text(entry.get("tags") or "") != norm_tags:
+                continue
+            display_name = str(name or "").strip()
+            if not display_name or display_name.startswith(PUBLIC_FALLBACK_CLOSET_PREFIX):
+                continue
+            worn_at = float(entry.get("last_worn") or entry.get("added_at") or 0)
+            if worn_at >= best_time:
+                best_name = display_name
+                best_time = worn_at
+        if best_name:
+            display[slot_text] = best_name
+    return display
+
+
 def serialize_current_clothing(service, state: dict[str, Any]) -> dict[str, Any]:
     wardrobe = service._get_wardrobe(state)
     closet, public_fallback = _split_public_fallback_closet(state)
     return {
         "dynamic_appearance": session_schema.get_outfit(state),
         "wardrobe": wardrobe,
+        "wardrobe_display": _wardrobe_display_names(wardrobe, closet),
         "public_fallback_outfit": public_fallback,
         "public_fallback_in_current": _public_fallback_in_current(wardrobe, public_fallback),
         "closet": closet,

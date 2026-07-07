@@ -394,6 +394,19 @@ function localizeClothingTags(value) {
   return raw.split(",").map(part => localizeClothingTag(part)).filter(Boolean).join("，");
 }
 
+function wardrobeDisplayText(slot, value, displayNames = {}) {
+  const named = String(displayNames?.[slot] || "").trim();
+  return named || localizeClothingTags(value) || String(value || "");
+}
+
+function wardrobeSummaryText(items = {}, displayNames = {}, fallback = "") {
+  const parts = wardrobeSlotOrder
+    .filter(slot => String(items?.[slot] || "").trim())
+    .map(slot => wardrobeDisplayText(slot, items[slot], displayNames))
+    .filter(Boolean);
+  return parts.length ? parts.join("，") : localizeClothingTags(fallback);
+}
+
 function closetDisplayName(name, entry = {}) {
   const raw = String(name || "").trim();
   if (raw === "public fallback top") return "公开兜底上衣";
@@ -403,6 +416,7 @@ function closetDisplayName(name, entry = {}) {
 }
 
 function wardrobeRows(items = {}, options = {}) {
+  const displayNames = options.displayNames || {};
   const entries = Object.entries(items || {})
     .filter(([, value]) => String(value ?? "").trim())
     .sort(([a], [b]) => {
@@ -417,7 +431,7 @@ function wardrobeRows(items = {}, options = {}) {
   return `<div class="wardrobe-rows">${entries.map(([slot, value]) => `
     <div class="wardrobe-row">
       <span>${escapeHtml(wardrobeSlotLabels[slot] || slot)}</span>
-      <strong title="${escapeHtml(value)}">${escapeHtml(localizeClothingTags(value) || value)}</strong>
+      <strong title="${escapeHtml(value)}">${escapeHtml(wardrobeDisplayText(slot, value, displayNames))}</strong>
       ${options.removable ? `<button class="ghost tiny" type="button" data-wardrobe-action="remove-slot" data-slot="${escapeHtml(slot)}">脱下</button>` : ""}
     </div>
   `).join("")}</div>`;
@@ -451,6 +465,7 @@ function renderRuntimeClothingPanel(char, isActive) {
   if (!isActive) return "";
   const clothing = state.characterData?.current_clothing || {};
   const current = clothing.dynamic_appearance || char.outfit || "";
+  const currentSummary = wardrobeSummaryText(clothing.wardrobe || {}, clothing.wardrobe_display || {}, current);
   return `
     <section class="form-section character-section runtime-clothing-section">
       <div class="runtime-clothing-head">
@@ -475,9 +490,9 @@ function renderRuntimeClothingPanel(char, isActive) {
           </div>
           <div class="runtime-clothing-current">
             <span>当前摘要</span>
-            <strong title="${escapeHtml(current)}">${escapeHtml(localizeClothingTags(current) || "未设置")}</strong>
+            <strong title="${escapeHtml(current)}">${escapeHtml(currentSummary || "未设置")}</strong>
           </div>
-          ${wardrobeRows(clothing.wardrobe || {}, { removable: true })}
+          ${wardrobeRows(clothing.wardrobe || {}, { removable: true, displayNames: clothing.wardrobe_display || {} })}
         </section>
         <section class="runtime-clothing-pane is-fallback">
           <div class="pane-title">

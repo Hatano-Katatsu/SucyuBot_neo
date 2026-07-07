@@ -1524,6 +1524,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             self.assertEqual(data["style_pool"], ["@base", "@dream_style"])
             self.assertEqual(data["current_clothing"]["wardrobe"]["dress"], "black silk slip dress")
+            self.assertEqual(data["current_clothing"]["wardrobe_display"]["dress"], "丝绸睡裙")
             self.assertEqual(data["current_clothing"]["public_fallback_outfit"]["bottom"], "dark blue jeans")
             self.assertNotIn("public fallback top", data["current_clothing"]["closet"])
             self.assertIn("丝绸睡裙", data["current_clothing"]["closet"])
@@ -1537,6 +1538,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("closet-choice", app_js)
             self.assertIn('data-wardrobe-action="apply"', app_js)
             self.assertIn("棉质针织", app_js)
+            self.assertIn("wardrobe_display", app_js)
             self.assertNotIn('<span>${escapeHtml(entry.tags || "")}</span>', app_js)
             self.assertIn("state.characterData?.style_pool", app_js)
             self.assertIn("留空表示本角色不注入画风", app_js)
@@ -1611,6 +1613,42 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             data = json.loads(resp.text)
             self.assertTrue(data["ok"])
             self.assertEqual(data["current_clothing"]["wardrobe"], {})
+
+        asyncio.run(run())
+
+    def test_webui_current_wardrobe_prefers_closet_display_names(self):
+        async def run():
+            from aiohttp import web
+            from aiohttp.test_utils import make_mocked_request
+            from telegram_comfyui_selfie.webui import api_characters
+
+            svc = self.make_service()
+            sid = "telegram:1"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "小雨")
+            session_schema.set_wardrobe(state, {"top": "white", "bottom": "denim shorts"})
+            session_schema.set_outfit(state, "white, denim shorts")
+            session_schema.set_closet(state, {
+                "露脐白衬衫": {"slot": "top", "tags": "white", "times_worn": 1, "last_worn": 3.0},
+                "超短牛仔裤": {"slot": "bottom", "tags": "denim shorts", "times_worn": 1, "last_worn": 3.0},
+            })
+            app = web.Application()
+            app["service"] = svc
+            req = make_mocked_request(
+                "GET",
+                f"/api/sessions/{sid}/characters",
+                app=app,
+                match_info={"session_id": sid},
+            )
+            req["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+
+            resp = await api_characters(req)
+            data = json.loads(resp.text)
+            self.assertEqual(data["current_clothing"]["wardrobe"], {"top": "white", "bottom": "denim shorts"})
+            self.assertEqual(data["current_clothing"]["wardrobe_display"], {
+                "top": "露脐白衬衫",
+                "bottom": "超短牛仔裤",
+            })
 
         asyncio.run(run())
 
