@@ -14,7 +14,6 @@ import aiohttp
 
 from . import session_schema
 from .appearance import (
-    apply_wardrobe_change,
     closet_add,
     infer_gender_from_count,
     infer_gender_from_prefix,
@@ -536,12 +535,11 @@ def _appearance_has_public_body_cover(service: Any, text: str) -> bool:
 
 def _ensure_public_fallback_outfit(service: Any, state: dict[str, Any], session_id: str) -> str:
     fallback_tags = render_wardrobe(PUBLIC_FALLBACK_OUTFIT_CHANGE) or PUBLIC_FALLBACK_OUTFIT_TAG
-    if not session_id or not isinstance(state, dict) or not hasattr(service, "_get_wardrobe"):
+    if not session_id or not isinstance(state, dict):
         return fallback_tags
 
-    wardrobe_before = dict(service._get_wardrobe(state) or {})
-    wardrobe_after = apply_wardrobe_change(wardrobe_before, PUBLIC_FALLBACK_OUTFIT_CHANGE)
-    if wardrobe_after == wardrobe_before:
+    existing = session_schema.get_public_fallback_outfit(state)
+    if render_wardrobe(existing) == fallback_tags:
         return fallback_tags
 
     closet = session_schema.get_closet(state)
@@ -549,18 +547,14 @@ def _ensure_public_fallback_outfit(service: Any, state: dict[str, Any], session_
     for slot, tags in PUBLIC_FALLBACK_OUTFIT_CHANGE.items():
         closet = closet_add(closet, f"public fallback {slot}", slot, tags, now=now)
     session_schema.set_closet(state, closet)
-    session_schema.set_wardrobe(state, wardrobe_after)
-    rendered = render_wardrobe(wardrobe_after)
-    session_schema.set_outfit(state, rendered)
-    if rendered.strip():
-        session_schema.clear_nudity(state)
+    session_schema.set_public_fallback_outfit(state, dict(PUBLIC_FALLBACK_OUTFIT_CHANGE))
     if hasattr(service, "_save_session_state"):
         service._save_session_state(session_id, state)
     if hasattr(service, "_ulog"):
         service._ulog(
             session_id,
             "WARDROBE",
-            f'public fallback outfit applied -> "{rendered[:140]}"',
+            f'public fallback outfit stored -> "{fallback_tags[:140]}"',
         )
     return fallback_tags
 

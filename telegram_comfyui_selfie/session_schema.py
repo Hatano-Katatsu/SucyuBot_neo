@@ -158,6 +158,7 @@ STATE_SCHEMA: dict[str, Field] = {
         "dynamic_appearance": "",   # 当前穿搭（渲染自 wardrobe）
         "wardrobe": {},             # 分槽衣柜（真源）
         "wardrobe_closet": {},      # 收藏的整套穿搭
+        "public_fallback_outfit": {}, # 公开场合兜底外出穿搭；仅公开场景生图时叠加，不覆盖当前穿搭
         "nudity": "",               # 持久裸体态（如 "completely nude"），空=穿着
         "nudity_at": 0.0,           # 裸体态确立时间，供 TTL 老化
     }, reset_preserved=True),
@@ -366,6 +367,7 @@ _CLOTHING_DEFAULT: dict[str, Any] = {
     "dynamic_appearance": "",
     "wardrobe": {},
     "wardrobe_closet": {},
+    "public_fallback_outfit": {},
     "nudity": "",
     "nudity_at": 0.0,
 }
@@ -437,6 +439,19 @@ def get_closet(state: dict[str, Any]) -> dict[str, Any]:
 
 def set_closet(state: dict[str, Any], value: Any) -> None:
     ensure_clothing_box(state)["wardrobe_closet"] = value if isinstance(value, dict) else {}
+
+
+def get_public_fallback_outfit(state: dict[str, Any]) -> dict[str, Any]:
+    value = ensure_clothing_box(state).get("public_fallback_outfit")
+    return value if isinstance(value, dict) else {}
+
+
+def set_public_fallback_outfit(state: dict[str, Any], value: Any) -> None:
+    ensure_clothing_box(state)["public_fallback_outfit"] = value if isinstance(value, dict) else {}
+
+
+def clear_public_fallback_outfit(state: dict[str, Any]) -> None:
+    ensure_clothing_box(state)["public_fallback_outfit"] = {}
 
 
 def get_nudity(state: dict[str, Any]) -> str:

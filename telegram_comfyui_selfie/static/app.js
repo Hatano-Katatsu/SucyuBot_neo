@@ -122,7 +122,6 @@ const characterFieldSections = [
     ["count", "人数标签", "text", "half"],
     ["style", "画风", "style_combo", "half"],
     ["appearance", "身体特征", "textarea", "wide"],
-    ["outfit", "服装标签", "textarea", "wide"],
     ["allow_change_appearance", "自动换装", "tristate", "half"],
   ]],
   ["关系与背景", [
@@ -297,6 +296,88 @@ function characterPill(label, value, className = "") {
   const text = compactText(value, 54);
   if (!text) return "";
   return `<span class="character-pill ${className}"><b>${escapeHtml(label)}</b>${escapeHtml(text)}</span>`;
+}
+
+const wardrobeSlotLabels = {
+  hair: "发型/发色",
+  eyes: "眼睛",
+  dress: "连衣裙/主体",
+  top: "上衣",
+  bottom: "下装",
+  outerwear: "外套",
+  bra: "胸罩",
+  panties: "内裤",
+  legwear: "袜/腿部",
+  footwear: "鞋",
+  accessory: "配饰",
+  other: "其他",
+};
+
+const wardrobeSlotOrder = Object.keys(wardrobeSlotLabels);
+
+function wardrobeRows(items = {}) {
+  const entries = Object.entries(items || {})
+    .filter(([, value]) => String(value ?? "").trim())
+    .sort(([a], [b]) => {
+      const ai = wardrobeSlotOrder.indexOf(a);
+      const bi = wardrobeSlotOrder.indexOf(b);
+      if (ai === -1 && bi === -1) return a.localeCompare(b);
+      if (ai === -1) return 1;
+      if (bi === -1) return -1;
+      return ai - bi;
+    });
+  if (!entries.length) return `<div class="empty-state small">暂无。</div>`;
+  return `<div class="wardrobe-rows">${entries.map(([slot, value]) => `
+    <div class="wardrobe-row">
+      <span>${escapeHtml(wardrobeSlotLabels[slot] || slot)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
+  `).join("")}</div>`;
+}
+
+function closetRows(closet = {}) {
+  const entries = Object.entries(closet || {})
+    .filter(([, entry]) => entry && String(entry.tags || "").trim())
+    .sort((a, b) => Number(b[1].last_worn || b[1].added_at || 0) - Number(a[1].last_worn || a[1].added_at || 0));
+  if (!entries.length) return `<div class="empty-state small">暂无收藏。</div>`;
+  return `<div class="closet-list">${entries.slice(0, 12).map(([name, entry]) => `
+    <article class="closet-item">
+      <div>
+        <strong>${escapeHtml(name)}</strong>
+        <small>${escapeHtml(wardrobeSlotLabels[entry.slot] || entry.slot || "衣物")}</small>
+      </div>
+      <span>${escapeHtml(entry.tags || "")}</span>
+    </article>
+  `).join("")}</div>`;
+}
+
+function renderRuntimeClothingPanel(char, isActive) {
+  if (!isActive) return "";
+  const clothing = state.characterData?.current_clothing || {};
+  const current = clothing.dynamic_appearance || char.outfit || "";
+  return `
+    <section class="form-section character-section runtime-clothing-section">
+      <h3 class="section-toggle" type="button">当前衣柜</h3>
+      <div class="runtime-clothing-grid">
+        <div class="runtime-clothing-current">
+          <span>当前穿搭标签</span>
+          <strong>${escapeHtml(current || "未设置")}</strong>
+        </div>
+        <div>
+          <h4>当前分槽</h4>
+          ${wardrobeRows(clothing.wardrobe || {})}
+        </div>
+        <div>
+          <h4>公开场合兜底</h4>
+          ${wardrobeRows(clothing.public_fallback_outfit || {})}
+        </div>
+        <div>
+          <h4>衣橱收藏</h4>
+          ${closetRows(clothing.closet || {})}
+        </div>
+      </div>
+    </section>
+  `;
 }
 
 function diaryTitle(content, date) {
@@ -750,6 +831,7 @@ function renderCharacterForm() {
     </div>
     <input type="hidden" name="avatar_path" value="${escapeHtml(char.avatar_path || "")}">
     <input type="hidden" name="avatar_updated_at" value="${escapeHtml(char.avatar_updated_at || "")}">
+    <input type="hidden" name="outfit" value="${escapeHtml(char.outfit || "")}">
   `;
   const profileAvatar = overview.querySelector(".character-profile-avatar.has-avatar");
   if (profileAvatar) {
@@ -769,6 +851,12 @@ function renderCharacterForm() {
     };
   }
   form.appendChild(overview);
+  const runtimeClothing = renderRuntimeClothingPanel(char, isActive);
+  if (runtimeClothing) {
+    const wrap = document.createElement("div");
+    wrap.innerHTML = runtimeClothing;
+    form.appendChild(wrap.firstElementChild);
+  }
 
   characterFieldSections.forEach(([sectionTitle, fields], index) => {
     const section = document.createElement("section");
@@ -804,6 +892,14 @@ function renderCharacterForm() {
     histGrid.classList.toggle("collapsed");
     histToggle.classList.toggle("collapsed");
   };
+  form.querySelectorAll(".runtime-clothing-section .section-toggle").forEach(toggle => {
+    toggle.onclick = () => {
+      const grid = toggle.parentElement?.querySelector(".runtime-clothing-grid");
+      if (!grid) return;
+      grid.classList.toggle("collapsed");
+      toggle.classList.toggle("collapsed");
+    };
+  });
 
   loadHistorySummary();
 

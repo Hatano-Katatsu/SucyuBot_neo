@@ -2845,6 +2845,7 @@ class TelegramComfyUIService(
         if desc.lower() in ("reset", "none", "clear", "无", "", "重置", "恢复", "默认"):
             session_schema.set_wardrobe(state, {})
             session_schema.set_outfit(state, "")
+            session_schema.clear_public_fallback_outfit(state)
             if session_id:
                 self._ulog(session_id, "WARDROBE", f'desc="{desc[:80]}" → reset 清空全部穿搭')
             return ""

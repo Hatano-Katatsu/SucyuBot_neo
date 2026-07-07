@@ -861,6 +861,7 @@ def serialize_prompt_slots(service, session_id: str, scene: str = "{场景描述
         },
         # 只读：当前衣柜按槽位拆分（编辑仍走上面的 dynamic_appearance 扁平框，保存后会自动重新分槽）。
         "wardrobe": service._get_wardrobe(state),
+        "public_fallback_outfit": session_schema.get_public_fallback_outfit(state),
         # 只读：衣橱收藏（角色穿过、可点名复穿的衣服）。
         "closet": session_schema.get_closet(state),
         "effective": {
@@ -875,6 +876,16 @@ def serialize_prompt_slots(service, session_id: str, scene: str = "{场景描述
             "基础外观只放稳定身体身份特征；1girl/1boy/solo 已迁移到人数槽 custom_count。",
             "场景偏好会注入生图辅助模型，用来影响配图和主动推送的地点、时间与自拍习惯。",
         ],
+    }
+
+
+def serialize_current_clothing(service, state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "dynamic_appearance": session_schema.get_outfit(state),
+        "wardrobe": service._get_wardrobe(state),
+        "public_fallback_outfit": session_schema.get_public_fallback_outfit(state),
+        "closet": session_schema.get_closet(state),
+        "nudity": session_schema.get_nudity(state),
     }
 
 
@@ -1196,6 +1207,7 @@ async def api_characters(request: web.Request):
         "active_id": active_id,
         "default_id": default_id,
         "current": service._character_export_payload(state) if hasattr(service, "_character_export_payload") else {},
+        "current_clothing": serialize_current_clothing(service, state),
         "style_pool": service._normalize_style_pool() if hasattr(service, "_normalize_style_pool") else [],
         "characters": characters,
         "checkpoints": checkpoints,
@@ -1551,6 +1563,7 @@ async def api_delete_character(request: web.Request):
         session_schema.set_outfit(state, "")
         session_schema.set_wardrobe(state, {})
         session_schema.set_closet(state, {})
+        session_schema.clear_public_fallback_outfit(state)
         session_schema.clear_nudity(state)
         session_schema.set_character_value(state, "persona_user_set", False)
         session_schema.set_character_value(state, "purity", None)

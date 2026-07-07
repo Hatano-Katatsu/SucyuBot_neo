@@ -1501,6 +1501,12 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc.config["style_pool"] = "@base\n@dream_style"
             state = svc._get_session_state(sid)
             session_schema.set_character_value(state, "custom_character", "小雨")
+            session_schema.set_outfit(state, "black silk slip dress, white cotton knit cardigan")
+            session_schema.set_wardrobe(state, {"dress": "black silk slip dress", "outerwear": "white cotton knit cardigan"})
+            session_schema.set_public_fallback_outfit(state, {"top": "plain white crew-neck t-shirt", "bottom": "dark blue jeans"})
+            session_schema.set_closet(state, {
+                "public fallback top": {"slot": "top", "tags": "plain white crew-neck t-shirt", "times_worn": 1, "last_worn": 1.0},
+            })
             svc._snapshot_character(state)
             app = web.Application()
             app["service"] = svc
@@ -1516,8 +1522,13 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             data = json.loads(resp.text)
 
             self.assertEqual(data["style_pool"], ["@base", "@dream_style"])
+            self.assertEqual(data["current_clothing"]["wardrobe"]["dress"], "black silk slip dress")
+            self.assertEqual(data["current_clothing"]["public_fallback_outfit"]["bottom"], "dark blue jeans")
+            self.assertIn("public fallback top", data["current_clothing"]["closet"])
             app_js = (Path(__file__).resolve().parents[1] / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
             self.assertIn('["style", "画风", "style_combo", "half"]', app_js)
+            self.assertNotIn('["outfit", "服装标签", "textarea", "wide"]', app_js)
+            self.assertIn("当前衣柜", app_js)
             self.assertIn("state.characterData?.style_pool", app_js)
             self.assertIn("留空表示本角色不注入画风", app_js)
 
@@ -7981,12 +7992,13 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("camisole", pos_lower)
         self.assertIn("nightgown", neg.lower())
         outfit = session_schema.get_outfit(state).lower()
-        self.assertIn("plain white crew-neck t-shirt", outfit)
-        self.assertIn("dark blue jeans", outfit)
-        self.assertNotIn("nightgown", outfit)
+        self.assertEqual(outfit, "black lace camisole nightgown")
+        fallback = session_schema.get_public_fallback_outfit(state)
+        self.assertEqual(fallback.get("top"), "plain white crew-neck t-shirt")
+        self.assertEqual(fallback.get("bottom"), "dark blue jeans")
         saved = svc.app_store.load_session_state(sid)
         self.assertIsNotNone(saved)
-        self.assertIn("dark blue jeans", session_schema.get_outfit(saved).lower())
+        self.assertIn("dark blue jeans", session_schema.get_public_fallback_outfit(saved).get("bottom", "").lower())
 
     def test_build_prompt_public_fallback_replaces_slip_dress_but_keeps_cardigan(self):
         svc = self.make_service()
@@ -8009,10 +8021,18 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("black silk slip dress", neg_lower)
         outfit = session_schema.get_outfit(state).lower()
         self.assertIn("upper back length black hair", outfit)
-        self.assertIn("plain white crew-neck t-shirt", outfit)
-        self.assertIn("dark blue jeans", outfit)
         self.assertIn("white cotton knit cardigan", outfit)
-        self.assertNotIn("black silk slip dress", outfit)
+        self.assertIn("black silk slip dress", outfit)
+        fallback = session_schema.get_public_fallback_outfit(state)
+        self.assertEqual(fallback.get("top"), "plain white crew-neck t-shirt")
+        self.assertEqual(fallback.get("bottom"), "dark blue jeans")
+
+        home_pos, _ = svc._build_prompt("sitting on the sofa at home", session_id=sid)
+        home_lower = home_pos.lower()
+        self.assertIn("black silk slip dress", home_lower)
+        self.assertIn("white cotton knit cardigan", home_lower)
+        self.assertNotIn("plain white crew-neck t-shirt", home_lower)
+        self.assertNotIn("dark blue jeans", home_lower)
 
     def test_build_prompt_private_context_keeps_sleepwear_outfit(self):
         svc = self.make_service()
@@ -9333,10 +9353,15 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             sid = "telegram:1"
             svc._classify_wardrobe_change = AsyncMock(return_value={"dress": "red dress", "names": {"dress": "红裙"}})
             await svc._apply_wardrobe(sid, "穿红裙")
+            session_schema.set_public_fallback_outfit(
+                svc._get_session_state(sid),
+                {"top": "plain white crew-neck t-shirt", "bottom": "dark blue jeans"},
+            )
             await svc._apply_wardrobe(sid, "reset")  # 脱掉当前外型
             state = svc._get_session_state(sid)
             self.assertEqual(session_schema.get_wardrobe(state), {})
             self.assertEqual(session_schema.get_outfit(state), "")
+            self.assertEqual(session_schema.get_public_fallback_outfit(state), {})
             self.assertIn("红裙", session_schema.get_closet(state))  # 衣橱收藏保留
 
         asyncio.run(run())

@@ -1511,6 +1511,7 @@ class CommandHandlersMixin:
         session_schema.set_outfit(state, "")
         session_schema.set_wardrobe(state, {})
         session_schema.set_closet(state, {})
+        session_schema.clear_public_fallback_outfit(state)
         session_schema.clear_nudity(state)
         session_schema.set_character_value(state, "persona_user_set", False)
         session_schema.set_character_value(state, "purity", None)
@@ -1593,6 +1594,7 @@ class CommandHandlersMixin:
             state,
             appearance_rules.seed_wardrobe_from_text(outfit, self._outfit_kw, self._accessory_kw) if outfit else {},
         )
+        session_schema.clear_public_fallback_outfit(state)
         session_schema.clear_nudity(state)
 
     @staticmethod
@@ -1834,6 +1836,7 @@ class CommandHandlersMixin:
                 session_schema.set_outfit(state, "")
                 session_schema.set_wardrobe(state, {})
                 session_schema.set_closet(state, {})
+                session_schema.clear_public_fallback_outfit(state)
                 session_schema.clear_nudity(state)
                 session_schema.set_character_value(state, "persona_user_set", False)
                 session_schema.set_character_value(state, "purity", None)
