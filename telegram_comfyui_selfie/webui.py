@@ -14,6 +14,7 @@ from typing import Any
 from aiohttp import web
 
 from . import session_schema
+from . import appearance as appearance_rules
 from .commands import SESSION_CUSTOM_RESET_KEYS
 from .world_runtime import PLACE_TYPES
 
@@ -167,6 +168,7 @@ def create_web_app(service) -> web.Application:
     app.router.add_delete(r"/api/sessions/{session_id:.+}/memories/{memory_id:\d+}", api_delete_memory)
     app.router.add_get("/api/sessions/{session_id:.+}/characters", api_characters)
     app.router.add_post("/api/sessions/{session_id:.+}/characters", api_save_character)
+    app.router.add_post("/api/sessions/{session_id:.+}/wardrobe", api_update_wardrobe)
     app.router.add_post("/api/sessions/{session_id:.+}/characters/{character_id:[^/]+}/avatar", api_generate_character_avatar)
     app.router.add_get("/api/sessions/{session_id:.+}/characters/{character_id:[^/]+}/avatar-image", api_character_avatar_image)
     app.router.add_get("/api/sessions/{session_id:.+}/characters/{character_id:[^/]+}/checkpoints", api_character_checkpoints)
@@ -879,14 +881,139 @@ def serialize_prompt_slots(service, session_id: str, scene: str = "{场景描述
     }
 
 
+PUBLIC_FALLBACK_CLOSET_PREFIX = "public fallback "
+
+
+def _split_public_fallback_closet(state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """把系统兜底收藏从普通衣橱里拆出来，避免 WebUI 把内部 key 展示给用户。"""
+    public_fallback = dict(session_schema.get_public_fallback_outfit(state))
+    visible_closet: dict[str, Any] = {}
+    closet = session_schema.get_closet(state)
+    for name, entry in (closet or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        key = str(name or "")
+        slot = str(entry.get("slot") or "").strip()
+        tags = str(entry.get("tags") or "").strip()
+        if key.startswith(PUBLIC_FALLBACK_CLOSET_PREFIX):
+            if slot and tags and not public_fallback.get(slot):
+                public_fallback[slot] = tags
+            continue
+        visible_closet[key] = entry
+    return visible_closet, public_fallback
+
+
+def _public_fallback_in_current(wardrobe: dict[str, Any], public_fallback: dict[str, Any]) -> bool:
+    for slot, tags in (public_fallback or {}).items():
+        if not slot or not str(tags or "").strip():
+            continue
+        if appearance_rules.normalize_appearance_text(wardrobe.get(slot) or "") == appearance_rules.normalize_appearance_text(tags):
+            return True
+    return False
+
+
 def serialize_current_clothing(service, state: dict[str, Any]) -> dict[str, Any]:
+    wardrobe = service._get_wardrobe(state)
+    closet, public_fallback = _split_public_fallback_closet(state)
     return {
         "dynamic_appearance": session_schema.get_outfit(state),
-        "wardrobe": service._get_wardrobe(state),
-        "public_fallback_outfit": session_schema.get_public_fallback_outfit(state),
-        "closet": session_schema.get_closet(state),
+        "wardrobe": wardrobe,
+        "public_fallback_outfit": public_fallback,
+        "public_fallback_in_current": _public_fallback_in_current(wardrobe, public_fallback),
+        "closet": closet,
         "nudity": session_schema.get_nudity(state),
     }
+
+
+def _apply_wardrobe_direct(service, sid: str, state: dict[str, Any], wardrobe: dict[str, Any]) -> str:
+    session_schema.set_wardrobe(state, wardrobe)
+    rendered = appearance_rules.render_wardrobe(wardrobe)
+    session_schema.set_outfit(state, rendered)
+    if rendered.strip():
+        session_schema.clear_nudity(state)
+    service._save_session_state(sid, state)
+    return rendered
+
+
+async def api_update_wardrobe(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        return json_error("衣柜操作必须是 JSON 对象")
+
+    action = str(payload.get("action") or "apply").strip()
+    state = service._get_session_state(sid)
+    result = ""
+
+    if action in {"apply", "replace"}:
+        description = str(payload.get("description") or "").strip()
+        if not description:
+            return json_error("请输入要修改的穿搭")
+        result = await service._apply_wardrobe(sid, description, replace=(action == "replace"))
+        state = service._get_session_state(sid)
+    elif action == "clear":
+        result = await service._apply_wardrobe(sid, "reset")
+        state = service._get_session_state(sid)
+    elif action == "wear_closet":
+        name = str(payload.get("name") or "").strip()
+        closet = session_schema.get_closet(state)
+        entry = closet.get(name) if isinstance(closet, dict) else None
+        if not isinstance(entry, dict):
+            return json_error("衣橱里没有这件衣服", status=404)
+        slot = str(entry.get("slot") or "").strip()
+        tags = str(entry.get("tags") or "").strip()
+        if slot not in appearance_rules.WARDROBE_CLOTHING_SLOTS or not tags:
+            return json_error("这件收藏缺少可复穿的槽位或标签")
+        wardrobe = appearance_rules.apply_wardrobe_change(service._get_wardrobe(state), {slot: tags})
+        closet = appearance_rules.closet_add(closet, name, slot, tags, now=time.time())
+        session_schema.set_closet(state, closet)
+        result = _apply_wardrobe_direct(service, sid, state, wardrobe)
+    elif action == "remove_slot":
+        slot = str(payload.get("slot") or "").strip()
+        removable = set(appearance_rules.WARDROBE_RENDER_ORDER)
+        if slot not in removable:
+            return json_error("未知的衣柜槽位")
+        wardrobe = dict(service._get_wardrobe(state))
+        wardrobe.pop(slot, None)
+        result = _apply_wardrobe_direct(service, sid, state, wardrobe)
+    elif action == "stash_public_fallback":
+        closet, public_fallback = _split_public_fallback_closet(state)
+        if not public_fallback:
+            return json_error("当前没有公开场合兜底")
+        wardrobe = dict(service._get_wardrobe(state))
+        changed = False
+        for slot, tags in public_fallback.items():
+            if appearance_rules.normalize_appearance_text(wardrobe.get(slot) or "") == appearance_rules.normalize_appearance_text(tags):
+                wardrobe.pop(slot, None)
+                changed = True
+        if not changed:
+            return json_error("当前穿搭里没有这套公开兜底")
+        session_schema.set_public_fallback_outfit(state, public_fallback)
+        session_schema.set_closet(state, {**closet, **{
+            name: entry for name, entry in session_schema.get_closet(state).items()
+            if str(name or "").startswith(PUBLIC_FALLBACK_CLOSET_PREFIX)
+        }})
+        result = _apply_wardrobe_direct(service, sid, state, wardrobe)
+    elif action == "clear_public_fallback":
+        session_schema.clear_public_fallback_outfit(state)
+        service._save_session_state(sid, state)
+        result = session_schema.get_outfit(state)
+    else:
+        return json_error("未知的衣柜操作")
+
+    if hasattr(service, "_snapshot_character"):
+        service._snapshot_character(state)
+    return json_ok({
+        "result": result,
+        "current": service._character_export_payload(state) if hasattr(service, "_character_export_payload") else {},
+        "current_clothing": serialize_current_clothing(service, state),
+    })
 
 
 async def api_status(request: web.Request):

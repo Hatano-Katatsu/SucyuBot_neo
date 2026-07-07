@@ -301,7 +301,7 @@ function characterPill(label, value, className = "") {
 const wardrobeSlotLabels = {
   hair: "发型/发色",
   eyes: "眼睛",
-  dress: "连衣裙/主体",
+  dress: "连衣裙",
   top: "上衣",
   bottom: "下装",
   outerwear: "外套",
@@ -315,7 +315,14 @@ const wardrobeSlotLabels = {
 
 const wardrobeSlotOrder = Object.keys(wardrobeSlotLabels);
 
-function wardrobeRows(items = {}) {
+function closetDisplayName(name, entry = {}) {
+  const raw = String(name || "").trim();
+  if (raw === "public fallback top") return "公开兜底上衣";
+  if (raw === "public fallback bottom") return "公开兜底下装";
+  return raw || String(entry.tags || "衣物");
+}
+
+function wardrobeRows(items = {}, options = {}) {
   const entries = Object.entries(items || {})
     .filter(([, value]) => String(value ?? "").trim())
     .sort(([a], [b]) => {
@@ -331,6 +338,7 @@ function wardrobeRows(items = {}) {
     <div class="wardrobe-row">
       <span>${escapeHtml(wardrobeSlotLabels[slot] || slot)}</span>
       <strong>${escapeHtml(value)}</strong>
+      ${options.removable ? `<button class="ghost tiny" type="button" data-wardrobe-action="remove-slot" data-slot="${escapeHtml(slot)}">脱下</button>` : ""}
     </div>
   `).join("")}</div>`;
 }
@@ -339,14 +347,15 @@ function closetRows(closet = {}) {
   const entries = Object.entries(closet || {})
     .filter(([, entry]) => entry && String(entry.tags || "").trim())
     .sort((a, b) => Number(b[1].last_worn || b[1].added_at || 0) - Number(a[1].last_worn || a[1].added_at || 0));
-  if (!entries.length) return `<div class="empty-state small">暂无收藏。</div>`;
+  if (!entries.length) return `<div class="empty-state small">还没有收藏。角色穿过的衣服会自动出现在这里。</div>`;
   return `<div class="closet-list">${entries.slice(0, 12).map(([name, entry]) => `
     <article class="closet-item">
       <div>
-        <strong>${escapeHtml(name)}</strong>
+        <strong>${escapeHtml(closetDisplayName(name, entry))}</strong>
         <small>${escapeHtml(wardrobeSlotLabels[entry.slot] || entry.slot || "衣物")}</small>
       </div>
       <span>${escapeHtml(entry.tags || "")}</span>
+      <button class="ghost tiny" type="button" data-wardrobe-action="wear-closet" data-name="${escapeHtml(name)}">穿上</button>
     </article>
   `).join("")}</div>`;
 }
@@ -357,27 +366,88 @@ function renderRuntimeClothingPanel(char, isActive) {
   const current = clothing.dynamic_appearance || char.outfit || "";
   return `
     <section class="form-section character-section runtime-clothing-section">
-      <h3 class="section-toggle" type="button">当前衣柜</h3>
-      <div class="runtime-clothing-grid">
-        <div class="runtime-clothing-current">
-          <span>当前穿搭标签</span>
-          <strong>${escapeHtml(current || "未设置")}</strong>
-        </div>
+      <div class="runtime-clothing-head">
         <div>
-          <h4>当前分槽</h4>
-          ${wardrobeRows(clothing.wardrobe || {})}
+          <h3>当前衣柜</h3>
+          <p>这里改的是当前角色现在穿在身上的衣服；会直接影响聊天后的生图。</p>
         </div>
-        <div>
-          <h4>公开场合兜底</h4>
+        <button class="ghost danger" type="button" data-wardrobe-action="clear">清空当前穿搭</button>
+      </div>
+      <div class="wardrobe-editor">
+        <textarea id="wardrobe-description" rows="2" placeholder="输入换装：例如 black silk slip dress, white cotton knit cardigan"></textarea>
+        <div class="wardrobe-editor-actions">
+          <button class="primary" type="button" data-wardrobe-action="apply">更新穿搭</button>
+          <button class="ghost" type="button" data-wardrobe-action="replace">整套替换</button>
+        </div>
+      </div>
+      <div class="runtime-clothing-layout">
+        <section class="runtime-clothing-pane is-current">
+          <div class="pane-title">
+            <h4>身上穿着</h4>
+            <span>当前真源</span>
+          </div>
+          <div class="runtime-clothing-current">
+            <span>最终标签</span>
+            <strong>${escapeHtml(current || "未设置")}</strong>
+          </div>
+          ${wardrobeRows(clothing.wardrobe || {}, { removable: true })}
+        </section>
+        <section class="runtime-clothing-pane is-fallback">
+          <div class="pane-title">
+            <h4>公开兜底</h4>
+            <span>只在外出/公开场景临时叠加</span>
+          </div>
           ${wardrobeRows(clothing.public_fallback_outfit || {})}
-        </div>
-        <div>
-          <h4>衣橱收藏</h4>
+          ${clothing.public_fallback_in_current ? `
+            <button class="ghost" type="button" data-wardrobe-action="stash-public-fallback">从当前穿搭移出兜底</button>
+          ` : ""}
+        </section>
+        <section class="runtime-clothing-pane is-closet">
+          <div class="pane-title">
+            <h4>衣橱收藏</h4>
+            <span>穿过的单件，可一键复穿</span>
+          </div>
           ${closetRows(clothing.closet || {})}
-        </div>
+        </section>
       </div>
     </section>
   `;
+}
+
+function bindRuntimeClothingHandlers(container) {
+  const panel = container.querySelector(".runtime-clothing-section");
+  if (!panel) return;
+  panel.addEventListener("click", async event => {
+    const button = event.target.closest("[data-wardrobe-action]");
+    if (!button || !panel.contains(button)) return;
+    const action = button.dataset.wardrobeAction;
+    const body = { action };
+    const editor = panel.querySelector("#wardrobe-description");
+    if (action === "apply" || action === "replace") {
+      body.description = String(editor?.value || "").trim();
+      if (!body.description) {
+        toast("先输入要换成什么衣服。", "error");
+        return;
+      }
+    } else if (action === "remove-slot") {
+      body.slot = button.dataset.slot || "";
+    } else if (action === "wear-closet") {
+      body.name = button.dataset.name || "";
+    } else if (action === "clear") {
+      if (!window.confirm("确定清空当前穿搭吗？衣橱收藏不会删除。")) return;
+    }
+    setBusy(button, true);
+    try {
+      const sid = encodeURIComponent(state.selectedSession);
+      await api(`/api/sessions/${sid}/wardrobe`, { method: "POST", body });
+      await loadCharacters();
+      toast("衣柜已更新");
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(button, false);
+    }
+  });
 }
 
 function diaryTitle(content, date) {
@@ -900,6 +970,7 @@ function renderCharacterForm() {
       toggle.classList.toggle("collapsed");
     };
   });
+  bindRuntimeClothingHandlers(form);
 
   loadHistorySummary();
 

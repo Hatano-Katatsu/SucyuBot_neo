@@ -24,7 +24,7 @@ from telegram_comfyui_selfie.commands import (
 )
 from telegram_comfyui_selfie.command_aliases import COMMAND_ALIAS_GROUPS, resolve_command_alias
 from telegram_comfyui_selfie.prompt_intake import heuristic_intake
-from telegram_comfyui_selfie.webui import api_character_avatar_image, api_diaries, api_generate_character_avatar, api_get_history_summary, api_organize_memories, api_save_character, api_save_diary, api_save_history_summary, api_system_error_log, api_test_push_selected_character, api_world_life_plan_generate, api_world_life_plan_goal_create, api_world_life_plan_goal_delete, api_world_life_plan_goal_update, build_world_route_preview, cast_config_value, masked_config, serialize_prompt_slots, session_summary
+from telegram_comfyui_selfie.webui import api_character_avatar_image, api_diaries, api_generate_character_avatar, api_get_history_summary, api_organize_memories, api_save_character, api_save_diary, api_save_history_summary, api_system_error_log, api_test_push_selected_character, api_update_wardrobe, api_world_life_plan_generate, api_world_life_plan_goal_create, api_world_life_plan_goal_delete, api_world_life_plan_goal_update, build_world_route_preview, cast_config_value, masked_config, serialize_prompt_slots, session_summary
 
 
 os.environ.setdefault("SUCYUBOT_TEST_FAST_SQLITE", "1")
@@ -1506,6 +1506,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             session_schema.set_public_fallback_outfit(state, {"top": "plain white crew-neck t-shirt", "bottom": "dark blue jeans"})
             session_schema.set_closet(state, {
                 "public fallback top": {"slot": "top", "tags": "plain white crew-neck t-shirt", "times_worn": 1, "last_worn": 1.0},
+                "丝绸睡裙": {"slot": "dress", "tags": "black silk slip dress", "times_worn": 1, "last_worn": 2.0},
             })
             svc._snapshot_character(state)
             app = web.Application()
@@ -1524,13 +1525,89 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(data["style_pool"], ["@base", "@dream_style"])
             self.assertEqual(data["current_clothing"]["wardrobe"]["dress"], "black silk slip dress")
             self.assertEqual(data["current_clothing"]["public_fallback_outfit"]["bottom"], "dark blue jeans")
-            self.assertIn("public fallback top", data["current_clothing"]["closet"])
+            self.assertNotIn("public fallback top", data["current_clothing"]["closet"])
+            self.assertIn("丝绸睡裙", data["current_clothing"]["closet"])
             app_js = (Path(__file__).resolve().parents[1] / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
             self.assertIn('["style", "画风", "style_combo", "half"]', app_js)
             self.assertNotIn('["outfit", "服装标签", "textarea", "wide"]', app_js)
             self.assertIn("当前衣柜", app_js)
+            self.assertIn("身上穿着", app_js)
+            self.assertIn("衣橱收藏", app_js)
+            self.assertIn('data-wardrobe-action="apply"', app_js)
+            self.assertIn("穿上", app_js)
             self.assertIn("state.characterData?.style_pool", app_js)
             self.assertIn("留空表示本角色不注入画风", app_js)
+
+        asyncio.run(run())
+
+    def test_webui_wardrobe_actions_edit_current_clothing(self):
+        async def run():
+            from aiohttp import web
+            from aiohttp.test_utils import make_mocked_request
+
+            svc = self.make_service()
+            sid = "telegram:1"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "小雨")
+            session_schema.set_wardrobe(state, {
+                "top": "plain white crew-neck t-shirt",
+                "bottom": "dark blue jeans",
+                "outerwear": "white cotton knit cardigan",
+            })
+            session_schema.set_outfit(state, appearance_rules.render_wardrobe(session_schema.get_wardrobe(state)))
+            session_schema.set_closet(state, {
+                "public fallback top": {"slot": "top", "tags": "plain white crew-neck t-shirt", "times_worn": 1, "last_worn": 1.0},
+                "public fallback bottom": {"slot": "bottom", "tags": "dark blue jeans", "times_worn": 1, "last_worn": 1.0},
+                "丝绸睡裙": {"slot": "dress", "tags": "black silk slip dress", "times_worn": 1, "last_worn": 2.0},
+            })
+            app = web.Application()
+            app["service"] = svc
+
+            def req(body):
+                request = make_mocked_request(
+                    "POST",
+                    f"/api/sessions/{sid}/wardrobe",
+                    app=app,
+                    match_info={"session_id": sid},
+                    headers={"Content-Type": "application/json"},
+                )
+                request["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+                request._read_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
+                return request
+
+            resp = await api_update_wardrobe(req({"action": "stash_public_fallback"}))
+            data = json.loads(resp.text)
+            self.assertTrue(data["ok"])
+            self.assertEqual(data["current_clothing"]["wardrobe"], {"outerwear": "white cotton knit cardigan"})
+            self.assertEqual(data["current_clothing"]["public_fallback_outfit"]["top"], "plain white crew-neck t-shirt")
+            self.assertNotIn("public fallback top", data["current_clothing"]["closet"])
+
+            resp = await api_update_wardrobe(req({"action": "wear_closet", "name": "丝绸睡裙"}))
+            data = json.loads(resp.text)
+            self.assertTrue(data["ok"])
+            wardrobe = data["current_clothing"]["wardrobe"]
+            self.assertEqual(wardrobe["dress"], "black silk slip dress")
+            self.assertEqual(wardrobe["outerwear"], "white cotton knit cardigan")
+            self.assertNotIn("top", wardrobe)
+            self.assertNotIn("bottom", wardrobe)
+
+            resp = await api_update_wardrobe(req({"action": "remove_slot", "slot": "outerwear"}))
+            data = json.loads(resp.text)
+            self.assertTrue(data["ok"])
+            self.assertEqual(data["current_clothing"]["wardrobe"], {"dress": "black silk slip dress"})
+
+            svc._classify_wardrobe_change = AsyncMock(return_value={"top": "white blouse", "names": {"top": "白衬衫"}})
+            resp = await api_update_wardrobe(req({"action": "apply", "description": "换白衬衫"}))
+            data = json.loads(resp.text)
+            self.assertTrue(data["ok"])
+            wardrobe = data["current_clothing"]["wardrobe"]
+            self.assertEqual(wardrobe["top"], "white blouse")
+            self.assertNotIn("dress", wardrobe)
+
+            resp = await api_update_wardrobe(req({"action": "clear"}))
+            data = json.loads(resp.text)
+            self.assertTrue(data["ok"])
+            self.assertEqual(data["current_clothing"]["wardrobe"], {})
 
         asyncio.run(run())
 

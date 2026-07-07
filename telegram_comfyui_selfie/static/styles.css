@@ -487,6 +487,37 @@ button:disabled {
   color: white;
 }
 
+.ghost {
+  background: var(--surface);
+  color: var(--text-secondary);
+  border-color: var(--line);
+  box-shadow: none;
+}
+
+.ghost:hover {
+  background: var(--surface-subtle);
+  color: var(--accent-strong);
+}
+
+.ghost.danger {
+  background: var(--surface);
+  color: var(--warn);
+  border-color: rgba(220, 38, 38, 0.28);
+}
+
+.ghost.danger:hover {
+  background: rgba(220, 38, 38, 0.08);
+  color: var(--warn);
+  border-color: rgba(220, 38, 38, 0.45);
+}
+
+button.tiny {
+  min-height: 26px;
+  padding: 4px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .icon-btn {
   width: 32px;
   height: 32px;
@@ -1537,8 +1568,12 @@ select {
 
 /* Mobile / responsive */
 @media (max-width: 1100px) {
-  .field-grid, .slot-edit-grid, .effective-grid, .prompt-slot-preview, .runtime-clothing-grid {
+  .field-grid, .slot-edit-grid, .effective-grid, .prompt-slot-preview, .runtime-clothing-layout {
     grid-template-columns: 1fr;
+  }
+
+  .runtime-clothing-pane.is-current {
+    grid-row: auto;
   }
 }
 
@@ -1585,6 +1620,10 @@ select {
   .status-grid { grid-template-columns: repeat(2, 1fr); }
   .session-layout, .split { grid-template-columns: 1fr; }
   .kv, .slot-row, .catalog-row, .note-line, .wardrobe-row, .closet-item { grid-template-columns: 1fr; gap: 6px; }
+  .runtime-clothing-head, .wardrobe-editor-actions { flex-direction: column; align-items: stretch; }
+  .runtime-clothing-head { display: grid; }
+  .wardrobe-editor { grid-template-columns: 1fr; }
+  .wardrobe-editor-actions { display: grid; }
   .slot-row strong { padding-bottom: 6px; border-bottom: 1px solid var(--line); }
   .panel { padding: 16px; }
 }
@@ -2096,24 +2135,98 @@ button:disabled .spinner {
   display: none;
 }
 
-.runtime-clothing-grid {
+.runtime-clothing-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.runtime-clothing-head h3 {
+  margin: 0 0 4px;
+}
+
+.runtime-clothing-head p,
+.pane-title span {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.wardrobe-editor {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px 16px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: stretch;
+  padding: 12px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  background: var(--surface-subtle);
+  border-radius: var(--radius-md);
 }
 
-.runtime-clothing-grid.collapsed {
-  display: none;
+.wardrobe-editor textarea {
+  min-height: 46px;
+  resize: vertical;
 }
 
-.runtime-clothing-current {
-  grid-column: 1 / -1;
-  padding-bottom: 10px;
+.wardrobe-editor-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.runtime-clothing-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.9fr);
+  gap: 12px;
+}
+
+.runtime-clothing-pane {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.runtime-clothing-pane.is-current {
+  grid-row: span 2;
+  border-color: rgba(13, 148, 136, 0.32);
+}
+
+.runtime-clothing-pane.is-fallback {
+  background: #f8fafc;
+}
+
+.runtime-clothing-pane.is-closet {
+  background: #fff;
+}
+
+.pane-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
   border-bottom: 1px solid var(--line);
 }
 
-.runtime-clothing-current span,
-.runtime-clothing-grid h4 {
+.pane-title h4 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.runtime-clothing-current {
+  padding: 8px 0 10px;
+  margin-bottom: 4px;
+}
+
+.runtime-clothing-current span {
   display: block;
   margin: 0 0 6px;
   color: var(--muted);
@@ -2138,9 +2251,9 @@ button:disabled .spinner {
 .wardrobe-row,
 .closet-item {
   display: grid;
-  grid-template-columns: 96px minmax(0, 1fr);
+  grid-template-columns: 92px minmax(0, 1fr) auto;
   gap: 8px;
-  align-items: start;
+  align-items: center;
   padding: 8px 0;
   border-bottom: 1px solid var(--line);
 }
