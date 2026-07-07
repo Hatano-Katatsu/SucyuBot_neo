@@ -13,7 +13,16 @@ from typing import Any
 import aiohttp
 
 from . import session_schema
-from .appearance import infer_gender_from_count, infer_gender_from_prefix, inject_appearance, normalize_appearance_text
+from .appearance import (
+    apply_wardrobe_change,
+    closet_add,
+    infer_gender_from_count,
+    infer_gender_from_prefix,
+    inject_appearance,
+    normalize_appearance_text,
+    render_wardrobe,
+    seed_wardrobe_from_text,
+)
 from .defaults import DEFAULT_CONFIG
 
 logger = logging.getLogger(__name__)
@@ -393,6 +402,11 @@ def _strip_conflicting_scene_appearance(
 
 
 PUBLIC_MODEST_OUTFIT_TAG = "modest casual clothes"
+PUBLIC_FALLBACK_OUTFIT_CHANGE = {
+    "top": "plain white crew-neck t-shirt",
+    "bottom": "dark blue jeans",
+}
+PUBLIC_FALLBACK_OUTFIT_TAG = ", ".join(PUBLIC_FALLBACK_OUTFIT_CHANGE.values())
 PUBLIC_PRIVATE_OUTFIT_TERMS = (
     "lingerie", "underwear", "panties", "g-string", "thong",
     "nightgown", "nightdress", "negligee", "sleepwear", "pajamas",
@@ -511,6 +525,46 @@ def _remove_public_private_outfit_tags(
     return normalize_appearance_text(", ".join(kept)), removed
 
 
+def _appearance_has_public_body_cover(service: Any, text: str) -> bool:
+    wardrobe = seed_wardrobe_from_text(
+        text,
+        getattr(service, "_outfit_kw", []),
+        getattr(service, "_accessory_kw", []),
+    )
+    return bool(wardrobe.get("dress") or (wardrobe.get("top") and wardrobe.get("bottom")))
+
+
+def _ensure_public_fallback_outfit(service: Any, state: dict[str, Any], session_id: str) -> str:
+    fallback_tags = render_wardrobe(PUBLIC_FALLBACK_OUTFIT_CHANGE) or PUBLIC_FALLBACK_OUTFIT_TAG
+    if not session_id or not isinstance(state, dict) or not hasattr(service, "_get_wardrobe"):
+        return fallback_tags
+
+    wardrobe_before = dict(service._get_wardrobe(state) or {})
+    wardrobe_after = apply_wardrobe_change(wardrobe_before, PUBLIC_FALLBACK_OUTFIT_CHANGE)
+    if wardrobe_after == wardrobe_before:
+        return fallback_tags
+
+    closet = session_schema.get_closet(state)
+    now = time.time()
+    for slot, tags in PUBLIC_FALLBACK_OUTFIT_CHANGE.items():
+        closet = closet_add(closet, f"public fallback {slot}", slot, tags, now=now)
+    session_schema.set_closet(state, closet)
+    session_schema.set_wardrobe(state, wardrobe_after)
+    rendered = render_wardrobe(wardrobe_after)
+    session_schema.set_outfit(state, rendered)
+    if rendered.strip():
+        session_schema.clear_nudity(state)
+    if hasattr(service, "_save_session_state"):
+        service._save_session_state(session_id, state)
+    if hasattr(service, "_ulog"):
+        service._ulog(
+            session_id,
+            "WARDROBE",
+            f'public fallback outfit applied -> "{rendered[:140]}"',
+        )
+    return fallback_tags
+
+
 def _public_render_context(service: Any, state: dict[str, Any], session_id: str, scene_desc: str) -> bool:
     scene = str(scene_desc or "")
     scene_is_public = bool(PUBLIC_SCENE_ANCHOR_RE.search(scene))
@@ -565,8 +619,9 @@ def _guard_public_outfit(
         return effective_appearance, one_shot_appearance, negative, []
 
     combined = _dedupe_prompt_modules([effective_clean, one_shot_clean])
-    if not service._parse_appearance(combined).get("outfit"):
-        effective_clean = _dedupe_prompt_modules([effective_clean, PUBLIC_MODEST_OUTFIT_TAG])
+    if not _appearance_has_public_body_cover(service, combined):
+        fallback_outfit = _ensure_public_fallback_outfit(service, state, session_id)
+        effective_clean = _dedupe_prompt_modules([effective_clean, fallback_outfit])
     negative = _append_negatives(negative, *removed, *PUBLIC_EXPOSURE_NEGATIVE_GUARDS, "revealing public outfit")
     return effective_clean, one_shot_clean, negative, removed
 

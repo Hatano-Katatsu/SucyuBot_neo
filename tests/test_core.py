@@ -7975,11 +7975,44 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         )
 
         pos_lower = pos.lower()
-        self.assertIn("modest casual clothes", pos_lower)
+        self.assertIn("plain white crew-neck t-shirt", pos_lower)
+        self.assertIn("dark blue jeans", pos_lower)
         self.assertNotIn("nightgown", pos_lower)
         self.assertNotIn("camisole", pos_lower)
         self.assertIn("nightgown", neg.lower())
-        self.assertEqual(session_schema.get_outfit(state), "black lace camisole nightgown")
+        outfit = session_schema.get_outfit(state).lower()
+        self.assertIn("plain white crew-neck t-shirt", outfit)
+        self.assertIn("dark blue jeans", outfit)
+        self.assertNotIn("nightgown", outfit)
+        saved = svc.app_store.load_session_state(sid)
+        self.assertIsNotNone(saved)
+        self.assertIn("dark blue jeans", session_schema.get_outfit(saved).lower())
+
+    def test_build_prompt_public_fallback_replaces_slip_dress_but_keeps_cardigan(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        session_schema.set_outfit(
+            state,
+            "upper back length black hair, voluminous curls, middle part bangs, "
+            "black silk slip dress, white cotton knit cardigan",
+        )
+
+        pos, neg = svc._build_prompt("sitting across from the viewer in a cozy izakaya cafe", session_id=sid)
+
+        pos_lower = pos.lower()
+        neg_lower = neg.lower()
+        self.assertIn("plain white crew-neck t-shirt", pos_lower)
+        self.assertIn("dark blue jeans", pos_lower)
+        self.assertIn("white cotton knit cardigan", pos_lower)
+        self.assertNotIn("black silk slip dress", pos_lower)
+        self.assertIn("black silk slip dress", neg_lower)
+        outfit = session_schema.get_outfit(state).lower()
+        self.assertIn("upper back length black hair", outfit)
+        self.assertIn("plain white crew-neck t-shirt", outfit)
+        self.assertIn("dark blue jeans", outfit)
+        self.assertIn("white cotton knit cardigan", outfit)
+        self.assertNotIn("black silk slip dress", outfit)
 
     def test_build_prompt_private_context_keeps_sleepwear_outfit(self):
         svc = self.make_service()
