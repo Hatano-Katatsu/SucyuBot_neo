@@ -998,13 +998,14 @@ async def api_update_wardrobe(request: web.Request):
         names = change.get("names") if isinstance(change.get("names"), dict) else {}
         closet = session_schema.get_closet(state)
         now = time.time()
-        added = []
-        for slot in appearance_rules.WARDROBE_CLOTHING_SLOTS:
+        added = [
+            slot for slot in appearance_rules.WARDROBE_CLOTHING_SLOTS
+            if appearance_rules.normalize_appearance_text(change.get(slot) or "")
+        ]
+        for slot in added:
             tags = appearance_rules.normalize_appearance_text(change.get(slot) or "")
-            if not tags:
-                continue
-            closet = appearance_rules.closet_add(closet, str(names.get(slot) or ""), slot, tags, now=now, worn=False)
-            added.append(slot)
+            name = service._wardrobe_closet_display_name(description, slot, tags, names, added)
+            closet = appearance_rules.closet_add(closet, name, slot, tags, now=now, worn=False)
         if not added:
             return json_error("没识别出可收藏的衣物（发型/瞳色/配饰不进衣橱）")
         session_schema.set_closet(state, closet)

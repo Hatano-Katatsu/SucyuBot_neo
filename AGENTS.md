@@ -259,6 +259,7 @@ telegram_comfyui_selfie/
 11. **WebUI 衣柜面板可操作化**：新增 `POST /api/sessions/{session_id}/wardrobe`，支持 WebUI 自然语言更新穿搭、整套替换、清空、按槽位脱下、从衣橱收藏一键穿上，以及把旧状态中混进当前穿搭的公开兜底移回 `public_fallback_outfit`。前端“当前衣柜”改成明确三块：身上穿着（当前真源，可脱下单槽）、公开兜底（只说明外出/公开场景临时叠加）、衣橱收藏（普通收藏可一键复穿）；系统自动生成的 `public fallback top/bottom` 不再混进普通收藏展示。新增 `test_webui_wardrobe_actions_edit_current_clothing` 并更新 WebUI 衣柜展示测试；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 380 tests in 10.157s`，`OK (skipped=1)`。
 12. **WebUI 衣橱收藏选择器重排**：衣橱收藏不再按“名称 / 英文生图标签 / 按钮”的表格展示，改为左侧衣服类型、右侧具体服装按钮的选择器；主显示使用中文收藏名或由常见英文 tag 本地化出的中文名（如 `white cotton knit cardigan` 显示为“白色棉质针织开衫”），英文 tags 只保留在 hover title 里供调试，不占主界面。当前穿搭摘要和输入示例也改为中文可读文案，不改变底层 prompt tags。更新 WebUI 测试锁定 `closet-picker` / `closet-choice` 结构和不再直接渲染 `entry.tags`；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 380 tests in 10.822s`，`OK (skipped=1)`。
 13. **WebUI 当前穿着保留可读衣名**：当前穿着的 prompt 真源仍是英文 tags，但 `/api/sessions/{session_id}/characters` 会用 `slot + tags` 从普通衣橱收藏反查中文短名，新增 `current_clothing.wardrobe_display` 给前端“身上穿着”和“当前摘要”优先显示；例如当前 top tag 只有 `white`，但衣橱里同槽同 tag 收藏名是“露脐白衬衫”，WebUI 会显示“露脐白衬衫”而不是“白色”。新增 `test_webui_current_wardrobe_prefers_closet_display_names`，验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 381 tests in 9.058s`，`OK (skipped=1)`。
+14. **衣橱新增保留用户输入名**：`_wardrobe_closet_display_name()` 统一处理衣橱收藏显示名；当 LLM/兜底分槽只返回 `white shirt`、`white` 等英文 prompt tags 而没有可靠中文 `names` 时，单件中文输入会用用户原始短语作为衣橱名，避免点击“存进衣橱（暂不换）”或“直接换上”自动收藏后又显示成英文/泛化标签。新增回归覆盖 WebUI `save-closet` 和 `_apply_wardrobe()` 自动收藏两条入口；验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 385 tests in 11.415s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-07-02）
 
@@ -425,7 +426,7 @@ telegram_comfyui_selfie/
 - `node --check telegram_comfyui_selfie\static\app.js`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m py_compile scripts\compare_llm_chat_prompts.py`
 - `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core -v`
-- 最新结果：`Ran 339 tests in 9.488s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
+- 最新结果：`Ran 385 tests in 11.415s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
 - 工具 schema 当前紧凑 JSON 长度：`1898` 字符；chat 回复请求体 key 顺序为 `model, max_tokens, temperature, top_p, frequency_penalty, tools, tool_choice, messages`（`presence_penalty` 留空时不下发；checkpoint/dream/memory 等内部任务不下发采样参数）
 - 本轮未改 prompt 比对脚本逻辑，未重新生成 `.tmp\llm_chat_prompt_compare_current.md`。
 - 真实 API 缓存探针沿用上一轮结论：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。

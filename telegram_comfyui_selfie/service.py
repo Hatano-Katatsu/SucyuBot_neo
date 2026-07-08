@@ -2858,6 +2858,27 @@ class TelegramComfyUIService(
                 tags = await self._translate_appearance_tags(desc)
             return appearance_rules.seed_wardrobe_from_text(tags, self._outfit_kw, self._accessory_kw)
 
+    @staticmethod
+    def _wardrobe_closet_display_name(description: str, slot: str, tags: str, names: dict, changed_slots: list[str]) -> str:
+        """为衣橱条目选择给用户看的名字；英文 tags 只作为生图语义，不该吞掉用户输入名。"""
+        raw = str((names or {}).get(slot) or "").strip()
+        tag_norm = appearance_rules.normalize_appearance_text(tags or "")
+        raw_norm = appearance_rules.normalize_appearance_text(raw)
+        if raw and (_HAS_CJK(raw) or raw_norm != tag_norm):
+            return raw[:40]
+
+        desc = str(description or "").strip()
+        if len(changed_slots) == 1 and _HAS_CJK(desc):
+            cleaned = re.sub(
+                r"^(?:请|帮我|给她|给角色|把|将|添加|加入|保存|收藏|存进|换上|穿上|穿|换|一件|一个|一条)\s*",
+                "",
+                desc,
+            )
+            cleaned = re.sub(r"(?:到|进)?(?:衣柜|衣橱|收藏|里面|里)$", "", cleaned).strip(" ，,。；;：:")
+            if cleaned:
+                return cleaned[:40]
+        return raw
+
     async def _wardrobe_apply_to_state(self, state: dict, description: str, *, replace: bool = False, session_id: str = "") -> str:
         """把一次换装应用到 state（改 wardrobe + dynamic_appearance），不落盘——由调用方保存。"""
         desc = (description or "").strip()
@@ -2895,13 +2916,16 @@ class TelegramComfyUIService(
             wardrobe = appearance_rules.apply_wardrobe_seed(wardrobe, seed)
         # 自动收藏：仅把【本次新穿上】的服装存进衣橱（用应用后的标签，含点名复穿时解析出的标签）。
         names = change.get("names") if isinstance(change.get("names"), dict) else {}
+        changed_slots = [
+            slot for slot in appearance_rules.WARDROBE_CLOTHING_SLOTS
+            if str(change.get(slot) or "").strip()
+        ]
         now = time.time()
-        for slot in appearance_rules.WARDROBE_CLOTHING_SLOTS:
-            if not str(change.get(slot) or "").strip():
-                continue  # 本次没设这个槽位 → 不动衣橱
+        for slot in changed_slots:
             tags = (wardrobe.get(slot) or "").strip()
             if tags:
-                closet = appearance_rules.closet_add(closet, names.get(slot, ""), slot, tags, now=now)
+                name = self._wardrobe_closet_display_name(desc, slot, tags, names, changed_slots)
+                closet = appearance_rules.closet_add(closet, name, slot, tags, now=now)
         session_schema.set_closet(state, closet)
         session_schema.set_wardrobe(state, wardrobe)
         rendered = appearance_rules.render_wardrobe(wardrobe)

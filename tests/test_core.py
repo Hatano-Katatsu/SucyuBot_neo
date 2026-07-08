@@ -1626,6 +1626,17 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertNotIn("dress", wardrobe)
             self.assertEqual(wardrobe["top"], "white blouse")
 
+            svc._classify_wardrobe_items = AsyncMock(return_value={"top": "white off shoulder shirt", "names": {}})
+            resp = await api_update_wardrobe(req({"action": "save-closet", "description": "露肩白衬衫"}))
+            data = json.loads(resp.text)
+            self.assertTrue(data["ok"])
+            closet = data["current_clothing"]["closet"]
+            self.assertIn("露肩白衬衫", closet)
+            self.assertNotIn("white off shoulder shirt", closet)
+            self.assertEqual(closet["露肩白衬衫"]["tags"], "white off shoulder shirt")
+            self.assertEqual(closet["露肩白衬衫"]["times_worn"], 0)
+            self.assertEqual(data["current_clothing"]["wardrobe"]["top"], "white blouse")
+
             # 编辑收藏：改名 + 改标签；正穿在身上的同步更新当前穿搭
             resp = await api_update_wardrobe(req({
                 "action": "closet_edit", "name": "白衬衫",
@@ -9602,6 +9613,13 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             await svc._apply_wardrobe(sid, "换蓝衬衫")
             closet = session_schema.get_closet(svc._get_session_state(sid))
             self.assertEqual(set(closet), {"碎花连衣裙", "蓝衬衫"})
+
+            svc._classify_wardrobe_change = AsyncMock(return_value={"top": "white shirt", "names": {}})
+            await svc._apply_wardrobe(sid, "换露脐白衬衫")
+            closet = session_schema.get_closet(svc._get_session_state(sid))
+            self.assertIn("露脐白衬衫", closet)
+            self.assertNotIn("white shirt", closet)
+            self.assertEqual(closet["露脐白衬衫"]["tags"], "white shirt")
 
         asyncio.run(run())
 
