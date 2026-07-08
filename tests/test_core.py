@@ -6234,6 +6234,53 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_roleplay_image_planner_behind_hug_demotes_pov_to_third(self):
+        """几何自洽闸门：角色从背后环抱面向屏幕的用户 → POV 看不到她，退回 third。"""
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "She wraps her arms around a man's chest from behind as he types at a computer",
+                "view": "pov",
+                "new_appearance_tags": "",
+                "user_location": "with_user",
+                "is_intimate": False,
+                "partner_in_frame": True,
+                "device_in_frame": False,
+            }, ensure_ascii=False))
+
+            plan = await plan_roleplay_image(svc, sid, intent="她从背后抱住正在打论文的你")
+
+            self.assertEqual(plan["view"], "third")
+            self.assertFalse(plan["device_in_frame"])
+
+        asyncio.run(run())
+
+    def test_build_prompt_behind_hug_uses_two_person_third_not_pov(self):
+        """背对相机的同框场景在 build_prompt 里不注入 POV，改用第三人称双人，不泄漏第一人称谎言。"""
+        svc = self.make_service()
+        sid = "telegram:1"
+        pos, neg = svc._build_prompt(
+            "First person view of a succubus wraps her arms around a man's chest from behind, "
+            "he types a thesis at a computer, a phone and tea set are scattered on the sofa",
+            session_id=sid,
+        )
+        low = pos.lower()
+        # 不再有第一人称谎言，也不留悬空冠词
+        self.assertNotIn("first person view", low)
+        self.assertNotIn("first-person pov", low)
+        self.assertNotIn(" a and ", low)
+        # 第三人称双人：伴侣是完整第二人，且负向不再压 male/第三人称/完整第二人
+        self.assertIn("male partner fully in frame", low)
+        self.assertNotIn("third-person perspective", neg.lower())
+        self.assertNotIn("full second person", neg.lower())
+
     def test_roleplay_image_planner_intimate_without_device_forces_pov(self):
         async def run():
             svc = self.make_service()
@@ -8705,12 +8752,24 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("moon-white nightgown", kept)
         self.assertNotIn("moon-wearing the current outfit", kept)
 
+        # 裸名词短语（做主语）替换成 "the current outfit"，避免旧的 "wearing the current outfit slips" 病句。
         replaced = _strip_conflicting_scene_outfit(
             "white nightgown slips to her elbows",
             ["current hanfu"],
             ["nightgown"],
         )
-        self.assertIn("wearing the current outfit", replaced)
+        self.assertIn("the current outfit", replaced)
+        self.assertNotIn("white nightgown", replaced)
+
+        # 动词短语（"wearing a red dress"）替换成完整从句，且不留悬空冠词。
+        verb_form = _strip_conflicting_scene_outfit(
+            "a succubus in a black silk nightgown sitting on a sofa",
+            ["current hanfu"],
+            ["nightgown"],
+        )
+        self.assertIn("the current outfit", verb_form)
+        self.assertNotIn("in a wearing", verb_form)
+        self.assertNotIn("black silk nightgown", verb_form)
 
     def test_daytime_prompt_rewrites_premature_sunset_terms(self):
         svc = self.make_service()

@@ -14,6 +14,7 @@ from .defaults import DEFAULT_CONFIG, WEEKDAY_NAMES
 from .generation import (
     ANIMATOOL_NLTAG_FIELDS,
     _infer_prompt_view,
+    _scene_breaks_pov_facing,
     _strip_non_mirror_camera_artifacts,
     public_outfit_guard_context,
 )
@@ -324,6 +325,11 @@ def _resolve_roleplay_view(
         final_view = "mirror"
     if free_composition:
         return final_view
+    # 几何自洽闸门：角色背对相机/处于相机背后（如从背后环抱面向屏幕的用户）时，任何“相机相对”
+    # 机位都不成立（相机看不到她），一律退回 third（旁观机位，对角色朝向零约束）。third/none 不受影响。
+    breaks_facing = _scene_breaks_pov_facing(scene, intent, mood, prompt, dialog_context)
+    if breaks_facing and final_view in {"pov", "selfie", "mirror", "portrait", ""}:
+        return "third"
     if (
         derived_co_located
         and not explicit_self_camera

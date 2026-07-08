@@ -375,14 +375,21 @@ def _strip_conflicting_scene_outfit(scene_desc: str, outfit_override: list[str],
     if not keywords:
         return scene_desc
     outfit_alt = "|".join(sorted(keywords, key=len, reverse=True))
-    patterns = [
-        rf"\b(?:wears?|wearing|dressed\s+in)\s+[^,.;]*(?:{outfit_alt})[^,.;]*",
-        rf"(?<![A-Za-z-])(?:black|white|blue|red|pink|purple|green|yellow|brown|gray|grey|dark|light)\s+[^,.;]*(?:{outfit_alt})[^,.;]*",
+    color_alt = "black|white|blue|red|pink|purple|green|yellow|brown|gray|grey|dark|light"
+    # (正则, 替换) 成对：动词短语("wearing a red dress")替换成完整从句；名词短语("a red dress"/"red dress")
+    # 连同前导冠词一起吃掉、替换成 "the current outfit"，避免留下悬空冠词（"in a wearing the current outfit"）。
+    replacements = [
+        (rf"\b(?:wears?|wearing|dressed\s+in)\s+[^,.;]*(?:{outfit_alt})[^,.;]*", "wearing the current outfit"),
+        (rf"(?<![A-Za-z-])(?:a|an|the)\s+(?:{color_alt})\s+[^,.;]*(?:{outfit_alt})[^,.;]*", "the current outfit"),
+        (rf"(?<![A-Za-z-])(?:{color_alt})\s+[^,.;]*(?:{outfit_alt})[^,.;]*", "the current outfit"),
     ]
     text = scene_desc
-    for pattern in patterns:
-        text = re.sub(pattern, "wearing the current outfit", text, flags=re.IGNORECASE)
+    for pattern, repl in replacements:
+        text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
+    # 折叠相邻重复的占位短语（如上下装两件都被替换成相邻的 "the current outfit"）。
     text = re.sub(r"(wearing the current outfit)(?:\s*,\s*\1)+", r"\1", text, flags=re.IGNORECASE)
+    text = re.sub(r"(the current outfit)(?:\s*,\s*\1)+", r"\1", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bwearing the current outfit\s*,\s*the current outfit\b", "wearing the current outfit", text, flags=re.IGNORECASE)
     text = re.sub(r"\s{2,}", " ", text)
     text = re.sub(r"\s+([,.;])", r"\1", text)
     return text
@@ -906,6 +913,42 @@ FEMALE_PARTNER_RE = re.compile(
     r"\b(?:she|her|hers|herself|girlfriend|wife|female partner|a woman|the woman|another woman)\b",
     re.IGNORECASE,
 )
+
+# 角色处于相机背后 / 背对相机的构图信号。
+# 所有“相机相对”机位（pov/selfie/portrait/mirror）都隐含同一前提：角色在相机前方且面向相机。
+# 命中这些信号说明角色跑到了相机背后或背对相机（如从背后环抱正对屏幕的用户），POV 会自相矛盾
+# （第一人称看不到她），必须退回 third（旁观机位，对角色朝向零约束）。
+# 只匹配无歧义的“角色在相机背后/背对”措辞——刻意不含裸 behind/背后（会误伤“背后的窗户/街景”）。
+POV_FACING_BREAK_RE = re.compile(
+    r"\bfrom behind\b|\bback[- ]?hug\b|\bfacing away\b|\bback turned\b|"
+    r"\bback to the (?:camera|viewer|user)\b|\bseen from behind\b|\brear view\b|"
+    r"\bhugs?\s+[^,.;]*?\bfrom behind\b|\barms?\s+around\s+[^,.;]*?\bfrom behind\b",
+    re.IGNORECASE,
+)
+POV_FACING_BREAK_ZH = (
+    "从背后", "背后抱", "背后环", "背后搂", "背后贴", "背后靠",
+    "身后抱", "身后环", "身后搂", "背对", "背朝", "背向", "背靠着你",
+)
+
+
+def _scene_breaks_pov_facing(*sources: str) -> bool:
+    combined = " ".join(str(s) for s in sources if s)
+    if not combined:
+        return False
+    if POV_FACING_BREAK_RE.search(combined):
+        return True
+    return any(kw in combined for kw in POV_FACING_BREAK_ZH)
+
+
+# 规划器/翻译层误写进 scene 的第一人称取景措辞：当画面已被判为角色背对相机、退回 third 时，
+# 这些“第一人称/用户视角”短语是自相矛盾的谎言，需连同其后的冠词一起清掉，避免留下悬空 "of a"。
+FIRST_PERSON_LIE_RE = re.compile(
+    r"\bfirst[- ]person\s+pov[^,.;]*?(?:looking toward the character)?\s*[,;]?\s*|"
+    r"\bfirst[- ]person\s+(?:view|point of view|perspective)\s+of\s+(?:a|an|the)\s+|"
+    r"\bfrom\s+(?:a\s+)?first[- ]person\s+(?:viewpoint|point of view|perspective)\s*[,;]?\s*|"
+    r"\bfrom\s+the\s+user'?s\s+(?:viewpoint|point of view|perspective)[^,.;]*?[,;]?\s*",
+    re.IGNORECASE,
+)
 # 设备入画（用户要求拍照/录像）的英文兜底：scene 到这步已译成英文。命中则放行手机/相机，不抹设备。
 # 只匹配【无歧义的拍摄意图】词；故意不含 "holding a phone/smartphone"——那既可能是误泄漏的手机
 # （应被清掉），区分不了意图。真正的拍摄意图主要由规划器 device_in_frame 与中文关键词（基于用户原话）给出。
@@ -1184,6 +1227,9 @@ def build_prompt(
         neg += ", male, boy, man"
 
     prompt_view = _infer_prompt_view(scene_desc)
+    # 角色背对相机/在相机背后（从背后环抱面向屏幕的用户等）：POV 看不到她，这类同框场景应走
+    # 第三人称双人取景，而非贴身 POV。此处与规划器的几何闸门同源，覆盖无规划器/规划器漏判路径。
+    partner_behind = is_partner_scene and not is_ntr_scene and _scene_breaks_pov_facing(scene_desc)
     if (is_sex_scene or is_partner_scene) and not is_ntr_scene:
         if not device_present:
             # 伴侣/性爱/日常同框画面不能是单人自拍取景：先清掉自拍/对镜的相机取景措辞，
@@ -1192,13 +1238,27 @@ def build_prompt(
             scene_desc = SELF_CAMERA_FRAMING_RE.sub("", scene_desc)
             for tag in ["selfie", "solo", "holding phone", "arm extended", "mirror selfie", "phone"]:
                 scene_desc = re.sub(r"\b" + re.escape(tag) + r"\b", "", scene_desc, flags=re.IGNORECASE)
+            # 删词可能留下悬空冠词（"A phone and tea set" → "A and tea set"，孤立的 "A" 会被画成文字）：
+            # 冠词紧接 and/逗号/句尾时一并清掉。
+            scene_desc = re.sub(r"\b(?:a|an|the)\s+and\b", "and", scene_desc, flags=re.IGNORECASE)
+            scene_desc = re.sub(r"\b(?:a|an|the)\s+(?=[,.;]|$)", "", scene_desc, flags=re.IGNORECASE)
             scene_desc = re.sub(r"\s*,\s*,+", ", ", scene_desc)
             scene_desc = re.sub(r"\s+([,.;])", r"\1", scene_desc)
             scene_desc = re.sub(r"\s{2,}", " ", scene_desc).strip(" ,")
+            if partner_behind:
+                # 退回第三人称双人取景：清掉误写的第一人称谎言（连同其后冠词，避免悬空 "of a"），
+                # 前置双人主体（角色为焦点，伴侣为完整第二人），不再补 POV 取景。
+                scene_desc = FIRST_PERSON_LIE_RE.sub("", scene_desc)
+                scene_desc = re.sub(r"\s*,\s*,+", ", ", scene_desc)
+                scene_desc = re.sub(r"\s+([,.;])", r"\1", scene_desc)
+                scene_desc = re.sub(r"\s{2,}", " ", scene_desc).strip(" ,")
+                subjects = "1boy, 1girl" if male else "1girl, 1boy"
+                if not re.search(r"\b1boy\b", scene_desc, re.IGNORECASE):
+                    scene_desc = f"{subjects}, {scene_desc}".strip(", ")
             # 取景清空后若已无 POV/对视开头，补一个 POV 取景，确保是“贴身视角”而非无主语近景。
-            if not re.search(r"first-person pov|looking at a (?:woman|man)", scene_desc, re.IGNORECASE):
+            elif not re.search(r"first-person pov|looking at a (?:woman|man)", scene_desc, re.IGNORECASE):
                 scene_desc = f"{view_opener('pov', 'boy' if male else 'girl')}, {scene_desc}".strip(", ")
-                scene_desc = re.sub(r"\bsolo\b,?\s*", "", scene_desc)
+            scene_desc = re.sub(r"\bsolo\b,?\s*", "", scene_desc)
         else:
             # 设备入画：仍要去掉 solo（画面里有两个身体），但保留自拍/对镜取景与设备。
             scene_desc = re.sub(r"\bsolo\b,?\s*", "", scene_desc)
@@ -1207,12 +1267,18 @@ def build_prompt(
             # 用户是女性（百合/女用户）：伴侣画成女性局部，放开“双女”负向，但仍保留 male 负向。
             if is_sex_scene:
                 scene_desc += ", partner's hands, partner's arms, intimate close-up"
+            elif partner_behind:
+                # 第三人称双人：伴侣是完整第二人（角色在其身后），不压成画面边缘局部。
+                scene_desc += ", female partner fully in frame, everyday close interaction"
             else:
                 scene_desc += ", partial female hands or feet visible only as required by the pose, everyday close interaction"
             neg = _remove_negatives(neg, "2girls", "multiple girls", "extra girls", "multiple characters", "second body", "duplicate body")
         else:
             if is_sex_scene:
                 scene_desc += ", partial male body visible, male hands, male torso, intimate close-up"
+            elif partner_behind:
+                # 第三人称双人：伴侣是完整第二人（角色从背后环抱他），不压成画面边缘局部。
+                scene_desc += ", male partner fully in frame, everyday close interaction"
             else:
                 partner_part = "partial male hands visible"
                 if re.search(r"\b(?:feet|foot)\b|脚", scene_lower):
@@ -1225,7 +1291,8 @@ def build_prompt(
                     partner_part = "partial male chest edge visible"
                 scene_desc += f", {partner_part}, everyday close interaction"
             neg = _remove_negatives(neg, "male", "boy", "man", "1boy")
-        if not is_sex_scene:
+        # 背对相机的双人第三人称需要完整的第二人，不能压“完整第二人/第三人称”负向。
+        if not is_sex_scene and not partner_behind:
             neg = _append_negatives(neg, "full second person", "extra face", "unrelated extra person")
         if device_present:
             # 用户要把手机/相机/镜子拍进画面：放开手机与对镜负向，让设备能渲染出来。
@@ -1234,6 +1301,9 @@ def build_prompt(
                 "visible phone", "phone in hand", "hand holding phone", "mirror", "mirror reflection", "mirror selfie",
                 *VISIBLE_PHONE_NEGATIVES,
             )
+        elif partner_behind:
+            # 退回第三人称双人：压手机/自拍，但绝不压 “third-person perspective”（那正是这里要的机位）。
+            neg = _append_negatives(neg, "selfie", "holding phone", "phone", "cellphone", "mobile phone", "smartphone", "arm extended")
         else:
             neg = _append_negatives(neg, "selfie", "holding phone", "phone", "cellphone", "mobile phone", "smartphone", "arm extended", "third-person perspective")
     else:
