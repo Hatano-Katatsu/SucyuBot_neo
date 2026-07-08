@@ -69,6 +69,127 @@ def _sanitize_planned_one_shot_appearance(
     return ""
 
 
+def _normalize_caption_for_exact_match(text: Any) -> str:
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    pairs = (("「", "」"), ("『", "』"), ("“", "”"), ('"', '"'), ("'", "'"))
+    changed = True
+    while changed and len(value) >= 2:
+        changed = False
+        for left, right in pairs:
+            if value.startswith(left) and value.endswith(right):
+                value = value[len(left):-len(right)].strip()
+                changed = True
+                break
+    return value
+
+
+def _recent_photo_captions_for_push(service: Any, state: dict[str, Any], session_id: str = "", limit: int = 5) -> list[str]:
+    reset_time = session_schema.get_short_context_reset_time(state)
+    photos = [
+        photo for photo in session_schema.get_sent_photos_history(state)
+        if service._within(photo.get("timestamp", 0), since=reset_time)
+    ][-limit:]
+    captions: list[str] = []
+    seen: set[str] = set()
+    for photo in photos:
+        caption = str(photo.get("caption") or "").strip()
+        norm = _normalize_caption_for_exact_match(caption)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        captions.append(caption[:120])
+    return captions
+
+
+def _format_forbidden_caption_context(captions: list[str]) -> str:
+    if not captions:
+        return ""
+    lines = [
+        "最近图片配文禁止原样复用（动态，仅本次推送生效）: 以下文本只用于避重，"
+        "不得作为新 caption 的素材、模板或可模仿台词；新 caption 必须换一句。"
+    ]
+    for idx, caption in enumerate(captions[-5:], 1):
+        lines.append(f"- forbidden_caption_{idx}: {caption}")
+    return "\n".join(lines)
+
+
+def _caption_exactly_reused(caption: Any, forbidden_captions: list[str]) -> bool:
+    current = _normalize_caption_for_exact_match(caption)
+    if not current:
+        return False
+    return any(current == _normalize_caption_for_exact_match(old) for old in forbidden_captions)
+
+
+def _sanitize_push_planner_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """给推送 planner 的消息副本移除照片历史 caption 行；正式聊天历史不动。"""
+    sanitized: list[dict[str, Any]] = []
+    for message in messages:
+        item = dict(message)
+        content = item.get("content")
+        if item.get("role") == "system" and isinstance(content, str) and content.startswith("照片历史"):
+            lines = [
+                line for line in content.splitlines()
+                if not re.match(r"^\s*caption\s*[:：]", line, flags=re.IGNORECASE)
+            ]
+            item["content"] = "\n".join(lines)
+        sanitized.append(item)
+    return sanitized
+
+
+def _summarize_spatial_context_for_push(spatial_context: str | None) -> str | None:
+    concepts = _spatial_concepts(spatial_context or "")
+    if not concepts:
+        return None
+    phrases = {
+        "feet": "near the user's feet",
+        "lap": "on or near the user's lap",
+        "behind": "behind the user",
+        "in_front": "in front of the user",
+        "beside": "beside the user",
+        "arms": "held close or in an embrace",
+        "shoulder": "near the user's shoulder",
+        "chest": "close to the user's chest or collarbone",
+        "back": "back-facing or near the user's back",
+        "sit": "seated posture",
+        "stand": "standing posture",
+        "lie": "lying posture",
+        "kneel": "kneeling posture",
+        "lean": "leaning close",
+        "look_up": "looking upward",
+        "bend": "bending or leaning over",
+    }
+    ordered = [phrases[key] for key in _SPATIAL_CONCEPT_ALIASES if key in concepts and key in phrases]
+    if not ordered:
+        return None
+    return (
+        "spatial summary for push: "
+        + "; ".join(ordered[:6])
+        + ". Do not copy dialogue, moans, quoted lines, or narrative text from the previous chat."
+    )
+
+
+def _parse_image_plan_json(raw_text: str) -> tuple[dict[str, Any], str, bool]:
+    text = re.sub(r"^\s*<thinking>.*?</thinking>\s*", "", raw_text or "", flags=re.DOTALL).strip()
+    text = re.sub(r"^\s*<reasoning>.*?</reasoning>\s*", "", text, flags=re.DOTALL).strip()
+    text = re.sub(r"^\s*<analysis>.*?</analysis>\s*", "", text, flags=re.DOTALL).strip()
+    text = re.sub(r"^```[a-zA-Z]*\n?", "", text).strip()
+    text = re.sub(r"\n?```\s*$", "", text).strip()
+    try:
+        parsed = json.loads(text)
+        if not isinstance(parsed, dict):
+            raise ValueError("image planner JSON is not an object")
+        return parsed, text, False
+    except Exception:
+        start = text.find("{")
+        end = text.rfind("}")
+        if 0 <= start < end:
+            parsed = json.loads(text[start:end + 1])
+            if not isinstance(parsed, dict):
+                raise ValueError("image planner JSON is not an object")
+            return parsed, text, True
+        raise
+
+
 async def _fetch_animatool_turbo_knowledge(service: Any, ttl: float = _ANIMATOOL_KNOWLEDGE_TTL) -> dict[str, Any]:
     """从 AnimaTool 动态获取 turbo 画图知识规范。"""
     url = str(service.config.get("comfyui_url", "http://127.0.0.1:8188")).rstrip("/")
@@ -743,6 +864,7 @@ async def plan_roleplay_image(
         role_name = service._get_session_cfg(session_id, "role_name", "魅魔")
     is_push = mode in ("normal", "morning", "ntr", "followup")
     is_followup = mode == "followup"
+    forbidden_captions = _recent_photo_captions_for_push(service, state, session_id) if is_push else []
     push_transition_decision: dict[str, Any] = {}
     push_transition_context = ""
     push_advance_context = ""
@@ -787,7 +909,7 @@ async def plan_roleplay_image(
     if hard_scene_transition or push_transition_decision.get("drop_continuity"):
         continuity_context = None
     prompt_continuity_context = None if is_push else continuity_context
-    spatial_context = format_planning_spatial_context(
+    raw_spatial_context = format_planning_spatial_context(
         service,
         state,
         session_id,
@@ -795,6 +917,7 @@ async def plan_roleplay_image(
         must_include=must_include,
         prompt=prompt,
     ) if not hard_scene_transition else None
+    spatial_context = _summarize_spatial_context_for_push(raw_spatial_context) if is_push else raw_spatial_context
     prompt_spatial_context = None if is_push else spatial_context
     photo_context = None if is_push else format_recent_photo_dedup_context(service, state, session_id)
     memory_query = "\n".join(part for part in (intent, mood, must_include, prompt, continuity_context or "") if part)
@@ -1032,7 +1155,8 @@ async def plan_roleplay_image(
             "对话后续场规则（动态，仅本次推送生效）: 这是用户刚结束对话 5-15 分钟后的轻量续场。"
             "请使用正式聊天上下文中的最近地点、情绪、未完成动作和照片历史作为低权重参考，"
             "让画面自然推进一小步；不要突然换地点、开新冲突、重置关系或复述上一条主动推送。"
-            "如果上一条照片也是主动推送，只把它当作避重参考，而不是必须接着演。"
+            "如果上一条照片也是主动推送，只把它当作避重参考，而不是必须接着演；"
+            "不要复用上一条图片 caption、同一句尾音或同一台词结构。"
         )
     elif is_push:
         push_dynamic_parts.append(
@@ -1041,6 +1165,9 @@ async def plan_roleplay_image(
             "若上一条照片来自 scheduled_push/followup_push/manual_push，只把它当作避重参考；"
             "同一地点内应推进到相邻动作或另一个生活细节，而不是复制上一张的语义。"
         )
+    forbidden_caption_context = _format_forbidden_caption_context(forbidden_captions)
+    if forbidden_caption_context:
+        push_dynamic_parts.append(forbidden_caption_context)
     if is_push and spatial_context:
         push_dynamic_parts.append(
             "空间/身体关系硬约束（动态，仅本次推送生效）:\n"
@@ -1140,12 +1267,19 @@ async def plan_roleplay_image(
 
     raw_text = ""
     text = ""
-    try:
+
+    async def call_planner(extra_push_dynamic: str = "") -> dict[str, Any]:
+        nonlocal raw_text, text
+        raw_text = ""
+        text = ""
+        combined_push_dynamic = "\n".join(part for part in (push_dynamic_context, extra_push_dynamic) if part)
         if is_push and hasattr(service, "_build_chat_context_messages_for_push") and hasattr(service, "_call_llm_messages"):
-            planner_messages = service._build_chat_context_messages_for_push(session_id)
+            planner_messages = _sanitize_push_planner_messages(
+                service._build_chat_context_messages_for_push(session_id)
+            )
             planner_messages.append({"role": "system", "content": system})
-            if push_dynamic_context:
-                planner_messages.append({"role": "system", "content": push_dynamic_context})
+            if combined_push_dynamic:
+                planner_messages.append({"role": "system", "content": combined_push_dynamic})
             planner_messages.append({"role": "user", "content": user})
             result = await service._call_llm_messages(
                 planner_messages,
@@ -1159,67 +1293,72 @@ async def plan_roleplay_image(
             if not raw_text:
                 raw_text = (msg.get("reasoning_content") or "").strip()
         else:
-            if push_dynamic_context:
-                system = system + "\n" + push_dynamic_context
+            call_system = system
+            if combined_push_dynamic:
+                call_system = call_system + "\n" + combined_push_dynamic
             raw_text = await service._call_llm(
-                system,
+                call_system,
                 user,
                 temp=float(service._get_llm_value("image", "temperature_scene", "0.95")),
                 tag="roleplay-image-plan",
                 purpose="image",
                 session_id=session_id,
             )
-        # 清理 thinking/reasoning 标签和 markdown 代码块标记
-        text = re.sub(r"^\s*<thinking>.*?</thinking>\s*", "", raw_text, flags=re.DOTALL).strip()
-        text = re.sub(r"^\s*<reasoning>.*?</reasoning>\s*", "", text, flags=re.DOTALL).strip()
-        text = re.sub(r"^\s*<analysis>.*?</analysis>\s*", "", text, flags=re.DOTALL).strip()
-        text = re.sub(r"^```[a-zA-Z]*\n?", "", text).strip()
-        text = re.sub(r"\n?```\s*$", "", text).strip()
-        parsed = json.loads(text)
-    except Exception as exc:
-        # 尝试从纯文本中提取 JSON 子串（LLM 可能返回了 文本+JSON 混合内容）
-        parsed = None
-        if text:
-            start = text.find("{")
-            end = text.rfind("}")
-            if 0 <= start < end:
-                try:
-                    parsed = json.loads(text[start:end + 1])
-                except json.JSONDecodeError:
-                    pass
-        if parsed is not None:
+        parsed_json, text, extracted = _parse_image_plan_json(raw_text)
+        if extracted:
             logger.info("roleplay image plan: extracted JSON from mixed text, raw_len=%d", len(raw_text))
-        else:
-            logger.error("roleplay image planning failed: %s raw_excerpt=%.300s", exc, raw_text)
-            # LLM 返回了纯文本（非 JSON）时，将其作为 scene 兜底，避免推送完全失败。
-            # 推送模式下 fallback_scene 为空（不传 intent/prompt），不兜底会导致 scene="" → 推送规划为空。
-            text_scene = raw_text.strip() if raw_text.strip() else fallback_scene
-            fallback_view = _resolve_roleplay_view(
-                requested_view=requested_view,
-                planned_view="",
-                default_view="pov" if (intimate_hint or persisted_co_located) else "selfie",
-                derived_co_located=persisted_co_located,
-                two_person=intimate_hint,
-                free_composition=free_composition,
-                scene=text_scene,
-                intent=intent,
-                mood=mood,
-                prompt=prompt,
-                dialog_context=continuity_context or "",
+        return parsed_json
+
+    try:
+        parsed = await call_planner()
+        if is_push and _caption_exactly_reused(parsed.get("caption"), forbidden_captions):
+            duplicate_caption = str(parsed.get("caption") or "").strip()
+            retry_dynamic = (
+                "配文重复修正（动态，仅本次重试生效）: 上一次输出的 caption 与最近图片配文完全相同。"
+                "保持同一画面意图和位置判断，但必须改写 caption 为另一句中文台词；"
+                "不要复用 forbidden_caption 的原句、开头、省略号结构或结尾语气。"
+                f"\n本次重复配文: {duplicate_caption}"
             )
-            if fallback_view == "portrait":
-                device_hint = False
-            return {
-                "scene": text_scene,
-                "view": fallback_view,
-                "aspect_ratio": "2:3",
-                "new_appearance_tags": None,
-                "clothing_off": clothing_off_hint,
-                "is_intimate": intimate_hint,
-                "partner_in_frame": False,
-                "device_in_frame": device_hint,
-                "caption": "",
-            }
+            try:
+                retry_parsed = await call_planner(retry_dynamic)
+                retry_caption = str(retry_parsed.get("caption") or "").strip()
+                if retry_caption and not _caption_exactly_reused(retry_caption, forbidden_captions):
+                    parsed = retry_parsed
+                else:
+                    logger.info("roleplay image plan retry still reused caption; keeping original plan")
+            except Exception as retry_exc:
+                logger.info("roleplay image plan caption retry failed: %s", retry_exc)
+    except Exception as exc:
+        logger.error("roleplay image planning failed: %s raw_excerpt=%.300s", exc, raw_text)
+        # LLM 返回了纯文本（非 JSON）时，将其作为 scene 兜底，避免推送完全失败。
+        # 推送模式下 fallback_scene 为空（不传 intent/prompt），不兜底会导致 scene="" → 推送规划为空。
+        text_scene = raw_text.strip() if raw_text.strip() else fallback_scene
+        fallback_view = _resolve_roleplay_view(
+            requested_view=requested_view,
+            planned_view="",
+            default_view="pov" if (intimate_hint or persisted_co_located) else "selfie",
+            derived_co_located=persisted_co_located,
+            two_person=intimate_hint,
+            free_composition=free_composition,
+            scene=text_scene,
+            intent=intent,
+            mood=mood,
+            prompt=prompt,
+            dialog_context=continuity_context or "",
+        )
+        if fallback_view == "portrait":
+            device_hint = False
+        return {
+            "scene": text_scene,
+            "view": fallback_view,
+            "aspect_ratio": "2:3",
+            "new_appearance_tags": None,
+            "clothing_off": clothing_off_hint,
+            "is_intimate": intimate_hint,
+            "partner_in_frame": False,
+            "device_in_frame": device_hint,
+            "caption": "",
+        }
 
     scene = _normalize_image_plan_scene(parsed, fallback_scene, strong_pin)
     if not free_composition:

@@ -4323,9 +4323,16 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 {"role": "assistant", "content": "「嗯，我在沙发这边等你。」"},
                 {
                     "role": "system",
-                    "content": "照片历史（系统记录，保留到 checkpoint/历史溢出统一裁剪；低权重连续性参考）:\nsource_kind: scheduled_push\nview: selfie\nnltag: A sofa selfie.",
+                    "content": "照片历史（系统记录，保留到 checkpoint/历史溢出统一裁剪；低权重连续性参考）:\nsource_kind: scheduled_push\nview: selfie\nnltag: A sofa selfie.\ncaption: ……还算能吃的独食呢~",
                 },
             ])
+            session_schema.set_sent_photos_history(state, [{
+                "timestamp": time.time(),
+                "scene": "A sofa selfie.",
+                "caption": "……还算能吃的独食呢~",
+                "view": "selfie",
+                "source_kind": "scheduled_push",
+            }])
             self.mock_image_planner_messages(svc, {
                 "scene": "A soft follow-up pov moment on the same sofa.",
                 "view": "pov",
@@ -4344,10 +4351,58 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             joined = "\n".join(m.get("content", "") for m in messages)
             self.assertIn("我先去洗个杯子", joined)
             self.assertIn("source_kind: scheduled_push", joined)
+            self.assertNotIn("caption: ……还算能吃的独食呢~", joined)
             self.assertIn("对话后续场规则", messages[-2]["content"])
+            self.assertIn("forbidden_caption_1: ……还算能吃的独食呢~", messages[-2]["content"])
             self.assertIn("推送模式: followup", messages[-1]["content"])
             self.assertNotIn("短期连续性:", messages[-1]["content"])
             self.assertNotIn("长期记忆:", messages[-1]["content"])
+
+        asyncio.run(run())
+
+    def test_push_planner_retries_exact_duplicate_caption_once(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            state = svc._get_session_state(sid)
+            session_schema.set_sent_photos_history(state, [{
+                "timestamp": time.time(),
+                "scene": "A sofa selfie.",
+                "caption": "……还算能吃的独食呢~",
+                "view": "pov",
+                "source_kind": "scheduled_push",
+            }])
+            first = {
+                "scene": "A pov sofa moment.",
+                "view": "pov",
+                "caption": "……还算能吃的独食呢~",
+                "character_location": "home",
+                "user_location": "with_user",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            }
+            second = dict(first, caption="偷吃完还要姐姐哄你一下吗？")
+            svc._call_llm_messages = AsyncMock(side_effect=[
+                {"choices": [{"message": {"content": json.dumps(first, ensure_ascii=False)}}], "usage": {}},
+                {"choices": [{"message": {"content": json.dumps(second, ensure_ascii=False)}}], "usage": {}},
+            ])
+            svc._call_llm = AsyncMock()
+
+            plan = await plan_roleplay_image(svc, sid, mode="normal", weather_data={"desc": "晴", "temp": "22"})
+
+            self.assertEqual(plan["caption"], "偷吃完还要姐姐哄你一下吗？")
+            self.assertEqual(svc._call_llm_messages.await_count, 2)
+            retry_messages = svc._call_llm_messages.await_args_list[1].args[0]
+            retry_joined = "\n".join(m.get("content", "") for m in retry_messages)
+            self.assertIn("配文重复修正", retry_joined)
+            self.assertIn("本次重复配文: ……还算能吃的独食呢~", retry_joined)
+            svc._call_llm.assert_not_awaited()
 
         asyncio.run(run())
 
@@ -6530,6 +6585,42 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("不要把上一幕的短动作", system)
             self.assertIn("已经喝完/放下/换了姿势", system)
             self.assertIn("地点锁定（最高优先", system)
+
+        asyncio.run(run())
+
+    def test_push_spatial_context_summarizes_without_replaying_dialogue(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            session_schema.set_chat_history(state, [
+                {"role": "user", "content": "继续刚才那个姿势。"},
+                {"role": "assistant", "content": "（她坐在你腿上，俯身靠近你的胸口。）「让我射……就这样求？」咕啾——"},
+            ])
+            self.mock_image_planner_messages(svc, {
+                "scene": "A pov sofa moment with the character leaning close.",
+                "view": "pov",
+                "character_location": "home",
+                "user_location": "with_user",
+                "is_intimate": True,
+                "partner_in_frame": True,
+                "device_in_frame": False,
+            })
+
+            await plan_roleplay_image(svc, sid, mode="normal", weather_data={"desc": "晴", "temp": "22"})
+
+            dynamic_system = svc._call_llm_messages.await_args.args[0][-2]["content"]
+            self.assertIn("空间/身体关系硬约束", dynamic_system)
+            self.assertIn("spatial summary for push", dynamic_system)
+            self.assertIn("seated posture", dynamic_system)
+            self.assertIn("leaning close", dynamic_system)
+            self.assertNotIn("让我射", dynamic_system)
+            self.assertNotIn("咕啾", dynamic_system)
 
         asyncio.run(run())
 
