@@ -10,11 +10,15 @@ from pathlib import Path
 from typing import Any
 
 
-STABLE_KINDS = {"profile", "preference", "relationship", "setting", "boundary", "visual"}
+USER_PROFILE_KIND = "user_profile"
+STABLE_KINDS = {USER_PROFILE_KIND, "profile", "preference", "relationship", "setting", "boundary", "visual"}
 VALID_KINDS = STABLE_KINDS | {"event", "correction", "manual"}
 KIND_ALIASES = {
     "资料": "profile",
     "用户资料": "profile",
+    "用户画像": USER_PROFILE_KIND,
+    "画像": USER_PROFILE_KIND,
+    "userprofile": USER_PROFILE_KIND,
     "偏好": "preference",
     "喜好": "preference",
     "关系": "relationship",
@@ -214,12 +218,86 @@ class LongTermMemoryStore:
                 f"""
                 SELECT * FROM memories
                 WHERE {scope} {status_sql}
-                ORDER BY importance DESC, updated_at DESC
+                ORDER BY CASE WHEN kind = ? THEN 0 ELSE 1 END, importance DESC, updated_at DESC
                 LIMIT ?
                 """,
-                (*params, int(limit)),
+                (*params, USER_PROFILE_KIND, int(limit)),
             ).fetchall()
         return [self._row_to_dict(row) for row in rows]
+
+    def merge_user_profile_memories(self, session_id: str, *, character: str = "", source: str = "user-profile-merge") -> dict[str, Any]:
+        """把同一角色下多条用户画像合并为唯一置顶记忆。"""
+        character = (character or "").strip()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM memories
+                WHERE session_id = ? AND character = ? AND kind = ? AND status = 'active'
+                ORDER BY importance DESC, updated_at DESC, id DESC
+                """,
+                (session_id, character, USER_PROFILE_KIND),
+            ).fetchall()
+            profiles = [self._row_to_dict(row) for row in rows]
+            if len(profiles) <= 1:
+                return {
+                    "changed": False,
+                    "kept_id": int(profiles[0]["id"]) if profiles else None,
+                    "merged": len(profiles),
+                }
+
+            keep = profiles[0]
+            keep_id = int(keep["id"])
+            seen_summary: set[str] = set()
+            summary_parts: list[str] = []
+            tag_parts: list[str] = []
+            importance = 1
+            source_parts: list[str] = []
+            for item in profiles:
+                summary = re.sub(r"\s+", " ", str(item.get("summary") or "")).strip()
+                key = summary.lower()
+                if summary and key not in seen_summary:
+                    summary_parts.append(summary)
+                    seen_summary.add(key)
+                tag_parts.extend(str(tag) for tag in (item.get("tags") or []) if str(tag).strip())
+                importance = max(importance, clamp_importance(item.get("importance")))
+                item_source = str(item.get("source") or "").strip()
+                if item_source:
+                    source_parts.append(item_source)
+            merged_summary = "；".join(summary_parts)[:600]
+            merged_tags = normalize_tags(["用户画像", *tag_parts])
+            merged_source = (source or "")[:120]
+            if source_parts:
+                merged_source = f"{merged_source}: " + " | ".join(source_parts)
+            merged_source = merged_source[:800]
+            now = time.time()
+            conn.execute(
+                """
+                UPDATE memories
+                SET summary = ?, tags = ?, importance = ?, source = ?, updated_at = ?
+                WHERE id = ? AND session_id = ? AND character = ? AND kind = ? AND status = 'active'
+                """,
+                (
+                    merged_summary,
+                    json.dumps(merged_tags, ensure_ascii=False),
+                    importance,
+                    merged_source,
+                    now,
+                    keep_id,
+                    session_id,
+                    character,
+                    USER_PROFILE_KIND,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE memories
+                SET status = 'deleted', updated_at = ?
+                WHERE session_id = ? AND character = ? AND kind = ? AND status = 'active' AND id <> ?
+                """,
+                (now, session_id, character, USER_PROFILE_KIND, keep_id),
+            )
+            conn.commit()
+        return {"changed": True, "kept_id": keep_id, "merged": len(profiles), "summary": merged_summary}
 
     def search_memories(self, session_id: str, query: str, *, character: str | None = None, limit: int = 8) -> list[dict[str, Any]]:
         scope, params = self._scope_clause(session_id, character)

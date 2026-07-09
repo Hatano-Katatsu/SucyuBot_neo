@@ -137,7 +137,7 @@
   "world_workday_dates": "",
   "character_age_stage": "",
   "character_day_anchor": "",
-  "user_gender": "male",
+  "user_gender": "",
   "amap_api_key": "",
   "amap_poi_enabled": true,
   "amap_poi_per_type": "5",

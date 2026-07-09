@@ -812,8 +812,18 @@ class SchedulerRuntimeMixin:
         limit = self._long_memory_limit()
         threshold = max(1, limit // 2)
         if len(editable) > limit:
-            return await self._summarize_all_memories(session_id, character_key, editable, target_n=threshold, diaries=diaries)
-        return await self._incremental_organize_memories(session_id, character_key, editable, diaries=diaries)
+            result = await self._summarize_all_memories(session_id, character_key, editable, target_n=threshold, diaries=diaries)
+        else:
+            result = await self._incremental_organize_memories(session_id, character_key, editable, diaries=diaries)
+        try:
+            merge_result = self.memory.merge_user_profile_memories(session_id, character=character_key, source="dream-user-profile-merge")
+            if merge_result.get("changed"):
+                result = dict(result)
+                result["user_profile_merge"] = merge_result
+                self._ulog(session_id, "MEMORY", f"用户画像合并 {json.dumps(merge_result, ensure_ascii=False)}")
+        except Exception:
+            logger.debug("merge user profile memories failed", exc_info=True)
+        return result
 
     async def _incremental_organize_memories(
         self, session_id: str, character_key: str,
@@ -839,7 +849,9 @@ class SchedulerRuntimeMixin:
             "For memories that are time nodes, deadlines, appointments, schedules, or countdowns, do not delete them "
             "only because the date or time has passed. Update or delete them only when the related event is clearly "
             "resolved, canceled, superseded, or has fully faded from recent diaries, checkpoint, and current window. "
-            "Return strict JSON: {\"ops\":[{\"op\":\"add|update|delete\",\"id\":123,\"kind\":\"profile|preference|relationship|setting|boundary|visual|event|correction\",\"summary\":\"...\",\"importance\":1-5,\"tags\":[\"...\"]}]}"
+            "Use kind=user_profile for durable facts about the human user: hobbies, behavior style, appearance, self-description, long-term preferences, and boundaries. "
+            "User_profile is character-scoped; if there are multiple user_profile memories, merge them instead of keeping duplicates. "
+            "Return strict JSON: {\"ops\":[{\"op\":\"add|update|delete\",\"id\":123,\"kind\":\"user_profile|profile|preference|relationship|setting|boundary|visual|event|correction\",\"summary\":\"...\",\"importance\":1-5,\"tags\":[\"...\"]}]}"
         )
         diary_text = "\n\n".join(f"[{d.get('diary_date')}]\n{d.get('content','')}" for d in (diaries or []))
         mem_text = "\n".join(f"{m['id']}. [{m.get('kind')}] {m.get('summary')}" for m in editable)
@@ -938,7 +950,9 @@ class SchedulerRuntimeMixin:
             "or has fully faded from recent diaries and checkpoint. "
             "Each memory should be self-contained and cover a broader theme rather than a single fact. "
             "Never include manual memories. "
-            f"Return strict JSON: {{\"memories\":[{{\"kind\":\"profile|preference|relationship|setting|boundary|visual|event|correction\","
+            "Use kind=user_profile for durable facts about the human user: hobbies, behavior style, appearance, self-description, long-term preferences, and boundaries. "
+            "There must be at most one user_profile memory in the output for this character; merge all user-profile details into that one item. "
+            f"Return strict JSON: {{\"memories\":[{{\"kind\":\"user_profile|profile|preference|relationship|setting|boundary|visual|event|correction\","
             "\"summary\":\"一句中文记忆摘要\",\"importance\":1-5,\"tags\":[\"标签\"]}]}} "
             f"memories 数组长度不超过 {target_n}。"
         )

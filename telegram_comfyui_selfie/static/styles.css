@@ -1271,6 +1271,21 @@ select {
   background: var(--surface-subtle);
 }
 
+.memory-row.is-user-profile {
+  border-color: var(--accent);
+  background: var(--accent-ghost);
+}
+
+.memory-row-label {
+  width: fit-content;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--accent-ghost);
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .manager-row .button-row,
 .manager-row .inline-meta-row {
   display: flex;

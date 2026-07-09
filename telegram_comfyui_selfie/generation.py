@@ -1039,6 +1039,13 @@ FEMALE_PARTNER_RE = re.compile(
     r"\b(?:she|her|hers|herself|girlfriend|wife|female partner|a woman|the woman|another woman)\b",
     re.IGNORECASE,
 )
+USER_BODY_PART_RE = re.compile(
+    r"\b(?:your|user'?s|partner'?s|male|female)\s+"
+    r"(?:hands?|arms?|torso|chest|body|legs?|feet|thighs?|shoulders?|back|abdomen|belly|waist|lap)\b|"
+    r"\b(?:hands?|arms?|torso|chest|legs?|feet|thighs?|shoulders?|back|lap)\s+"
+    r"(?:visible|at the edge of frame|in frame)\b",
+    re.IGNORECASE,
+)
 
 # 角色处于相机背后 / 背对相机的构图信号。
 # 所有“相机相对”机位（pov/selfie/portrait/mirror）都隐含同一前提：角色在相机前方且面向相机。
@@ -1317,7 +1324,7 @@ def build_prompt(
     # /自拍、调度推送等路径）。场景里混进与角色性别相反的伴侣，但本该是单人图，是 1girl/solo 与
     # “画面里有第二人”的硬矛盾，最易画出断臂/双人；非 NTR 时按亲密/伴侣场景处理，让伴侣只入局部。
     partner_re = FEMALE_PARTNER_RE if male else MALE_PARTNER_RE
-    scene_has_partner = partner_in_frame or bool(partner_re.search(scene_desc))
+    scene_has_partner = partner_in_frame or bool(partner_re.search(scene_desc)) or bool(USER_BODY_PART_RE.search(scene_desc))
     device_present = device_in_frame or bool(DEVICE_SCENE_RE.search(scene_desc))
     scene_has_sex_keyword = any(k in scene_lower for k in sex_keywords)
     is_partner_scene = scene_has_partner and not is_ntr_scene
@@ -1326,7 +1333,7 @@ def build_prompt(
     quality = "masterpiece, best quality, highres, absurdres, newest, year 2025, anime coloring, clean lineart, soft cel shading, detailed illustration"
     safety_tag = str(safety.get("tag") or "").strip()
     count = "1boy, solo" if male else "1girl, solo"
-    if is_ntr or is_sex_scene or is_partner_scene:
+    if is_ntr or is_partner_scene:
         count = re.sub(r"\bsolo\b,?\s*", "", count).strip(", ")
     character, series = _visual_character_identity(state)
     artist = current_style if current_style.startswith("@") else ""
@@ -1369,7 +1376,10 @@ def build_prompt(
             # 否则会出现“自拍框 + 画面里有第二人”的矛盾（断臂/双人的主因）。
             # 用户明确要拍照/录像（device_present）时跳过：保留其自拍/对镜取景与设备。
             scene_desc = SELF_CAMERA_FRAMING_RE.sub("", scene_desc)
-            for tag in ["selfie", "solo", "holding phone", "arm extended", "mirror selfie", "phone"]:
+            framing_tags = ["selfie", "holding phone", "arm extended", "mirror selfie", "phone"]
+            if is_partner_scene:
+                framing_tags.append("solo")
+            for tag in framing_tags:
                 scene_desc = re.sub(r"\b" + re.escape(tag) + r"\b", "", scene_desc, flags=re.IGNORECASE)
             # 删词可能留下悬空冠词（"A phone and tea set" → "A and tea set"，孤立的 "A" 会被画成文字）：
             # 冠词紧接 and/逗号/句尾时一并清掉。
@@ -1391,22 +1401,28 @@ def build_prompt(
             # 取景清空后若已无 POV/对视开头，补一个 POV 取景，确保是“贴身视角”而非无主语近景。
             elif not re.search(r"first-person pov|looking at a (?:woman|man)", scene_desc, re.IGNORECASE):
                 scene_desc = f"{view_opener('pov', 'boy' if male else 'girl')}, {scene_desc}".strip(", ")
-            scene_desc = re.sub(r"\bsolo\b,?\s*", "", scene_desc)
+            if is_partner_scene:
+                scene_desc = re.sub(r"\bsolo\b,?\s*", "", scene_desc)
         else:
-            # 设备入画：仍要去掉 solo（画面里有两个身体），但保留自拍/对镜取景与设备。
-            scene_desc = re.sub(r"\bsolo\b,?\s*", "", scene_desc)
+            # 设备入画：只有画面里确实有第二身体时才去掉 solo；设备本身不等于伴侣入画。
+            if is_partner_scene:
+                scene_desc = re.sub(r"\bsolo\b,?\s*", "", scene_desc)
         user_gender = service._get_user_gender(session_id) if session_id and hasattr(service, "_get_user_gender") else "male"
-        if user_gender == "female":
-            # 用户是女性（百合/女用户）：伴侣画成女性局部，放开“双女”负向，但仍保留 male 负向。
+        if not is_partner_scene:
             if is_sex_scene:
-                scene_desc += ", partner's hands, partner's arms, intimate close-up"
+                scene_desc += ", off-frame partner, no visible second person, intimate close-up"
+                neg = _append_negatives(neg, "full second person", "second body", "duplicate body", "extra face", "unrelated extra person")
+        elif user_gender == "female":
+            # 用户是女性（百合/女用户）：只有明确入画时才画女性局部，并放开“双女”负向。
+            if is_sex_scene:
+                scene_desc += ", partner's hands or arms visible only as required by the pose, intimate close-up"
             elif partner_behind:
                 # 第三人称双人：伴侣是完整第二人（角色在其身后），不压成画面边缘局部。
                 scene_desc += ", female partner fully in frame, everyday close interaction"
             else:
                 scene_desc += ", partial female hands or feet visible only as required by the pose, everyday close interaction"
             neg = _remove_negatives(neg, "2girls", "multiple girls", "extra girls", "multiple characters", "second body", "duplicate body")
-        else:
+        elif user_gender == "male":
             if is_sex_scene:
                 scene_desc += ", partial male body visible, male hands, male torso, intimate close-up"
             elif partner_behind:
@@ -1424,8 +1440,21 @@ def build_prompt(
                     partner_part = "partial male chest edge visible"
                 scene_desc += f", {partner_part}, everyday close interaction"
             neg = _remove_negatives(neg, "male", "boy", "man", "1boy")
+        else:
+            if is_sex_scene:
+                scene_desc += ", partner's hands or arms visible only as required by the pose, intimate close-up"
+            elif partner_behind:
+                scene_desc += ", partner fully in frame, everyday close interaction"
+            else:
+                scene_desc += ", partner's hands or feet visible only as required by the pose, everyday close interaction"
+            neg = _remove_negatives(
+                neg,
+                "male", "boy", "man", "1boy",
+                "2girls", "multiple girls", "extra girls",
+                "multiple characters", "second body", "duplicate body",
+            )
         # 背对相机的双人第三人称需要完整的第二人，不能压“完整第二人/第三人称”负向。
-        if not is_sex_scene and not partner_behind:
+        if is_partner_scene and not is_sex_scene and not partner_behind:
             neg = _append_negatives(neg, "full second person", "extra face", "unrelated extra person")
         if device_present:
             # 用户要把手机/相机/镜子拍进画面：放开手机与对镜负向，让设备能渲染出来。

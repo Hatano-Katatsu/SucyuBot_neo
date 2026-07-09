@@ -404,7 +404,7 @@ DEFAULT_CONFIG = {
     "character_day_anchor": "",
     # 用户自己的性别：male / female。决定亲密场景里“用户身体”画成男性还是女性局部
     # （默认 male；改 female 支持百合/女性用户，配合角色性别可覆盖异性恋/百合/gay 等取向）。
-    "user_gender": "male",
+    "user_gender": "",
     # —— 联网搜索（Tavily）——聊天中角色遇到不熟悉/时效性话题时调用 search_web 工具查资料。
     "tavily_api_key": "",
     "web_search_enabled": False,

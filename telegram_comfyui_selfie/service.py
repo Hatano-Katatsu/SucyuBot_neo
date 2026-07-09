@@ -1047,13 +1047,17 @@ class TelegramComfyUIService(
         return "你是纯洁的天使，完全不涉及任何性相关内容，言行永远纯真 safe。"
 
     def _get_user_gender(self, session_id: str = "") -> str:
-        """用户自己的性别（male/female）：决定亲密场景里“用户身体”画成男性还是女性局部。"""
+        """用户自己的性别（male/female/空）：只在用户身体明确入画时决定局部身体词。"""
         state = self._get_session_state(session_id) if session_id else {}
-        raw = state.get("custom_user_gender") or self.config.get("user_gender") or "male"
+        raw = state.get("custom_user_gender")
+        if raw in (None, ""):
+            raw = self.config.get("user_gender")
         g = re.sub(r"\s+", "", str(raw).strip().lower())
         if g in ("female", "f", "woman", "女", "女性", "女生", "girl"):
             return "female"
-        return "male"
+        if g in ("male", "m", "man", "男", "男性", "男生", "boy"):
+            return "male"
+        return ""
 
     @staticmethod
     def _get_time_period(hour: int) -> str:

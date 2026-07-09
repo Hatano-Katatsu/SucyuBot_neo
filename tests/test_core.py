@@ -799,6 +799,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn(".runtime-clothing-section", styles)
         self.assertIn("container-type: inline-size", styles)
         self.assertIn("@container (max-width: 720px)", styles)
+        self.assertIn('user_profile: "用户画像"', app_js)
+        self.assertIn('mem.kind === "user_profile" ? " is-user-profile" : ""', app_js)
+        self.assertIn(".memory-row.is-user-profile", styles)
 
     def test_model_panel_has_no_thinking_controls(self):
         app_js = (Path(__file__).resolve().parents[1] / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
@@ -3292,6 +3295,39 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         memory = next(m for m in svc.memory.list_memories(sid, limit=10) if int(m["id"]) == int(memory_id))
         self.assertEqual(memory.get("hit_count"), 0)
+
+    def test_user_profile_memory_is_pinned_and_character_scoped(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        svc.memory.add_memory(sid, "preference", "普通高重要偏好", character="角色A", importance=5)
+        svc.memory.add_memory(sid, "user_profile", "用户自述是短发女性，喜欢夜跑", character="角色A", importance=2, tags=["外貌"])
+        svc.memory.add_memory(sid, "user_profile", "用户自述是长发男性", character="角色B", importance=5, tags=["外貌"])
+
+        memories_a = svc.memory.list_memories(sid, character="角色A", limit=10)
+        self.assertEqual(memories_a[0].get("kind"), "user_profile")
+        self.assertIn("短发女性", memories_a[0].get("summary", ""))
+        self.assertNotIn("长发男性", "\n".join(m.get("summary", "") for m in memories_a))
+
+        context = svc.memory.context_memories(sid, "", character="角色A", limit=1)
+        self.assertEqual(context[0].get("kind"), "user_profile")
+
+    def test_user_profile_memory_merge_keeps_one_per_character(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        svc.memory.add_memory(sid, "user_profile", "用户喜欢夜跑", character="角色A", importance=3, tags=["兴趣"])
+        svc.memory.add_memory(sid, "用户画像", "用户自述是短发女性", character="角色A", importance=5, tags=["外貌"])
+        svc.memory.add_memory(sid, "user_profile", "用户自述戴眼镜", character="角色B", importance=4, tags=["外貌"])
+
+        result = svc.memory.merge_user_profile_memories(sid, character="角色A")
+
+        self.assertTrue(result.get("changed"))
+        active_a = svc.memory.list_memories(sid, character="角色A", limit=10)
+        profiles_a = [m for m in active_a if m.get("kind") == "user_profile"]
+        self.assertEqual(len(profiles_a), 1)
+        self.assertIn("用户喜欢夜跑", profiles_a[0].get("summary", ""))
+        self.assertIn("用户自述是短发女性", profiles_a[0].get("summary", ""))
+        active_b = svc.memory.list_memories(sid, character="角色B", limit=10)
+        self.assertEqual(len([m for m in active_b if m.get("kind") == "user_profile"]), 1)
 
     def test_long_memory_queue_is_disabled_for_normal_chat(self):
         svc = self.make_service()
@@ -6682,8 +6718,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("first person view", low)
         self.assertNotIn("first-person pov", low)
         self.assertNotIn(" a and ", low)
-        # 第三人称双人：伴侣是完整第二人，且负向不再压 male/第三人称/完整第二人
-        self.assertIn("male partner fully in frame", low)
+        # 第三人称双人：未设置用户性别时用中性伴侣描述，且负向不再压第三人称/完整第二人
+        self.assertIn("partner fully in frame", low)
         self.assertNotIn("third-person perspective", neg.lower())
         self.assertNotIn("full second person", neg.lower())
 
@@ -9969,6 +10005,54 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_roleplay_image_planner_passes_user_profile_as_conditional_context(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc.memory.add_memory(
+                sid,
+                "user_profile",
+                "用户自述是短发女性，常戴黑框眼镜",
+                character=svc._memory_character(sid),
+                importance=5,
+                tags=["外貌"],
+            )
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "25"})
+            captured = {}
+
+            async def fake_call_llm(system, user, **kwargs):
+                captured["user"] = user
+                return json.dumps({
+                    "scene": "First-person POV, looking at a woman, quiet bedroom light",
+                    "view": "pov",
+                    "new_appearance_tags": "",
+                    "user_location": "with_user",
+                    "is_intimate": True,
+                    "partner_in_frame": False,
+                    "device_in_frame": False,
+                }, ensure_ascii=False)
+
+            svc._call_llm = fake_call_llm
+
+            await plan_roleplay_image(
+                svc,
+                sid,
+                intent="亲密后的安静近景",
+                prompt="她靠近看着你，但不需要把你画出来",
+            )
+
+            self.assertIn("用户画像（仅当用户/伴侣身体明确入画时参考", captured["user"])
+            self.assertIn("短发女性", captured["user"])
+            self.assertIn("不得因为有画像就让用户入画", captured["user"])
+            self.assertIn("不要写进角色 new_appearance_tags", captured["user"])
+
+        asyncio.run(run())
+
     def test_intimate_context_detection_chinese_keywords(self):
         self.assertTrue(_detect_intimate_context("角色正在与用户交合时的面部特写"))
         self.assertTrue(_detect_intimate_context("", "", "进入她体内"))
@@ -9982,7 +10066,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         state = svc._get_session_state(sid)
         state["custom_positive_prefix"] = "1girl, black long hair, purple eyes"
         state["custom_count"] = "1girl"
-        # POV 亲密场景应保留 pov, 剥离 selfie, 不加 third-person
+        # POV 亲密场景应保留 pov, 剥离 selfie, 不加 third-person；但不再默认把用户身体画进来。
         pos, neg = svc._build_prompt(
             "First-person POV, looking at a woman, sex, make love, intimate close-up, missionary position",
             session_id=sid,
@@ -9992,15 +10076,17 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("selfie", pos_lower)
         self.assertNotIn("holding phone", pos_lower)
         self.assertNotIn("third-person perspective", pos_lower)
-        self.assertNotIn("solo", pos_lower)
-        self.assertIn("partial male body visible", pos_lower)
-        self.assertIn("male hands", pos_lower)
+        self.assertIn("solo", pos_lower)
+        self.assertNotIn("partial male body visible", pos_lower)
+        self.assertNotIn("male hands", pos_lower)
+        self.assertIn("off-frame partner", pos_lower)
+        self.assertIn("no visible second person", pos_lower)
         self.assertIn("intimate close-up", pos_lower)
         neg_lower = neg.lower()
         for term in ["selfie", "holding phone", "phone", "arm extended", "third-person perspective"]:
             self.assertIn(term, neg_lower, f"negative should suppress {term}")
         self.assertNotIn("pov", neg_lower)
-        self.assertNotIn("male", neg_lower)
+        self.assertIn("male", neg_lower)
 
     def test_build_prompt_intimate_flag_equivalent_to_english_keywords(self):
         svc = self.make_service()
@@ -10016,12 +10102,13 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         )
         pos_lower = pos.lower()
         self.assertIn("first-person pov", pos_lower)
-        self.assertNotIn("solo", pos_lower)
-        self.assertIn("partial male body visible", pos_lower)
-        self.assertIn("male hands", pos_lower)
+        self.assertIn("solo", pos_lower)
+        self.assertNotIn("partial male body visible", pos_lower)
+        self.assertNotIn("male hands", pos_lower)
+        self.assertIn("off-frame partner", pos_lower)
         neg_lower = neg.lower()
         self.assertNotIn("pov", neg_lower)
-        self.assertNotIn("male", neg_lower)
+        self.assertIn("male", neg_lower)
 
     def test_build_prompt_partner_flag_routes_to_everyday_partner_path(self):
         # 日常 partner_in_frame=True：去掉 solo 冲突，但不要误走性爱/亲密特写路径。
@@ -10030,6 +10117,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         state = svc._get_session_state(sid)
         state["custom_positive_prefix"] = "1girl, black long hair, purple eyes"
         state["custom_count"] = "1girl"
+        state["custom_user_gender"] = "male"
         pos, neg = svc._build_prompt(
             "First-person POV from the user's viewpoint, Xixi sits at her owner's feet while waiting for him to dry her hair",
             session_id=sid,
@@ -10043,6 +10131,26 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("intimate close-up", pos_lower)
         self.assertNotIn("male", neg.lower())
 
+    def test_build_prompt_partner_flag_uses_female_user_gender(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["custom_positive_prefix"] = "1girl, black long hair, purple eyes"
+        state["custom_count"] = "1girl"
+        state["custom_user_gender"] = "female"
+        pos, neg = svc._build_prompt(
+            "First-person POV, looking at a woman, partner's hands touching her shoulder, intimate close-up",
+            session_id=sid,
+            is_intimate=True,
+            partner_in_frame=True,
+        )
+        pos_lower = pos.lower()
+        self.assertNotIn("solo", pos_lower)
+        self.assertIn("partner's hands or arms visible", pos_lower)
+        self.assertNotIn("partial male body visible", pos_lower)
+        self.assertNotIn("male torso", pos_lower)
+        self.assertNotIn("2girls", neg.lower())
+
     def test_build_prompt_device_in_frame_keeps_selfie_and_phone(self):
         # 用户明确要"做爱时对镜自拍/录像"：device_in_frame=True 应保留自拍/对镜取景与设备，不强制清掉。
         svc = self.make_service()
@@ -10050,6 +10158,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         state = svc._get_session_state(sid)
         state["custom_positive_prefix"] = "1girl, black long hair, purple eyes"
         state["custom_count"] = "1girl"
+        state["custom_user_gender"] = "male"
         pos, neg = svc._build_prompt(
             "A mirror reflection of a woman, holding a smartphone, sex, riding him, intimate close-up",
             session_id=sid,
@@ -10060,7 +10169,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         # 设备与对镜取景保留
         self.assertIn("mirror reflection", pos_lower)
         self.assertIn("smartphone", pos_lower)
-        # 仍按性爱场景去掉 solo、画男伴局部
+        # riding him 是明确男伴身体线索，仍按可见伴侣处理。
         self.assertNotIn("solo", pos_lower)
         self.assertIn("partial male body visible", pos_lower)
         # 手机/对镜负向被放开，male 负向去掉
@@ -10257,15 +10366,16 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         state["custom_positive_prefix"] = "1girl, black long hair, purple eyes"
         state["custom_count"] = "1girl"
         pos, neg = svc._build_prompt(
-            "A selfie of a woman, solo, lying beside him after sex",
+            "A selfie of a woman, solo, after sex, intimate close-up",
             session_id=sid,
             is_intimate=True,
         )
         pos_lower = pos.lower()
         self.assertNotIn("selfie", pos_lower)
-        self.assertNotIn("solo", pos_lower)
+        self.assertIn("solo", pos_lower)
         self.assertIn("first-person pov", pos_lower)
-        self.assertIn("partial male body visible", pos_lower)
+        self.assertNotIn("partial male body visible", pos_lower)
+        self.assertIn("off-frame partner", pos_lower)
 
     def test_chat_system_static_has_interpretation_rules(self):
         """system_static 应包含语言理解和反重复规则。"""
@@ -10355,6 +10465,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("作为 event 记忆保存", src)
         self.assertIn("不要把整段当成用户发言", src)
         self.assertIn("User/用户 是人类用户", src)
+        self.assertIn("user_profile", src)
+        self.assertIn("用户画像", src)
 
     def test_memory_extractor_checkpoint_dialog_keeps_user_assistant_roles(self):
         async def run():
@@ -10447,8 +10559,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("time nodes", incremental)
         self.assertIn("fully faded", incremental)
         self.assertIn("Do not create new memories from inference", incremental)
+        self.assertIn("user_profile", incremental)
+        self.assertIn("User_profile is character-scoped", incremental)
         self.assertIn("do not drop them merely", summarize)
         self.assertIn("Use only the supplied memories", summarize)
+        self.assertIn("at most one user_profile", summarize)
 
     def test_scene_stale_hint_when_gap_exceeds_threshold(self):
         """场景断档感知: 距离上次对话超过阈值时在 system_dynamic 注入提示。"""
@@ -10710,6 +10825,36 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(result.get("status"), "no_op")
             self.assertIn("Recent diaries:", captured["user"])
             self.assertIn("Editable memories:", captured["user"])
+
+        asyncio.run(run())
+
+    def test_dream_memory_organize_merges_user_profile_after_noop(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = "test-character"
+            svc.memory.add_memory(sid, "user_profile", "用户喜欢夜跑", character=key, importance=3, tags=["兴趣"])
+            svc.memory.add_memory(sid, "user_profile", "用户自述是短发女性", character=key, importance=5, tags=["外貌"])
+            svc.memory.add_memory(sid, "user_profile", "其他角色画像不应合并", character="other-character", importance=5)
+            svc.has_llm_config = lambda purpose, session_id="": True
+
+            async def fake_call_llm(system, user, **kw):
+                return json.dumps({"ops": []})
+
+            svc._call_llm = fake_call_llm
+
+            result = await svc._organize_memories_after_dream(sid, key)
+
+            profiles = [m for m in svc.memory.list_memories(sid, character=key, limit=10) if m.get("kind") == "user_profile"]
+            self.assertEqual(len(profiles), 1)
+            self.assertIn("用户喜欢夜跑", profiles[0].get("summary", ""))
+            self.assertIn("用户自述是短发女性", profiles[0].get("summary", ""))
+            other_profiles = [
+                m for m in svc.memory.list_memories(sid, character="other-character", limit=10)
+                if m.get("kind") == "user_profile"
+            ]
+            self.assertEqual(len(other_profiles), 1)
+            self.assertEqual(result.get("user_profile_merge", {}).get("merged"), 2)
 
         asyncio.run(run())
 

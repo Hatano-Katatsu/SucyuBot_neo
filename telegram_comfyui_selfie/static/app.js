@@ -152,6 +152,7 @@ const memoryKindMap = {
   manual: "手动",
   event: "事件",
   fact: "事实",
+  user_profile: "用户画像",
   profile: "资料",
   preference: "偏好",
   relationship: "关系",
@@ -1395,7 +1396,8 @@ async function loadMemories() {
     const data = await api(`/api/sessions/${sid}/memories?character_key=${charKey}`);
     if (state.selectedCharacter !== rawCharKey) return;
     const rows = (data.memories || []).map(mem => `
-      <div class="manager-row memory-row">
+      <div class="manager-row memory-row${mem.kind === "user_profile" ? " is-user-profile" : ""}">
+        ${mem.kind === "user_profile" ? `<div class="memory-row-label">置顶用户画像</div>` : ""}
         <textarea data-memory-summary="${mem.id}" rows="1" placeholder="记忆内容">${escapeHtml(mem.summary || "")}</textarea>
         <select data-memory-kind="${mem.id}" title="类型">${memoryKindOptions(mem.kind || "manual")}</select>
         <div class="range-wrap" title="重要度 1-5">

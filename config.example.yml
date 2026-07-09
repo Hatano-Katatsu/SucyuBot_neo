@@ -204,7 +204,7 @@ role_defaults:
   timezone_offset: "8.0"
   character_age_stage: ""
   character_day_anchor: ""
-  user_gender: "male"
+  user_gender: ""
   chat_reply_length: ""
 
 world:

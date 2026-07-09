@@ -18,6 +18,7 @@ from .generation import (
     _strip_non_mirror_camera_artifacts,
     public_outfit_guard_context,
 )
+from .memory import USER_PROFILE_KIND, format_memory_lines
 from .world_runtime import PLACE_TYPES
 
 logger = logging.getLogger(__name__)
@@ -827,7 +828,7 @@ async def plan_roleplay_image(
             planned_view="",
             default_view="pov" if (fallback_intimate_hint or persisted_co_located) else "selfie",
             derived_co_located=persisted_co_located,
-            two_person=fallback_intimate_hint,
+            two_person=False,
             free_composition=free_composition,
             scene=fallback_scene,
             intent=intent,
@@ -936,6 +937,17 @@ async def plan_roleplay_image(
     memory_context = ""
     if not is_push and hasattr(service, "_long_term_memory_context"):
         memory_context = service._long_term_memory_context(session_id, memory_query, limit=8)
+    user_profile_context = ""
+    if not is_push and hasattr(service, "memory"):
+        try:
+            character_key = service._memory_character(session_id) if hasattr(service, "_memory_character") else ""
+            profile_memories = [
+                memory for memory in service.memory.list_memories(session_id, character=character_key, limit=20)
+                if memory.get("kind") == USER_PROFILE_KIND
+            ][:3]
+            user_profile_context = format_memory_lines(profile_memories, with_ids=False)
+        except Exception:
+            logger.debug("user profile context build failed for image planning", exc_info=True)
     world_query = "\n".join(part for part in (intent, mood, must_include, prompt) if part)
     world_context = ""
     if hasattr(service, "_format_world_context"):
@@ -973,8 +985,8 @@ async def plan_roleplay_image(
     intimate_hint = _detect_intimate_context(intent, mood, prompt, continuity_context or "")
     device_hint = _detect_device_context(intent, mood, prompt, continuity_context or "")
     clothing_off_hint = _infer_clothing_off_fallback(intent, mood, prompt, continuity_context or "")
-    user_gender = service._get_user_gender(session_id) if hasattr(service, "_get_user_gender") else "male"
-    user_g_zh = "女性" if user_gender == "female" else "男性"
+    user_gender = service._get_user_gender(session_id) if hasattr(service, "_get_user_gender") else ""
+    user_g_zh = "女性" if user_gender == "female" else ("男性" if user_gender == "male" else "用户性别对应的")
 
     spatial_hint = service._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])
     spatial_label = f"默认物理空间设定（{spatial_hint}）" if str(spatial_hint).strip() else "默认无固定空间设定"
@@ -1008,15 +1020,17 @@ async def plan_roleplay_image(
     )
     stable_intimacy_rules = (
         "场景类型自判: 只要角色与用户有贴身性接触（性交、骑乘、交合、爱抚、拥抱贴身、亲吻、前戏，"
-        "或任何用户身体会与角色贴合入画的性暗示情形），都判为亲密场景 is_intimate=true；纯日常、无身体接触才是 false。"
+        "或明确发生性暗示/性行为），都判为亲密场景 is_intimate=true；纯日常、无身体接触才是 false。"
         "性事刚结束的事后温存、同床共枕、相拥而眠、躺在对方身边、爱抚余韵等画面，只要用户的身体仍与角色同框贴近，"
         "同样判为 is_intimate=true（不要因为‘性行为已结束’就当成日常）。请在 JSON 里输出 is_intimate 布尔值。"
+        "注意: is_intimate 只表示亲密/性爱语境，不等于用户身体必须入画；POV 可以只看到角色，用户在画外。"
         + ("系统初步判断本次可能属于亲密场景，请重点确认。" if intimate_hint else "")
     )
     if free_composition:
         interaction_rules = (
             "\n【自由配图模式的亲密构图】若 is_intimate=true，仍要避免把用户误画成抢主体的完整第二人；"
-            f"用户身体默认只作为{user_g_zh}局部、手臂、胸腹、背或腿入画。"
+            f"只有用户要求或场景硬约束明确需要用户身体可见时，才把用户写成{user_g_zh}局部、手臂、胸腹、背或腿入画；"
+            "没有可见身体线索时，保持角色单人画面，用户只作为画外视角或互动对象。"
             "但用户本次明确指定的视角、机位、远近、局部特写、手机/相机/镜子入画优先，不要硬改成 POV。"
             "new_appearance_tags 仍只填临时外观变化，不要把情绪或动作写进去。"
         )
@@ -1024,6 +1038,8 @@ async def plan_roleplay_image(
         interaction_rules = (
             "\n【以下亲密交互规则仅当你判定 is_intimate=true 时适用；若判定为日常/非性场景，请完全忽略本段，按通用规则写】:\n"
             "- 视角固定为 pov（用户第一人称视角），严禁 selfie 或 mirror，不需要第三人称全景。\n"
+            "- 用户身体入画闸门: is_intimate 不等于 partner_in_frame。没有明确可见的用户身体部位时，scene 可以只写 POV 看向角色，用户在画外；"
+            "只有原文、短期连续性或空间硬约束明确出现用户的手/手臂/胸腹/背/腿/脚/怀里/腿上/躺在身边/骑乘/搂抱等可见身体线索时，才写用户局部并把 partner_in_frame 置 true。\n"
             f"- 用户身体归属（关键，针对双人误画）: 画面焦点永远是角色（一名女性）。用户作为亲密伴侣入画时，只画用户的【{user_g_zh}】身体局部（手、手臂、胸膛或胸部、腹、背、腿），"
             "绝不能把用户写成有完整面部、发型、表情、迷离眼神的第二个主角，更不能让用户喧宾夺主。\n"
             f"凡“你的手/你的胸/你的背/你的腿”等用户身体部位，scene 要写成可见的{user_g_zh}身体局部，不要写成“另一个角色/她/第二个人”。"
@@ -1051,7 +1067,8 @@ async def plan_roleplay_image(
             "但对方依然只画身体局部，不得写成完整的第二个主角。\n"
         )
     field_rules = (
-        "partner_in_frame: 当画面里会出现用户/伴侣的身体（哪怕只是局部）时置 true；纯角色单人时 false。\n"
+        "partner_in_frame: 仅当画面里会出现用户/伴侣的身体（哪怕只是局部）时置 true；"
+        "is_intimate=true 但用户身体不需要可见时仍置 false，保持角色单人 POV。\n"
         "device_in_frame: 仅当用户明确要求把手机/相机/镜子作为拍照、录像、对镜的道具拍进画面时置 true；否则 false。"
     )
     single_frame_rules = (
@@ -1296,6 +1313,12 @@ async def plan_roleplay_image(
         user += f"\n\n空间/身体关系硬约束（scene 主句必须保留，不要改成相反站位）:\n{prompt_spatial_context}"
     if photo_context:
         user += f"\n\n最近已发图片摘要:\n{photo_context}"
+    if user_profile_context:
+        user += (
+            "\n\n用户画像（仅当用户/伴侣身体明确入画时参考；不得因为有画像就让用户入画；"
+            "画像中的外貌只能写进可见的用户局部，不要写进角色 new_appearance_tags）:\n"
+            f"{user_profile_context}"
+        )
     if memory_context:
         user += f"\n\n长期记忆:\n{memory_context}"
 
@@ -1353,7 +1376,7 @@ async def plan_roleplay_image(
             planned_view="",
             default_view="pov" if (intimate_hint or persisted_co_located) else "selfie",
             derived_co_located=persisted_co_located,
-            two_person=intimate_hint,
+            two_person=False,
             free_composition=free_composition,
             scene=text_scene,
             intent=intent,
@@ -1416,9 +1439,9 @@ async def plan_roleplay_image(
     partner_in_frame = bool(parsed.get("partner_in_frame"))
     # 设备入画：规划器主判 + 中文关键词兜底。命中则放行手机/镜子、不再强制把画面掰成 POV。
     device_in_frame = bool(parsed.get("device_in_frame")) or device_hint
-    two_person = is_intimate or partner_in_frame
+    two_person = partner_in_frame
     default_view = "selfie"
-    if two_person or derived_co_located:
+    if is_intimate or two_person or derived_co_located:
         default_view = "pov"
     final_view = _resolve_roleplay_view(
         requested_view=requested_view,

@@ -238,6 +238,10 @@ telegram_comfyui_selfie/
 8. **WebUI 衣橱状态控制**：角色当前衣柜返回 `wardrobe_item_states`，前端“身上穿着”行新增状态下拉（正常/半脱/破损/脱掉），并新增“一键还原状态”。API 增加 `set-item-state` 与 `clear-item-states`，换穿收藏、编辑正穿收藏、移除槽位、清空穿搭和公开兜底移出时会同步清理对应状态。移动端衣橱布局补充状态控件换行和按钮布局，避免窄屏挤压。
 9. **本轮追加验证**：新增/更新测试覆盖 clothing box 状态访问器、WebUI 状态设置/一键还原、状态渲染前缀与贴身裸露标签、removed 状态仅影响 prompt 且可还原、自然换装 states 保留衣柜但全裸清空。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 401 tests in 14.856s`，`OK (skipped=1)`。
 10. **WebUI 衣橱窄容器布局修复**：衣橱模块新增 `container-type: inline-size` 和 `@container (max-width: 720px)` 响应式规则，按模块自身宽度而不是整页 viewport 切单列；同时降低右侧列最小宽度、让部件状态控件独占整行，修复窄面板下“当前摘要/衣物行被挤成竖排”的问题。新增静态测试锁定容器查询规则，验证 `node --check telegram_comfyui_selfie\static\app.js` 与相关单测通过。
+11. **POV 用户入画解耦**：`is_intimate` 只表示亲密/性爱语境和 POV 倾向，不再自动等价为 `partner_in_frame`。普通亲密 POV 默认可以只看到角色和画外伴侣，保留 `solo` 并压制第二身体；只有 planner 明确 `partner_in_frame=true` 或 scene 出现明确用户/伴侣身体线索时，才去掉 `solo`、放开对应负向并加入用户局部。`user_gender` 默认改为空，未设置时使用中性 partner 局部，不再默认男性；显式设置 male/female 时仍按配置渲染。
+12. **用户画像长期记忆**：长期记忆新增 `user_profile` kind，专门保存人类用户的兴趣、行为方式、外貌、自我描述、长期偏好和边界。记忆列表和上下文注入会把用户画像置顶；checkpoint 可以临时抽取多条，dream 记忆整理后会按 `session_id + character` 合并为唯一一条，不跨角色共享。WebUI 记忆类型新增“用户画像”，并对置顶画像加专门样式。
+13. **用户画像进入画图规划**：非推送图像 planner 会单独注入“用户画像（仅当用户/伴侣身体明确入画时参考）”上下文，允许其中的用户外貌信息用于可见用户局部，但提示词明确不得因为画像存在就强行让用户入画，也不得写进角色 `new_appearance_tags`。推送 planner 复用正式聊天前缀，置顶用户画像会随长期记忆前缀进入。
+14. **本轮追加验证**：新增/更新测试覆盖亲密 POV 不强制用户身体、女性用户显式入画不走男性兜底、未知用户性别走中性伴侣描述、用户画像置顶与角色隔离、dream 整理后合并用户画像、用户画像作为条件上下文进入画图规划、WebUI 用户画像类型和样式。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 406 tests in 10.172s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-07-06）
 

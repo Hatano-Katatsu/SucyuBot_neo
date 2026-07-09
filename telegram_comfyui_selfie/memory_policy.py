@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from . import session_schema
-from .memory import format_memory_lines, normalize_kind
+from .memory import USER_PROFILE_KIND, format_memory_lines, normalize_kind
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ class MemoryPolicyMixin:
         summary = (summary or "").strip()
         if not summary:
             return False
-        if kind in ("manual", "correction", "boundary"):
+        if kind in ("manual", "correction", "boundary", USER_PROFILE_KIND):
             return True
 
         text = summary
@@ -128,6 +128,8 @@ class MemoryPolicyMixin:
         system = (
             "你是长期记忆提取器。请从一轮用户与角色的对话中提取值得长期保存的信息。\n"
             "只保存稳定偏好、明确设定、关系状态变化、重要事件、视觉/穿搭偏好、边界或禁忌。\n"
+            "用户画像 user_profile 专门保存人类用户相关的稳定信息：兴趣爱好、行为方式、外貌、自我描述、长期偏好和边界；"
+            "不要把 bot 角色的人设、动作、身体状态或短期剧情写进用户画像。用户画像按当前角色独立维护，不跨角色共享。\n"
             "长期记忆负责可跨场景复用的高重要度事实/偏好/边界/纠正，不负责承接刚才发生到哪一步；近期连续性交给 checkpoint，宏观关系阶段交给角色历史提要。\n"
             "长期记忆不是第二套人设系统，不要保存已有结构化状态负责的内容。\n"
             "不要保存当前角色、当前人设、当前身体特征、当前地点/时区、当前纯良度、当前画风、当前临时穿搭或最近图片内容；"
@@ -140,7 +142,7 @@ class MemoryPolicyMixin:
             "严格来源约束（最重要）：只从对话原文提取信息，不要推断、补充、联想或编造对话中没有明确出现的规则、约定、偏好或事件。"
             "例如：用户说「我迟到了」→ 不要推断出「迟到要请吃东西」；用户说「送你一个发卡」→ 不要推断出「发卡是某种约定的象征」。\n"
             "如果已有相关记忆已经覆盖，不要重复输出。\n"
-            "必须输出严格 JSON: {\"memories\":[{\"kind\":\"profile|preference|relationship|setting|boundary|visual|event|correction\","
+            "必须输出严格 JSON: {\"memories\":[{\"kind\":\"user_profile|profile|preference|relationship|setting|boundary|visual|event|correction\","
             "\"summary\":\"一句中文记忆摘要\",\"importance\":1-5,\"tags\":[\"标签\"]}]}。没有值得保存的内容时 memories 为空数组。"
         )
         if assistant_text:
