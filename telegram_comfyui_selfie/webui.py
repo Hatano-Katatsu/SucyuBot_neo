@@ -945,11 +945,13 @@ def _wardrobe_display_names(wardrobe: dict[str, Any], closet: dict[str, Any]) ->
 
 def serialize_current_clothing(service, state: dict[str, Any]) -> dict[str, Any]:
     wardrobe = service._get_wardrobe(state)
+    session_schema.prune_wardrobe_item_states(state, wardrobe)
     closet, public_fallback = _split_public_fallback_closet(state)
     return {
         "dynamic_appearance": session_schema.get_outfit(state),
         "wardrobe": wardrobe,
         "wardrobe_display": _wardrobe_display_names(wardrobe, closet),
+        "wardrobe_item_states": session_schema.get_wardrobe_item_states(state),
         "public_fallback_outfit": public_fallback,
         "public_fallback_in_current": _public_fallback_in_current(wardrobe, public_fallback),
         "closet": closet,
@@ -959,6 +961,7 @@ def serialize_current_clothing(service, state: dict[str, Any]) -> dict[str, Any]
 
 def _apply_wardrobe_direct(service, sid: str, state: dict[str, Any], wardrobe: dict[str, Any]) -> str:
     session_schema.set_wardrobe(state, wardrobe)
+    session_schema.prune_wardrobe_item_states(state, wardrobe)
     rendered = appearance_rules.render_wardrobe(wardrobe)
     session_schema.set_outfit(state, rendered)
     if rendered.strip():
@@ -1033,6 +1036,7 @@ async def api_update_wardrobe(request: web.Request):
         if slot and appearance_rules.normalize_appearance_text(wardrobe.get(slot) or "") == appearance_rules.normalize_appearance_text(old_tags):
             # 这件正穿在身上 → 同步更新当前穿搭标签。
             wardrobe[slot] = new_tags
+            session_schema.clear_wardrobe_item_states(state, [slot])
             result = _apply_wardrobe_direct(service, sid, state, wardrobe)
         else:
             service._save_session_state(sid, state)
@@ -1049,6 +1053,26 @@ async def api_update_wardrobe(request: web.Request):
     elif action == "clear":
         result = await service._apply_wardrobe(sid, "reset")
         state = service._get_session_state(sid)
+    elif action == "set_item_state":
+        slot = str(payload.get("slot") or "").strip()
+        item_state = str(payload.get("state") or "").strip()
+        if slot not in appearance_rules.WARDROBE_CLOTHING_SLOTS:
+            return json_error("未知的衣物槽位")
+        wardrobe = service._get_wardrobe(state)
+        if not str(wardrobe.get(slot) or "").strip():
+            return json_error("这个槽位当前没有穿着")
+        session_schema.set_wardrobe(state, wardrobe)
+        session_schema.set_wardrobe_item_state(state, slot, item_state)
+        if session_schema.get_wardrobe_item_states(state):
+            session_schema.clear_nudity(state)
+        service._save_session_state(sid, state)
+        result = session_schema.get_outfit(state)
+    elif action == "clear_item_states":
+        session_schema.clear_wardrobe_item_states(state)
+        if session_schema.get_outfit(state).strip():
+            session_schema.clear_nudity(state)
+        service._save_session_state(sid, state)
+        result = session_schema.get_outfit(state)
     elif action == "wear_closet":
         name = str(payload.get("name") or "").strip()
         closet = session_schema.get_closet(state)
@@ -1062,6 +1086,7 @@ async def api_update_wardrobe(request: web.Request):
         wardrobe = appearance_rules.apply_wardrobe_change(service._get_wardrobe(state), {slot: tags})
         closet = appearance_rules.closet_add(closet, name, slot, tags, now=time.time())
         session_schema.set_closet(state, closet)
+        session_schema.clear_wardrobe_item_states(state, [slot])
         result = _apply_wardrobe_direct(service, sid, state, wardrobe)
     elif action == "remove_slot":
         slot = str(payload.get("slot") or "").strip()
@@ -1070,6 +1095,7 @@ async def api_update_wardrobe(request: web.Request):
             return json_error("未知的衣柜槽位")
         wardrobe = dict(service._get_wardrobe(state))
         wardrobe.pop(slot, None)
+        session_schema.clear_wardrobe_item_states(state, [slot])
         result = _apply_wardrobe_direct(service, sid, state, wardrobe)
     elif action == "stash_public_fallback":
         closet, public_fallback = _split_public_fallback_closet(state)
@@ -1080,6 +1106,7 @@ async def api_update_wardrobe(request: web.Request):
         for slot, tags in public_fallback.items():
             if appearance_rules.normalize_appearance_text(wardrobe.get(slot) or "") == appearance_rules.normalize_appearance_text(tags):
                 wardrobe.pop(slot, None)
+                session_schema.clear_wardrobe_item_states(state, [slot])
                 changed = True
         if not changed:
             return json_error("当前穿搭里没有这套公开兜底")

@@ -233,6 +233,10 @@ telegram_comfyui_selfie/
 3. **创建角色可设置作息**：`/创建OC` 模板和自然结构字段支持工作日/周末起床睡觉时间；初始化向导新增作息步骤，可回复“默认”跳过。默认角色卡也会把作息字段写回全局 config。
 4. **WebUI 角色页与衣橱移动端优化**：角色表单合并“关系/背景/边界”为“生活与边界”，加入四个作息 time 输入；角色概览显示作息摘要。衣橱在移动端改为单列布局，分槽收藏横向浏览，槽内按钮和编辑表单适配窄屏。
 5. **本轮回归验证**：新增/更新测试覆盖普通推送不触发 dream、morning 推送触发 dream、角色作息生成随机推送窗口和早安窗口、创建 OC 写入作息、默认角色作息写回 config、WebUI 字段合并与移动端衣橱样式。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 398 tests in 14.645s`，`OK (skipped=1)`。
+6. **衣物部件状态层**：`clothing` box 新增 `wardrobe_item_states`，支持 `half_off` / `damaged` / `removed` 三类临时状态并提供统一访问器、状态归一、清理和按当前衣柜 prune。单件“半脱/破损/脱掉”不再破坏 `wardrobe` 本体，便于事件结束后恢复；“全裸/脱光/把衣服都脱了”按用户要求仍走清空当前穿搭，并记录 `nudity=completely nude`。
+7. **生图提示词反映状态**：`build_prompt()` 会把半脱部件渲染为 `half-removed <tag>`、破损部件渲染为 `torn <tag>`、脱掉部件从正向临时移除并压入负向；贴身衣物半脱/破损/脱掉时自动补 `nipples` / `pussy`，全身遮盖都移除时补 `nude`，同时移除对应负向冲突词。状态渲染会在 `explicit_appearance_override` 后再执行一次，避免原始 `dynamic_appearance` 把旧衣物重新带回。
+8. **WebUI 衣橱状态控制**：角色当前衣柜返回 `wardrobe_item_states`，前端“身上穿着”行新增状态下拉（正常/半脱/破损/脱掉），并新增“一键还原状态”。API 增加 `set-item-state` 与 `clear-item-states`，换穿收藏、编辑正穿收藏、移除槽位、清空穿搭和公开兜底移出时会同步清理对应状态。移动端衣橱布局补充状态控件换行和按钮布局，避免窄屏挤压。
+9. **本轮追加验证**：新增/更新测试覆盖 clothing box 状态访问器、WebUI 状态设置/一键还原、状态渲染前缀与贴身裸露标签、removed 状态仅影响 prompt 且可还原、自然换装 states 保留衣柜但全裸清空。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 401 tests in 14.856s`，`OK (skipped=1)`。
 
 ## 今日变更（2026-07-06）
 

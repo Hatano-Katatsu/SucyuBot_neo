@@ -1623,8 +1623,10 @@ select {
   .closet-slot summary { grid-template-columns: 64px minmax(0, 1fr) auto; }
   .runtime-clothing-head, .wardrobe-editor-actions { flex-direction: column; align-items: stretch; }
   .runtime-clothing-head { display: grid; }
+  .runtime-clothing-head-actions { display: grid; justify-content: stretch; }
   .wardrobe-editor { grid-template-columns: 1fr; }
   .wardrobe-editor-actions { display: grid; }
+  .wardrobe-state-control { grid-column: 1 / -1; justify-self: stretch; }
   .slot-row strong { padding-bottom: 6px; border-bottom: 1px solid var(--line); }
   .panel { padding: 16px; }
 }
@@ -2152,6 +2154,14 @@ button:disabled .spinner {
   margin: 0 0 4px;
 }
 
+.runtime-clothing-head-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .runtime-clothing-head p,
 .pane-title span {
   margin: 0;
@@ -2276,6 +2286,37 @@ button:disabled .spinner {
   font-weight: 500;
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+.wardrobe-state-control {
+  display: inline-grid;
+  grid-template-columns: auto minmax(82px, 1fr);
+  gap: 6px;
+  align-items: center;
+  justify-self: end;
+  min-width: 132px;
+}
+
+.wardrobe-state-control span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.wardrobe-state-control select {
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 24px 4px 8px;
+  font-size: 12px;
+}
+
+.wardrobe-state-badge {
+  justify-self: end;
+  padding: 3px 7px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
 }
 
 .closet-list {
@@ -2423,6 +2464,12 @@ button:disabled .spinner {
     gap: 10px;
   }
 
+  .runtime-clothing-head-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    justify-content: stretch;
+  }
+
   .wardrobe-editor {
     grid-template-columns: 1fr;
   }
@@ -2453,6 +2500,11 @@ button:disabled .spinner {
 
   .wardrobe-row {
     grid-template-columns: 76px minmax(0, 1fr);
+  }
+
+  .wardrobe-state-control {
+    grid-column: 1 / -1;
+    justify-self: stretch;
   }
 
   .closet-list {

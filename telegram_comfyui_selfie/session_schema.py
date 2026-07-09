@@ -166,6 +166,7 @@ STATE_SCHEMA: dict[str, Field] = {
         "dynamic_appearance": "",   # 当前穿搭（渲染自 wardrobe）
         "wardrobe": {},             # 分槽衣柜（真源）
         "wardrobe_closet": {},      # 收藏的整套穿搭
+        "wardrobe_item_states": {},  # 分槽衣物状态：half_off/damaged/removed；不破坏 wardrobe 本体
         "public_fallback_outfit": {}, # 公开场合兜底外出穿搭；仅公开场景生图时叠加，不覆盖当前穿搭
         "nudity": "",               # 持久裸体态（如 "completely nude"），空=穿着
         "nudity_at": 0.0,           # 裸体态确立时间，供 TTL 老化
@@ -375,12 +376,52 @@ _CLOTHING_DEFAULT: dict[str, Any] = {
     "dynamic_appearance": "",
     "wardrobe": {},
     "wardrobe_closet": {},
+    "wardrobe_item_states": {},
     "public_fallback_outfit": {},
     "nudity": "",
     "nudity_at": 0.0,
 }
 # 旧扁平字段名（顶层）→ 迁移进盒。
-_LEGACY_CLOTHING_FLAT_KEYS = ("dynamic_appearance", "wardrobe", "wardrobe_closet")
+_LEGACY_CLOTHING_FLAT_KEYS = ("dynamic_appearance", "wardrobe", "wardrobe_closet", "wardrobe_item_states")
+WARDROBE_ITEM_STATES = frozenset({"half_off", "damaged", "removed"})
+_WARDROBE_ITEM_STATE_ALIASES = {
+    "": "",
+    "normal": "",
+    "none": "",
+    "clear": "",
+    "reset": "",
+    "恢复": "",
+    "还原": "",
+    "正常": "",
+    "穿好": "",
+    "整理好": "",
+    "half": "half_off",
+    "half-off": "half_off",
+    "half_off": "half_off",
+    "half_removed": "half_off",
+    "half-removed": "half_off",
+    "partly_off": "half_off",
+    "slipped": "half_off",
+    "pulled_aside": "half_off",
+    "半脱": "half_off",
+    "半褪": "half_off",
+    "滑落": "half_off",
+    "拉开": "half_off",
+    "damaged": "damaged",
+    "broken": "damaged",
+    "torn": "damaged",
+    "ripped": "damaged",
+    "破损": "damaged",
+    "撕破": "damaged",
+    "撕裂": "damaged",
+    "removed": "removed",
+    "off": "removed",
+    "taken_off": "removed",
+    "take_off": "removed",
+    "脱掉": "removed",
+    "脱下": "removed",
+    "不穿": "removed",
+}
 
 
 def normalize_outfit_string(text: str) -> str:
@@ -439,6 +480,71 @@ def get_wardrobe(state: dict[str, Any]) -> dict[str, Any]:
 
 def set_wardrobe(state: dict[str, Any], value: Any) -> None:
     ensure_clothing_box(state)["wardrobe"] = value if isinstance(value, dict) else {}
+
+
+def normalize_wardrobe_item_state(value: Any) -> str:
+    """归一衣物状态。空串表示正常/清除状态标记。"""
+    if isinstance(value, dict):
+        value = value.get("state") or value.get("value") or ""
+    key = str(value or "").strip().lower().replace(" ", "_")
+    key = _WARDROBE_ITEM_STATE_ALIASES.get(key, key)
+    return key if key in WARDROBE_ITEM_STATES else ""
+
+
+def get_wardrobe_item_states(state: dict[str, Any]) -> dict[str, str]:
+    """读取分槽衣物状态；懒清理旧格式/非法值。"""
+    box = ensure_clothing_box(state)
+    raw = box.get("wardrobe_item_states")
+    if not isinstance(raw, dict):
+        raw = {}
+    normalized: dict[str, str] = {}
+    for slot, value in raw.items():
+        slot_text = str(slot or "").strip()
+        norm = normalize_wardrobe_item_state(value)
+        if slot_text and norm:
+            normalized[slot_text] = norm
+    if normalized != raw:
+        box["wardrobe_item_states"] = normalized
+    return box["wardrobe_item_states"]
+
+
+def set_wardrobe_item_state(state: dict[str, Any], slot: str, value: Any) -> None:
+    slot_text = str(slot or "").strip()
+    if not slot_text:
+        return
+    states = dict(get_wardrobe_item_states(state))
+    norm = normalize_wardrobe_item_state(value)
+    if norm:
+        states[slot_text] = norm
+    else:
+        states.pop(slot_text, None)
+    ensure_clothing_box(state)["wardrobe_item_states"] = states
+
+
+def clear_wardrobe_item_states(state: dict[str, Any], slots: list[str] | tuple[str, ...] | set[str] | None = None) -> None:
+    if slots is None:
+        ensure_clothing_box(state)["wardrobe_item_states"] = {}
+        return
+    states = dict(get_wardrobe_item_states(state))
+    for slot in slots:
+        states.pop(str(slot or "").strip(), None)
+    ensure_clothing_box(state)["wardrobe_item_states"] = states
+
+
+def prune_wardrobe_item_states(state: dict[str, Any], wardrobe: dict[str, Any] | None = None) -> None:
+    """删除已不在当前衣柜里的状态标记，避免孤立状态污染后续 prompt。"""
+    if wardrobe is None:
+        wardrobe = get_wardrobe(state)
+    if not isinstance(wardrobe, dict):
+        wardrobe = {}
+    states = get_wardrobe_item_states(state)
+    kept = {
+        slot: value
+        for slot, value in states.items()
+        if str(wardrobe.get(slot) or "").strip()
+    }
+    if kept != states:
+        ensure_clothing_box(state)["wardrobe_item_states"] = kept
 
 
 def get_closet(state: dict[str, Any]) -> dict[str, Any]:

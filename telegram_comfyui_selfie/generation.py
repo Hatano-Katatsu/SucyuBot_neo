@@ -14,6 +14,8 @@ import aiohttp
 
 from . import session_schema
 from .appearance import (
+    WARDROBE_CLOTHING_SLOTS,
+    WARDROBE_RENDER_ORDER,
     closet_add,
     infer_gender_from_count,
     infer_gender_from_prefix,
@@ -662,6 +664,16 @@ _BOTTOM_CLOTHING_OFF_WORDS = (
     "bottomless", "no panties", "no underwear", "panties", "panty",
     "g-string", "thong", "knickers", "briefs", "underwear",
 )
+_WARDROBE_STATE_PREFIX = {
+    "half_off": "half-removed",
+    "damaged": "torn",
+}
+_WARDROBE_UPPER_COVER_SLOTS = ("dress", "top", "bra")
+_WARDROBE_LOWER_COVER_SLOTS = ("dress", "bottom", "panties")
+_WARDROBE_EXPOSURE_NEGATIVES = (
+    "nude", "naked", "nudity", "topless", "bottomless", "completely nude",
+    "revealing clothes", "nipples", "nipple", "pussy", "vagina",
+)
 
 
 def _removable_appearance_tags(service: Any, appearance: str) -> list[str]:
@@ -728,6 +740,120 @@ def _apply_clothing_off(service: Any, clothing_off: str, effective_appearance: s
     if _FULL_NUDE_RE.search(raw) or any(word in raw_lower for word in _BOTTOM_CLOTHING_OFF_WORDS):
         neg = _remove_negatives(neg, *BOTTOM_EXPOSURE_NEGATIVES)
     return appearance, neg
+
+
+def _prefix_wardrobe_tags(tags: str, prefix: str) -> str:
+    return normalize_appearance_text(", ".join(f"{prefix} {tag}" for tag in _split_tags(tags) if tag))
+
+
+def _append_unique_appearance_tags(appearance: str, tags: list[str] | tuple[str, ...]) -> str:
+    text = appearance
+    lower = f", {text.lower()},"
+    for tag in tags:
+        tag = str(tag or "").strip()
+        if not tag:
+            continue
+        needle = f", {tag.lower()},"
+        if needle in lower:
+            continue
+        text = f"{text}, {tag}" if text.strip() else tag
+        lower = f", {text.lower()},"
+    return normalize_appearance_text(text)
+
+
+def _wardrobe_state_exposure_tags(wardrobe: dict[str, Any], states: dict[str, str]) -> list[str]:
+    worn_slots = {
+        slot for slot in WARDROBE_CLOTHING_SLOTS
+        if str((wardrobe or {}).get(slot) or "").strip()
+    }
+    if not worn_slots or not states:
+        return []
+
+    tags: list[str] = []
+    if states.get("bra") in {"half_off", "damaged", "removed"}:
+        tags.append("nipples")
+    if states.get("panties") in {"half_off", "damaged", "removed"}:
+        tags.append("pussy")
+
+    def has_normal_cover(slots: tuple[str, ...]) -> bool:
+        return any(slot in worn_slots and states.get(slot) not in {"half_off", "damaged", "removed"} for slot in slots)
+
+    upper_touched = any(states.get(slot) in {"half_off", "damaged", "removed"} for slot in _WARDROBE_UPPER_COVER_SLOTS)
+    lower_touched = any(states.get(slot) in {"half_off", "damaged", "removed"} for slot in _WARDROBE_LOWER_COVER_SLOTS)
+    if upper_touched and not has_normal_cover(_WARDROBE_UPPER_COVER_SLOTS):
+        tags.append("nipples")
+    if lower_touched and not has_normal_cover(_WARDROBE_LOWER_COVER_SLOTS):
+        tags.append("pussy")
+
+    all_removed = all(states.get(slot) == "removed" for slot in worn_slots)
+    no_upper_cover = not has_normal_cover(_WARDROBE_UPPER_COVER_SLOTS)
+    no_lower_cover = not has_normal_cover(_WARDROBE_LOWER_COVER_SLOTS)
+    if all_removed or (upper_touched and lower_touched and no_upper_cover and no_lower_cover):
+        tags.append("nude")
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for tag in tags:
+        if tag not in seen:
+            out.append(tag)
+            seen.add(tag)
+    return out
+
+
+def _apply_wardrobe_item_states(
+    service: Any,
+    state: dict[str, Any],
+    appearance: str,
+) -> tuple[str, str, list[str], list[str]]:
+    """把衣柜部件状态渲染到本次 prompt，不改写 wardrobe 本体。"""
+    try:
+        wardrobe = service._get_wardrobe(state)
+    except Exception:
+        wardrobe = session_schema.get_wardrobe(state)
+    states = {
+        slot: value
+        for slot, value in session_schema.get_wardrobe_item_states(state).items()
+        if str((wardrobe or {}).get(slot) or "").strip()
+    }
+    if not states:
+        return appearance, render_wardrobe(wardrobe), [], []
+
+    rendered_parts: list[str] = []
+    removed_tags: list[str] = []
+    text = appearance
+    for slot in WARDROBE_RENDER_ORDER:
+        tags = str((wardrobe or {}).get(slot) or "").strip()
+        if not tags:
+            continue
+        item_state = states.get(slot)
+        if item_state:
+            original_tags = _split_tags(tags)
+            for tag in original_tags:
+                text = service._remove_tag(text, tag)
+            if item_state == "removed":
+                removed_tags.extend(original_tags)
+                continue
+            prefixed = _prefix_wardrobe_tags(tags, _WARDROBE_STATE_PREFIX[item_state])
+            if prefixed:
+                rendered_parts.append(prefixed)
+                text = _append_unique_appearance_tags(text, _split_tags(prefixed))
+        else:
+            rendered_parts.append(tags)
+
+    exposure_tags = _wardrobe_state_exposure_tags(wardrobe, states)
+    text = _append_unique_appearance_tags(text, exposure_tags)
+    return normalize_appearance_text(text), normalize_appearance_text(", ".join(rendered_parts)), removed_tags, exposure_tags
+
+
+def _free_wardrobe_state_exposure_negatives(neg: str, exposure_tags: list[str], removed_tags: list[str]) -> str:
+    if removed_tags:
+        neg = _append_negatives(neg, *removed_tags)
+    if not exposure_tags:
+        return neg
+    neg = _remove_negatives(neg, *_WARDROBE_EXPOSURE_NEGATIVES)
+    if any(tag in {"pussy", "nude"} for tag in exposure_tags):
+        neg = _remove_negatives(neg, *BOTTOM_EXPOSURE_NEGATIVES)
+    return neg
 
 
 def _strip_conflicting_scene_light(service: Any, session_id: str, scene_desc: str) -> str:
@@ -1159,6 +1285,13 @@ def build_prompt(
     prefix_parts = _split_prompt_prefix(base_char)
     char = prefix_parts.base
     char = inject_appearance(service, char, session_id)
+    wardrobe_state_worn_src = ""
+    wardrobe_state_removed_tags: list[str] = []
+    wardrobe_state_exposure_tags: list[str] = []
+    if session_id and session_schema.get_wardrobe_item_states(state):
+        char, wardrobe_state_worn_src, wardrobe_state_removed_tags, wardrobe_state_exposure_tags = _apply_wardrobe_item_states(
+            service, state, char
+        )
     scene_desc = _strip_conflicting_scene_appearance(service, state, char, scene_desc)
     scene_desc = _strip_conflicting_scene_light(service, session_id, scene_desc)
     if service._parse_appearance(scene_desc).get("outfit"):
@@ -1344,9 +1477,21 @@ def build_prompt(
     effective_appearance = char
     if appearance_override:
         effective_appearance = f"{effective_appearance}, {appearance_override}" if effective_appearance else appearance_override
+    if session_id and session_schema.get_wardrobe_item_states(state):
+        effective_appearance, wardrobe_state_worn_src, removed_again, exposure_again = _apply_wardrobe_item_states(
+            service, state, effective_appearance
+        )
+        for tag in removed_again:
+            if tag not in wardrobe_state_removed_tags:
+                wardrobe_state_removed_tags.append(tag)
+        for tag in exposure_again:
+            if tag not in wardrobe_state_exposure_tags:
+                wardrobe_state_exposure_tags.append(tag)
     one_shot_effective = (one_shot_appearance or "").strip()
     # 当前衣柜标签单独传给公开场合兜底，避免误删角色 base 里的标志性暴露服装/装甲/原皮造型。
-    worn_src = service._effective_dynamic_appearance(session_id) if session_id else session_schema.get_outfit(state)
+    worn_src = wardrobe_state_worn_src or (
+        service._effective_dynamic_appearance(session_id) if session_id else session_schema.get_outfit(state)
+    )
     current_outfit_tags = _removable_appearance_tags(service, worn_src)
     effective_appearance, one_shot_effective, neg, _public_outfit_removed = _guard_public_outfit(
         service,
@@ -1366,6 +1511,7 @@ def build_prompt(
     if one_shot_effective:
         worn_tags += _removable_appearance_tags(service, one_shot_effective)
     effective_appearance, neg = _apply_clothing_off(service, clothing_off, effective_appearance, neg, worn_tags)
+    neg = _free_wardrobe_state_exposure_negatives(neg, wardrobe_state_exposure_tags, wardrobe_state_removed_tags)
     slots = PromptSlots(
         raw_scene=raw_scene_desc,
         scene=scene_desc,

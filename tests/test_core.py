@@ -1625,6 +1625,16 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(wardrobe["top"], "white blouse")
             self.assertNotIn("dress", wardrobe)
 
+            resp = await api_update_wardrobe(req({"action": "set-item-state", "slot": "top", "state": "half_off"}))
+            data = json.loads(resp.text)
+            self.assertTrue(data["ok"])
+            self.assertEqual(data["current_clothing"]["wardrobe_item_states"], {"top": "half_off"})
+
+            resp = await api_update_wardrobe(req({"action": "clear-item-states"}))
+            data = json.loads(resp.text)
+            self.assertTrue(data["ok"])
+            self.assertEqual(data["current_clothing"]["wardrobe_item_states"], {})
+
             # 存进衣橱（暂不换上）：只进收藏、不动当前穿搭；action 连字符会被规范成下划线
             svc._classify_wardrobe_items = AsyncMock(return_value={"dress": "red qipao", "names": {"dress": "红旗袍"}})
             resp = await api_update_wardrobe(req({"action": "save-closet", "description": "红色旗袍"}))
@@ -8070,6 +8080,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(ss.get_wardrobe(legacy), {"dress": "red dress"})
         self.assertEqual(ss.get_closet(legacy), {"套装A": {}})
         # 子键补齐 + 默认裸体态为空
+        self.assertEqual(ss.get_wardrobe_item_states(legacy), {})
         self.assertEqual(ss.get_nudity(legacy), "")
         self.assertEqual(box["nudity_at"], 0.0)
 
@@ -8082,6 +8093,14 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         ss.get_wardrobe(st)["hat"] = "beret"
         self.assertEqual(st["clothing"]["wardrobe"]["hat"], "beret")
         # 裸体态读写 + 清除
+        ss.set_wardrobe_item_state(st, "bra", "half_off")
+        ss.set_wardrobe_item_state(st, "panties", "破损")
+        ss.set_wardrobe_item_state(st, "top", "normal")
+        self.assertEqual(ss.get_wardrobe_item_states(st), {"bra": "half_off", "panties": "damaged"})
+        ss.prune_wardrobe_item_states(st, {"bra": "black bra"})
+        self.assertEqual(ss.get_wardrobe_item_states(st), {"bra": "half_off"})
+        ss.clear_wardrobe_item_states(st)
+        self.assertEqual(ss.get_wardrobe_item_states(st), {})
         ss.set_nudity(st, "completely nude", at=1000.0)
         self.assertEqual(ss.get_nudity(st), "completely nude")
         self.assertEqual(ss.get_nudity_at(st), 1000.0)
@@ -8908,6 +8927,54 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("no underwear", neg_lower)
         self.assertNotIn("bottomless", neg_lower)
         self.assertEqual(session_schema.get_outfit(state), "white blouse, dark skirt, black panties")
+
+    def test_wardrobe_item_states_render_prefixes_and_exposure_tags(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        svc._set_character_place(sid, "home", "家里", 0.95, source="test")
+        session_schema.set_wardrobe(state, {
+            "top": "white blouse",
+            "bra": "black lace bra",
+            "panties": "black panties",
+        })
+        session_schema.set_outfit(state, appearance_rules.render_wardrobe(session_schema.get_wardrobe(state)))
+        session_schema.set_wardrobe_item_state(state, "bra", "half_off")
+        session_schema.set_wardrobe_item_state(state, "panties", "damaged")
+
+        pos, neg = svc._build_prompt("sitting on the bed at home", session_id=sid)
+        pos_lower = pos.lower()
+        neg_lower = neg.lower()
+        self.assertIn("white blouse", pos_lower)
+        self.assertIn("half-removed black lace bra", pos_lower)
+        self.assertIn("torn black panties", pos_lower)
+        self.assertIn("nipples", pos_lower)
+        self.assertIn("pussy", pos_lower)
+        self.assertNotIn("white blouse, black lace bra", pos_lower)
+        self.assertNotIn("black lace bra, black panties", pos_lower)
+        self.assertNotIn("nipples", neg_lower)
+        self.assertNotIn("pussy", neg_lower)
+        self.assertNotIn("no panties", neg_lower)
+        self.assertEqual(session_schema.get_wardrobe(state)["bra"], "black lace bra")
+
+    def test_wardrobe_removed_state_is_prompt_only_and_restorable(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        svc._set_character_place(sid, "home", "家里", 0.95, source="test")
+        session_schema.set_wardrobe(state, {"dress": "black silk slip dress"})
+        session_schema.set_outfit(state, appearance_rules.render_wardrobe(session_schema.get_wardrobe(state)))
+        session_schema.set_wardrobe_item_state(state, "dress", "removed")
+
+        pos, neg = svc._build_prompt("lying on the bed at home", session_id=sid)
+        self.assertNotIn("black silk slip dress", pos.lower())
+        self.assertIn("nude", pos.lower())
+        self.assertIn("black silk slip dress", neg.lower())
+        self.assertEqual(session_schema.get_wardrobe(state), {"dress": "black silk slip dress"})
+
+        session_schema.clear_wardrobe_item_states(state)
+        pos, _ = svc._build_prompt("lying on the bed at home", session_id=sid)
+        self.assertIn("black silk slip dress", pos.lower())
 
     def test_outfit_normalized_so_nude_strips_deterministically(self):
         """脏穿搭(双空格/重复标签)经归一后，全裸能确定性剥掉——回归"脱不掉衣服"。
@@ -10061,6 +10128,36 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             state = svc._get_session_state(sid)
             self.assertEqual(session_schema.get_wardrobe(state).get("dress"), "red qipao")
             self.assertEqual(session_schema.get_wardrobe(state).get("bra"), "black bra")
+
+        asyncio.run(run())
+
+    def test_apply_wardrobe_states_preserve_slots_but_full_nude_clears(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            state = svc._get_session_state(sid)
+            session_schema.set_wardrobe(state, {
+                "dress": "black silk slip dress",
+                "bra": "black lace bra",
+                "panties": "black panties",
+            })
+            session_schema.set_outfit(state, appearance_rules.render_wardrobe(session_schema.get_wardrobe(state)))
+
+            svc._classify_wardrobe_change = AsyncMock(return_value={
+                "states": {"bra": "half_off", "panties": "removed"},
+            })
+            await svc._apply_wardrobe(sid, "胸罩半褪，内裤脱掉")
+            state = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_wardrobe(state)["bra"], "black lace bra")
+            self.assertEqual(session_schema.get_wardrobe(state)["panties"], "black panties")
+            self.assertEqual(session_schema.get_wardrobe_item_states(state), {"bra": "half_off", "panties": "removed"})
+
+            await svc._apply_wardrobe(sid, "全裸")
+            state = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_wardrobe(state), {})
+            self.assertEqual(session_schema.get_outfit(state), "")
+            self.assertEqual(session_schema.get_wardrobe_item_states(state), {})
+            self.assertEqual(session_schema.get_nudity(state), "completely nude")
 
         asyncio.run(run())
 

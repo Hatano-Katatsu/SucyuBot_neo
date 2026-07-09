@@ -2828,11 +2828,12 @@ class TelegramComfyUIService(
             "- 连衣裙类（连衣裙/旗袍/和服/泳衣连体/jumpsuit/bodysuit）填 dress，系统会自动覆盖 top+bottom，不要再填 top/bottom。\n"
             "- 上半身衣物→top；下半身（裤/裙/短裤）→bottom；外套/夹克/大衣/开衫→outerwear；胸罩→bra；内裤→panties；袜/丝袜/连裤袜→legwear；鞋→footwear。\n"
             "- 眼镜/项链/耳环/手套/帽子/choker 等配饰：要戴上的填 accessory_add，要摘掉的填 accessory_remove。\n"
-            "- 脱掉/不穿某一层（如脱外套、光脚、摘掉发饰）：把该槽位名放进 remove 列表。\n"
-            "- 想整套换掉/全裸从头来：reset_all=true。\n"
+            "- 单件衣物的状态变化不要删除衣柜本体，写进 states：半脱/滑落/拉开/褪到一半→half_off；撕破/破损/裂开→damaged；脱掉/褪下/暂时不穿某一层→removed；整理好/穿回去/恢复正常→normal。\n"
+            "- 全裸/脱光/把衣服都脱了：reset_all=true，让系统清空当前穿搭。\n"
+            "- remove 只用于明确要求清空某槽位/以后不穿这个槽位，或发饰/配饰等非服装槽位的物理移除；普通剧情里的脱外套/脱内衣应写 states，不写 remove。\n"
             "- 若用户/剧情点名【衣橱里已有的衣服】（见下方清单），直接用清单里的英文标签填进对应槽位。\n"
             "- names：给本次新穿上的每个服装槽位起个简短中文名（如 dress→\"碎花连衣裙\"），用于衣橱收藏；没新衣物则留空。\n"
-            "严格 JSON: {\"dress\":\"\",\"top\":\"\",\"bottom\":\"\",\"outerwear\":\"\",\"bra\":\"\",\"panties\":\"\",\"legwear\":\"\",\"footwear\":\"\",\"hair\":\"\",\"eyes\":\"\",\"other\":\"\",\"accessory_add\":\"\",\"accessory_remove\":\"\",\"remove\":[],\"reset_all\":false,\"names\":{}}"
+            "严格 JSON: {\"dress\":\"\",\"top\":\"\",\"bottom\":\"\",\"outerwear\":\"\",\"bra\":\"\",\"panties\":\"\",\"legwear\":\"\",\"footwear\":\"\",\"hair\":\"\",\"eyes\":\"\",\"other\":\"\",\"accessory_add\":\"\",\"accessory_remove\":\"\",\"remove\":[],\"states\":{},\"reset_all\":false,\"names\":{}}"
         )
         user = (
             f"当前衣柜（穿在身上）:\n{current_summary or '（空）'}\n\n"
@@ -2887,12 +2888,30 @@ class TelegramComfyUIService(
     async def _wardrobe_apply_to_state(self, state: dict, description: str, *, replace: bool = False, session_id: str = "") -> str:
         """把一次换装应用到 state（改 wardrobe + dynamic_appearance），不落盘——由调用方保存。"""
         desc = (description or "").strip()
-        if desc.lower() in ("reset", "none", "clear", "无", "", "重置", "恢复", "默认"):
+        if desc.lower() in ("reset", "none", "clear", "无", "", "重置", "默认"):
             session_schema.set_wardrobe(state, {})
             session_schema.set_outfit(state, "")
+            session_schema.clear_wardrobe_item_states(state)
             session_schema.clear_public_fallback_outfit(state)
             if session_id:
                 self._ulog(session_id, "WARDROBE", f'desc="{desc[:80]}" → reset 清空全部穿搭')
+            return ""
+        if desc.lower() in ("恢复", "还原", "整理好", "穿好"):
+            session_schema.clear_wardrobe_item_states(state)
+            rendered = appearance_rules.render_wardrobe(self._get_wardrobe(state))
+            if rendered.strip():
+                session_schema.clear_nudity(state)
+            if session_id:
+                self._ulog(session_id, "WARDROBE", f'desc="{desc[:80]}" → 清除衣物状态')
+            return rendered
+        if self._TEMPORARY_NUDITY_RE.search(desc) and not self._PUT_ON_RE.search(desc):
+            session_schema.set_wardrobe(state, {})
+            session_schema.set_outfit(state, "")
+            session_schema.clear_wardrobe_item_states(state)
+            session_schema.clear_public_fallback_outfit(state)
+            session_schema.set_nudity(state, "completely nude", at=time.time())
+            if session_id:
+                self._ulog(session_id, "WARDROBE", f'desc="{desc[:80]}" → 全裸/脱光清空全部穿搭')
             return ""
         wardrobe = {} if replace else self._get_wardrobe(state)
         closet = session_schema.get_closet(state)
@@ -2902,11 +2921,11 @@ class TelegramComfyUIService(
                 desc, appearance_rules.wardrobe_summary(wardrobe), appearance_rules.closet_brief_for_llm(closet)
             )
             wardrobe = appearance_rules.apply_wardrobe_change(wardrobe, change)
-            # 守卫：reset_all 但没穿任何新衣服 → 这是"脱光"，不应清空衣柜
+            # 守卫：非裸体语义下 reset_all 但没穿任何新衣服，多半是分类器误判，不清空衣柜。
             if change.get("reset_all") and not any(
                 str(change.get(s) or "").strip()
                 for s in appearance_rules.WARDROBE_CLOTHING_SLOTS
-            ):
+            ) and not self._TEMPORARY_NUDITY_RE.search(desc):
                 if session_id:
                     self._ulog(session_id, "WARDROBE", f"拦截 reset_all 无新衣: desc=\"{desc[:120]}\"")
                 return ""
@@ -2933,6 +2952,20 @@ class TelegramComfyUIService(
                 closet = appearance_rules.closet_add(closet, name, slot, tags, now=now)
         session_schema.set_closet(state, closet)
         session_schema.set_wardrobe(state, wardrobe)
+        state_changes = change.get("states") if isinstance(change.get("states"), dict) else {}
+        clear_state_slots = set(changed_slots)
+        clear_state_slots.update(str(slot or "").strip() for slot in (change.get("remove") or []) if str(slot or "").strip())
+        if clear_state_slots:
+            session_schema.clear_wardrobe_item_states(state, clear_state_slots)
+        for slot, value in state_changes.items():
+            slot = str(slot or "").strip()
+            if slot not in appearance_rules.WARDROBE_CLOTHING_SLOTS:
+                continue
+            if not str(wardrobe.get(slot) or "").strip():
+                session_schema.clear_wardrobe_item_states(state, [slot])
+                continue
+            session_schema.set_wardrobe_item_state(state, slot, value)
+        session_schema.prune_wardrobe_item_states(state, wardrobe)
         rendered = appearance_rules.render_wardrobe(wardrobe)
         session_schema.set_outfit(state, rendered)
         # 她重新穿上了衣服 → 解除持久裸体态（换装是"穿回衣服"的明确叙事事件）。
@@ -2966,9 +2999,6 @@ class TelegramComfyUIService(
         self._ulog(session_id, "WARDROBE", f'模型调用 change_appearance allow={"on" if allow else "off"} mode={mode} desc="{desc[:100]}"')
         if not allow:
             return "当前会话已关闭模型自主修改外型，dynamic_appearance 未改变。"
-        if self._TEMPORARY_NUDITY_RE.search(desc) and not self._PUT_ON_RE.search(desc):
-            self._ulog(session_id, "WARDROBE", f'拦截临时裸体 change_appearance: "{desc[:120]}"')
-            return "临时脱衣/裸体不需要调用 change_appearance——配图系统会自动处理，场景结束后角色会自动恢复原着装。只有换上不同衣服时才调用。"
         result = await self._apply_wardrobe(session_id, description, replace=(mode == "replace"))
         return f"外貌已改变: {result}"
 

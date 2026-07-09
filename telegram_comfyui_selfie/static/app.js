@@ -334,6 +334,13 @@ const wardrobeSlotLabels = {
 
 const wardrobeSlotOrder = Object.keys(wardrobeSlotLabels);
 const closetSlotOrder = ["dress", "top", "bottom", "outerwear", "bra", "panties", "legwear", "footwear"];
+const wardrobeStateLabels = {
+  normal: "正常",
+  half_off: "半脱",
+  damaged: "破损",
+  removed: "脱掉",
+};
+const wardrobeStateOptions = ["normal", "half_off", "damaged", "removed"];
 const clothingColorWords = [
   ["dark blue", "深蓝色"],
   ["light blue", "浅蓝色"],
@@ -436,6 +443,8 @@ function closetDisplayName(name, entry = {}) {
 
 function wardrobeRows(items = {}, options = {}) {
   const displayNames = options.displayNames || {};
+  const states = options.states || {};
+  const editableStates = Boolean(options.editableStates);
   const entries = Object.entries(items || {})
     .filter(([, value]) => String(value ?? "").trim())
     .sort(([a], [b]) => {
@@ -451,6 +460,14 @@ function wardrobeRows(items = {}, options = {}) {
     <div class="wardrobe-row">
       <span>${escapeHtml(wardrobeSlotLabels[slot] || slot)}</span>
       <strong title="${escapeHtml(value)}">${escapeHtml(wardrobeDisplayText(slot, value, displayNames))}</strong>
+      ${editableStates && closetSlotOrder.includes(slot) ? `
+        <label class="wardrobe-state-control">
+          <span>状态</span>
+          <select data-wardrobe-action="set-item-state" data-slot="${escapeHtml(slot)}">
+            ${wardrobeStateOptions.map(name => `<option value="${escapeHtml(name)}"${(states[slot] || "normal") === name ? " selected" : ""}>${escapeHtml(wardrobeStateLabels[name] || name)}</option>`).join("")}
+          </select>
+        </label>
+      ` : (states[slot] ? `<em class="wardrobe-state-badge">${escapeHtml(wardrobeStateLabels[states[slot]] || states[slot])}</em>` : "")}
     </div>
   `).join("")}</div>`;
 }
@@ -526,7 +543,10 @@ function renderRuntimeClothingPanel(char, isActive) {
           <h3>当前衣柜</h3>
           <p>这里改的是当前角色现在穿在身上的衣服；会直接影响聊天后的生图。</p>
         </div>
-        <button class="ghost danger" type="button" data-wardrobe-action="clear">清空当前穿搭</button>
+        <div class="runtime-clothing-head-actions">
+          <button class="ghost" type="button" data-wardrobe-action="clear-item-states">一键还原状态</button>
+          <button class="ghost danger" type="button" data-wardrobe-action="clear">清空当前穿搭</button>
+        </div>
       </div>
       <div class="wardrobe-editor">
         <textarea id="wardrobe-description" rows="2" placeholder="输入换装：例如 黑色丝绸睡裙，白色棉质针织开衫"></textarea>
@@ -539,13 +559,17 @@ function renderRuntimeClothingPanel(char, isActive) {
         <section class="runtime-clothing-pane is-current">
           <div class="pane-title">
             <h4>身上穿着</h4>
-            <span>只读 · 换装去「衣橱收藏」操作</span>
+            <span>换装去「衣橱收藏」操作；单件状态可在这里调整</span>
           </div>
           <div class="runtime-clothing-current">
             <span>当前摘要</span>
             <strong title="${escapeHtml(current)}">${escapeHtml(currentSummary || "未设置")}</strong>
           </div>
-          ${wardrobeRows(clothing.wardrobe || {}, { displayNames: clothing.wardrobe_display || {} })}
+          ${wardrobeRows(clothing.wardrobe || {}, {
+            displayNames: clothing.wardrobe_display || {},
+            states: clothing.wardrobe_item_states || {},
+            editableStates: true,
+          })}
         </section>
         <section class="runtime-clothing-pane is-fallback">
           <div class="pane-title">
@@ -607,9 +631,30 @@ function bindRuntimeClothingHandlers(container) {
     if (event.target.open) state.closetOpenSlots.add(slot);
     else state.closetOpenSlots.delete(slot);
   }, true);
+  panel.addEventListener("change", async event => {
+    const control = event.target.closest('select[data-wardrobe-action="set-item-state"]');
+    if (!control || !panel.contains(control)) return;
+    const body = {
+      action: "set-item-state",
+      slot: control.dataset.slot || "",
+      state: control.value || "normal",
+    };
+    control.disabled = true;
+    try {
+      const sid = encodeURIComponent(state.selectedSession);
+      await api(`/api/sessions/${sid}/wardrobe`, { method: "POST", body });
+      await loadCharacters();
+      toast("衣物状态已更新");
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      control.disabled = false;
+    }
+  });
   panel.addEventListener("click", async event => {
     const button = event.target.closest("[data-wardrobe-action]");
     if (!button || !panel.contains(button)) return;
+    if (button.tagName === "SELECT") return;
     const action = button.dataset.wardrobeAction;
     if (action === "edit-closet") {
       startClosetEdit(button);
