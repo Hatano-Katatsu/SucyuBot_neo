@@ -226,6 +226,14 @@ telegram_comfyui_selfie/
 7. **推送避重改为提示词约束**：推送 caption 可写 1-3 句、30-120 个中文字符以增加生活气息；planner 会在提示词中看到最近图片 forbidden caption 和最近 scheduled/followup/manual push 的 caption、scene、nltag 与意图作为避重材料，但不再在返回后做 exact/语义重复二次判断或 retry。
 8. **本轮验证**：新增/更新测试覆盖回复发送后再排续场、推送前 checkpoint 裁剪、续场 planner checkpoint 后历史进入前缀、followup 节拍推进、普通推送动态块不重复注入最近原句、今日片段候选注入、推送避重提示词注入且无二次 retry、早安转场清理临时裸体但保留照片避重。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 395 tests in 7.841s`，`OK (skipped=1)`。
 
+## 今日变更（2026-07-09）
+
+1. **dream 固定早安触发**：普通/续场/手动以外的非 morning 推送不再检查 `_should_run_dream_before_push()`，只有 `mode=morning` 的早安推送会同步执行 dream；避免随机推送前额外整理记忆打断主动推送节奏。
+2. **角色作息接入调度**：角色卡新增 `workday_wake_time`、`workday_sleep_time`、`weekend_wake_time`、`weekend_sleep_time`，默认 08:00 / 23:50。工作日/周末按角色作息生成当天随机推送窗口：起床后 30 分钟开始，睡觉时间作为最晚自动推送时间；早安推送和 dream 时间点使用起床时间，并继续尊重 `world_workday_dates` / `world_holiday_dates`。
+3. **创建角色可设置作息**：`/创建OC` 模板和自然结构字段支持工作日/周末起床睡觉时间；初始化向导新增作息步骤，可回复“默认”跳过。默认角色卡也会把作息字段写回全局 config。
+4. **WebUI 角色页与衣橱移动端优化**：角色表单合并“关系/背景/边界”为“生活与边界”，加入四个作息 time 输入；角色概览显示作息摘要。衣橱在移动端改为单列布局，分槽收藏横向浏览，槽内按钮和编辑表单适配窄屏。
+5. **本轮回归验证**：新增/更新测试覆盖普通推送不触发 dream、morning 推送触发 dream、角色作息生成随机推送窗口和早安窗口、创建 OC 写入作息、默认角色作息写回 config、WebUI 字段合并与移动端衣橱样式。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 398 tests in 14.645s`，`OK (skipped=1)`。
+
 ## 今日变更（2026-07-06）
 
 1. **拉取远端更新**：本轮先从 `origin/main` 快进到 `22a3fbf`，在最新代码上继续处理 Telegram 图片输入、续场推送、life plan 和 dream 摘要链路。

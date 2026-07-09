@@ -1259,6 +1259,8 @@ async def api_update_session(request: web.Request):
         "custom_scene_preference", "custom_selfie_preference",
         "custom_character", "custom_series", "custom_visual_character", "custom_visual_series", "custom_daily_selfie_limit",
         "custom_character_age_stage", "custom_character_occupation", "custom_character_day_anchor",
+        "custom_workday_wake_time", "custom_workday_sleep_time",
+        "custom_weekend_wake_time", "custom_weekend_sleep_time",
     }
     life_profile_keys = {
         "custom_scheduled_persona", "custom_role_name", "custom_bot_name",

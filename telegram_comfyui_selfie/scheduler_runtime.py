@@ -312,20 +312,115 @@ class SchedulerRuntimeMixin:
     def _is_bad_weather(w) -> bool:
         return bool(w and w.get("code", "0") in {"200", "299", "300", "399", "500", "599", "600", "699", "700", "799"})
 
+    @staticmethod
+    def _parse_schedule_time_minutes(value: Any, default_minutes: int) -> int:
+        text = str(value or "").strip().replace("：", ":")
+        if not text:
+            return max(0, min(1439, int(default_minutes)))
+        match = re.search(r"^(\d{1,2})(?::(\d{1,2}))?$", text)
+        if not match:
+            return max(0, min(1439, int(default_minutes)))
+        try:
+            hour = int(match.group(1))
+            minute = int(match.group(2) or 0)
+        except (TypeError, ValueError):
+            return max(0, min(1439, int(default_minutes)))
+        if hour == 24 and minute == 0:
+            return 23 * 60 + 59
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return max(0, min(1439, int(default_minutes)))
+        return hour * 60 + minute
+
+    @staticmethod
+    def _format_schedule_minute(minute: int) -> str:
+        minute = max(0, min(1439, int(minute)))
+        return f"{minute // 60:02d}:{minute % 60:02d}"
+
+    @staticmethod
+    def _config_date_set(value: Any) -> set[str]:
+        if isinstance(value, (list, tuple, set)):
+            items = value
+        else:
+            items = re.split(r"[\s,，;；]+", str(value or ""))
+        return {str(item).strip() for item in items if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(item).strip())}
+
+    def _is_weekend_schedule_day(self, local_dt: datetime) -> bool:
+        day = local_dt.strftime("%Y-%m-%d")
+        if day in self._config_date_set(self.config.get("world_workday_dates", "")):
+            return False
+        if day in self._config_date_set(self.config.get("world_holiday_dates", "")):
+            return True
+        return local_dt.weekday() >= 5
+
+    def _character_schedule_minutes(self, session_id: str, local_dt: datetime | None = None) -> dict[str, Any]:
+        local_dt = local_dt or self._session_now(session_id)
+        weekend = self._is_weekend_schedule_day(local_dt)
+        wake_key = "weekend_wake_time" if weekend else "workday_wake_time"
+        sleep_key = "weekend_sleep_time" if weekend else "workday_sleep_time"
+        wake_default = 8 * 60
+        sleep_default = 23 * 60 + 50
+        wake = self._parse_schedule_time_minutes(
+            self._get_session_cfg(session_id, wake_key, self.config.get(wake_key, "08:00")),
+            wake_default,
+        )
+        sleep = self._parse_schedule_time_minutes(
+            self._get_session_cfg(session_id, sleep_key, self.config.get(sleep_key, "23:50")),
+            sleep_default,
+        )
+        return {"wake": wake, "sleep": sleep, "is_weekend": weekend, "wake_key": wake_key, "sleep_key": sleep_key}
+
+    def _daily_push_window_minutes(self, session_id: str, local_dt: datetime) -> tuple[int, int]:
+        schedule = self._character_schedule_minutes(session_id, local_dt)
+        start = min(1439, int(schedule["wake"]) + 30)
+        end = int(schedule["sleep"])
+        if end < start:
+            end = start
+        return start, end
+
+    def _build_daily_push_times(self, session_id: str, local_dt: datetime, daily_limit: int) -> list[str]:
+        if daily_limit <= 0:
+            return []
+        start, end = self._daily_push_window_minutes(session_id, local_dt)
+        span = max(1, end - start)
+        slot = span / max(1, daily_limit)
+        times = []
+        for i in range(daily_limit):
+            low = int(start + i * slot)
+            high = int(start + (i + 1) * slot)
+            high = max(low, min(end, high))
+            minute = random.randint(low, high)
+            times.append(self._format_schedule_minute(minute))
+        return sorted(times)
+
+    def _is_morning_push_time(self, session_id: str, local_dt: datetime) -> bool:
+        wake = int(self._character_schedule_minutes(session_id, local_dt)["wake"])
+        now_minute = local_dt.hour * 60 + local_dt.minute
+        return 0 <= now_minute - wake < 5
+
     def _dream_idle_seconds(self) -> float:
         try:
             return max(0.0, float(self.config.get("dream_idle_hours", "2") or 2) * 3600)
         except Exception:
             return 7200.0
 
-    def _dream_morning_hour(self) -> int:
+    def _dream_morning_hour(self, session_id: str = "", local_dt: datetime | None = None) -> int:
+        if session_id:
+            try:
+                return int(self._character_schedule_minutes(session_id, local_dt)["wake"]) // 60
+            except Exception:
+                pass
         try:
             return max(0, min(23, int(self.config.get("dream_morning_hour", "8") or 8)))
         except Exception:
             return 8
 
-    def _dream_diary_date(self, local_dt: datetime, *, force_previous_day: bool = False) -> str:
-        if force_previous_day or local_dt.hour < self._dream_morning_hour():
+    def _dream_diary_date(self, local_dt: datetime, *, force_previous_day: bool = False, session_id: str = "") -> str:
+        if session_id:
+            wake_minute = int(self._character_schedule_minutes(session_id, local_dt)["wake"])
+        else:
+            wake_minute = self._dream_morning_hour() * 60
+        now_minute = local_dt.hour * 60 + local_dt.minute
+        if force_previous_day or now_minute < wake_minute:
             return (local_dt - timedelta(days=1)).strftime("%Y-%m-%d")
         return local_dt.strftime("%Y-%m-%d")
 
@@ -488,7 +583,7 @@ class SchedulerRuntimeMixin:
                 logger.warning("dream style pool sync failed", exc_info=True)
         source_limit = max(1000, int(self.config.get("dream_source_hard_limit_chars", "50000") or 50000))
         source_text = self._format_store_messages(messages, limit_chars=source_limit, roles={"user", "assistant"}) if hasattr(self, "_format_store_messages") else ""
-        diary_date = self._dream_diary_date(local_dt, force_previous_day=(reason == "morning"))
+        diary_date = self._dream_diary_date(local_dt, force_previous_day=(reason == "morning"), session_id=session_id)
         if hasattr(self, "write_character_checkpoint"):
             try:
                 checkpoint_path = self.write_character_checkpoint(
@@ -1207,20 +1302,14 @@ class SchedulerRuntimeMixin:
                     except ValueError:
                         daily_limit = 3
                     if session_schema.get_daily_trigger_date(state) != today:
-                        times = []
-                        if daily_limit > 0:
-                            start, end = 8 * 60 + 30, 23 * 60 + 50
-                            slot = (end - start) / daily_limit
-                            for i in range(daily_limit):
-                                minute = random.randint(int(start + i * slot), int(start + (i + 1) * slot))
-                                times.append(f"{minute // 60:02d}:{minute % 60:02d}")
+                        times = self._build_daily_push_times(session_id, now, daily_limit)
                         session_schema.set_daily_trigger_times(state, sorted(times))
                         session_schema.set_daily_trigger_date(state, today)
                         session_schema.set_daily_triggered_times(state, [])
                         self._mark_dirty(session_id)
 
                     # 推送关闭(每日次数=0)时，早安推送也不发——否则“关闭推送”每天早上又冒出来（用户报的“只持续一天”）。
-                    if daily_limit > 0 and now.hour == 8 and now.minute < 5 and session_schema.get_last_morning_greet_date(state) != today:
+                    if daily_limit > 0 and self._is_morning_push_time(session_id, now) and session_schema.get_last_morning_greet_date(state) != today:
                         if self._check_goodnight_inhibition(state):
                             self._mark_morning_greet_sent(session_id, now, reason="inhibited-goodnight")
                         elif session_id not in self._active_pushes:
@@ -1303,8 +1392,6 @@ class SchedulerRuntimeMixin:
                 mode = "ntr"
             if mode == "morning":
                 await self._run_dream(session_id, local_dt, reason="morning", force=True)
-            elif self._should_run_dream_before_push(session_id, state):
-                await self._run_dream(session_id, local_dt, reason=f"push-{mode}", force=False)
             if hasattr(self, "ensure_life_plan_for_today"):
                 try:
                     await self.ensure_life_plan_for_today(session_id, force=False, reason=f"push-{mode}")

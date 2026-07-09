@@ -77,6 +77,10 @@ const configSections = [
     ["post_chat_push_delay_max_minutes", "续场最长延迟(分钟)", "number"],
     ["post_chat_push_daily_limit", "每日续场推送上限", "number"],
     ["post_chat_push_cooldown_minutes", "续场冷却(分钟)", "number"],
+    ["workday_wake_time", "默认工作日起床", "time"],
+    ["workday_sleep_time", "默认工作日睡觉", "time"],
+    ["weekend_wake_time", "默认周末起床", "time"],
+    ["weekend_sleep_time", "默认周末睡觉", "time"],
     ["location", "默认城市", "text"],
     ["timezone_offset", "时区偏移", "text"],
     ["character_age_stage", "默认年龄段", "select:,minor,adult"],
@@ -129,13 +133,15 @@ const characterFieldSections = [
     ["appearance", "身体特征", "textarea", "wide"],
     ["allow_change_appearance", "自动换装", "tristate", "half"],
   ]],
-  ["关系与背景", [
+  ["生活与边界", [
     ["relationship", "空间关系", "textarea", "wide"],
     ["age_stage", "年龄段", "select:,minor,adult", "third"],
     ["occupation", "职业", "text", "third"],
     ["day_anchor", "白天去向", "select:,company,school,factory,farm,construction,medical,retail,delivery,driver,home,flexible", "third"],
-  ]],
-  ["边界", [
+    ["workday_wake_time", "工作日起床", "time", "quarter"],
+    ["workday_sleep_time", "工作日睡觉", "time", "quarter"],
+    ["weekend_wake_time", "周末起床", "time", "quarter"],
+    ["weekend_sleep_time", "周末睡觉", "time", "quarter"],
     ["purity", "纯良度", "number", "third"],
   ]],
 ];
@@ -301,6 +307,14 @@ function characterPill(label, value, className = "") {
   const text = compactText(value, 54);
   if (!text) return "";
   return `<span class="character-pill ${className}"><b>${escapeHtml(label)}</b>${escapeHtml(text)}</span>`;
+}
+
+function characterScheduleSummary(char = {}) {
+  const workdayWake = char.workday_wake_time || "08:00";
+  const workdaySleep = char.workday_sleep_time || "23:50";
+  const weekendWake = char.weekend_wake_time || "08:00";
+  const weekendSleep = char.weekend_sleep_time || "23:50";
+  return `工作日 ${workdayWake}-${workdaySleep} / 周末 ${weekendWake}-${weekendSleep}`;
 }
 
 const wardrobeSlotLabels = {
@@ -1080,6 +1094,7 @@ function renderCharacterForm() {
     characterPill("自称", char.bot_self_name || "-"),
     characterPill("称呼用户", char.user_address || "-"),
     characterPill("关系", char.relationship || "-"),
+    characterPill("作息", characterScheduleSummary(char)),
     characterPill("画风", char.style || "不注入"),
     characterPill("纯良度", char.purity ?? "-"),
     characterPill("自动换装", autoChange),

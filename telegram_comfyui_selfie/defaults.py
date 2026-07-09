@@ -17,7 +17,7 @@ MENU_BODY = (
 
 INIT_GUIDE = (
     "初始化向导\n\n"
-    "我会一个问题一个问题地创建新角色卡，并顺手完成出处、外貌穿搭、角色设定、关系称呼、城市、纯良度和推送频率设置。\n"
+    "我会一个问题一个问题地创建新角色卡，并顺手完成出处、外貌穿搭、角色设定、关系称呼、城市、作息、纯良度和推送频率设置。\n"
     "每一步直接回复答案即可；不想填写的项目回复“跳过”，想中止回复“取消初始化”。\n"
     "初始化完成后，需要 WebUI 时可用 /web密码 <密码> 设置密码，再用 /webui 获取持久免登录链接。\n"
     "后续想改角色，直接用 /修改角色 <自然语言要求>。"
@@ -46,6 +46,10 @@ OC_CREATE_HELP = (
     "初始穿搭：白衬衫，深色百褶裙\n"
     "与你的关系：同城暧昧对象，周末经常一起出门\n"
     "所在城市：上海\n\n"
+    "工作日起床：08:00\n"
+    "工作日睡觉：23:50\n"
+    "周末起床：09:00\n"
+    "周末睡觉：23:50\n\n"
     "可用年龄段：minor / adult\n"
     "职业直接写中文即可（如 上班族 / 高中生 / 护士 / 程序员），系统会自动判断白天去向。\n\n"
     "提示：也可以自然写，系统会尽量把出处、原名、Danbooru 生图标签、稳定身体特征、初始穿搭、关系、城市和画风自动归档到对应槽位。"
@@ -331,6 +335,10 @@ DEFAULT_CONFIG = {
     "dream_memory_summarize_max_tokens": "8192",
     "dream_morning_hour": "8",
     "dream_idle_hours": "2",
+    "workday_wake_time": "08:00",
+    "workday_sleep_time": "23:50",
+    "weekend_wake_time": "08:00",
+    "weekend_sleep_time": "23:50",
     "life_plan_enabled": True,
     "life_plan_long_review_days": "10",
     "life_plan_texture_goal_count": "2",

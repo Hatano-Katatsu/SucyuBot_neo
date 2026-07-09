@@ -134,6 +134,10 @@ STATE_SCHEMA: dict[str, Field] = {
     "custom_character_age_stage": Field(C, default=""),
     "custom_character_occupation": Field(C, default=""),
     "custom_character_day_anchor": Field(C, default=""),
+    "custom_workday_wake_time": Field(C, default=""),
+    "custom_workday_sleep_time": Field(C, default=""),
+    "custom_weekend_wake_time": Field(C, default=""),
+    "custom_weekend_sleep_time": Field(C, default=""),
     # —— 角色配置：非 custom_ 前缀的配置项（纯良度 / 标志位）——
     "persona_user_set": Field(C, default=False),
     "purity": Field(C, default=None),

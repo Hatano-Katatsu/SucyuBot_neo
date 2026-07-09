@@ -99,6 +99,10 @@ memory:
   dream_memory_summarize_max_tokens: "8192"
   dream_morning_hour: "8"
   dream_idle_hours: "2"
+  workday_wake_time: "08:00"
+  workday_sleep_time: "23:50"
+  weekend_wake_time: "08:00"
+  weekend_sleep_time: "23:50"
   life_plan_enabled: true
   life_plan_long_review_days: "10"
   life_plan_texture_goal_count: "2"

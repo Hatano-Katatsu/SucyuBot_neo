@@ -2081,6 +2081,10 @@ button:disabled .spinner {
   grid-column: span 4;
 }
 
+.character-form .field-quarter {
+  grid-column: span 3;
+}
+
 .character-form .field-wide,
 .character-form .field-wrap.full-width {
   grid-column: 1 / -1;
@@ -2398,6 +2402,112 @@ button:disabled .spinner {
   font-size: 13px;
   font-weight: 500;
   overflow-wrap: anywhere;
+}
+
+@media (max-width: 700px) {
+  .character-form .field-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .character-form .field-wrap,
+  .character-form .field-half,
+  .character-form .field-third,
+  .character-form .field-quarter,
+  .character-form .field-wide,
+  .character-form .field-wrap.full-width {
+    grid-column: 1 / -1;
+  }
+
+  .runtime-clothing-head {
+    display: grid;
+    gap: 10px;
+  }
+
+  .wardrobe-editor {
+    grid-template-columns: 1fr;
+  }
+
+  .wardrobe-editor-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    align-items: stretch;
+  }
+
+  .wardrobe-editor-actions button {
+    width: 100%;
+  }
+
+  .runtime-clothing-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .runtime-clothing-pane.is-current {
+    grid-row: auto;
+  }
+
+  .pane-title {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .wardrobe-row {
+    grid-template-columns: 76px minmax(0, 1fr);
+  }
+
+  .closet-list {
+    display: flex;
+    gap: 10px;
+    overflow-x: auto;
+    padding: 2px 2px 8px;
+    scroll-snap-type: x proximity;
+  }
+
+  .closet-slot {
+    min-width: min(86vw, 360px);
+    scroll-snap-align: start;
+  }
+
+  .closet-slot summary {
+    grid-template-columns: 58px minmax(0, 1fr) auto;
+  }
+
+  .closet-slot-options {
+    max-height: 52vh;
+    overflow-y: auto;
+  }
+
+  .closet-option {
+    align-items: stretch;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .closet-option:last-child {
+    border-bottom: 0;
+  }
+
+  .closet-option .closet-choice {
+    flex-basis: 100%;
+    min-height: 36px;
+    border-radius: var(--radius-md);
+  }
+
+  .closet-option-tools {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .closet-edit-form {
+    width: 100%;
+  }
+
+  .closet-edit-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 /* Memory / diary tabs */

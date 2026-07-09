@@ -38,6 +38,10 @@ CARD_STRING_FIELDS: tuple[tuple[str, str], ...] = (
     ("age_stage", "custom_character_age_stage"),
     ("occupation", "custom_character_occupation"),
     ("day_anchor", "custom_character_day_anchor"),
+    ("workday_wake_time", "custom_workday_wake_time"),
+    ("workday_sleep_time", "custom_workday_sleep_time"),
+    ("weekend_wake_time", "custom_weekend_wake_time"),
+    ("weekend_sleep_time", "custom_weekend_sleep_time"),
     ("relationship", "custom_spatial_relationship"),
     ("scene_preference", "custom_scene_preference"),
     ("selfie_preference", "custom_selfie_preference"),
@@ -65,6 +69,10 @@ DEFAULT_CARD_TO_CONFIG: dict[str, str] = {
     "relationship": "spatial_relationship",
     "age_stage": "character_age_stage",
     "day_anchor": "character_day_anchor",
+    "workday_wake_time": "workday_wake_time",
+    "workday_sleep_time": "workday_sleep_time",
+    "weekend_wake_time": "weekend_wake_time",
+    "weekend_sleep_time": "weekend_sleep_time",
     "outfit": "dynamic_appearance",
 }
 

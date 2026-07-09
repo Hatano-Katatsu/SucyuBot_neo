@@ -182,7 +182,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             text = svc.send_message.await_args.args[1]
             self.assertIn("初始化向导", text)
-            self.assertIn("第 1/8 步", text)
+            self.assertIn("第 1/9 步", text)
 
         asyncio.run(run())
 
@@ -218,11 +218,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             await svc.handle_update({"message": {"chat": {"id": 123}, "text": "初始化"}})
             self.assertTrue(session_schema.get_init_flow(svc._get_session_state(sid)).get("active"))
-            self.assertIn("第 1/8 步", svc.send_message.await_args.args[1])
+            self.assertIn("第 1/9 步", svc.send_message.await_args.args[1])
 
             await svc.handle_update({"message": {"chat": {"id": 123}, "text": "小雨"}})
             self.assertEqual(session_schema.get_init_flow(svc._get_session_state(sid)).get("step"), 1)
-            self.assertIn("第 2/8 步", svc.send_message.await_args.args[1])
+            self.assertIn("第 2/9 步", svc.send_message.await_args.args[1])
 
             await svc.handle_update({"message": {"chat": {"id": 123}, "text": "原创"}})
             state = svc._get_session_state(sid)
@@ -676,6 +676,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "大学生，温柔、慢热",
                 "同城恋人，称呼我主人",
                 "跳过",
+                "默认",
                 "3",
                 "0",
             ):
@@ -714,6 +715,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "跳过",
                 "跳过",
                 "跳过",
+                "默认",
                 "auto",
                 "默认",
             ):
@@ -760,6 +762,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "学生，开朗、认真",
                 "同校朋友，称呼我老师",
                 "跳过",
+                "默认",
                 "auto",
                 "默认",
             ):
@@ -780,11 +783,19 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         asyncio.run(run())
 
     def test_character_panel_hides_preference_fields(self):
-        app_js = (Path(__file__).resolve().parents[1] / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
+        root = Path(__file__).resolve().parents[1]
+        app_js = (root / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
+        styles = (root / "telegram_comfyui_selfie" / "static" / "styles.css").read_text(encoding="utf-8")
         character_fields = app_js.split("const characterFieldSections = [", 1)[1].split("const commands =", 1)[0]
         self.assertIn('["user_address", "对用户称呼", "text", "half"]', character_fields)
+        self.assertIn('["workday_wake_time", "工作日起床", "time", "quarter"]', character_fields)
+        self.assertIn('["weekend_sleep_time", "周末睡觉", "time", "quarter"]', character_fields)
+        self.assertIn('["purity", "纯良度", "number", "third"]', character_fields)
+        self.assertNotIn('["边界"', character_fields)
         self.assertNotIn('["scene_preference"', character_fields)
         self.assertNotIn('["selfie_preference"', character_fields)
+        self.assertIn(".character-form .field-quarter", styles)
+        self.assertIn("scroll-snap-type: x proximity", styles)
 
     def test_model_panel_has_no_thinking_controls(self):
         app_js = (Path(__file__).resolve().parents[1] / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
@@ -907,7 +918,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             state = svc._get_session_state(sid)
             self.assertTrue(session_schema.get_init_flow(state).get("active"))
             self.assertIn("初始化向导", svc.send_message.await_args.args[1])
-            self.assertIn("第 1/8 步", svc.send_message.await_args.args[1])
+            self.assertIn("第 1/9 步", svc.send_message.await_args.args[1])
 
         asyncio.run(run())
 
@@ -4197,6 +4208,55 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_scheduled_push_runs_dream_only_for_morning(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 7, 9, 9, 0, tzinfo=timezone.utc)
+            svc.config["default_purity"] = "6"
+            svc._should_run_dream_before_push = lambda session_id, state: True
+            svc._run_dream = AsyncMock()
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22", "code": "113"})
+            svc._llm_write_scene = AsyncMock(return_value=("window selfie", "caption", "", "selfie", "2:3"))
+            svc._translate_to_tags = AsyncMock(return_value="english prompt")
+            svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
+            svc.send_photo = AsyncMock()
+
+            ok = await svc._sched_fire(sid, fixed_now, mode_override="normal", skip_active_check=True)
+
+            self.assertTrue(ok)
+            svc._run_dream.assert_not_awaited()
+
+            ok = await svc._sched_fire(sid, fixed_now, mode_override="morning", skip_active_check=True)
+
+            self.assertTrue(ok)
+            svc._run_dream.assert_awaited_once_with(sid, fixed_now, reason="morning", force=True)
+
+        asyncio.run(run())
+
+    def test_character_schedule_controls_daily_window_and_morning(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        session_schema.set_character_value(state, "custom_workday_wake_time", "07:00")
+        session_schema.set_character_value(state, "custom_workday_sleep_time", "22:30")
+        session_schema.set_character_value(state, "custom_weekend_wake_time", "10:00")
+        session_schema.set_character_value(state, "custom_weekend_sleep_time", "21:00")
+        weekday = datetime(2026, 7, 9, 7, 2, tzinfo=timezone.utc)
+        weekend = datetime(2026, 7, 11, 10, 2, tzinfo=timezone.utc)
+
+        self.assertTrue(svc._is_morning_push_time(sid, weekday))
+        self.assertFalse(svc._is_morning_push_time(sid, weekday.replace(hour=7, minute=5)))
+        self.assertTrue(svc._is_morning_push_time(sid, weekend))
+        self.assertEqual(svc._daily_push_window_minutes(sid, weekday), (7 * 60 + 30, 22 * 60 + 30))
+        self.assertEqual(svc._daily_push_window_minutes(sid, weekend), (10 * 60 + 30, 21 * 60))
+        self.assertEqual(svc._dream_diary_date(weekday.replace(hour=6, minute=59), session_id=sid), "2026-07-08")
+        self.assertEqual(svc._dream_diary_date(weekday.replace(hour=7, minute=0), session_id=sid), "2026-07-09")
+
+        with patch("telegram_comfyui_selfie.scheduler_runtime.random.randint", side_effect=lambda low, high: low):
+            self.assertEqual(svc._build_daily_push_times(sid, weekday, 2), ["07:30", "15:00"])
+            self.assertEqual(svc._build_daily_push_times(sid, weekend, 2), ["10:30", "15:45"])
+
     def test_scheduled_push_task_marks_trigger_only_after_success(self):
         async def run():
             svc = self.make_service()
@@ -4948,6 +5008,38 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("长期线", text)
             self.assertIn("[", text)
             self.assertIn("中期线", text)
+
+        asyncio.run(run())
+
+    def test_create_oc_accepts_character_schedule(self):
+        async def run():
+            svc = self.make_service()
+            svc.send_message = AsyncMock()
+            sid = "telegram:123"
+
+            await svc._create_oc_from_fields(
+                123,
+                sid,
+                "名字：小雨\n作息：工作日 7:30-22:40，周末 9点半-23:45",
+                {
+                    "name": "小雨",
+                    "role": "原创角色",
+                    "persona": "自然",
+                    "appearance": "black hair, blue eyes",
+                    "schedule": "工作日 7:30-22:40，周末 9点半-23:45",
+                },
+                {},
+            )
+
+            state = svc._get_session_state(sid)
+            self.assertEqual(state["custom_workday_wake_time"], "07:30")
+            self.assertEqual(state["custom_workday_sleep_time"], "22:40")
+            self.assertEqual(state["custom_weekend_wake_time"], "09:30")
+            self.assertEqual(state["custom_weekend_sleep_time"], "23:45")
+            saved = session_schema.get_saved_characters(state)["小雨"]
+            self.assertEqual(saved["workday_wake_time"], "07:30")
+            self.assertEqual(saved["weekend_sleep_time"], "23:45")
+            self.assertIn("作息: 工作日 07:30-22:40 / 周末 09:30-23:45", svc.send_message.await_args.args[1])
 
         asyncio.run(run())
 
@@ -7688,6 +7780,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             "bot_self_name": "本座",
             "style": "@rurudo",
             "relationship": "同居恋人",
+            "workday_wake_time": "07:30",
+            "workday_sleep_time": "22:40",
         })
         # 卡片字段映射到 config 键
         self.assertEqual(svc.config["scheduled_persona"], "新的人格")
@@ -7695,10 +7789,13 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(svc.config["bot_self_name"], "本座")
         self.assertEqual(svc.config["current_style"], "@rurudo")
         self.assertEqual(svc.config["spatial_relationship"], "同居恋人")
+        self.assertEqual(svc.config["workday_wake_time"], "07:30")
+        self.assertEqual(svc.config["workday_sleep_time"], "22:40")
         # 默认卡读取反映写回值；appearance 与 positive_prefix 1:1
         card = svc._default_character_payload()
         self.assertEqual(card["appearance"], "succubus, silver hair, red eyes")
         self.assertEqual(card["persona"], "新的人格")
+        self.assertEqual(card["workday_wake_time"], "07:30")
         # 不创建 saved_characters 条目
         sid = "telegram:1"
         self.assertEqual(svc._get_session_state(sid).get("saved_characters") or {}, {})

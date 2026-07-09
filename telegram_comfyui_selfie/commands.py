@@ -27,6 +27,8 @@ SESSION_CUSTOM_RESET_KEYS = (
     "custom_character", "custom_series",
     "custom_visual_character", "custom_visual_series",
     "custom_character_age_stage", "custom_character_occupation", "custom_character_day_anchor",
+    "custom_workday_wake_time", "custom_workday_sleep_time",
+    "custom_weekend_wake_time", "custom_weekend_sleep_time",
 )
 # ── 会话 state 字段归属分类 ──
 # 单一来源在 session_schema.STATE_SCHEMA（每字段声明 归属 + 默认值 + reset 保留）。此处仅
@@ -99,6 +101,25 @@ OC_FIELD_ALIASES = {
     "白天去向": "occupation",
     "occupation": "occupation",
     "day_anchor": "occupation",
+    "工作日起床": "workday_wake_time",
+    "工作日起床时间": "workday_wake_time",
+    "平日起床": "workday_wake_time",
+    "workday_wake_time": "workday_wake_time",
+    "工作日睡觉": "workday_sleep_time",
+    "工作日睡觉时间": "workday_sleep_time",
+    "工作日最晚推送": "workday_sleep_time",
+    "平日睡觉": "workday_sleep_time",
+    "workday_sleep_time": "workday_sleep_time",
+    "周末起床": "weekend_wake_time",
+    "周末起床时间": "weekend_wake_time",
+    "weekend_wake_time": "weekend_wake_time",
+    "周末睡觉": "weekend_sleep_time",
+    "周末睡觉时间": "weekend_sleep_time",
+    "周末最晚推送": "weekend_sleep_time",
+    "weekend_sleep_time": "weekend_sleep_time",
+    "作息": "schedule",
+    "生活作息": "schedule",
+    "schedule": "schedule",
     "性格": "persona",
     "人格": "persona",
     "人设": "persona",
@@ -158,47 +179,57 @@ class CommandHandlersMixin:
     INIT_FLOW_STEPS = (
         (
             "name",
-            "第 1/8 步：新角色卡叫什么名字？\n"
+            "第 1/9 步：新角色卡叫什么名字？\n"
             "这是角色池里的主键和切换名称，必填。例如：小雨、爱丽丝。",
         ),
         (
             "source_identity",
-            "第 2/8 步：角色出处是什么？\n"
+            "第 2/9 步：角色出处是什么？\n"
             "原创角色回复“原创”。现有作品角色请写原作和角色名，最好用英文或罗马音，例如：Blue Archive / Tendou Aris。回复“跳过”按原创处理。",
         ),
         (
             "appearance",
-            "第 3/8 步：角色外貌和初始穿搭是什么？\n"
+            "第 3/9 步：角色外貌和初始穿搭是什么？\n"
             "例如：黑色短发、蓝眼睛、身材纤细、白衬衫、深色百褶裙。回复“跳过”可使用默认外貌。",
         ),
         (
             "role",
-            "第 4/8 步：角色设定是什么？\n"
+            "第 4/9 步：角色设定是什么？\n"
             "包括角色类型、职业身份、性格、语气和习惯。例如：大学生，温柔慢热，说话简短。回复“跳过”可留空。",
         ),
         (
             "relationship",
-            "第 5/8 步：你和角色的关系、以及角色怎么称呼你？\n"
+            "第 5/9 步：你和角色的关系、以及角色怎么称呼你？\n"
             "例如：同城恋人，称呼我主人；或：同校朋友，叫我老师。回复“跳过”可留空。",
         ),
         (
             "city",
-            "第 6/8 步：你所在或故事发生的城市是哪里？\n"
+            "第 6/9 步：你所在或故事发生的城市是哪里？\n"
             "例如：上海、东京、纽约。回复“跳过”可之后再用 /天气设置 设置。",
         ),
         (
+            "schedule",
+            "第 7/9 步：角色作息是什么？\n"
+            "格式示例：工作日 08:00-23:50，周末 09:00-23:50。起床时间是早安/dream 时间点，睡觉时间是最晚自动推送时间。回复“默认”或“跳过”使用 08:00/23:50。",
+        ),
+        (
             "purity",
-            "第 7/8 步：纯良度设置为多少？\n"
+            "第 8/9 步：纯良度设置为多少？\n"
             "输入 0-10 的整数，数字越高越保守；也可以回复 auto。",
         ),
         (
             "push_frequency",
-            "第 8/8 步：每天主动推送几次？\n"
+            "第 9/9 步：每天主动推送几次？\n"
             "输入 0-20 的整数，0 表示关闭；也可以回复“默认”。",
         ),
     )
     INIT_FLOW_SKIP_WORDS = {"跳过", "skip", "略过", "暂不", "不用", "不要", "无", "空"}
+    INIT_FLOW_DEFAULT_WORDS = {"默认", "全局", "auto", "自动", "reset"}
     INIT_FLOW_CANCEL_WORDS = {"取消", "取消初始化", "退出", "退出初始化", "cancel", "stop", "结束"}
+    _SCHEDULE_TIME_RE = re.compile(
+        r"(?<!\d)(2[0-4]|[01]?\d)"
+        r"(?:\s*[:：]\s*([0-5]?\d)|\s*[点时]\s*([0-5]?\d)?\s*(半)?)?\s*分?"
+    )
 
     async def dispatch_command(self, chat_id: int | str, session_id: str, command: str, arg: str):
         command = resolve_command_alias(command)
@@ -335,6 +366,11 @@ class CommandHandlersMixin:
                 except ValueError:
                     await self.send_message(chat_id, "纯良度请输入 0-10 的整数，或 auto。")
                     return False
+        if key == "schedule":
+            val = answer.strip().lower()
+            if val not in self.INIT_FLOW_DEFAULT_WORDS and not self._parse_oc_schedule_answer(answer):
+                await self.send_message(chat_id, "作息格式示例：工作日 08:00-23:50，周末 09:00-23:50；或回复“默认”。")
+                return False
         if key == "push_frequency":
             val = answer.strip().lower()
             if val not in ("默认", "全局", "reset", "auto"):
@@ -369,6 +405,9 @@ class CommandHandlersMixin:
             value = str(answers.get(key) or "").strip()
             if value:
                 lines.append(f"{label}：{value}")
+        schedule = str(answers.get("schedule") or "").strip()
+        if schedule and schedule.lower() not in self.INIT_FLOW_DEFAULT_WORDS:
+            lines.append(f"作息：{schedule}")
         return "\n".join(lines)
 
     async def _finish_init_flow(self, chat_id: int | str, session_id: str):
@@ -447,6 +486,68 @@ class CommandHandlersMixin:
             if current:
                 fields[current] = (fields.get(current, "") + "\n" + line).strip()
         return fields
+
+    @classmethod
+    def _extract_oc_schedule_times(cls, text: str) -> list[str]:
+        times: list[str] = []
+        for match in cls._SCHEDULE_TIME_RE.finditer(str(text or "")):
+            token = match.group(0)
+            try:
+                hour = int(match.group(1))
+                minute_text = match.group(2) or match.group(3)
+                minute = int(minute_text or (30 if match.group(4) or "半" in token else 0))
+            except (TypeError, ValueError):
+                continue
+            if hour == 24 and minute == 0:
+                hour, minute = 23, 59
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                times.append(f"{hour:02d}:{minute:02d}")
+        return times
+
+    @classmethod
+    def _normalize_oc_schedule_time(cls, value: Any) -> str:
+        times = cls._extract_oc_schedule_times(str(value or "").replace("：", ":"))
+        return times[0] if times else ""
+
+    @classmethod
+    def _parse_oc_schedule_answer(cls, text: str) -> dict[str, str]:
+        body = str(text or "").strip()
+        if not body:
+            return {}
+        result: dict[str, str] = {}
+        markers: list[tuple[int, str]] = []
+        for pattern, prefix in (
+            (r"工作日|平日|weekday", "workday"),
+            (r"周末|休息日|weekend", "weekend"),
+        ):
+            for match in re.finditer(pattern, body, flags=re.IGNORECASE):
+                markers.append((match.start(), prefix))
+        markers.sort(key=lambda item: item[0])
+        if markers:
+            for idx, (start, prefix) in enumerate(markers):
+                end = markers[idx + 1][0] if idx + 1 < len(markers) else len(body)
+                times = cls._extract_oc_schedule_times(body[start:end])
+                if times:
+                    result[f"{prefix}_wake_time"] = times[0]
+                if len(times) >= 2:
+                    result[f"{prefix}_sleep_time"] = times[1]
+            return result
+        times = cls._extract_oc_schedule_times(body)
+        if len(times) >= 4:
+            result.update({
+                "workday_wake_time": times[0],
+                "workday_sleep_time": times[1],
+                "weekend_wake_time": times[2],
+                "weekend_sleep_time": times[3],
+            })
+        elif len(times) >= 2:
+            result.update({
+                "workday_wake_time": times[0],
+                "workday_sleep_time": times[1],
+                "weekend_wake_time": times[0],
+                "weekend_sleep_time": times[1],
+            })
+        return result
 
     @staticmethod
     def _oc_gender_tag(*parts: str) -> str:
@@ -751,6 +852,9 @@ class CommandHandlersMixin:
         intake: dict[str, Any],
     ) -> None:
         fields = self._complete_oc_character_fields(fields)
+        schedule_from_compound = self._parse_oc_schedule_answer(fields.get("schedule", ""))
+        for key, value in schedule_from_compound.items():
+            fields.setdefault(key, value)
         name = (fields.get("name") or "").strip()
         if not name:
             await self.send_message(chat_id, "缺少 OC 名字。\n\n" + OC_CREATE_HELP)
@@ -772,6 +876,16 @@ class CommandHandlersMixin:
         original_name = (fields.get("original_name") or "").strip()
         visual_character = (fields.get("visual_character") or "").strip()
         visual_series = (fields.get("visual_series") or "").strip()
+        schedule_payload = {
+            key: value
+            for key, value in {
+                "workday_wake_time": self._normalize_oc_schedule_time(fields.get("workday_wake_time")),
+                "workday_sleep_time": self._normalize_oc_schedule_time(fields.get("workday_sleep_time")),
+                "weekend_wake_time": self._normalize_oc_schedule_time(fields.get("weekend_wake_time")),
+                "weekend_sleep_time": self._normalize_oc_schedule_time(fields.get("weekend_sleep_time")),
+            }.items()
+            if value
+        }
         is_original = (
             source_type in ("original", "oc", "原创", "原创角色")
             or bool(source_identity and re.search(r"\boc\b|原创|自创|原创角色", source_identity, flags=re.IGNORECASE))
@@ -839,6 +953,7 @@ class CommandHandlersMixin:
             "age_stage": age,
             "occupation": occupation,
             "day_anchor": anchor,
+            **schedule_payload,
         })
         session_schema.set_character_value(state, "custom_raw_profile_text", text)
         session_schema.set_character_value(state, "custom_prompt_intake", intake)
@@ -881,6 +996,16 @@ class CommandHandlersMixin:
             lines.append(f"关系: {relationship[:200]}")
         if user_address:
             lines.append(f"对用户称呼: {user_address[:80]}")
+        if schedule_payload:
+            workday = (
+                f"{schedule_payload.get('workday_wake_time', '08:00')}-"
+                f"{schedule_payload.get('workday_sleep_time', '23:50')}"
+            )
+            weekend = (
+                f"{schedule_payload.get('weekend_wake_time', '08:00')}-"
+                f"{schedule_payload.get('weekend_sleep_time', '23:50')}"
+            )
+            lines.append(f"作息: 工作日 {workday} / 周末 {weekend}")
         if applied_style:
             lines.append(f"画风: {applied_style[:200]}")
         summary = prompt_intake.useful_summary(intake)
