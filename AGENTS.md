@@ -237,6 +237,7 @@ telegram_comfyui_selfie/
 7. **生图提示词反映状态**：`build_prompt()` 会把半脱部件渲染为 `half-removed <tag>`、破损部件渲染为 `torn <tag>`、脱掉部件从正向临时移除并压入负向；贴身衣物半脱/破损/脱掉时自动补 `nipples` / `pussy`，全身遮盖都移除时补 `nude`，同时移除对应负向冲突词。状态渲染会在 `explicit_appearance_override` 后再执行一次，避免原始 `dynamic_appearance` 把旧衣物重新带回。
 8. **WebUI 衣橱状态控制**：角色当前衣柜返回 `wardrobe_item_states`，前端“身上穿着”行新增状态下拉（正常/半脱/破损/脱掉），并新增“一键还原状态”。API 增加 `set-item-state` 与 `clear-item-states`，换穿收藏、编辑正穿收藏、移除槽位、清空穿搭和公开兜底移出时会同步清理对应状态。移动端衣橱布局补充状态控件换行和按钮布局，避免窄屏挤压。
 9. **本轮追加验证**：新增/更新测试覆盖 clothing box 状态访问器、WebUI 状态设置/一键还原、状态渲染前缀与贴身裸露标签、removed 状态仅影响 prompt 且可还原、自然换装 states 保留衣柜但全裸清空。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 401 tests in 14.856s`，`OK (skipped=1)`。
+10. **WebUI 衣橱窄容器布局修复**：衣橱模块新增 `container-type: inline-size` 和 `@container (max-width: 720px)` 响应式规则，按模块自身宽度而不是整页 viewport 切单列；同时降低右侧列最小宽度、让部件状态控件独占整行，修复窄面板下“当前摘要/衣物行被挤成竖排”的问题。新增静态测试锁定容器查询规则，验证 `node --check telegram_comfyui_selfie\static\app.js` 与相关单测通过。
 
 ## 今日变更（2026-07-06）
 

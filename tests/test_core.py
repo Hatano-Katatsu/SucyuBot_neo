@@ -796,6 +796,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn('["selfie_preference"', character_fields)
         self.assertIn(".character-form .field-quarter", styles)
         self.assertIn("scroll-snap-type: x proximity", styles)
+        self.assertIn(".runtime-clothing-section", styles)
+        self.assertIn("container-type: inline-size", styles)
+        self.assertIn("@container (max-width: 720px)", styles)
 
     def test_model_panel_has_no_thinking_controls(self):
         app_js = (Path(__file__).resolve().parents[1] / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
