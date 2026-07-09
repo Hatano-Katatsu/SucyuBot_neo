@@ -1194,16 +1194,50 @@ class LifePlanMixin:
     def _life_plan_push_context(self, session_id: str, *, now: datetime | None = None) -> str:
         if not self._life_plan_enabled(session_id):
             return ""
-        event = self._life_plan_event_for_now(session_id, now=now)
-        if not event:
+        row = self._load_life_plan_row(session_id)
+        if not row:
             return ""
-        side = str(event.get("side_note") or "").strip() or self._fallback_life_event_side(event)
-        if not side or self._life_text_has_purpose_words(side):
+        plan = row.get("payload") or {}
+        today = plan.get("today") or {}
+        current = now or self._session_now(session_id)
+        if today.get("date") != self._life_today_date(session_id, current):
             return ""
-        return (
-            "生活线侧面（只作此刻状态和情绪背景，不是安排播报）: "
-            f"{side}\n处理规则: 推送写此刻的状态、地点、疲惫或余韵，不要写成进度汇报。"
+        hint = self._life_time_hint_for_dt(current)
+        planned = [
+            item for item in today.get("events") or []
+            if isinstance(item, dict) and item.get("status") == "planned"
+        ]
+        candidates = [item for item in planned if item.get("time_hint") == hint] or planned
+        texture = str(today.get("texture") or "").strip()
+        if not candidates and (not texture or self._life_text_has_purpose_words(texture)):
+            return ""
+        lines = [
+            "今日生活片段候选（来自角色生活线；参考，不是硬日程或安排播报）:",
+        ]
+        if texture and not self._life_text_has_purpose_words(texture):
+            lines.append(f"- 今日底色: {texture}")
+        for idx, event in enumerate(candidates, 1):
+            side = str(event.get("side_note") or "").strip() or self._fallback_life_event_side(event)
+            if self._life_text_has_purpose_words(side):
+                side = ""
+            event_text = str(event.get("text") or "").strip()
+            place_key = str(event.get("place_key") or "").strip()
+            place_label = PLACE_TYPES.get(place_key, {}).get("label", place_key) if place_key else ""
+            time_hint = str(event.get("time_hint") or "").strip()
+            parts = []
+            if time_hint or place_label:
+                parts.append(f"{time_hint or '当前'} @ {place_label or '未指定'}")
+            if event_text:
+                parts.append(event_text)
+            if side:
+                parts.append(f"侧面状态: {side}")
+            if parts:
+                lines.append(f"- 候选{idx}: " + "；".join(parts))
+        lines.append(
+            "处理规则: 这些片段只提供角色今天可能流露的生活方向。推送可以选择其中一个、混合几个，"
+            "或按当前动线/天气自然发散；不要逐条播报，不要写成进度汇报。"
         )
+        return "\n".join(lines)
 
     def _format_life_plan_diary_context(self, session_id: str, character_key: str, diary_date: str) -> str:
         row = self._load_life_plan_row(session_id, character_key)

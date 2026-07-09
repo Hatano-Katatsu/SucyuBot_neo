@@ -5,6 +5,7 @@ import logging
 import re
 import time
 from datetime import datetime
+from difflib import SequenceMatcher
 from typing import Any
 
 import aiohttp
@@ -118,6 +119,67 @@ def _caption_exactly_reused(caption: Any, forbidden_captions: list[str]) -> bool
     if not current:
         return False
     return any(current == _normalize_caption_for_exact_match(old) for old in forbidden_captions)
+
+
+def _normalize_push_dedup_text(text: Any) -> str:
+    value = str(text or "").lower()
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"[，。！？、；：,.!?;:'\"“”‘’「」『』（）()\[\]{}<>《》~…—_-]+", "", value)
+    return value.strip()
+
+
+def _recent_push_texts_for_push(service: Any, state: dict[str, Any], session_id: str = "", limit: int = 3) -> list[str]:
+    reset_time = session_schema.get_short_context_reset_time(state)
+    push_kinds = {"scheduled_push", "followup_push", "manual_push"}
+    photos = [
+        photo for photo in session_schema.get_sent_photos_history(state)
+        if service._within(photo.get("timestamp", 0), since=reset_time)
+        and str(photo.get("source_kind") or "").strip().lower() in push_kinds
+    ][-limit:]
+    texts: list[str] = []
+    for photo in photos:
+        parts = [
+            str(photo.get("caption") or "").strip(),
+            str(photo.get("nltag") or photo.get("scene") or "").strip(),
+            str(photo.get("source_intent") or "").strip(),
+        ]
+        text = "；".join(part for part in parts if part)
+        if text:
+            texts.append(text[:700])
+    return texts
+
+
+def _format_recent_push_dedup_context(texts: list[str]) -> str:
+    if not texts:
+        return ""
+    lines = [
+        "最近主动推送内容避重（动态，仅本次推送生效）: 以下是最近已主动推送给用户的内容，只能作为避重参考。"
+        "新推送必须换一个生活细节、动作结构或情绪角度，不要复刻同一张图、同一句问候或同一段等待姿态。"
+    ]
+    for idx, text in enumerate(texts[-3:], 1):
+        lines.append(f"- recent_push_{idx}: {text}")
+    return "\n".join(lines)
+
+
+def _push_plan_repeats_recent(parsed: dict[str, Any], recent_texts: list[str]) -> bool:
+    if not recent_texts:
+        return False
+    current = _normalize_push_dedup_text(
+        " ".join(str(parsed.get(key) or "") for key in ("caption", "scene"))
+    )
+    if len(current) < 12:
+        return False
+    for old in recent_texts:
+        previous = _normalize_push_dedup_text(old)
+        if len(previous) < 12:
+            continue
+        shorter, longer = (current, previous) if len(current) <= len(previous) else (previous, current)
+        if len(shorter) >= 24 and shorter in longer:
+            return True
+        ratio = SequenceMatcher(None, current[:600], previous[:600]).ratio()
+        if ratio >= 0.78:
+            return True
+    return False
 
 
 def _sanitize_push_planner_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -865,6 +927,7 @@ async def plan_roleplay_image(
     is_push = mode in ("normal", "morning", "ntr", "followup")
     is_followup = mode == "followup"
     forbidden_captions = _recent_photo_captions_for_push(service, state, session_id) if is_push else []
+    recent_push_texts = _recent_push_texts_for_push(service, state, session_id) if is_push else []
     push_transition_decision: dict[str, Any] = {}
     push_transition_context = ""
     push_advance_context = ""
@@ -920,6 +983,7 @@ async def plan_roleplay_image(
     spatial_context = _summarize_spatial_context_for_push(raw_spatial_context) if is_push else raw_spatial_context
     prompt_spatial_context = None if is_push else spatial_context
     photo_context = None if is_push else format_recent_photo_dedup_context(service, state, session_id)
+    push_photo_context = format_sent_photo_context(service, state, session_id, limit=3) if is_push else None
     memory_query = "\n".join(part for part in (intent, mood, must_include, prompt, continuity_context or "") if part)
     memory_context = ""
     if not is_push and hasattr(service, "_long_term_memory_context"):
@@ -1123,10 +1187,18 @@ async def plan_roleplay_image(
         + json_contract_rules
     )
     if needs_caption:
-        stable_front += (
-            "\ncaption 填一句简短的中文台词（纯文本，角色口吻），本图的配文。"
-            "scene 描述本次画面的英文自然语言场景（不要中文）。"
-        )
+        if is_push:
+            stable_front += (
+                "\ncaption 填中文消息（纯文本，角色口吻），本图的配文。"
+                "可以是一到三句，允许写出此刻正在做的事、看到的生活细节、给用户的一点近况或情绪，"
+                "但不要写成流水账、任务汇报或重复上一条推送；通常控制在 30-120 个中文字符。"
+                "scene 描述本次画面的英文自然语言场景（不要中文）。"
+            )
+        else:
+            stable_front += (
+                "\ncaption 填一句简短的中文台词（纯文本，角色口吻），本图的配文。"
+                "scene 描述本次画面的英文自然语言场景（不要中文）。"
+            )
     else:
         stable_front += (
             "\n聊天模型已经给出文字回复，这张图只配画面、不需要任何台词或配文，不要输出 caption 字段。"
@@ -1152,22 +1224,39 @@ async def plan_roleplay_image(
         push_dynamic_parts.append(push_advance_context)
     if is_followup:
         push_dynamic_parts.append(
-            "对话后续场规则（动态，仅本次推送生效）: 这是用户刚结束对话 5-15 分钟后的轻量续场。"
-            "请使用正式聊天上下文中的最近地点、情绪、未完成动作和照片历史作为低权重参考，"
+            "对话后续场规则（动态，仅本次推送生效）: 这是用户刚结束对话 3-10 分钟后的轻量续场。"
+            "请使用下方最近一轮对话动态和照片历史作为低权重参考，"
             "让画面自然推进一小步；不要突然换地点、开新冲突、重置关系或复述上一条主动推送。"
             "如果上一条照片也是主动推送，只把它当作避重参考，而不是必须接着演；"
             "不要复用上一条图片 caption、同一句尾音或同一台词结构。"
         )
     elif is_push:
         push_dynamic_parts.append(
-            "主动推送避重规则（动态，仅本次推送生效）: 正式聊天上下文中的照片历史是低权重系统记录。"
+            "主动推送避重规则 + 主动推送今日片段规则（动态，仅本次推送生效）: 若下方提供“今日生活片段候选”，把它们当作参考素材，"
+            "可以选择其中一个、混合几个，或按当前世界动线、地点、天气和光线自然发散成 bot 自己生活里的一个此刻画面；"
+            "不要逐条播报候选，也不要机械执行成日程汇报。"
+            "画面和 caption 应体现角色此刻的生活质感，而不是只复述上一轮聊天或单纯问用户在不在。"
+            "正式聊天上下文中的照片历史是低权重系统记录。"
             "可以用来保持连续性和避免重复，但不要主动复述系统记录、上一条 caption 或同一动作结构。"
             "若上一条照片来自 scheduled_push/followup_push/manual_push，只把它当作避重参考；"
             "同一地点内应推进到相邻动作或另一个生活细节，而不是复制上一张的语义。"
         )
+    if is_followup and continuity_context:
+        push_dynamic_parts.append(
+            "最近一轮对话动态参考（checkpoint 后，仅用于承接或避重；不要逐句复述）:\n"
+            f"{continuity_context}"
+        )
+    if is_push and push_photo_context:
+        push_dynamic_parts.append(
+            "最近图片视觉参考（checkpoint 后，仅用于承接或避重；照片 caption 不可原样复用）:\n"
+            f"{push_photo_context}"
+        )
     forbidden_caption_context = _format_forbidden_caption_context(forbidden_captions)
     if forbidden_caption_context:
         push_dynamic_parts.append(forbidden_caption_context)
+    recent_push_context = _format_recent_push_dedup_context(recent_push_texts)
+    if recent_push_context:
+        push_dynamic_parts.append(recent_push_context)
     if is_push and spatial_context:
         push_dynamic_parts.append(
             "空间/身体关系硬约束（动态，仅本次推送生效）:\n"
@@ -1311,23 +1400,39 @@ async def plan_roleplay_image(
 
     try:
         parsed = await call_planner()
-        if is_push and _caption_exactly_reused(parsed.get("caption"), forbidden_captions):
-            duplicate_caption = str(parsed.get("caption") or "").strip()
-            retry_dynamic = (
-                "配文重复修正（动态，仅本次重试生效）: 上一次输出的 caption 与最近图片配文完全相同。"
-                "保持同一画面意图和位置判断，但必须改写 caption 为另一句中文台词；"
-                "不要复用 forbidden_caption 的原句、开头、省略号结构或结尾语气。"
-                f"\n本次重复配文: {duplicate_caption}"
-            )
+        duplicate_caption = _caption_exactly_reused(parsed.get("caption"), forbidden_captions) if is_push else False
+        duplicate_push = _push_plan_repeats_recent(parsed, recent_push_texts) if is_push else False
+        if is_push and (duplicate_caption or duplicate_push):
+            retry_parts: list[str] = []
+            if duplicate_caption:
+                duplicate_caption_text = str(parsed.get("caption") or "").strip()
+                retry_parts.append(
+                    "配文重复修正（动态，仅本次重试生效）: 上一次输出的 caption 与最近图片配文完全相同。"
+                    "保持同一画面意图和位置判断，但必须改写 caption 为另一句中文台词；"
+                    "不要复用 forbidden_caption 的原句、开头、省略号结构或结尾语气。"
+                    f"\n本次重复配文: {duplicate_caption_text}"
+                )
+            if duplicate_push:
+                retry_parts.append(
+                    "推送内容重复修正（动态，仅本次重试生效）: 上一次输出的 scene/caption 与最近主动推送过于相似。"
+                    "必须换一个今日片段里的生活细节、动作结构、道具或情绪角度；"
+                    "不要再次写同一地点里的同一姿势、同一等待动作、同一句近况或同一张自拍构图。"
+                )
+            retry_dynamic = "\n".join(retry_parts)
             try:
                 retry_parsed = await call_planner(retry_dynamic)
                 retry_caption = str(retry_parsed.get("caption") or "").strip()
-                if retry_caption and not _caption_exactly_reused(retry_caption, forbidden_captions):
+                retry_duplicate_caption = _caption_exactly_reused(retry_caption, forbidden_captions)
+                retry_duplicate_push = _push_plan_repeats_recent(retry_parsed, recent_push_texts)
+                if not retry_duplicate_caption and not retry_duplicate_push:
+                    parsed = retry_parsed
+                elif retry_duplicate_caption and not retry_duplicate_push:
+                    retry_parsed["caption"] = ""
                     parsed = retry_parsed
                 else:
-                    logger.info("roleplay image plan retry still reused caption; keeping original plan")
+                    logger.info("roleplay image plan retry still repeated recent push; keeping original plan")
             except Exception as retry_exc:
-                logger.info("roleplay image plan caption retry failed: %s", retry_exc)
+                logger.info("roleplay image plan duplicate retry failed: %s", retry_exc)
     except Exception as exc:
         logger.error("roleplay image planning failed: %s raw_excerpt=%.300s", exc, raw_text)
         # LLM 返回了纯文本（非 JSON）时，将其作为 scene 兜底，避免推送完全失败。

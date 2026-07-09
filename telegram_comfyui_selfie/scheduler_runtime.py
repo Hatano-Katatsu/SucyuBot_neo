@@ -1094,8 +1094,8 @@ class SchedulerRuntimeMixin:
             return False
         if counter_reset:
             self._save_session_state(session_id, state)
-        min_minutes = max(0.1, self._post_chat_push_number(session_id, "post_chat_push_delay_min_minutes", 5))
-        max_minutes = max(min_minutes, self._post_chat_push_number(session_id, "post_chat_push_delay_max_minutes", 15))
+        min_minutes = max(0.1, self._post_chat_push_number(session_id, "post_chat_push_delay_min_minutes", 3))
+        max_minutes = max(min_minutes, self._post_chat_push_number(session_id, "post_chat_push_delay_max_minutes", 10))
         delay = random.uniform(min_minutes, max_minutes) * 60
         expected_message_time = session_schema.get_last_message_time(state)
         tasks = getattr(self, "_post_chat_push_tasks", None)
@@ -1320,6 +1320,12 @@ class SchedulerRuntimeMixin:
                     await self._ensure_life_profile(session_id)
                 except Exception:
                     logger.debug("life profile ensure failed for scheduler push", exc_info=True)
+            if hasattr(self, "_checkpoint_context_before_push"):
+                try:
+                    await self._checkpoint_context_before_push(session_id)
+                    state = self._get_session_state(session_id)
+                except Exception:
+                    logger.debug("push pre-checkpoint failed", exc_info=True)
             if hasattr(self, "build_world_state"):
                 try:
                     world = self.build_world_state(session_id, weather=w or weather, now=local_dt, mode=mode)

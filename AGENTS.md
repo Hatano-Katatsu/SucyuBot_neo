@@ -215,6 +215,16 @@ telegram_comfyui_selfie/
 - fire-and-forget `asyncio.create_task` 内异常可能被静默吞掉；排查生图/推送失败优先看 service log。
 - `_get_llm_value("chat", "temperature")` 的 legacy 回退会落到 `llm_temperature_scene`，除非 `chat_llm_temperature` 显式设置。
 
+## 今日变更（2026-07-09）
+
+1. **拉取远端更新**：本轮先从 `origin/main` 快进到 `07c4bd0`，在最新代码上修复主动推送和续场推送容易复读上一句话的问题。
+2. **续场推送时机与延迟**：`handle_chat()` 改为等 bot 回复发送完成后再安排续场推送，默认延迟从 5-15 分钟改为 3-10 分钟；期间用户继续发言仍会取消旧任务并按最新对话重排。
+3. **推送前 checkpoint 整理**：`_sched_fire()` 发送任何推送前会执行专用 checkpoint 检查，把未折叠上下文裁到“最近一条用户消息及其之后”，旧内容仍按 checkpoint 路径摘要和抽取长期记忆；已经满足该形态时不做无意义裁剪。
+4. **推送 planner 前缀稳定化**：推送 planner 复用正式聊天 prompt 的稳定前缀时不再携带 checkpoint 后完整历史和动态尾部；续场推送才把最近一轮对话、最近图片和避重信息放到 checkpoint 后的动态 system，保证到 checkpoint 为止更容易和正常聊天/前次推送前缀命中。
+5. **普通主动推送改用生活片段**：非续场的 normal/morning/ntr 推送不再注入最近对话原文，只保留照片避重、空间摘要、世界动线和今日生活片段候选。`_life_plan_push_context()` 会把当前时间段内的所有 planned 今日片段都给 planner，并明确这些片段只是参考，可选择、混合或按天气/地点自然发散，不写成日程播报。
+6. **推送避重增强**：推送 caption 可写 1-3 句、30-120 个中文字符以增加生活气息；planner 会收集最近 scheduled/followup/manual push 的 caption、scene、nltag 与意图，遇到 exact caption 或语义近似重复时自动重试一次，避免连续推送同一句或同一画面结构。
+7. **本轮验证**：新增/更新测试覆盖回复发送后再排续场、推送前 checkpoint 裁剪、续场 planner checkpoint 前缀与动态尾部、普通推送不注入最近原句、今日片段候选注入、语义重复推送重试、早安转场清理临时裸体但保留照片避重。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 394 tests in 9.580s`，`OK (skipped=1)`。
+
 ## 今日变更（2026-07-06）
 
 1. **拉取远端更新**：本轮先从 `origin/main` 快进到 `22a3fbf`，在最新代码上继续处理 Telegram 图片输入、续场推送、life plan 和 dream 摘要链路。

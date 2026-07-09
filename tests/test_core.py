@@ -2883,6 +2883,55 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         svc._save_life_plan_payload(sid, "小雨", payload)
         self.assertEqual(svc._life_plan_chat_context(sid, now=fixed_now), "")
 
+    def test_life_plan_push_context_lists_current_period_candidates(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        fixed_now = datetime(2026, 7, 2, 15, 0, tzinfo=timezone.utc)
+        svc._session_now = lambda session_id="": fixed_now
+        today = svc._life_today_date(sid, fixed_now)
+        svc._save_life_plan_payload(sid, "", {
+            "long_goals": [],
+            "mid_goals": [],
+            "today": {
+                "date": today,
+                "texture": "下午有点犯困，但心里还惦着没收好的尾巴。",
+                "events": [
+                    {
+                        "id": "e1",
+                        "time_hint": "afternoon",
+                        "text": "去咖啡店把草稿摊开重新看一遍",
+                        "place_key": "cafe",
+                        "status": "planned",
+                        "side_note": "杯壁上还挂着水珠，纸角被压得有点卷。",
+                    },
+                    {
+                        "id": "e2",
+                        "time_hint": "afternoon",
+                        "text": "顺路买一盒新的便签纸",
+                        "place_key": "bookstore",
+                        "status": "planned",
+                        "side_note": "手指停在颜色架前犹豫了好一会儿。",
+                    },
+                    {
+                        "id": "e3",
+                        "time_hint": "morning",
+                        "text": "晨跑",
+                        "place_key": "park",
+                        "status": "planned",
+                        "side_note": "鞋带沾了露水。",
+                    },
+                ],
+            },
+        })
+
+        ctx = svc._life_plan_push_context(sid, now=fixed_now)
+
+        self.assertIn("今日生活片段候选", ctx)
+        self.assertIn("去咖啡店把草稿", ctx)
+        self.assertIn("新的便签纸", ctx)
+        self.assertNotIn("晨跑", ctx)
+        self.assertIn("可以选择其中一个、混合几个", ctx)
+
     def test_life_plan_ops_apply_caps_and_ignore_unknown_ids(self):
         svc = self.make_service()
         sid = "telegram:123"
@@ -4062,7 +4111,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._call_llm_messages.assert_awaited()
             messages = svc._call_llm_messages.await_args.args[0]
             joined = "\n".join(m.get("content", "") for m in messages)
-            self.assertIn("切，不和姐姐扯了", joined)
+            self.assertNotIn("切，不和姐姐扯了", joined)
+            self.assertIn("最近图片视觉参考", joined)
+            self.assertIn("咖啡店告别", joined)
             self.assertIn("主动推送避重规则", joined)
 
         asyncio.run(run())
@@ -4195,6 +4246,34 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_post_chat_push_schedules_after_reply_sent(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            events = []
+            svc.has_llm_config = lambda purpose, session_id="": True
+            svc.send_action = AsyncMock()
+            svc.run_roleplay_chat = AsyncMock(side_effect=lambda chat_id, session_id, text: events.append("reply-ready") or "回复")
+
+            async def fake_send(chat_id, text, *, split_paragraphs, on_progress):
+                events.append("send-start")
+                on_progress(text)
+                events.append("send-done")
+
+            svc._send_chat_reply_tracked = AsyncMock(side_effect=fake_send)
+
+            def fake_schedule(session_id):
+                events.append("scheduled")
+                return True
+
+            svc._schedule_post_chat_push = fake_schedule
+
+            await svc.handle_chat(1, sid, "你好")
+
+            self.assertEqual(events, ["reply-ready", "send-start", "send-done", "scheduled"])
+
+        asyncio.run(run())
+
     def test_post_chat_push_schedule_uses_session_scoped_image_config(self):
         async def run():
             svc = self.make_service()
@@ -4285,6 +4364,36 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_push_checkpoint_keeps_latest_user_turn_only(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            key = svc._context_character_key(sid)
+            messages = [
+                {"role": "user", "content": "旧用户消息"},
+                {"role": "assistant", "content": "旧角色回复"},
+                {"role": "system", "content": "照片历史 system 旧图"},
+                {"role": "user", "content": "上一句用户"},
+                {"role": "assistant", "content": "上一句回复"},
+                {"role": "system", "content": "照片历史 system 新图"},
+            ]
+            session_schema.set_chat_history(svc._get_session_state(sid), list(messages))
+            svc.app_store.append_messages(sid, key, messages)
+            rows = svc.app_store.list_messages(sid, key)
+
+            changed = await svc._checkpoint_context_before_push(sid)
+
+            self.assertTrue(changed)
+            state = svc._get_session_state(sid)
+            kept = session_schema.get_chat_history(state)
+            self.assertEqual([m["content"] for m in kept], ["上一句用户", "上一句回复", "照片历史 system 新图"])
+            checkpoint = svc.app_store.get_checkpoint(sid, key)
+            self.assertEqual(int(checkpoint["source_until_id"]), int(rows[2]["id"]))
+            self.assertIn("旧用户消息", checkpoint["summary"])
+            self.assertEqual(session_schema.get_short_context_start(state), 0)
+
+        asyncio.run(run())
+
     def test_record_sent_photo_marks_source_kind_in_system_history(self):
         svc = self.make_service()
         sid = "telegram:123"
@@ -4308,7 +4417,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("nltag: A compact final nltag.", history_message)
         self.assertIn("caption: 给你看一眼。", history_message)
 
-    def test_followup_push_planner_uses_formal_chat_context_messages(self):
+    def test_followup_push_planner_uses_checkpoint_prefix_and_dynamic_recent_context(self):
         async def run():
             svc = self.make_service()
             sid = "telegram:123"
@@ -4350,9 +4459,14 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             messages = svc._call_llm_messages.await_args.args[0]
             joined = "\n".join(m.get("content", "") for m in messages)
             self.assertIn("我先去洗个杯子", joined)
-            self.assertIn("source_kind: scheduled_push", joined)
+            self.assertIn("A sofa selfie", joined)
+            prefix_joined = "\n".join(m.get("content", "") for m in messages[:-3])
+            self.assertNotIn("我先去洗个杯子", prefix_joined)
+            self.assertNotIn("照片历史（系统记录", prefix_joined)
             self.assertNotIn("caption: ……还算能吃的独食呢~", joined)
             self.assertIn("对话后续场规则", messages[-2]["content"])
+            self.assertIn("最近一轮对话动态参考", messages[-2]["content"])
+            self.assertIn("最近图片视觉参考", messages[-2]["content"])
             self.assertIn("forbidden_caption_1: ……还算能吃的独食呢~", messages[-2]["content"])
             self.assertIn("推送模式: followup", messages[-1]["content"])
             self.assertNotIn("短期连续性:", messages[-1]["content"])
@@ -4403,6 +4517,100 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("配文重复修正", retry_joined)
             self.assertIn("本次重复配文: ……还算能吃的独食呢~", retry_joined)
             svc._call_llm.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_push_planner_retries_semantic_duplicate_push_once(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            state = svc._get_session_state(sid)
+            session_schema.set_sent_photos_history(state, [{
+                "timestamp": time.time(),
+                "scene": "A woman takes a selfie in a sunlit kitchen beside cooling croissants, a steaming kettle, and wildflowers on the windowsill.",
+                "nltag": "A woman takes a selfie in a sunlit kitchen beside cooling croissants, a steaming kettle, and wildflowers on the windowsill.",
+                "caption": "早上好呀。昨晚梦到你在面包店后厨给我扎双马尾，醒来发现头发还是散的。",
+                "view": "selfie",
+                "source_kind": "scheduled_push",
+            }])
+            first = {
+                "scene": "A woman takes a selfie in a sunlit kitchen beside cooling croissants, a steaming kettle, and wildflowers on the windowsill.",
+                "view": "selfie",
+                "caption": "早呀，梦到你在后厨给我扎双马尾，醒来头发还是散着。",
+                "character_location": "home",
+                "user_location": "unknown",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            }
+            second = dict(
+                first,
+                scene="A quiet afternoon cafe table with open drafts, sticky notes, and rain beading on the window.",
+                caption="便签纸挑了浅蓝色，草稿也终于摊开了。",
+                character_location="cafe",
+            )
+            svc._call_llm_messages = AsyncMock(side_effect=[
+                {"choices": [{"message": {"content": json.dumps(first, ensure_ascii=False)}}], "usage": {}},
+                {"choices": [{"message": {"content": json.dumps(second, ensure_ascii=False)}}], "usage": {}},
+            ])
+            svc._call_llm = AsyncMock()
+
+            plan = await plan_roleplay_image(svc, sid, mode="normal", weather_data={"desc": "晴", "temp": "22"})
+
+            self.assertEqual(plan["caption"], "便签纸挑了浅蓝色，草稿也终于摊开了。")
+            self.assertEqual(svc._call_llm_messages.await_count, 2)
+            retry_joined = "\n".join(m.get("content", "") for m in svc._call_llm_messages.await_args_list[1].args[0])
+            self.assertIn("推送内容重复修正", retry_joined)
+
+        asyncio.run(run())
+
+    def test_scheduled_push_planner_injects_today_life_candidates(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 7, 2, 15, 0, tzinfo=timezone.utc)
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            today = svc._life_today_date(sid, fixed_now)
+            svc._save_life_plan_payload(sid, "", {
+                "long_goals": [],
+                "mid_goals": [],
+                "today": {
+                    "date": today,
+                    "texture": "下午有点犯困，但心里还惦着没收好的尾巴。",
+                    "events": [
+                        {"id": "e1", "time_hint": "afternoon", "text": "去咖啡店把草稿摊开重新看一遍", "place_key": "cafe", "status": "planned"},
+                        {"id": "e2", "time_hint": "afternoon", "text": "顺路买一盒新的便签纸", "place_key": "bookstore", "status": "planned"},
+                    ],
+                },
+            })
+            self.mock_image_planner_messages(svc, {
+                "scene": "A cafe table moment with drafts and sticky notes.",
+                "caption": "便签纸买回来了，草稿也摊开了。",
+                "view": "selfie",
+                "character_location": "cafe",
+                "user_location": "unknown",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            })
+
+            await plan_roleplay_image(svc, sid, mode="normal", now=fixed_now, weather_data={"desc": "晴", "temp": "24"})
+
+            dynamic_system = svc._call_llm_messages.await_args.args[0][-2]["content"]
+            self.assertIn("今日生活片段候选", dynamic_system)
+            self.assertIn("去咖啡店把草稿", dynamic_system)
+            self.assertIn("新的便签纸", dynamic_system)
+            self.assertIn("可以选择其中一个、混合几个", dynamic_system)
+            self.assertIn("主动推送今日片段规则", dynamic_system)
 
         asyncio.run(run())
 
@@ -6502,7 +6710,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("早安推送开启新一天", system)
             self.assertNotIn("短期连续性", user)
             self.assertNotIn("最近已发图片摘要", user)
-            self.assertIn("衣服脱了", joined)
+            self.assertNotIn("衣服脱了", joined)
             self.assertIn("loose cotton knit cardigan", joined)
             self.assertEqual(plan["clothing_off"], "")
             self.assertEqual(session_schema.get_nudity(state), "")

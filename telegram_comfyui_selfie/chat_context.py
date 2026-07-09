@@ -291,12 +291,6 @@ class ChatContextMixin:
                     self.queue_life_plan_refresh_if_needed(session_id, reason="lazy-chat")
                 except Exception:
                     logger.debug("queue life plan refresh failed", exc_info=True)
-            if hasattr(self, "_schedule_post_chat_push"):
-                try:
-                    self._schedule_post_chat_push(session_id)
-                except Exception:
-                    logger.debug("schedule post-chat push failed", exc_info=True)
-
             if not self.has_llm_config("chat", session_id):
                 await self.send_message(chat_id, "聊天与角色扮演模型未配置，聊天和工具触发不可用。命令功能仍可使用。")
                 return
@@ -315,6 +309,11 @@ class ChatContextMixin:
                     split_paragraphs=split,
                     on_progress=update_sent,
                 )
+                if hasattr(self, "_schedule_post_chat_push"):
+                    try:
+                        self._schedule_post_chat_push(session_id)
+                    except Exception:
+                        logger.debug("schedule post-chat push failed", exc_info=True)
             else:
                 await self.send_message(chat_id, "回复生成失败，请稍后重试。")
         except asyncio.CancelledError:
@@ -628,7 +627,14 @@ class ChatContextMixin:
             ))
         return content
 
-    def _build_chat_messages(self, session_id: str, user_text: str) -> list[dict[str, Any]]:
+    def _build_chat_messages(
+        self,
+        session_id: str,
+        user_text: str,
+        *,
+        include_history: bool = True,
+        include_dynamic_tail: bool = True,
+    ) -> list[dict[str, Any]]:
         state = self._get_session_state(session_id)
         now = self._session_now(session_id)
         weekday = WEEKDAY_NAMES[now.weekday()]
@@ -750,7 +756,8 @@ class ChatContextMixin:
             f"scene_stale={int(scene_stale)}",
             f"world_dynamic={world_dynamic or 'off'}",
         ])
-        self._track_dynamic_context_change(session_id, dynamic_signature)
+        if include_dynamic_tail:
+            self._track_dynamic_context_change(session_id, dynamic_signature)
         if session_schema.get_replying_to_selfie(state):
             session_schema.set_replying_to_selfie(state, False)
         # ── 天级/低频稳定上下文（角色历史、长期记忆、配置控制）──
@@ -793,9 +800,11 @@ class ChatContextMixin:
             messages.append({"role": "system", "content": world_conditions_context})
         if checkpoint_part:
             messages.append({"role": "system", "content": checkpoint_part})
-        history = self._chat_prompt_history(state)
-        messages.extend(history)
-        messages.append({"role": "system", "content": system_dynamic})
+        history = self._chat_prompt_history(state) if include_history else []
+        if include_history:
+            messages.extend(history)
+        if include_dynamic_tail:
+            messages.append({"role": "system", "content": system_dynamic})
         messages.append({"role": "user", "content": user_text})
         self._log_prefix_slot_signatures(
             session_id,
@@ -809,12 +818,18 @@ class ChatContextMixin:
         return messages
 
     def _build_chat_context_messages_for_push(self, session_id: str, marker: str = "【系统事件】后台上下文前缀占位") -> list[dict[str, Any]]:
-        """复用聊天 prompt 分层构造推送上下文，并去掉占位 user。
+        """复用聊天 prompt 到 checkpoint 为止的稳定前缀，并去掉占位 user。
 
-        推送图片规划需要吃到 checkpoint 锚定的正式上下文和照片 system 记录；
-        但真正的推送任务说明放在后续动态 system/user 中，避免把占位文本当成用户发言。
+        推送图片规划需要和正常聊天共享静态/低频/半稳定/checkpoint 前缀；
+        checkpoint 之后的最近一轮对话和照片记录由推送动态尾部单独注入，避免每次推送
+        把变化历史放在 planner 前缀里，破坏后续聊天和推送的通用 prefix cache 命中。
         """
-        messages = self._build_chat_messages(session_id, marker)
+        messages = self._build_chat_messages(
+            session_id,
+            marker,
+            include_history=False,
+            include_dynamic_tail=False,
+        )
         if messages and messages[-1].get("role") == "user" and messages[-1].get("content") == marker:
             messages = messages[:-1]
         return messages
@@ -1605,6 +1620,69 @@ class ChatContextMixin:
             self._ulog(session_id, "CHECKPOINT", f"until=#{until_id} chars={len(merged)}")
         except Exception:
             logger.warning("context checkpoint failed", exc_info=True)
+
+    async def _checkpoint_context_before_push(self, session_id: str) -> bool:
+        """推送前把未折叠上下文收敛到最近一个用户起点之后。
+
+        普通 checkpoint 按窗口长度保留尾部 N 条；推送 planner 更看重前缀稳定，所以这里
+        特化为：checkpoint 掉最近一条 user 之前的全部消息，只保留“上一句用户消息以及
+        从这一句开始的回复/照片记录”。若当前未折叠窗口已经从这条 user 开始，则不改动。
+        """
+        if not session_id:
+            return False
+        key = self._context_character_key(session_id)
+        scope = f"{session_id}\n{key}"
+        task = getattr(self, "_checkpoint_tasks", {}).get(scope)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.debug("cancelled pending checkpoint before push", exc_info=True)
+        try:
+            checkpoint = self.app_store.get_checkpoint(session_id, key)
+            source_until = int(checkpoint.get("source_until_id") or 0)
+            pending = self.app_store.list_messages(session_id, key, after_id=source_until)
+            if not pending:
+                return False
+            keep_start = -1
+            for idx in range(len(pending) - 1, -1, -1):
+                if pending[idx].get("role") == "user":
+                    keep_start = idx
+                    break
+            if keep_start <= 0:
+                return False
+            overflow = pending[:keep_start]
+            kept = pending[keep_start:]
+            previous = checkpoint.get("summary") or ""
+            merged = await self._summarize_checkpoint(session_id, previous, overflow)
+            hard = self._checkpoint_hard_limit_chars()
+            if len(merged) > hard:
+                merged = merged[-hard:]
+            until_id = int(overflow[-1]["id"])
+            try:
+                await self._extract_long_term_memories_from_messages(session_id, overflow, source_type="push-checkpoint")
+            except Exception:
+                logger.warning("push checkpoint memory extraction failed", exc_info=True)
+            self.app_store.upsert_checkpoint(session_id, key, merged, until_id)
+            state = self._get_session_state(session_id)
+            session_schema.set_checkpoint_summary(state, merged)
+            session_schema.set_checkpoint_message_id(state, until_id)
+            session_schema.set_last_checkpoint_at(state, time.time())
+            session_schema.set_chat_history(state, [
+                {"role": str(msg.get("role") or ""), "content": str(msg.get("content") or "")}
+                for msg in kept
+                if str(msg.get("role") or "").strip() and str(msg.get("content") or "").strip()
+            ])
+            session_schema.set_short_context_start(state, 0)
+            self._save_session_state(session_id, state)
+            self._ulog(session_id, "CHECKPOINT", f"push-prep until=#{until_id} kept={len(kept)} chars={len(merged)}")
+            return True
+        except Exception:
+            logger.warning("push pre-checkpoint failed", exc_info=True)
+            return False
 
     def _checkpoint_hard_limit_chars(self) -> int:
         try:
