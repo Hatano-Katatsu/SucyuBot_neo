@@ -5,7 +5,6 @@ import logging
 import re
 import time
 from datetime import datetime
-from difflib import SequenceMatcher
 from typing import Any
 
 import aiohttp
@@ -114,20 +113,6 @@ def _format_forbidden_caption_context(captions: list[str]) -> str:
     return "\n".join(lines)
 
 
-def _caption_exactly_reused(caption: Any, forbidden_captions: list[str]) -> bool:
-    current = _normalize_caption_for_exact_match(caption)
-    if not current:
-        return False
-    return any(current == _normalize_caption_for_exact_match(old) for old in forbidden_captions)
-
-
-def _normalize_push_dedup_text(text: Any) -> str:
-    value = str(text or "").lower()
-    value = re.sub(r"\s+", " ", value)
-    value = re.sub(r"[，。！？、；：,.!?;:'\"“”‘’「」『』（）()\[\]{}<>《》~…—_-]+", "", value)
-    return value.strip()
-
-
 def _recent_push_texts_for_push(service: Any, state: dict[str, Any], session_id: str = "", limit: int = 3) -> list[str]:
     reset_time = session_schema.get_short_context_reset_time(state)
     push_kinds = {"scheduled_push", "followup_push", "manual_push"}
@@ -159,43 +144,6 @@ def _format_recent_push_dedup_context(texts: list[str]) -> str:
     for idx, text in enumerate(texts[-3:], 1):
         lines.append(f"- recent_push_{idx}: {text}")
     return "\n".join(lines)
-
-
-def _push_plan_repeats_recent(parsed: dict[str, Any], recent_texts: list[str]) -> bool:
-    if not recent_texts:
-        return False
-    current = _normalize_push_dedup_text(
-        " ".join(str(parsed.get(key) or "") for key in ("caption", "scene"))
-    )
-    if len(current) < 12:
-        return False
-    for old in recent_texts:
-        previous = _normalize_push_dedup_text(old)
-        if len(previous) < 12:
-            continue
-        shorter, longer = (current, previous) if len(current) <= len(previous) else (previous, current)
-        if len(shorter) >= 24 and shorter in longer:
-            return True
-        ratio = SequenceMatcher(None, current[:600], previous[:600]).ratio()
-        if ratio >= 0.78:
-            return True
-    return False
-
-
-def _sanitize_push_planner_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """给推送 planner 的消息副本移除照片历史 caption 行；正式聊天历史不动。"""
-    sanitized: list[dict[str, Any]] = []
-    for message in messages:
-        item = dict(message)
-        content = item.get("content")
-        if item.get("role") == "system" and isinstance(content, str) and content.startswith("照片历史"):
-            lines = [
-                line for line in content.splitlines()
-                if not re.match(r"^\s*caption\s*[:：]", line, flags=re.IGNORECASE)
-            ]
-            item["content"] = "\n".join(lines)
-        sanitized.append(item)
-    return sanitized
 
 
 def _summarize_spatial_context_for_push(spatial_context: str | None) -> str | None:
@@ -932,7 +880,7 @@ async def plan_roleplay_image(
     push_transition_context = ""
     push_advance_context = ""
     life_push_context = ""
-    if is_push and not is_followup and hasattr(service, "_push_scene_transition_decision"):
+    if is_push and hasattr(service, "_push_scene_transition_decision"):
         try:
             push_transition_decision = service._push_scene_transition_decision(
                 state,
@@ -961,7 +909,7 @@ async def plan_roleplay_image(
             life_push_context = service._life_plan_push_context(session_id, now=now)
         except Exception:
             logger.debug("life plan push context failed", exc_info=True)
-    hard_scene_transition = bool(push_transition_decision.get("should_transition")) and not is_followup
+    hard_scene_transition = bool(push_transition_decision.get("should_transition"))
     if hard_scene_transition:
         session_schema.clear_nudity(state)
     continuity_context = (
@@ -1040,7 +988,8 @@ async def plan_roleplay_image(
     stable_mode_rules = (
         "通用模式要求:\n"
         "morning: 必须使用 pov，刚睡醒、厨房或卧室早安场景。\n"
-        "followup: 用户刚结束对话后的短时间续场推送，保持最近地点、关系、情绪和相邻动作，不主动开新场景。\n"
+        "followup: 用户刚结束对话后的短时间续场推送，优先保持最近地点、关系、情绪和相邻动作；"
+        "若节拍推进/转场判定已触发，则按判定让时间自然推进一拍，不要停在上一句话附近。\n"
         f"normal: 根据{spatial_label}和近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror。\n"
         "ntr: 用户长时间未互动的冷落惩罚推送，强烈 NTR 危机感，通常 portrait（他人帮角色拍）、selfie 或分屏。\n"
         "推送转场通用规则: 最近对话/照片只能作为情绪、约定和避免重复的参考；判定应转场时，不要把上一幕地点、姿势或话题强行续写成此刻仍在发生。\n"
@@ -1225,8 +1174,9 @@ async def plan_roleplay_image(
     if is_followup:
         push_dynamic_parts.append(
             "对话后续场规则（动态，仅本次推送生效）: 这是用户刚结束对话 3-10 分钟后的轻量续场。"
-            "请使用下方最近一轮对话动态和照片历史作为低权重参考，"
-            "让画面自然推进一小步；不要突然换地点、开新冲突、重置关系或复述上一条主动推送。"
+            "请使用正式聊天上下文里 checkpoint 后保留的最近一轮对话和照片历史作为参考，"
+            "让画面自然推进一小步；若下方出现节拍推进/转场判定，按判定推进，不要停在上一句话附近。"
+            "不要突然换地点、开新冲突、重置关系或复述上一条主动推送。"
             "如果上一条照片也是主动推送，只把它当作避重参考，而不是必须接着演；"
             "不要复用上一条图片 caption、同一句尾音或同一台词结构。"
         )
@@ -1240,11 +1190,6 @@ async def plan_roleplay_image(
             "可以用来保持连续性和避免重复，但不要主动复述系统记录、上一条 caption 或同一动作结构。"
             "若上一条照片来自 scheduled_push/followup_push/manual_push，只把它当作避重参考；"
             "同一地点内应推进到相邻动作或另一个生活细节，而不是复制上一张的语义。"
-        )
-    if is_followup and continuity_context:
-        push_dynamic_parts.append(
-            "最近一轮对话动态参考（checkpoint 后，仅用于承接或避重；不要逐句复述）:\n"
-            f"{continuity_context}"
         )
     if is_push and push_photo_context:
         push_dynamic_parts.append(
@@ -1363,9 +1308,7 @@ async def plan_roleplay_image(
         text = ""
         combined_push_dynamic = "\n".join(part for part in (push_dynamic_context, extra_push_dynamic) if part)
         if is_push and hasattr(service, "_build_chat_context_messages_for_push") and hasattr(service, "_call_llm_messages"):
-            planner_messages = _sanitize_push_planner_messages(
-                service._build_chat_context_messages_for_push(session_id)
-            )
+            planner_messages = service._build_chat_context_messages_for_push(session_id)
             planner_messages.append({"role": "system", "content": system})
             if combined_push_dynamic:
                 planner_messages.append({"role": "system", "content": combined_push_dynamic})
@@ -1400,39 +1343,6 @@ async def plan_roleplay_image(
 
     try:
         parsed = await call_planner()
-        duplicate_caption = _caption_exactly_reused(parsed.get("caption"), forbidden_captions) if is_push else False
-        duplicate_push = _push_plan_repeats_recent(parsed, recent_push_texts) if is_push else False
-        if is_push and (duplicate_caption or duplicate_push):
-            retry_parts: list[str] = []
-            if duplicate_caption:
-                duplicate_caption_text = str(parsed.get("caption") or "").strip()
-                retry_parts.append(
-                    "配文重复修正（动态，仅本次重试生效）: 上一次输出的 caption 与最近图片配文完全相同。"
-                    "保持同一画面意图和位置判断，但必须改写 caption 为另一句中文台词；"
-                    "不要复用 forbidden_caption 的原句、开头、省略号结构或结尾语气。"
-                    f"\n本次重复配文: {duplicate_caption_text}"
-                )
-            if duplicate_push:
-                retry_parts.append(
-                    "推送内容重复修正（动态，仅本次重试生效）: 上一次输出的 scene/caption 与最近主动推送过于相似。"
-                    "必须换一个今日片段里的生活细节、动作结构、道具或情绪角度；"
-                    "不要再次写同一地点里的同一姿势、同一等待动作、同一句近况或同一张自拍构图。"
-                )
-            retry_dynamic = "\n".join(retry_parts)
-            try:
-                retry_parsed = await call_planner(retry_dynamic)
-                retry_caption = str(retry_parsed.get("caption") or "").strip()
-                retry_duplicate_caption = _caption_exactly_reused(retry_caption, forbidden_captions)
-                retry_duplicate_push = _push_plan_repeats_recent(retry_parsed, recent_push_texts)
-                if not retry_duplicate_caption and not retry_duplicate_push:
-                    parsed = retry_parsed
-                elif retry_duplicate_caption and not retry_duplicate_push:
-                    retry_parsed["caption"] = ""
-                    parsed = retry_parsed
-                else:
-                    logger.info("roleplay image plan retry still repeated recent push; keeping original plan")
-            except Exception as retry_exc:
-                logger.info("roleplay image plan duplicate retry failed: %s", retry_exc)
     except Exception as exc:
         logger.error("roleplay image planning failed: %s raw_excerpt=%.300s", exc, raw_text)
         # LLM 返回了纯文本（非 JSON）时，将其作为 scene 兜底，避免推送完全失败。

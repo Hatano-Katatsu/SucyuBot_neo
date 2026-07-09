@@ -818,16 +818,16 @@ class ChatContextMixin:
         return messages
 
     def _build_chat_context_messages_for_push(self, session_id: str, marker: str = "【系统事件】后台上下文前缀占位") -> list[dict[str, Any]]:
-        """复用聊天 prompt 到 checkpoint 为止的稳定前缀，并去掉占位 user。
+        """复用聊天 prompt 前缀和 checkpoint 后历史，并去掉占位 user。
 
-        推送图片规划需要和正常聊天共享静态/低频/半稳定/checkpoint 前缀；
-        checkpoint 之后的最近一轮对话和照片记录由推送动态尾部单独注入，避免每次推送
-        把变化历史放在 planner 前缀里，破坏后续聊天和推送的通用 prefix cache 命中。
+        推送前 checkpoint 会把未折叠窗口收敛到最近一轮用户消息及之后；
+        这些保留下来的对话和照片记录应像正常聊天一样进入 planner 前缀，
+        这样用户继续对话或连续推送时都能共享同一段上下文前缀。
         """
         messages = self._build_chat_messages(
             session_id,
             marker,
-            include_history=False,
+            include_history=True,
             include_dynamic_tail=False,
         )
         if messages and messages[-1].get("role") == "user" and messages[-1].get("content") == marker:

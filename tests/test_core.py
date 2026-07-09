@@ -4111,7 +4111,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._call_llm_messages.assert_awaited()
             messages = svc._call_llm_messages.await_args.args[0]
             joined = "\n".join(m.get("content", "") for m in messages)
-            self.assertNotIn("切，不和姐姐扯了", joined)
+            prefix_joined = "\n".join(m.get("content", "") for m in messages[:-3])
+            self.assertIn("切，不和姐姐扯了", prefix_joined)
+            self.assertNotIn("切，不和姐姐扯了", messages[-2]["content"])
             self.assertIn("最近图片视觉参考", joined)
             self.assertIn("咖啡店告别", joined)
             self.assertIn("主动推送避重规则", joined)
@@ -4417,7 +4419,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("nltag: A compact final nltag.", history_message)
         self.assertIn("caption: 给你看一眼。", history_message)
 
-    def test_followup_push_planner_uses_checkpoint_prefix_and_dynamic_recent_context(self):
+    def test_followup_push_planner_uses_checkpoint_history_prefix_and_dynamic_push_context(self):
         async def run():
             svc = self.make_service()
             sid = "telegram:123"
@@ -4461,11 +4463,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("我先去洗个杯子", joined)
             self.assertIn("A sofa selfie", joined)
             prefix_joined = "\n".join(m.get("content", "") for m in messages[:-3])
-            self.assertNotIn("我先去洗个杯子", prefix_joined)
-            self.assertNotIn("照片历史（系统记录", prefix_joined)
-            self.assertNotIn("caption: ……还算能吃的独食呢~", joined)
+            self.assertIn("我先去洗个杯子", prefix_joined)
+            self.assertIn("照片历史（系统记录", prefix_joined)
+            self.assertIn("caption: ……还算能吃的独食呢~", prefix_joined)
             self.assertIn("对话后续场规则", messages[-2]["content"])
-            self.assertIn("最近一轮对话动态参考", messages[-2]["content"])
+            self.assertNotIn("最近一轮对话动态参考", messages[-2]["content"])
             self.assertIn("最近图片视觉参考", messages[-2]["content"])
             self.assertIn("forbidden_caption_1: ……还算能吃的独食呢~", messages[-2]["content"])
             self.assertIn("推送模式: followup", messages[-1]["content"])
@@ -4474,7 +4476,49 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_push_planner_retries_exact_duplicate_caption_once(self):
+    def test_followup_push_planner_injects_beat_advance_context(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            now = datetime.fromtimestamp(time.time(), timezone.utc)
+            ts = now.timestamp()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+                "scene_stale_minutes": "30",
+                "push_continuity_hours": "2",
+            })
+            state = svc._get_session_state(sid)
+            session_schema.set_last_interaction(state, ts - 45 * 60)
+            session_schema.set_last_message_time(state, ts - 45 * 60)
+            session_schema.set_recent_message_history(state, [
+                {"text": "姐姐把杯子放在水槽边，说等会儿回来。", "time": ts - 45 * 60},
+            ])
+            session_schema.set_chat_history(state, [
+                {"role": "user", "content": "我先去洗个杯子。"},
+                {"role": "assistant", "content": "「嗯，我在沙发这边等你。」"},
+            ])
+            self.mock_image_planner_messages(svc, {
+                "scene": "A pov living-room moment after the cup has been set down.",
+                "view": "pov",
+                "character_location": "home",
+                "user_location": "with_user",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            })
+
+            await plan_roleplay_image(svc, sid, mode="followup", weather_data={"desc": "晴", "temp": "22"}, now=now)
+
+            dynamic_system = svc._call_llm_messages.await_args.args[0][-2]["content"]
+            self.assertIn("对话后续场规则", dynamic_system)
+            self.assertIn("推送场景节拍推进", dynamic_system)
+            self.assertIn("不要停在上一句话附近", dynamic_system)
+
+        asyncio.run(run())
+
+    def test_push_planner_prompts_forbidden_caption_without_retry(self):
         async def run():
             svc = self.make_service()
             sid = "telegram:123"
@@ -4501,26 +4545,24 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "partner_in_frame": False,
                 "device_in_frame": False,
             }
-            second = dict(first, caption="偷吃完还要姐姐哄你一下吗？")
-            svc._call_llm_messages = AsyncMock(side_effect=[
-                {"choices": [{"message": {"content": json.dumps(first, ensure_ascii=False)}}], "usage": {}},
-                {"choices": [{"message": {"content": json.dumps(second, ensure_ascii=False)}}], "usage": {}},
-            ])
+            svc._call_llm_messages = AsyncMock(return_value={
+                "choices": [{"message": {"content": json.dumps(first, ensure_ascii=False)}}],
+                "usage": {},
+            })
             svc._call_llm = AsyncMock()
 
             plan = await plan_roleplay_image(svc, sid, mode="normal", weather_data={"desc": "晴", "temp": "22"})
 
-            self.assertEqual(plan["caption"], "偷吃完还要姐姐哄你一下吗？")
-            self.assertEqual(svc._call_llm_messages.await_count, 2)
-            retry_messages = svc._call_llm_messages.await_args_list[1].args[0]
-            retry_joined = "\n".join(m.get("content", "") for m in retry_messages)
-            self.assertIn("配文重复修正", retry_joined)
-            self.assertIn("本次重复配文: ……还算能吃的独食呢~", retry_joined)
+            self.assertEqual(plan["caption"], "……还算能吃的独食呢~")
+            self.assertEqual(svc._call_llm_messages.await_count, 1)
+            joined = "\n".join(m.get("content", "") for m in svc._call_llm_messages.await_args.args[0])
+            self.assertIn("forbidden_caption_1: ……还算能吃的独食呢~", joined)
+            self.assertNotIn("配文重复修正", joined)
             svc._call_llm.assert_not_awaited()
 
         asyncio.run(run())
 
-    def test_push_planner_retries_semantic_duplicate_push_once(self):
+    def test_push_planner_prompts_recent_push_context_without_retry(self):
         async def run():
             svc = self.make_service()
             sid = "telegram:123"
@@ -4548,24 +4590,20 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "partner_in_frame": False,
                 "device_in_frame": False,
             }
-            second = dict(
-                first,
-                scene="A quiet afternoon cafe table with open drafts, sticky notes, and rain beading on the window.",
-                caption="便签纸挑了浅蓝色，草稿也终于摊开了。",
-                character_location="cafe",
-            )
-            svc._call_llm_messages = AsyncMock(side_effect=[
-                {"choices": [{"message": {"content": json.dumps(first, ensure_ascii=False)}}], "usage": {}},
-                {"choices": [{"message": {"content": json.dumps(second, ensure_ascii=False)}}], "usage": {}},
-            ])
+            svc._call_llm_messages = AsyncMock(return_value={
+                "choices": [{"message": {"content": json.dumps(first, ensure_ascii=False)}}],
+                "usage": {},
+            })
             svc._call_llm = AsyncMock()
 
             plan = await plan_roleplay_image(svc, sid, mode="normal", weather_data={"desc": "晴", "temp": "22"})
 
-            self.assertEqual(plan["caption"], "便签纸挑了浅蓝色，草稿也终于摊开了。")
-            self.assertEqual(svc._call_llm_messages.await_count, 2)
-            retry_joined = "\n".join(m.get("content", "") for m in svc._call_llm_messages.await_args_list[1].args[0])
-            self.assertIn("推送内容重复修正", retry_joined)
+            self.assertEqual(plan["caption"], "早呀，梦到你在后厨给我扎双马尾，醒来头发还是散着。")
+            self.assertEqual(svc._call_llm_messages.await_count, 1)
+            joined = "\n".join(m.get("content", "") for m in svc._call_llm_messages.await_args.args[0])
+            self.assertIn("最近主动推送内容避重", joined)
+            self.assertIn("recent_push_1", joined)
+            self.assertNotIn("推送内容重复修正", joined)
 
         asyncio.run(run())
 
@@ -6710,7 +6748,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("早安推送开启新一天", system)
             self.assertNotIn("短期连续性", user)
             self.assertNotIn("最近已发图片摘要", user)
-            self.assertNotIn("衣服脱了", joined)
+            self.assertIn("衣服脱了", "\n".join(m.get("content", "") for m in messages[:-3]))
+            self.assertNotIn("衣服脱了", system)
+            self.assertNotIn("衣服脱了", user)
             self.assertIn("loose cotton knit cardigan", joined)
             self.assertEqual(plan["clothing_off"], "")
             self.assertEqual(session_schema.get_nudity(state), "")
