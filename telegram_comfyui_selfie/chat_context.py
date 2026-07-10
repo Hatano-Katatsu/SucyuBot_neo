@@ -148,6 +148,13 @@ class ChatContextMixin:
             self._append_photo_history_message(session_id, msg, state=state)
         self._save_session_state(session_id, state)
 
+    def _flush_pending_wardrobe_history_messages(self, session_id: str) -> None:
+        if not hasattr(self, "_take_pending_wardrobe_history_messages"):
+            return
+        pending = self._take_pending_wardrobe_history_messages(session_id)
+        if pending:
+            self._append_chat_history_messages(session_id, pending)
+
     def _trim_last_assistant_history_to_sent(self, session_id: str, full_text: str, sent_text: str) -> None:
         """发送被取消时，只保留 Telegram 已确认发出的 assistant 内容。"""
         full_text = str(full_text or "").strip()
@@ -318,6 +325,7 @@ class ChatContextMixin:
                 await self.send_message(chat_id, "回复生成失败，请稍后重试。")
         except asyncio.CancelledError:
             self._ensure_user_history_committed(session_id, text)
+            self._flush_pending_wardrobe_history_messages(session_id)
             self._flush_pending_photo_history_messages(session_id)
             if reply:
                 self._trim_last_assistant_history_to_sent(session_id, reply, sent_reply)
@@ -339,6 +347,8 @@ class ChatContextMixin:
                 await self._ensure_life_profile(session_id)
             except Exception:
                 logger.debug("ensure life profile failed", exc_info=True)
+        if hasattr(self, "_record_external_wardrobe_change_before_user"):
+            self._record_external_wardrobe_change_before_user(session_id)
         messages = self._build_chat_messages(session_id, user_text)
         extra_system_prompt = str(extra_system_prompt or "").strip()
         if extra_system_prompt:
@@ -599,6 +609,8 @@ class ChatContextMixin:
         new_messages = [{"role": "user", "content": stored_user_text}]
         if content:
             new_messages.append({"role": "assistant", "content": content})
+        if hasattr(self, "_take_pending_wardrobe_history_messages"):
+            new_messages.extend(self._take_pending_wardrobe_history_messages(session_id))
         if hasattr(self, "_take_pending_photo_history_messages"):
             new_messages.extend(self._take_pending_photo_history_messages(session_id))
         history.extend(new_messages)
@@ -662,11 +674,10 @@ class ChatContextMixin:
             "当用户明示或暗示想看你的样子、照片、穿着或当前场景时，应调用 generate_roleplay_image。"
             "工具调用只需要描述这张图要回应的对话意图、情绪和必要元素；"
             "最终画面会由生图辅助模型结合完整上下文整合。不要把工具名、函数调用或内部指令写进聊天文字。"
-            "\n换装持久化（重要）：当剧情里角色【换上新的服装/配饰】、【摘掉当前正在戴着的眼镜/项链/耳环/发夹等配饰】或【换了一套不同的穿搭】时，必须调用 change_appearance 工具记录这次变化，"
-            "这样之后的配图和对话会保持一致。"
-            "但注意：性爱/亲密行为/洗澡中的【临时脱衣/裸体】只是暂时的，场景结束后衣服会穿回来——不要为此调用 change_appearance，"
-            "配图系统会自动处理临时裸露。脱掉外层（如外套、开衫）准备换上另一套时仍要走 change_appearance；"
-            "明确摘掉并继续不戴的配饰（如眼镜、项链）也要走 change_appearance。"
+            "\n换装持久化（重要）：当剧情里角色换上/移除服装配饰、一次更换多件衣物，或衣物变为半脱/破损/脱下/恢复正常时，必须调用 change_appearance；"
+            "每件变化分别写入 items，工具会返回完整最新着装，之后的配图和对话以工具结果及历史中的衣橱状态 system 记录为准。"
+            "性爱/亲密/洗澡中的临时衣物状态也用 set_state 记录，事件结束时再恢复 normal；全裸/脱光用 clear_all。"
+            "明确摘掉并继续不戴的配饰用 remove，换整套才用 mode=replace。"
             "不要只在文字里描述换装却不调用工具。"
             "\n位置持久化：当剧情里角色移动到新地点、或你明确交代了此刻在哪（出门、到公司、回家、到了某店等）时，调用 update_location 工具记录，"
             "这样之后的配图和推送会和你说的位置保持一致，不会无理由瞬移。位置没变就不用调。"
@@ -696,14 +707,23 @@ class ChatContextMixin:
 
         # ── 半稳定状态快照（外型/衣橱/世界模板：中低频变化，独立放在 checkpoint 前）──
         semistable_parts: list[str] = []
-        visual_context = self._chat_visible_appearance_context(session_id)
+        wardrobe_semistable = session_schema.get_wardrobe_semistable_snapshot(state)
+        visual_context = (
+            wardrobe_semistable.get("visual_context", "")
+            if wardrobe_semistable
+            else self._chat_visible_appearance_context(session_id)
+        )
         if visual_context:
             semistable_parts.append(
                 "当前可见外型与配饰（这是你此刻身上真实可见的状态；用户问到外貌、穿搭、配饰或随身物时优先依据这里，"
                 "不要编造不存在的配饰）：\n"
                 f"{visual_context}"
             )
-        closet_context = self._wardrobe_closet_context(session_id) if hasattr(self, "_wardrobe_closet_context") else ""
+        closet_context = (
+            wardrobe_semistable.get("closet_context", "")
+            if wardrobe_semistable
+            else (self._wardrobe_closet_context(session_id) if hasattr(self, "_wardrobe_closet_context") else "")
+        )
         if closet_context:
             semistable_parts.append(
                 "你的衣橱里收藏着这些穿过的衣服（你清楚自己有哪些）：\n"
@@ -939,20 +959,37 @@ class ChatContextMixin:
                 "function": {
                     "name": "change_appearance",
                     "description": (
-                        "剧情中角色换上新的服装、换了一套穿搭、脱下外套/鞋袜等外层，或明确摘掉并继续不戴眼镜/项链/耳环/发夹等配饰时调用，持续生效。"
-                        "支持分层换装：上衣/下装/连衣裙/外套/内衣(胸罩/内裤)/袜/鞋可分别更换；同类自动替换，连衣裙覆盖上下装；也可脱某层或摘配饰。"
-                        "description 用自然语言写变化，如「换上红色旗袍」「脱掉外套」「把浅蓝圆框眼镜摘掉先不戴」。"
-                        "mode 默认 merge；整套从头换才用 replace。"
-                        "性爱/亲密/洗澡中的临时脱衣或裸体不要调用，配图系统会自动处理临时裸露，场景结束后角色会恢复原着装。"
-                        "仅确实换上会继续穿的不同衣服，或摘掉会继续不戴的配饰时调用。"
+                        "角色穿上、移除或改变衣物状态时调用。一次调用可在 items 中处理多件；"
+                        "wear=穿上/替换该槽，remove=真正移除，set_state=半脱/破损/临时脱下/恢复。"
+                        "服装 tags 写简短英文作图标签，name 写中文衣橱名；连衣裙自动覆盖上下装。"
+                        "临时脱衣也必须 set_state，结束时设 normal；全裸/脱光用 clear_all。整套重换才用 mode=replace。"
                     ),
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "description": {"type": "string", "description": "本次外观/换装变化的自然语言描述。"},
                             "mode": {"type": "string", "enum": ["merge", "replace"]},
+                            "clear_all": {"type": "boolean", "description": "全裸/脱光时为 true，清空全部当前衣物。"},
+                            "items": {
+                                "type": "array",
+                                "description": "本轮全部衣物/配饰操作；每件单独一项。",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "slot": {
+                                            "type": "string",
+                                            "enum": ["dress", "top", "bottom", "outerwear", "bra", "panties", "legwear", "footwear", "accessory", "hair", "eyes", "other"],
+                                        },
+                                        "action": {"type": "string", "enum": ["wear", "remove", "set_state", "restore"]},
+                                        "tags": {"type": "string", "description": "wear/remove 的英文视觉标签；remove 整槽时可空。"},
+                                        "name": {"type": "string", "description": "wear 新衣物的简短中文名称。"},
+                                        "state": {"type": "string", "enum": ["normal", "half_off", "damaged", "removed"]},
+                                    },
+                                    "required": ["slot", "action"],
+                                },
+                            },
+                            "description": {"type": "string", "description": "仅兼容旧调用；能写 items 时不要使用。"},
                         },
-                        "required": ["description"],
+                        "required": ["items"],
                     },
                 },
             },
@@ -1040,7 +1077,15 @@ class ChatContextMixin:
                 after_cancel_done=lambda: self._flush_pending_photo_history_messages(session_id),
             )
         if fn == "change_appearance":
-            return await self.tool_change_appearance(session_id, args.get("description", ""), args.get("mode", "merge"))
+            clear_all_raw = args.get("clear_all")
+            clear_all = clear_all_raw is True or str(clear_all_raw or "").strip().lower() in {"1", "true", "yes", "on"}
+            return await self.tool_change_appearance(
+                session_id,
+                args.get("description", ""),
+                args.get("mode", "merge"),
+                items=args.get("items"),
+                clear_all=clear_all,
+            )
         if fn == "update_location":
             return await self.tool_update_location(session_id, args.get("place", ""))
         if fn == "update_user_location":
@@ -1609,8 +1654,10 @@ class ChatContextMixin:
                     await self._extract_long_term_memories_from_messages(session_id, overflow, source_type="checkpoint")
                 except Exception:
                     logger.warning("checkpoint memory extraction failed", exc_info=True)
-            self.app_store.upsert_checkpoint(session_id, character_key, merged, until_id)
             state = self._get_session_state(session_id)
+            if hasattr(self, "_sync_wardrobe_checkpoint_events"):
+                self._sync_wardrobe_checkpoint_events(session_id, state, pending, overflow)
+            self.app_store.upsert_checkpoint(session_id, character_key, merged, until_id)
             session_schema.set_checkpoint_summary(state, merged)
             session_schema.set_checkpoint_message_id(state, until_id)
             session_schema.set_last_checkpoint_at(state, time.time())
@@ -1666,8 +1713,10 @@ class ChatContextMixin:
                 await self._extract_long_term_memories_from_messages(session_id, overflow, source_type="push-checkpoint")
             except Exception:
                 logger.warning("push checkpoint memory extraction failed", exc_info=True)
-            self.app_store.upsert_checkpoint(session_id, key, merged, until_id)
             state = self._get_session_state(session_id)
+            if hasattr(self, "_sync_wardrobe_checkpoint_events"):
+                self._sync_wardrobe_checkpoint_events(session_id, state, pending, overflow)
+            self.app_store.upsert_checkpoint(session_id, key, merged, until_id)
             session_schema.set_checkpoint_summary(state, merged)
             session_schema.set_checkpoint_message_id(state, until_id)
             session_schema.set_last_checkpoint_at(state, time.time())
@@ -1889,6 +1938,8 @@ class ChatContextMixin:
         session_schema.set_checkpoint_summary(state, "")
         session_schema.set_checkpoint_message_id(state, latest_id)
         session_schema.set_last_checkpoint_at(state, time.time() if session_id else 0)
+        session_schema.clear_wardrobe_semistable_snapshot(state)
+        session_schema.clear_wardrobe_observed_snapshot(state)
         self._demote_character_place(state)
         session_schema.clear_nudity(state)  # 新场景：不再续上上一幕的裸体态
 

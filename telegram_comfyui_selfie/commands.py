@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import random
 import re
 import time
@@ -15,6 +16,8 @@ from . import session_schema
 from .command_aliases import resolve_command_alias
 from .defaults import INIT_GUIDE, MENU_BODY, MENU_TOPICS, MENU_TOPIC_ALIASES, OC_CREATE_HELP, SCENES, WEEKDAY_NAMES
 from .memory import format_memory_lines
+
+logger = logging.getLogger(__name__)
 
 
 # /角色 reset uses this full cleanup path. Keep one public hard-reset entry.
@@ -1231,32 +1234,87 @@ class CommandHandlersMixin:
             note += f"\n当前末尾用户消息: {tail[:80]}"
         await self.send_message(chat_id, note)
 
-    def _pop_last_user_for_regenerate(self, session_id: str) -> str:
+    @staticmethod
+    def _last_complete_chat_turn_start(messages: list[dict[str, Any]]) -> int:
+        """找最后一个含 assistant 回复的 user 轮次，允许回复后跟任意 system 记录。"""
+        next_user = len(messages)
+        for index in range(len(messages) - 1, -1, -1):
+            if messages[index].get("role") != "user":
+                continue
+            if any(message.get("role") == "assistant" for message in messages[index + 1:next_user]):
+                return index
+            next_user = index
+        return -1
+
+    async def _pop_last_user_for_regenerate(self, session_id: str) -> str:
         state = self._get_session_state(session_id)
-        history = session_schema.get_chat_history(state)
-        changed = False
-        if history and history[-1].get("role") == "assistant":
-            history.pop()
-            changed = True
-        if not history or history[-1].get("role") != "user":
-            if changed:
-                session_schema.set_chat_history(state, history)
-                session_schema.set_replying_to_selfie(state, False)
-                self._save_session_state(session_id, state)
+        character_key = self._context_character_key(session_id)
+        scope = f"{session_id}\n{character_key}"
+        task = getattr(self, "_checkpoint_tasks", {}).get(scope)
+        if task and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.debug("cancel checkpoint before regenerate rollback failed", exc_info=True)
+
+        history = list(session_schema.get_chat_history(state))
+        memory_start = self._last_complete_chat_turn_start(history)
+        last_user = ""
+        remaining = history[:memory_start] if memory_start >= 0 else history
+        removed = history[memory_start:] if memory_start >= 0 else []
+        if memory_start >= 0:
+            last_user = str(history[memory_start].get("content") or "").strip()
+
+        deleted_rows = 0
+        try:
+            checkpoint = self.app_store.get_checkpoint(session_id, character_key)
+            source_until = int(checkpoint.get("source_until_id") or 0)
+            pending = self.app_store.list_messages(session_id, character_key, after_id=source_until)
+            store_start = self._last_complete_chat_turn_start(pending)
+            if store_start >= 0:
+                store_user = str(pending[store_start].get("content") or "").strip()
+                if store_user:
+                    last_user = store_user
+                deleted_rows = self.app_store.delete_messages_from_id(
+                    session_id,
+                    character_key,
+                    int(pending[store_start].get("id") or 0),
+                )
+                remaining = [
+                    {"role": str(message.get("role") or ""), "content": str(message.get("content") or "")}
+                    for message in pending[:store_start]
+                    if str(message.get("role") or "").strip() and str(message.get("content") or "").strip()
+                ]
+                removed = pending[store_start:]
+        except Exception:
+            logger.warning("regenerate rollback sqlite sync failed", exc_info=True)
+
+        if not last_user:
             return ""
-        last_user = (history.pop().get("content") or "").strip()
-        session_schema.set_chat_history(state, history)
+        session_schema.set_chat_history(state, remaining)
+        if hasattr(self, "_restore_wardrobe_after_history_retract"):
+            self._restore_wardrobe_after_history_retract(state, remaining, removed)
+        if session_schema.get_short_context_start(state) > len(remaining):
+            session_schema.set_short_context_start(state, 0)
         session_schema.set_replying_to_selfie(state, False)
         self._save_session_state(session_id, state)
+        self._ulog(
+            session_id,
+            "ROLLBACK_REGEN",
+            f"撤回最近完整轮次，移除内存 {max(0, len(history) - len(remaining))} 条、SQLite {deleted_rows} 条",
+        )
         return last_user
 
     async def _regenerate_last_reply(self, chat_id, session_id, *, instruction: str = "", source: str = "REGEN"):
-        last_user = self._pop_last_user_for_regenerate(session_id)
-        if not last_user:
-            await self.send_message(chat_id, "没有可重答的上一条用户消息。")
-            return
         if not self.has_llm_config("chat", session_id):
             await self.send_message(chat_id, "聊天模型未配置，无法重答。")
+            return
+        last_user = await self._pop_last_user_for_regenerate(session_id)
+        if not last_user:
+            await self.send_message(chat_id, "没有可撤回重答的上一轮用户消息。")
             return
         instruction = (instruction or "").strip()
         extra_system = ""

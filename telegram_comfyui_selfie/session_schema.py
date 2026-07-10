@@ -218,6 +218,10 @@ STATE_SCHEMA: dict[str, Field] = {
         "last_message_time": 0.0,
         "character_history_summary": "",
         "life_plan": {},
+        # 工具换装后、checkpoint 前冻结的衣橱半稳定层文本；最新状态由历史 system 事件承接。
+        "wardrobe_semistable_snapshot": {},
+        # 上一次已进入聊天上下文的衣橱状态，用于识别 WebUI/命令在两轮之间的直接修改。
+        "wardrobe_observed_snapshot": {},
     }, reset_preserved=False),
     "life_plan": Field(T, default={}, reset_preserved=True),
 }
@@ -795,6 +799,8 @@ _CONTEXT_DEFAULT: dict[str, Any] = {
     "last_message_time": 0.0,
     "character_history_summary": "",
     "life_plan": {},
+    "wardrobe_semistable_snapshot": {},
+    "wardrobe_observed_snapshot": {},
 }
 _LEGACY_CONTEXT_FLAT_KEYS = (
     "recent_message_history", "chat_history", "checkpoint_summary",
@@ -804,7 +810,7 @@ _LEGACY_CONTEXT_FLAT_KEYS = (
     "last_sent_selfie_source_description", "last_sent_selfie_replied",
     "rounds_since_image", "short_context_start", "short_context_reset_time",
     "short_context_reset_reason", "last_message_text", "last_message_time",
-    "character_history_summary", "life_plan",
+    "character_history_summary", "life_plan", "wardrobe_semistable_snapshot", "wardrobe_observed_snapshot",
 )
 
 
@@ -887,6 +893,59 @@ def get_chat_history(state):
 
 def set_chat_history(state, value):
     _context_set(state, "chat_history", list(value or []))
+
+
+def get_wardrobe_semistable_snapshot(state: dict[str, Any]) -> dict[str, Any]:
+    value = _context_get(state, "wardrobe_semistable_snapshot")
+    if not isinstance(value, dict):
+        return {}
+    if not value.get("active"):
+        return {}
+    snapshot: dict[str, Any] = {
+        "active": "1",
+        "visual_context": str(value.get("visual_context") or ""),
+        "closet_context": str(value.get("closet_context") or ""),
+        "state_signature": str(value.get("state_signature") or ""),
+    }
+    if isinstance(value.get("wardrobe"), dict):
+        snapshot["wardrobe"] = dict(value["wardrobe"])
+    if isinstance(value.get("item_states"), dict):
+        snapshot["item_states"] = dict(value["item_states"])
+    snapshot["outfit"] = str(value.get("outfit") or "")
+    snapshot["nudity"] = str(value.get("nudity") or "")
+    return snapshot
+
+
+def set_wardrobe_semistable_snapshot(state: dict[str, Any], value: Any) -> None:
+    raw = value if isinstance(value, dict) else {}
+    normalized = ({
+        "active": True,
+        "visual_context": str(raw.get("visual_context") or ""),
+        "closet_context": str(raw.get("closet_context") or ""),
+        "state_signature": str(raw.get("state_signature") or ""),
+        "wardrobe": dict(raw.get("wardrobe") or {}) if isinstance(raw.get("wardrobe"), dict) else {},
+        "item_states": dict(raw.get("item_states") or {}) if isinstance(raw.get("item_states"), dict) else {},
+        "outfit": str(raw.get("outfit") or ""),
+        "nudity": str(raw.get("nudity") or ""),
+    } if raw else {})
+    _context_set(state, "wardrobe_semistable_snapshot", normalized)
+
+
+def clear_wardrobe_semistable_snapshot(state: dict[str, Any]) -> None:
+    _context_set(state, "wardrobe_semistable_snapshot", {})
+
+
+def get_wardrobe_observed_snapshot(state: dict[str, Any]) -> dict[str, str]:
+    value = _context_get(state, "wardrobe_observed_snapshot")
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def set_wardrobe_observed_snapshot(state: dict[str, Any], value: Any) -> None:
+    _context_set(state, "wardrobe_observed_snapshot", dict(value) if isinstance(value, dict) else {})
+
+
+def clear_wardrobe_observed_snapshot(state: dict[str, Any]) -> None:
+    _context_set(state, "wardrobe_observed_snapshot", {})
 
 
 # ── checkpoint ──

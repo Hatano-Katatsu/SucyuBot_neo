@@ -282,6 +282,18 @@ class AppStateStore:
             conn.commit()
         return True
 
+    def delete_messages_from_id(self, session_id: str, character_key: str, start_id: int) -> int:
+        """删除指定角色从 start_id 起的聊天尾部，供撤回/重答保持 SQLite 与内存历史一致。"""
+        if not session_id or int(start_id or 0) <= 0:
+            return 0
+        with closing(self._connect()) as conn:
+            cur = conn.execute(
+                "DELETE FROM chat_messages WHERE session_id = ? AND character_key = ? AND id >= ?",
+                (session_id, character_key or "", int(start_id)),
+            )
+            conn.commit()
+        return max(0, int(cur.rowcount or 0))
+
     def list_messages(
         self,
         session_id: str,

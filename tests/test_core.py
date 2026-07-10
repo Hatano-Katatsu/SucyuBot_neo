@@ -1947,7 +1947,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         tools = svc._chat_tools_schema()
         text = json.dumps(tools, ensure_ascii=False, separators=(",", ":"))
 
-        self.assertLess(len(text), 1900)
+        self.assertLess(len(text), 2600)
         self.assertIn("generate_roleplay_image", text)
         self.assertIn("change_appearance", text)
         self.assertIn("update_location", text)
@@ -1957,13 +1957,15 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             "portrait=别人帮角色拍",
             "NTR",
             "只有mirror允许镜子和手机同框",
-            "连衣裙覆盖上下装",
-            "胸罩/内裤",
-            "临时脱衣或裸体不要调用",
-            "场景结束后角色会恢复原着装",
+            "一次调用可在 items 中处理多件",
+            "set_state=半脱/破损/临时脱下/恢复",
+            "临时脱衣也必须 set_state",
+            "全裸/脱光用 clear_all",
             "无法判断不要编造",
         ):
             self.assertIn(required, text)
+        self.assertIn('"items":{"type":"array"', text)
+        self.assertIn('"state":{"type":"string","enum":["normal","half_off","damaged","removed"]}', text)
 
     def test_chat_tools_schema_includes_search_web_only_when_enabled(self):
         """搜索工具按配置挂载：默认关不进 schema（也不动静态前缀）；开了但没 key 同样不挂。"""
@@ -4254,6 +4256,164 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertFalse(ok)
             self.assertTrue(any(kind == "PUSH" and "telegram down" in text for kind, text in logs))
             self.assertEqual(session_schema.get_sent_photos_history(svc._get_session_state(sid)), [])
+
+        asyncio.run(run())
+
+    def test_rollback_with_prompt_skips_trailing_system_and_truncates_sqlite(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = svc._context_character_key(sid)
+            svc.send_message = AsyncMock()
+            svc.send_action = AsyncMock()
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "chat" and session_id == sid
+            messages = [
+                {"role": "system", "content": "本轮用户消息前的衣橱状态，应保留"},
+                {"role": "user", "content": "上一条用户消息"},
+                {"role": "assistant", "content": "需要撤回的旧回复"},
+                {"role": "system", "content": "照片历史：旧回复发出的图片"},
+                {"role": "system", "content": "衣橱状态：旧回复产生的状态"},
+            ]
+            state = svc._get_session_state(sid)
+            session_schema.set_chat_history(state, messages)
+            svc.app_store.append_messages(sid, key, messages)
+            svc._save_session_state(sid, state)
+            captured = {}
+
+            async def fake_run_roleplay(chat_id, session_id, user_text, **kwargs):
+                captured["user_text"] = user_text
+                captured["kwargs"] = kwargs
+                return "重答回复"
+
+            svc.run_roleplay_chat = fake_run_roleplay
+            await svc.cmd_rollback(1, sid, "语气更自然")
+
+            self.assertEqual(captured["user_text"], "上一条用户消息")
+            self.assertEqual(captured["kwargs"]["history_user_text"], "上一条用户消息")
+            self.assertEqual(session_schema.get_chat_history(state), [messages[0]])
+            rows = svc.app_store.list_messages(sid, key)
+            self.assertEqual([(row["role"], row["content"]) for row in rows], [
+                ("system", "本轮用户消息前的衣橱状态，应保留"),
+            ])
+            self.assertEqual(svc.send_message.await_args.args[1], "重答回复")
+
+        asyncio.run(run())
+
+    def test_consecutive_rollback_with_prompt_retracts_each_regenerated_turn(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = svc._context_character_key(sid)
+            svc.send_message = AsyncMock()
+            svc.send_action = AsyncMock()
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "chat" and session_id == sid
+            initial = [
+                {"role": "user", "content": "同一句用户消息"},
+                {"role": "assistant", "content": "最初回复"},
+                {"role": "system", "content": "照片历史：最初回复的尾随记录"},
+            ]
+            state = svc._get_session_state(sid)
+            session_schema.set_chat_history(state, initial)
+            svc.app_store.append_messages(sid, key, initial)
+            svc._save_session_state(sid, state)
+            calls = []
+
+            async def fake_run_roleplay(chat_id, session_id, user_text, **kwargs):
+                reply = f"第{len(calls) + 1}次重答"
+                calls.append((user_text, kwargs.get("extra_system_prompt", "")))
+                svc._append_chat_history_messages(session_id, [
+                    {"role": "user", "content": kwargs.get("history_user_text") or user_text},
+                    {"role": "assistant", "content": reply},
+                    {"role": "system", "content": f"照片历史：{reply}的尾随记录"},
+                ])
+                return reply
+
+            svc.run_roleplay_chat = fake_run_roleplay
+            await svc.cmd_rollback(1, sid, "第一次扮演提示")
+            await svc.cmd_rollback(1, sid, "第二次扮演提示")
+
+            self.assertEqual([call[0] for call in calls], ["同一句用户消息", "同一句用户消息"])
+            self.assertIn("第一次扮演提示", calls[0][1])
+            self.assertIn("第二次扮演提示", calls[1][1])
+            history = session_schema.get_chat_history(state)
+            self.assertEqual([message["content"] for message in history], [
+                "同一句用户消息",
+                "第2次重答",
+                "照片历史：第2次重答的尾随记录",
+            ])
+            rows = svc.app_store.list_messages(sid, key)
+            self.assertEqual([row["content"] for row in rows], [
+                "同一句用户消息",
+                "第2次重答",
+                "照片历史：第2次重答的尾随记录",
+            ])
+            sent = [call.args[1] for call in svc.send_message.await_args_list]
+            self.assertEqual(sent, ["第1次重答", "第2次重答"])
+
+        asyncio.run(run())
+
+    def test_rollback_with_prompt_restores_wardrobe_before_removed_tool_event(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = svc._context_character_key(sid)
+            svc.send_message = AsyncMock()
+            svc.send_action = AsyncMock()
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "chat" and session_id == sid
+            state = svc._get_session_state(sid)
+            session_schema.set_wardrobe(state, {"top": "white blouse", "bottom": "blue jeans"})
+            session_schema.set_outfit(state, "white blouse, blue jeans")
+            before_change = svc._wardrobe_state_snapshot(sid, state)
+            session_schema.set_wardrobe_semistable_snapshot(state, before_change)
+
+            session_schema.set_wardrobe(state, {"dress": "red dress"})
+            session_schema.set_outfit(state, "red dress")
+            after_change = svc._wardrobe_state_snapshot(sid, state)
+            session_schema.set_wardrobe_observed_snapshot(state, after_change)
+            event = svc._format_wardrobe_state_system_message(after_change)
+            messages = [
+                {"role": "user", "content": "换成红裙"},
+                {"role": "assistant", "content": "已经换好了。"},
+                event,
+            ]
+            session_schema.set_chat_history(state, messages)
+            svc.app_store.append_messages(sid, key, messages)
+            svc._save_session_state(sid, state)
+
+            async def fake_run_roleplay(*args, **kwargs):
+                return "重新回答"
+
+            svc.run_roleplay_chat = fake_run_roleplay
+            await svc.cmd_rollback(1, sid, "不要真的换衣服")
+
+            self.assertEqual(session_schema.get_wardrobe(state), {
+                "top": "white blouse",
+                "bottom": "blue jeans",
+            })
+            self.assertEqual(session_schema.get_outfit(state), "white blouse, blue jeans")
+            self.assertEqual(session_schema.get_wardrobe_semistable_snapshot(state), {})
+            self.assertEqual(session_schema.get_wardrobe_observed_snapshot(state).get("state_signature"), before_change["state_signature"])
+
+        asyncio.run(run())
+
+    def test_regenerate_without_chat_model_preserves_history(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.send_message = AsyncMock()
+            svc.has_llm_config = lambda purpose, session_id="": False
+            state = svc._get_session_state(sid)
+            original = [
+                {"role": "user", "content": "不要丢掉"},
+                {"role": "assistant", "content": "原回复"},
+                {"role": "system", "content": "尾随记录"},
+            ]
+            session_schema.set_chat_history(state, original)
+
+            await svc.cmd_rollback(1, sid, "换个语气")
+
+            self.assertEqual(session_schema.get_chat_history(state), original)
+            self.assertIn("模型未配置", svc.send_message.await_args.args[1])
 
         asyncio.run(run())
 
@@ -10825,6 +10985,272 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(result.get("status"), "no_op")
             self.assertIn("Recent diaries:", captured["user"])
             self.assertIn("Editable memories:", captured["user"])
+
+        asyncio.run(run())
+
+    def test_checkpoint_restores_latest_wardrobe_system_event(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = svc._context_character_key(sid)
+            state = svc._get_session_state(sid)
+            session_schema.set_wardrobe(state, {"dress": "red dress", "footwear": "black heels"})
+            session_schema.set_outfit(state, "red dress, black heels")
+            session_schema.set_wardrobe_item_state(state, "dress", "damaged")
+            expected = svc._wardrobe_state_snapshot(sid, state)
+            event = svc._format_wardrobe_state_system_message(expected)
+
+            messages = [
+                {"role": "user", "content": "换好衣服了吗"},
+                {"role": "assistant", "content": "换好了。"},
+                event,
+                {"role": "user", "content": "我们继续聊"},
+                {"role": "assistant", "content": "好。"},
+            ]
+            svc.app_store.append_messages(sid, key, messages)
+            session_schema.set_chat_history(state, messages)
+            session_schema.set_wardrobe_semistable_snapshot(state, {
+                "visual_context": "旧半稳定穿搭",
+                "closet_context": "旧衣橱",
+            })
+            # 模拟运行态衣橱数据丢失/陈旧；checkpoint 应以最新 system 快照校准。
+            session_schema.set_wardrobe(state, {"top": "stale shirt"})
+            session_schema.set_outfit(state, "stale shirt")
+            session_schema.clear_wardrobe_item_states(state)
+
+            svc._summarize_checkpoint = AsyncMock(return_value="CHECKPOINT SUMMARY")
+            svc._extract_long_term_memories_from_messages = AsyncMock()
+            await svc._run_context_checkpoint(sid, key, keep=2, force=True)
+
+            self.assertEqual(session_schema.get_wardrobe(state), {
+                "dress": "red dress",
+                "footwear": "black heels",
+            })
+            self.assertEqual(session_schema.get_wardrobe_item_states(state), {"dress": "damaged"})
+            self.assertEqual(session_schema.get_outfit(state), "red dress, black heels")
+            self.assertEqual(session_schema.get_wardrobe_semistable_snapshot(state), {})
+            self.assertEqual([message["content"] for message in session_schema.get_chat_history(state)], ["我们继续聊", "好。"])
+
+        asyncio.run(run())
+
+    def test_checkpoint_uses_latest_kept_wardrobe_event_and_advances_frozen_baseline(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = svc._context_character_key(sid)
+            state = svc._get_session_state(sid)
+
+            session_schema.set_wardrobe(state, {"top": "white blouse"})
+            session_schema.set_outfit(state, "white blouse")
+            first = svc._wardrobe_state_snapshot(sid, state)
+            first_event = svc._format_wardrobe_state_system_message(first)
+            session_schema.set_wardrobe(state, {"dress": "green dress"})
+            session_schema.set_outfit(state, "green dress")
+            second = svc._wardrobe_state_snapshot(sid, state)
+            second_event = svc._format_wardrobe_state_system_message(second)
+
+            messages = [
+                {"role": "user", "content": "第一轮"},
+                {"role": "assistant", "content": "第一轮回复"},
+                first_event,
+                {"role": "user", "content": "第二轮"},
+                {"role": "assistant", "content": "第二轮回复"},
+                second_event,
+            ]
+            svc.app_store.append_messages(sid, key, messages)
+            session_schema.set_chat_history(state, messages)
+            session_schema.set_wardrobe_semistable_snapshot(state, {
+                "visual_context": "更早的穿搭",
+                "closet_context": "",
+                "state_signature": "older",
+            })
+            session_schema.set_wardrobe(state, {"top": "stale shirt"})
+            session_schema.set_outfit(state, "stale shirt")
+            svc._summarize_checkpoint = AsyncMock(return_value="CHECKPOINT SUMMARY")
+            svc._extract_long_term_memories_from_messages = AsyncMock()
+
+            await svc._run_context_checkpoint(sid, key, keep=3, force=True)
+
+            self.assertEqual(session_schema.get_wardrobe(state), {"dress": "green dress"})
+            frozen = session_schema.get_wardrobe_semistable_snapshot(state)
+            self.assertEqual(frozen.get("state_signature"), first.get("state_signature"))
+            self.assertIn("white blouse", frozen.get("visual_context", ""))
+            kept = session_schema.get_chat_history(state)
+            self.assertEqual([message["role"] for message in kept], ["user", "assistant", "system"])
+            self.assertEqual(
+                svc._parse_wardrobe_state_system_message(kept[-1]).get("state_signature"),
+                second.get("state_signature"),
+            )
+
+        asyncio.run(run())
+
+    def test_checkpoint_does_not_roll_back_unrecorded_webui_wardrobe_change(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = svc._context_character_key(sid)
+            state = svc._get_session_state(sid)
+            session_schema.set_wardrobe(state, {"top": "white blouse"})
+            session_schema.set_outfit(state, "white blouse")
+            old_snapshot = svc._wardrobe_state_snapshot(sid, state)
+            session_schema.set_wardrobe_observed_snapshot(state, old_snapshot)
+            event = svc._format_wardrobe_state_system_message(old_snapshot)
+            messages = [
+                {"role": "user", "content": "旧轮"},
+                {"role": "assistant", "content": "旧回复"},
+                event,
+                {"role": "user", "content": "保留轮"},
+                {"role": "assistant", "content": "保留回复"},
+            ]
+            svc.app_store.append_messages(sid, key, messages)
+            session_schema.set_chat_history(state, messages)
+
+            # WebUI 已写入更新状态，但下一条用户消息尚未来，因此还没有新 system 事件。
+            session_schema.set_wardrobe(state, {"dress": "new webui dress"})
+            session_schema.set_outfit(state, "new webui dress")
+            svc._summarize_checkpoint = AsyncMock(return_value="CHECKPOINT SUMMARY")
+            svc._extract_long_term_memories_from_messages = AsyncMock()
+
+            await svc._run_context_checkpoint(sid, key, keep=2, force=True)
+
+            self.assertEqual(session_schema.get_wardrobe(state), {"dress": "new webui dress"})
+            self.assertEqual(session_schema.get_outfit(state), "new webui dress")
+            self.assertTrue(svc._record_external_wardrobe_change_before_user(sid))
+            latest = svc._parse_wardrobe_state_system_message(session_schema.get_chat_history(state)[-1])
+            self.assertEqual(latest["wardrobe"], {"dress": "new webui dress"})
+
+        asyncio.run(run())
+
+    def test_structured_wardrobe_tool_updates_multiple_items_and_states(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            state = svc._get_session_state(sid)
+            session_schema.set_wardrobe(state, {
+                "top": "white blouse",
+                "bottom": "blue jeans",
+                "outerwear": "gray cardigan",
+            })
+            session_schema.set_outfit(state, "white blouse, blue jeans, gray cardigan")
+            svc._classify_wardrobe_change = AsyncMock(side_effect=AssertionError("structured tool must not reclassify"))
+
+            result = await svc.tool_change_appearance(sid, items=[
+                {"slot": "top", "action": "wear", "tags": "red silk blouse", "name": "红色丝绸衬衫"},
+                {"slot": "footwear", "action": "wear", "tags": "black ankle boots", "name": "黑色短靴"},
+                {"slot": "outerwear", "action": "remove"},
+                {"slot": "bottom", "action": "set_state", "state": "damaged"},
+            ])
+
+            state = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_wardrobe(state), {
+                "top": "red silk blouse",
+                "bottom": "blue jeans",
+                "footwear": "black ankle boots",
+            })
+            self.assertEqual(session_schema.get_wardrobe_item_states(state), {"bottom": "damaged"})
+            self.assertIn("red silk blouse", result)
+            self.assertIn("bottom=damaged", result)
+            self.assertIn("state_json:", result)
+            svc._classify_wardrobe_change.assert_not_awaited()
+            pending = svc._take_pending_wardrobe_history_messages(sid)
+            self.assertEqual(len(pending), 1)
+            parsed = svc._parse_wardrobe_state_system_message(pending[0])
+            self.assertEqual(parsed["wardrobe"]["footwear"], "black ankle boots")
+            self.assertEqual(parsed["item_states"], {"bottom": "damaged"})
+
+        asyncio.run(run())
+
+    def test_wardrobe_tool_appends_round_end_system_event_and_keeps_semistable_prefix(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            state = svc._get_session_state(sid)
+            session_schema.set_wardrobe(state, {"top": "white blouse", "bottom": "blue jeans"})
+            session_schema.set_outfit(state, "white blouse, blue jeans")
+            calls = {"count": 0}
+
+            async def fake_messages(messages, **kwargs):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    return {"choices": [{"message": {"content": "", "tool_calls": [{
+                        "id": "wardrobe-1",
+                        "function": {
+                            "name": "change_appearance",
+                            "arguments": json.dumps({
+                                "items": [
+                                    {"slot": "top", "action": "wear", "tags": "red blouse", "name": "红衬衫"},
+                                    {"slot": "bottom", "action": "set_state", "state": "half_off"},
+                                ]
+                            }, ensure_ascii=False),
+                        },
+                    }]}}]}
+                return {"choices": [{"message": {"content": "（她整理了一下衣摆。）\n\n「这样呢？」"}}]}
+
+            svc._call_llm_messages = fake_messages
+            svc._ensure_life_profile = AsyncMock(return_value={})
+            svc._judge_image_moment = AsyncMock(return_value=None)
+            svc._update_character_place_from_text = AsyncMock()
+
+            reply = await svc.run_roleplay_chat(1, sid, "换件红上衣，把牛仔裤褪下一半")
+            self.assertIn("这样呢", reply)
+            history = session_schema.get_chat_history(state)
+            self.assertEqual([message["role"] for message in history], ["user", "assistant", "system"])
+            parsed = svc._parse_wardrobe_state_system_message(history[-1])
+            self.assertEqual(parsed["wardrobe"]["top"], "red blouse")
+            self.assertEqual(parsed["item_states"], {"bottom": "half_off"})
+
+            messages = svc._build_chat_messages(sid, "继续")
+            semistable = next(
+                message["content"] for message in messages
+                if message.get("role") == "system" and "当前可见外型与配饰" in message.get("content", "")
+            )
+            self.assertIn("white blouse", semistable)
+            self.assertNotIn("red blouse", semistable)
+            historical_event = next(
+                message["content"] for message in messages
+                if message.get("role") == "system" and message.get("content", "").startswith("衣橱状态（系统记录")
+            )
+            self.assertIn("red blouse", historical_event)
+            await asyncio.sleep(0)
+
+        asyncio.run(run())
+
+    def test_webui_wardrobe_change_is_recorded_before_next_user_message(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            state = svc._get_session_state(sid)
+            session_schema.set_wardrobe(state, {"top": "white blouse", "bottom": "blue jeans"})
+            session_schema.set_outfit(state, "white blouse, blue jeans")
+            self.assertFalse(svc._record_external_wardrobe_change_before_user(sid))
+
+            # 模拟 WebUI 在两轮聊天之间直接修改当前穿搭和部件状态。
+            session_schema.set_wardrobe(state, {"dress": "black cocktail dress"})
+            session_schema.set_outfit(state, "black cocktail dress")
+            session_schema.set_wardrobe_item_state(state, "dress", "damaged")
+            self.assertTrue(svc._record_external_wardrobe_change_before_user(sid))
+            self.assertFalse(svc._record_external_wardrobe_change_before_user(sid))
+
+            before_chat = session_schema.get_chat_history(state)
+            self.assertEqual(len(before_chat), 1)
+            self.assertEqual(before_chat[0]["role"], "system")
+            parsed = svc._parse_wardrobe_state_system_message(before_chat[0])
+            self.assertEqual(parsed["wardrobe"], {"dress": "black cocktail dress"})
+            self.assertEqual(parsed["item_states"], {"dress": "damaged"})
+
+            messages = svc._build_chat_messages(sid, "你换好了吗")
+            event_index = next(
+                index for index, message in enumerate(messages)
+                if message.get("content", "").startswith("衣橱状态（系统记录")
+            )
+            self.assertLess(event_index, len(messages) - 1)
+            self.assertEqual(messages[-1], {"role": "user", "content": "你换好了吗"})
+            semistable = next(
+                message["content"] for message in messages
+                if message.get("role") == "system" and "当前可见外型与配饰" in message.get("content", "")
+            )
+            self.assertIn("white blouse", semistable)
+            self.assertNotIn("black cocktail dress", semistable)
 
         asyncio.run(run())
 

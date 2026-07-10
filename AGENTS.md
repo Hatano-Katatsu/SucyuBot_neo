@@ -243,6 +243,16 @@ telegram_comfyui_selfie/
 13. **用户画像进入画图规划**：非推送图像 planner 会单独注入“用户画像（仅当用户/伴侣身体明确入画时参考）”上下文，允许其中的用户外貌信息用于可见用户局部，但提示词明确不得因为画像存在就强行让用户入画，也不得写进角色 `new_appearance_tags`。推送 planner 复用正式聊天前缀，置顶用户画像会随长期记忆前缀进入。
 14. **本轮追加验证**：新增/更新测试覆盖亲密 POV 不强制用户身体、女性用户显式入画不走男性兜底、未知用户性别走中性伴侣描述、用户画像置顶与角色隔离、dream 整理后合并用户画像、用户画像作为条件上下文进入画图规划、WebUI 用户画像类型和样式。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 406 tests in 10.172s`，`OK (skipped=1)`。
 
+## 今日变更（2026-07-10）
+
+1. **远端状态确认**：本轮执行 `git fetch --prune origin`，本地 `main` 与 `origin/main` 均位于 `7939035`，工作区起始状态干净，远端没有需要拉取的新提交。
+2. **结构化批量换装工具**：保留 `change_appearance` 工具名兼容旧调用，新增 `items[]` 批量协议；单次可对多件服装/配饰执行 `wear`、`remove`、`set_state`、`restore`，支持 `normal` / `half_off` / `damaged` / `removed` 状态和 `clear_all` 全裸清空。结构化调用直接写分槽衣橱，不再额外调用换装分类 LLM；旧 `description` 仍保留 LLM 主分类、关键词兜底路径。成功结果返回完整最新着装和状态 JSON。
+3. **衣橱历史事件与前缀稳定**：工具换装立即更新真实衣橱，但 checkpoint 前的半稳定外观/衣橱层保持原基线；本轮回复结束后追加唯一的“衣橱状态” system 快照。WebUI/命令在两轮之间直接改衣橱时，下一轮正式聊天前比较状态签名，若有变化则在最新 user 消息之前持久化同格式 system 快照，且相同状态不会重复插入。
+4. **checkpoint 衣橱协作**：普通 checkpoint 和推送前 checkpoint 都解析衣橱 system 事件；真实衣橱按未折叠窗口中的最新事件校准，半稳定层只推进到已折叠的最后事件。若检测到 WebUI 已写入但尚未生成事件的更新状态，不用旧历史快照回滚；待下一轮聊天再补最新事件。连续事件全部折叠后才解除冻结，使半稳定层与 checkpoint 一起归位。
+5. **本轮验证**：新增/更新测试覆盖批量多件换装、状态更新、轮末 system 注入、WebUI 变更在 user 前注入且避重、checkpoint 全折叠/部分折叠采用最新事件、未记录 WebUI 更新不被旧事件回滚和结构化工具 schema。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 412 tests in 11.149s`，`OK (skipped=1)`。
+6. **撤回扮演提示修复**：`/撤回 <扮演提示>` / `/重答 [扮演提示]` 不再要求历史严格以相邻的 `user, assistant` 结尾；现在按完整轮次边界跨过照片历史、衣橱状态等尾随 system 消息，撤回最近一个含 assistant 回复的 user 轮次及其全部派生 system 记录。撤回前会取消同角色待执行的 checkpoint，并同步截断内存 `chat_history` 与 SQLite 未折叠 `chat_messages`，避免 checkpoint 把旧回复重新带回；聊天模型未配置时不再先删除历史。连续多次撤回会稳定命中刚生成的新回复。
+7. **撤回衣橱副作用协作**：衣橱半稳定快照保留结构化 wardrobe/item_states；若被撤回轮次含换装 system 事件，会恢复到撤回前基线或剩余历史中的最新衣橱事件，再进行重答，避免旧回复已撤回但真实生图仍沿用其换装结果。新增测试覆盖尾随多条 system、SQLite 截断、连续两次带提示撤回、无模型保留历史和换装副作用恢复；全量结果 `Ran 416 tests in 12.186s`，`OK (skipped=1)`。
+
 ## 今日变更（2026-07-06）
 
 1. **拉取远端更新**：本轮先从 `origin/main` 快进到 `22a3fbf`，在最新代码上继续处理 Telegram 图片输入、续场推送、life plan 和 dream 摘要链路。

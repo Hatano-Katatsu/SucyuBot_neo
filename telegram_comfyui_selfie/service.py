@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import re
@@ -36,6 +37,10 @@ from .time_context import build_time_context, format_light_guard, format_time_co
 from .world_runtime import WorldRuntimeMixin
 
 logger = logging.getLogger(__name__)
+
+WARDROBE_STATE_EVENT_PREFIX = (
+    "衣橱状态（系统记录，保留到 checkpoint/历史溢出统一裁剪；这是当前真实着装，后续对话与配图以此为准，不要主动复述）："
+)
 
 # 日志脱敏：vision 请求会把图片编码成 base64 data_url 放进 messages，
 # 落盘到 llm_debug.json / 用户 ERROR 日志时会污染日志并放大体积。
@@ -2997,14 +3002,375 @@ class TelegramComfyUIService(
         r"\b(?:换[上穿]|穿[上回]|put\s+on|wear|change\s+(?:into|to)|换上)", re.IGNORECASE
     )
 
-    async def tool_change_appearance(self, session_id: str, description: str = "", mode: str = "merge") -> str:
+    @staticmethod
+    def _coerce_wardrobe_tool_items(value: Any) -> list[dict[str, Any]]:
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return []
+        if isinstance(value, dict):
+            value = [value]
+        if not isinstance(value, list):
+            return []
+        return [dict(item) for item in value if isinstance(item, dict)]
+
+    def _wardrobe_state_snapshot(self, session_id: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
+        state = state if state is not None else self._get_session_state(session_id)
+        wardrobe = {
+            slot: appearance_rules.normalize_appearance_text(str(value or ""))
+            for slot, value in self._get_wardrobe(state).items()
+            if slot in appearance_rules.WARDROBE_RENDER_ORDER and str(value or "").strip()
+        }
+        states = {
+            slot: value
+            for slot, value in session_schema.get_wardrobe_item_states(state).items()
+            if slot in appearance_rules.WARDROBE_CLOTHING_SLOTS and slot in wardrobe
+        }
+        nudity = session_schema.get_nudity(state)
+        visual_context = self._chat_visible_appearance_context(session_id)
+        closet_context = self._wardrobe_closet_context(session_id)
+        signature_payload = {
+            "wardrobe": wardrobe,
+            "item_states": states,
+            "nudity": nudity,
+            "visual_context": visual_context,
+            "closet_context": closet_context,
+        }
+        signature = hashlib.sha1(
+            json.dumps(signature_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest()[:16]
+        return {
+            "version": 1,
+            "wardrobe": wardrobe,
+            "item_states": states,
+            "outfit": appearance_rules.render_wardrobe(wardrobe),
+            "nudity": nudity,
+            "state_signature": signature,
+            "visual_context": visual_context,
+            "closet_context": closet_context,
+        }
+
+    @staticmethod
+    def _format_wardrobe_state_system_message(snapshot: dict[str, Any]) -> dict[str, str]:
+        return {
+            "role": "system",
+            "content": (
+                f"{WARDROBE_STATE_EVENT_PREFIX}\n"
+                f"state_json: {json.dumps(snapshot, ensure_ascii=False, separators=(',', ':'))}"
+            ),
+        }
+
+    @staticmethod
+    def _parse_wardrobe_state_system_message(message: dict[str, Any]) -> dict[str, Any] | None:
+        if str(message.get("role") or "") != "system":
+            return None
+        content = str(message.get("content") or "")
+        if not content.startswith(WARDROBE_STATE_EVENT_PREFIX) or "state_json:" not in content:
+            return None
+        try:
+            parsed = json.loads(content.split("state_json:", 1)[1].strip())
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    def _capture_wardrobe_semistable_before_tool(self, session_id: str, state: dict[str, Any]) -> bool:
+        if session_schema.get_wardrobe_semistable_snapshot(state):
+            return False
+        baseline = session_schema.get_wardrobe_observed_snapshot(state)
+        if not baseline:
+            baseline = self._wardrobe_state_snapshot(session_id, state)
+        session_schema.set_wardrobe_semistable_snapshot(state, baseline)
+        return True
+
+    def _record_external_wardrobe_change_before_user(self, session_id: str) -> bool:
+        """WebUI/命令直接改衣橱后，在下一条 user 入历史前补一条统一状态事件。"""
+        state = self._get_session_state(session_id)
+        current = self._wardrobe_state_snapshot(session_id, state)
+        observed = session_schema.get_wardrobe_observed_snapshot(state)
+        if not observed:
+            # 首次建立前缀基线；此时没有可比较的旧上下文，不制造伪变更事件。
+            session_schema.set_wardrobe_observed_snapshot(state, current)
+            self._save_session_state(session_id, state)
+            return False
+
+        represented_signature = str(observed.get("state_signature") or "")
+        for message in reversed(session_schema.get_chat_history(state)):
+            parsed = self._parse_wardrobe_state_system_message(message)
+            if parsed is not None:
+                represented_signature = str(parsed.get("state_signature") or "")
+                break
+        current_signature = str(current.get("state_signature") or "")
+        if current_signature and current_signature == represented_signature:
+            return False
+        if not session_schema.get_wardrobe_semistable_snapshot(state):
+            session_schema.set_wardrobe_semistable_snapshot(state, observed)
+        session_schema.set_wardrobe_observed_snapshot(state, current)
+        self._append_chat_history_messages(
+            session_id,
+            [self._format_wardrobe_state_system_message(current)],
+        )
+        self._ulog(session_id, "WARDROBE", "检测到聊天外衣橱变更，已在本轮 user 前追加衣橱状态 system 事件")
+        return True
+
+    def _pending_wardrobe_history_bucket(self) -> dict[str, dict[str, str]]:
+        bucket = getattr(self, "_pending_wardrobe_history_messages", None)
+        if not isinstance(bucket, dict):
+            bucket = {}
+            self._pending_wardrobe_history_messages = bucket
+        return bucket
+
+    def _queue_pending_wardrobe_history_message(self, session_id: str, snapshot: dict[str, Any]) -> None:
+        # 同一轮有多次换装时只保留最终快照，历史无需回放中间态。
+        self._pending_wardrobe_history_bucket()[session_id] = self._format_wardrobe_state_system_message(snapshot)
+
+    def _take_pending_wardrobe_history_messages(self, session_id: str) -> list[dict[str, str]]:
+        message = self._pending_wardrobe_history_bucket().pop(session_id, None)
+        return [message] if isinstance(message, dict) else []
+
+    def _apply_wardrobe_state_snapshot(self, state: dict[str, Any], snapshot: dict[str, Any]) -> bool:
+        raw_wardrobe = snapshot.get("wardrobe")
+        if not isinstance(raw_wardrobe, dict):
+            return False
+        wardrobe = {
+            slot: appearance_rules.normalize_appearance_text(str(value or ""))
+            for slot, value in raw_wardrobe.items()
+            if slot in appearance_rules.WARDROBE_RENDER_ORDER and str(value or "").strip()
+        }
+        session_schema.set_wardrobe(state, wardrobe)
+        session_schema.set_outfit(state, appearance_rules.render_wardrobe(wardrobe))
+        session_schema.clear_wardrobe_item_states(state)
+        raw_states = snapshot.get("item_states")
+        if isinstance(raw_states, dict):
+            for slot, value in raw_states.items():
+                if slot in appearance_rules.WARDROBE_CLOTHING_SLOTS and slot in wardrobe:
+                    session_schema.set_wardrobe_item_state(state, slot, value)
+        session_schema.prune_wardrobe_item_states(state, wardrobe)
+        nudity = str(snapshot.get("nudity") or "").strip()
+        if nudity:
+            session_schema.set_nudity(state, nudity, at=time.time())
+        else:
+            session_schema.clear_nudity(state)
+        return True
+
+    def _sync_wardrobe_checkpoint_events(
+        self,
+        session_id: str,
+        state: dict[str, Any],
+        pending: list[dict[str, Any]],
+        overflow: list[dict[str, Any]],
+    ) -> bool:
+        pending_events = [
+            (index, parsed)
+            for index, message in enumerate(pending)
+            if (parsed := self._parse_wardrobe_state_system_message(message)) is not None
+        ]
+        if not pending_events:
+            return False
+        latest_index, latest_snapshot = pending_events[-1]
+        current_before = self._wardrobe_state_snapshot(session_id, state)
+        observed_before = session_schema.get_wardrobe_observed_snapshot(state)
+        has_unrecorded_external_change = bool(
+            observed_before
+            and current_before.get("state_signature")
+            and current_before.get("state_signature") != observed_before.get("state_signature")
+        )
+        if has_unrecorded_external_change:
+            # WebUI/命令可能刚写入了比历史事件更新的真实状态；不能被旧 system 快照回滚。
+            changed = False
+        else:
+            changed = self._apply_wardrobe_state_snapshot(state, latest_snapshot)
+            session_schema.set_wardrobe_observed_snapshot(state, latest_snapshot)
+        overflow_events = [
+            (index, parsed)
+            for index, message in enumerate(overflow)
+            if (parsed := self._parse_wardrobe_state_system_message(message)) is not None
+        ]
+        if overflow_events:
+            overflow_index, overflow_snapshot = overflow_events[-1]
+            if latest_index <= len(overflow) - 1:
+                # 所有衣橱事件都已折叠，半稳定层可直接追上真实数据。
+                session_schema.clear_wardrobe_semistable_snapshot(state)
+            else:
+                # 仍有更新事件留在未折叠历史：半稳定层只推进到已 checkpoint 的最后状态。
+                session_schema.set_wardrobe_semistable_snapshot(state, overflow_snapshot)
+            changed = True
+        return changed
+
+    def _restore_wardrobe_after_history_retract(
+        self,
+        state: dict[str, Any],
+        remaining: list[dict[str, Any]],
+        removed: list[dict[str, Any]],
+    ) -> bool:
+        if not any(self._parse_wardrobe_state_system_message(message) is not None for message in removed):
+            return False
+        target = None
+        for message in reversed(remaining):
+            target = self._parse_wardrobe_state_system_message(message)
+            if target is not None:
+                break
+        if target is None:
+            frozen = session_schema.get_wardrobe_semistable_snapshot(state)
+            if isinstance(frozen.get("wardrobe"), dict):
+                target = frozen
+        if not isinstance(target, dict) or not self._apply_wardrobe_state_snapshot(state, target):
+            return False
+        session_schema.set_wardrobe_observed_snapshot(state, target)
+        session_schema.clear_wardrobe_semistable_snapshot(state)
+        return True
+
+    def _wardrobe_tool_result(self, snapshot: dict[str, Any]) -> str:
+        outfit = str(snapshot.get("outfit") or "").strip() or "（无穿着）"
+        states = snapshot.get("item_states") if isinstance(snapshot.get("item_states"), dict) else {}
+        state_text = "、".join(f"{slot}={value}" for slot, value in states.items()) or "全部正常"
+        compact = {
+            key: snapshot.get(key)
+            for key in ("version", "wardrobe", "item_states", "outfit", "nudity", "state_signature")
+        }
+        return (
+            f"衣橱已更新。最新着装: {outfit}；部件状态: {state_text}。\n"
+            f"state_json: {json.dumps(compact, ensure_ascii=False, separators=(',', ':'))}"
+        )
+
+    def _apply_structured_wardrobe_items(
+        self,
+        state: dict[str, Any],
+        items: Any,
+        *,
+        mode: str = "merge",
+        clear_all: bool = False,
+        session_id: str = "",
+    ) -> tuple[bool, str]:
+        normalized_items = self._coerce_wardrobe_tool_items(items)
+        if not normalized_items and not clear_all:
+            return False, "没有有效的衣物操作，衣橱未改变。"
+        if clear_all:
+            session_schema.set_wardrobe(state, {})
+            session_schema.set_outfit(state, "")
+            session_schema.clear_wardrobe_item_states(state)
+            session_schema.clear_public_fallback_outfit(state)
+            session_schema.set_nudity(state, "completely nude", at=time.time())
+            return True, ""
+
+        wardrobe = {} if mode == "replace" else self._get_wardrobe(state)
+        closet = session_schema.get_closet(state)
+        change: dict[str, Any] = {"states": {}, "remove": []}
+        names: dict[str, str] = {}
+        valid_count = 0
+        accessory_add: list[str] = []
+        accessory_remove: list[str] = []
+        worn_slots: list[str] = []
+        for item in normalized_items:
+            slot = str(item.get("slot") or "").strip().lower()
+            action = str(item.get("action") or "wear").strip().lower().replace("-", "_")
+            tags = appearance_rules.normalize_appearance_text(str(item.get("tags") or ""))
+            state_value = str(item.get("state") or "").strip()
+            if slot not in appearance_rules.WARDROBE_RENDER_ORDER:
+                continue
+            if action in {"wear", "set", "put_on"}:
+                if not tags:
+                    continue
+                if slot == "accessory":
+                    accessory_add.append(tags)
+                else:
+                    change[slot] = tags
+                if slot in appearance_rules.WARDROBE_CLOTHING_SLOTS:
+                    worn_slots.append(slot)
+                    name = str(item.get("name") or "").strip()
+                    if name:
+                        names[slot] = name[:40]
+                if state_value and slot in appearance_rules.WARDROBE_CLOTHING_SLOTS:
+                    change["states"][slot] = state_value
+                valid_count += 1
+            elif action in {"remove", "take_off", "delete"}:
+                if slot == "accessory" and tags:
+                    accessory_remove.append(tags)
+                else:
+                    change["remove"].append(slot)
+                valid_count += 1
+            elif action in {"set_state", "state", "restore"}:
+                if slot not in appearance_rules.WARDROBE_CLOTHING_SLOTS or slot not in wardrobe:
+                    continue
+                change["states"][slot] = "normal" if action == "restore" else (state_value or "normal")
+                valid_count += 1
+        if not valid_count:
+            return False, "没有有效的衣物操作，衣橱未改变。"
+        if accessory_add:
+            change["accessory_add"] = ", ".join(accessory_add)
+        if accessory_remove:
+            change["accessory_remove"] = ", ".join(accessory_remove)
+        wardrobe = appearance_rules.apply_wardrobe_change(wardrobe, change)
+        now = time.time()
+        for slot in worn_slots:
+            tags = str(wardrobe.get(slot) or "").strip()
+            if tags:
+                name = names.get(slot) or tags
+                closet = appearance_rules.closet_add(closet, name, slot, tags, now=now)
+        session_schema.set_closet(state, closet)
+        session_schema.set_wardrobe(state, wardrobe)
+        if mode == "replace":
+            session_schema.clear_wardrobe_item_states(state)
+            session_schema.clear_public_fallback_outfit(state)
+        clear_slots = set(worn_slots)
+        clear_slots.update(str(slot or "") for slot in change.get("remove") or [])
+        session_schema.clear_wardrobe_item_states(state, clear_slots)
+        for slot, value in change.get("states", {}).items():
+            if slot in wardrobe:
+                session_schema.set_wardrobe_item_state(state, slot, value)
+        session_schema.prune_wardrobe_item_states(state, wardrobe)
+        rendered = appearance_rules.render_wardrobe(wardrobe)
+        session_schema.set_outfit(state, rendered)
+        if rendered:
+            session_schema.clear_nudity(state)
+        if session_id:
+            self._ulog(session_id, "WARDROBE", f"结构化批量换装 mode={mode} items={normalized_items} result={rendered[:160]}")
+        return True, ""
+
+    async def tool_change_appearance(
+        self,
+        session_id: str,
+        description: str = "",
+        mode: str = "merge",
+        *,
+        items: Any = None,
+        clear_all: bool = False,
+    ) -> str:
         allow = self._allow_llm_change_appearance(session_id)
         desc = (description or "").strip()
-        self._ulog(session_id, "WARDROBE", f'模型调用 change_appearance allow={"on" if allow else "off"} mode={mode} desc="{desc[:100]}"')
+        structured_items = self._coerce_wardrobe_tool_items(items)
+        self._ulog(session_id, "WARDROBE", f'模型调用 change_appearance allow={"on" if allow else "off"} mode={mode} items={len(structured_items)} desc="{desc[:100]}"')
         if not allow:
             return "当前会话已关闭模型自主修改外型，dynamic_appearance 未改变。"
-        result = await self._apply_wardrobe(session_id, description, replace=(mode == "replace"))
-        return f"外貌已改变: {result}"
+        state = self._get_session_state(session_id)
+        captured = self._capture_wardrobe_semistable_before_tool(session_id, state)
+        if structured_items or clear_all:
+            changed, error = self._apply_structured_wardrobe_items(
+                state,
+                structured_items,
+                mode="replace" if mode == "replace" else "merge",
+                clear_all=bool(clear_all),
+                session_id=session_id,
+            )
+            if not changed:
+                if captured:
+                    session_schema.clear_wardrobe_semistable_snapshot(state)
+                self._save_session_state(session_id, state)
+                return error
+            self._save_session_state(session_id, state)
+        elif desc:
+            await self._apply_wardrobe(session_id, desc, replace=(mode == "replace"))
+            state = self._get_session_state(session_id)
+        else:
+            if captured:
+                session_schema.clear_wardrobe_semistable_snapshot(state)
+            self._save_session_state(session_id, state)
+            return "没有有效的衣物操作，衣橱未改变。"
+        snapshot = self._wardrobe_state_snapshot(session_id, state)
+        session_schema.set_wardrobe_observed_snapshot(state, snapshot)
+        self._save_session_state(session_id, state)
+        self._queue_pending_wardrobe_history_message(session_id, snapshot)
+        return self._wardrobe_tool_result(snapshot)
 
     # ── 联网搜索（Tavily）──────────────────────────────────────────────────
 
