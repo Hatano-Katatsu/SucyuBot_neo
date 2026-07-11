@@ -1187,6 +1187,13 @@ async def api_save_config(request: web.Request):
     values = payload.get("values", payload)
     if not isinstance(values, dict):
         return json_error("配置数据格式不正确")
+    # 修改全局作息时间或推送频率后，需要重新生成所有会话今天的推送时间列表
+    global_schedule_keys = {
+        "workday_wake_time", "workday_sleep_time",
+        "weekend_wake_time", "weekend_sleep_time",
+        "daily_selfie_limit",
+    }
+    schedule_changed = False
     for key, value in values.items():
         if key in YAML_ONLY_CONFIG_KEYS:
             continue
@@ -1194,7 +1201,17 @@ async def api_save_config(request: web.Request):
             continue
         old = service.config.get(key)
         service.config[key] = cast_config_value(key, value, old)
+        if key in global_schedule_keys:
+            schedule_changed = True
     service.save_config()
+    if schedule_changed:
+        for sid in list(service.sessions.keys()):
+            try:
+                s = service._get_session_state(sid)
+                session_schema.set_daily_trigger_date(s, "")
+                service._save_session_state(sid, s)
+            except Exception:
+                pass
     return json_ok({"config": masked_config(service)})
 
 
@@ -1294,7 +1311,14 @@ async def api_update_session(request: web.Request):
         "custom_character", "custom_series", "custom_visual_character", "custom_visual_series", "custom_character_age_stage",
         "custom_character_occupation", "custom_character_day_anchor",
     }
+    # 修改作息时间或推送频率后，需要重新生成今天的推送时间列表
+    schedule_keys = {
+        "custom_workday_wake_time", "custom_workday_sleep_time",
+        "custom_weekend_wake_time", "custom_weekend_sleep_time",
+        "custom_daily_selfie_limit",
+    }
     profile_touched = False
+    schedule_touched = False
     for key in allowed:
         if key in payload:
             value = "" if payload[key] is None else str(payload[key])
@@ -1304,11 +1328,15 @@ async def api_update_session(request: web.Request):
                 state[key] = value
             if key in life_profile_keys:
                 profile_touched = True
+            if key in schedule_keys:
+                schedule_touched = True
     # dynamic_appearance 现走 clothing box（不在 allowed 里直写顶层，避免遗留陈旧顶层键）。
     if "dynamic_appearance" in payload:
         session_schema.set_outfit(state, "" if payload["dynamic_appearance"] is None else str(payload["dynamic_appearance"]))
     if profile_touched:
         state.pop("life_profile", None)
+    if schedule_touched:
+        session_schema.set_daily_trigger_date(state, "")
     if "purity" in payload:
         raw = str(payload["purity"]).strip()
         if raw:

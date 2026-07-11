@@ -325,7 +325,10 @@ class SchedulerRuntimeMixin:
             minute = int(match.group(2) or 0)
         except (TypeError, ValueError):
             return max(0, min(1439, int(default_minutes)))
-        if hour == 24 and minute == 0:
+        # "24:00" 和 "0:00" 在作息时间语境中都表示午夜（一天结束），
+        # 而非凌晨0点。统一映射为 23:59，避免 sleep_time 被解析为 0
+        # 导致推送窗口塌缩。
+        if (hour == 24 and minute == 0) or (hour == 0 and minute == 0):
             return 23 * 60 + 59
         if not (0 <= hour <= 23 and 0 <= minute <= 59):
             return max(0, min(1439, int(default_minutes)))
@@ -373,6 +376,10 @@ class SchedulerRuntimeMixin:
         schedule = self._character_schedule_minutes(session_id, local_dt)
         start = min(1439, int(schedule["wake"]) + 30)
         end = int(schedule["sleep"])
+        if end < start:
+            # sleep_time < wake_time 表示用户设置的睡眠时间在第二天凌晨
+            # （如 1:00 睡觉），单日推送窗口中把它当作一天最后一刻。
+            end = 23 * 60 + 59
         if end < start:
             end = start
         return start, end

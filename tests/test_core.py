@@ -4466,6 +4466,38 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(svc._build_daily_push_times(sid, weekday, 2), ["07:30", "15:00"])
             self.assertEqual(svc._build_daily_push_times(sid, weekend, 2), ["10:30", "15:45"])
 
+    def test_midnight_sleep_time_does_not_collapse_push_window(self):
+        """回归测试: 作息时间 sleep=0:00 不应导致推送窗口塌缩为 0，使所有推送时间相同。
+
+        之前 _parse_schedule_time_minutes 把 "0:00" 解析为 0 分钟（凌晨0点），
+        sleep(0) < wake(525) 导致 _daily_push_window_minutes 的 `if end < start: end = start`
+        把窗口压成 0，所有推送时间都变成 09:15。
+        """
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        session_schema.set_character_value(state, "custom_weekend_wake_time", "08:45")
+        session_schema.set_character_value(state, "custom_weekend_sleep_time", "0:00")
+        weekend = datetime(2026, 7, 11, 10, 2, tzinfo=timezone.utc)
+
+        # "0:00" 应被解析为 23:59，而非 00:00
+        start, end = svc._daily_push_window_minutes(sid, weekend)
+        self.assertEqual(start, 8 * 60 + 45 + 30)  # 09:15
+        self.assertEqual(end, 23 * 60 + 59)  # 23:59
+        self.assertGreater(end - start, 0)
+
+        # 推送时间不应全部相同
+        times = svc._build_daily_push_times(sid, weekend, 7)
+        self.assertEqual(len(times), 7)
+        self.assertGreater(len(set(times)), 1, f"推送时间不应全部相同: {times}")
+
+        # "24:00" 等效写法也应正常
+        session_schema.set_character_value(state, "custom_weekend_sleep_time", "24:00")
+        start2, end2 = svc._daily_push_window_minutes(sid, weekend)
+        self.assertEqual(end2, 23 * 60 + 59)
+        times2 = svc._build_daily_push_times(sid, weekend, 4)
+        self.assertGreater(len(set(times2)), 1, f"推送时间不应全部相同: {times2}")
+
     def test_scheduled_push_task_marks_trigger_only_after_success(self):
         async def run():
             svc = self.make_service()

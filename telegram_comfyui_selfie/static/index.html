@@ -205,7 +205,8 @@
         <section class="panel memory-diary-panel">
           <div class="panel-head">
             <div class="tab-bar">
-              <button class="tab active" data-tab="memory" type="button">长期记忆</button>
+              <button class="tab active" data-tab="wardrobe" type="button">衣橱</button>
+              <button class="tab" data-tab="memory" type="button">长期记忆</button>
               <button class="tab" data-tab="diary" type="button">日记</button>
             </div>
             <div class="panel-head-actions">
@@ -230,7 +231,12 @@
               </button>
             </div>
           </div>
-          <div id="memory-tab" class="tab-panel active">
+          <div id="wardrobe-tab" class="tab-panel active">
+            <div id="wardrobe-manager" class="manager-box">
+              <div class="empty-state">选择角色后查看衣橱。</div>
+            </div>
+          </div>
+          <div id="memory-tab" class="tab-panel">
             <div id="memory-manager" class="manager-box">
               <div class="empty-state">选择角色后查看记忆。</div>
             </div>

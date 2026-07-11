@@ -7,7 +7,7 @@ const state = {
   selectedSession: null,
   selectedCharacter: null,
   characterData: null,
-  memoryDiaryTab: "memory",
+  memoryDiaryTab: "wardrobe",
   selectedWorldSession: null,
   worldPreview: null,
   logs: [],
@@ -712,6 +712,33 @@ function bindRuntimeClothingHandlers(container) {
   });
 }
 
+function renderWardrobePanel() {
+  const box = $("#wardrobe-manager");
+  if (!box) return;
+  if (!state.selectedSession || !state.selectedCharacter || !state.characterData) {
+    box.innerHTML = `<div class="empty-state">选择角色后查看衣橱。</div>`;
+    return;
+  }
+  const charId = state.selectedCharacter;
+  const char = state.characterData.characters?.[charId];
+  if (!char) {
+    box.innerHTML = `<div class="empty-state">选择角色后查看衣橱。</div>`;
+    return;
+  }
+  const isActive = charId === state.characterData.active_id;
+  if (!isActive) {
+    box.innerHTML = `<div class="empty-state">该角色不是当前角色，请先「设为当前」再操作衣橱。</div>`;
+    return;
+  }
+  const html = renderRuntimeClothingPanel(char, true);
+  if (!html) {
+    box.innerHTML = `<div class="empty-state">衣橱暂不可用。</div>`;
+    return;
+  }
+  box.innerHTML = html;
+  bindRuntimeClothingHandlers(box);
+}
+
 function diaryTitle(content, date) {
   const first = String(content || "").split(/\r?\n/).map(line => line.trim()).find(Boolean) || "";
   const title = first.replace(/^#+\s*/, "").trim();
@@ -1184,12 +1211,6 @@ function renderCharacterForm() {
     };
   }
   form.appendChild(overview);
-  const runtimeClothing = renderRuntimeClothingPanel(char, isActive);
-  if (runtimeClothing) {
-    const wrap = document.createElement("div");
-    wrap.innerHTML = runtimeClothing;
-    form.appendChild(wrap.firstElementChild);
-  }
 
   characterFieldSections.forEach(([sectionTitle, fields], index) => {
     const section = document.createElement("section");
@@ -1225,15 +1246,8 @@ function renderCharacterForm() {
     histGrid.classList.toggle("collapsed");
     histToggle.classList.toggle("collapsed");
   };
-  form.querySelectorAll(".runtime-clothing-section .section-toggle").forEach(toggle => {
-    toggle.onclick = () => {
-      const grid = toggle.parentElement?.querySelector(".runtime-clothing-grid");
-      if (!grid) return;
-      grid.classList.toggle("collapsed");
-      toggle.classList.toggle("collapsed");
-    };
-  });
-  bindRuntimeClothingHandlers(form);
+
+  renderWardrobePanel();
 
   loadHistorySummary();
 
@@ -1543,6 +1557,7 @@ function switchMemoryDiaryTab(tab) {
   state.memoryDiaryTab = tab;
   $all("#view-characters .tab").forEach(t => t.classList.toggle("active", t.dataset.tab === tab));
   $all("#view-characters .tab-panel").forEach(p => p.classList.toggle("active", p.id === `${tab}-tab`));
+  if (tab === "wardrobe") renderWardrobePanel();
 }
 
 async function exportSelectedCharacterCheckpoint(button) {
@@ -2776,7 +2791,8 @@ async function initEvents() {
     const btn = event.currentTarget;
     setBusy(btn, true);
     try {
-      if (state.memoryDiaryTab === "memory") await loadMemories();
+      if (state.memoryDiaryTab === "wardrobe") await loadCharacters();
+      else if (state.memoryDiaryTab === "memory") await loadMemories();
       else await loadDiaries();
       toast("已刷新");
     } catch (err) {

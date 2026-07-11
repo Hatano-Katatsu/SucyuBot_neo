@@ -503,6 +503,9 @@ class CommandHandlersMixin:
                 continue
             if hour == 24 and minute == 0:
                 hour, minute = 23, 59
+            # "0:00" 在作息时间语境中表示午夜（一天结束），非凌晨0点
+            if hour == 0 and minute == 0:
+                hour, minute = 23, 59
             if 0 <= hour <= 23 and 0 <= minute <= 59:
                 times.append(f"{hour:02d}:{minute:02d}")
         return times
@@ -963,6 +966,8 @@ class CommandHandlersMixin:
         session_schema.set_character_value(state, "persona_user_set", True)
         applied_style = self._apply_intake_style(state, intake)
         state.pop("life_profile", None)
+        if schedule_payload:
+            session_schema.set_daily_trigger_date(state, "")
         if switching:
             self._restore_character_context(session_id, state)
         # 新 OC 的初始穿搭在 restore（切角色会整体清空短期态）之后再设，避免被清掉。
