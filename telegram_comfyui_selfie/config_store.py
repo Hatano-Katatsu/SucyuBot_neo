@@ -17,7 +17,7 @@ CONFIG_GROUPS: dict[str, list[str]] = {
         "long_memory_db_path", "user_log_enabled", "user_log_dir",
     ],
     "comfyui": [
-        "comfyui_url", "comfyui_workflow_file", "image_backend", "width", "height",
+        "comfyui_url", "comfyui_workflow_file", "image_backend", "animatool_workflow", "width", "height",
         "steps", "cfg", "sampler", "scheduler", "turbo_mode", "turbo_strength",
         "unet_model", "clip_model", "vae_model", "turbo_lora_model",
         "animatool_turbo_steps", "animatool_turbo_cfg", "animatool_filename_prefix",

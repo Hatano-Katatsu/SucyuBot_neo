@@ -9,6 +9,11 @@ ComfyUI-AnimaTool：随 ComfyUI 启动的 Anima Tool Use API
   POST /anima/generate_turbo   - Turbo 快速生成（cfg=1, steps=10, 内置 turbo LoRA）
   GET  /anima/schema_turbo     - 返回 Turbo Tool Schema
   GET  /anima/knowledge_turbo  - 返回 Turbo 专家知识
+  POST /anima/generate_turbo_v1 - Anima Turbo v1.0 生成
+  POST /anima/generate_aesthetic_v1 - Anima Aesthetic v1.0 生成
+  GET  /anima/schema_turbo_v1  - 返回 Turbo v1.0 Schema
+  GET  /anima/schema_aesthetic_v1 - 返回 Aesthetic v1.0 Schema
+  GET  /anima/knowledge_new_models - 返回新模型共享专家知识
 """
 from __future__ import annotations
 
@@ -54,6 +59,8 @@ def _setup_routes():
     knowledge_dir = _TOOL_ROOT / "knowledge"
     schema_path = _TOOL_ROOT / "schemas" / "tool_schema_universal.json"
     schema_turbo_path = _TOOL_ROOT / "schemas" / "tool_schema_turbo.json"
+    schema_turbo_v1_path = _TOOL_ROOT / "schemas" / "tool_schema_turbo_v1.json"
+    schema_aesthetic_v1_path = _TOOL_ROOT / "schemas" / "tool_schema_aesthetic_v1.json"
 
     # -------------------------
     # GET /anima/health
@@ -154,7 +161,82 @@ def _setup_routes():
 
         return web.json_response(result)
 
-    print("[ComfyUI-AnimaTool] Routes registered: /anima/health, /anima/schema, /anima/knowledge, /anima/generate, /anima/schema_turbo, /anima/knowledge_turbo, /anima/generate_turbo")
+    # -------------------------
+    # POST /anima/generate_turbo_v1
+    # -------------------------
+    @routes.post("/anima/generate_turbo_v1")
+    async def anima_generate_turbo_v1(request):
+        try:
+            body = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"JSON parse error: {e}"}, status=400)
+
+        if "payload" in body and isinstance(body["payload"], dict):
+            payload = body["payload"]
+        else:
+            payload = body
+
+        try:
+            result = await asyncio.to_thread(executor.generate_v2, payload, "turbo1.0")
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+        return web.json_response(result)
+
+    # -------------------------
+    # POST /anima/generate_aesthetic_v1
+    # -------------------------
+    @routes.post("/anima/generate_aesthetic_v1")
+    async def anima_generate_aesthetic_v1(request):
+        try:
+            body = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"JSON parse error: {e}"}, status=400)
+
+        if "payload" in body and isinstance(body["payload"], dict):
+            payload = body["payload"]
+        else:
+            payload = body
+
+        try:
+            result = await asyncio.to_thread(executor.generate_v2, payload, "aesthetic1.0")
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+        return web.json_response(result)
+
+    # -------------------------
+    # GET /anima/schema_turbo_v1
+    # -------------------------
+    @routes.get("/anima/schema_turbo_v1")
+    async def anima_schema_turbo_v1(request):
+        if not schema_turbo_v1_path.exists():
+            return web.json_response({"error": "turbo v1 schema not found"}, status=404)
+        obj = json.loads(schema_turbo_v1_path.read_text(encoding="utf-8"))
+        return web.json_response(obj)
+
+    # -------------------------
+    # GET /anima/schema_aesthetic_v1
+    # -------------------------
+    @routes.get("/anima/schema_aesthetic_v1")
+    async def anima_schema_aesthetic_v1(request):
+        if not schema_aesthetic_v1_path.exists():
+            return web.json_response({"error": "aesthetic v1 schema not found"}, status=404)
+        obj = json.loads(schema_aesthetic_v1_path.read_text(encoding="utf-8"))
+        return web.json_response(obj)
+
+    # -------------------------
+    # GET /anima/knowledge_new_models
+    # -------------------------
+    @routes.get("/anima/knowledge_new_models")
+    async def anima_knowledge_new_models(request):
+        return web.json_response({
+            "new_models_expert": _read_text(knowledge_dir / "new_models_expert.md"),
+            "artist_list": _read_text(knowledge_dir / "artist_list.md"),
+            "new_models_examples": _read_text(knowledge_dir / "new_models_examples.md"),
+        })
+
+    print("[ComfyUI-AnimaTool] Routes registered: /anima/health, /anima/schema, /anima/knowledge, /anima/generate, /anima/schema_turbo, /anima/knowledge_turbo, /anima/generate_turbo, /anima/generate_turbo_v1, /anima/generate_aesthetic_v1, /anima/schema_turbo_v1, /anima/schema_aesthetic_v1, /anima/knowledge_new_models")
 
 
 # ComfyUI 加载 custom_nodes 时会 import 这个模块

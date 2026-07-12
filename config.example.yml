@@ -24,6 +24,7 @@ comfyui:
   comfyui_url: "http://127.0.0.1:8188"
   comfyui_workflow_file: ""
   image_backend: "native"
+  animatool_workflow: "turbo_v1"
   width: "1024"
   height: "1024"
   steps: "30"

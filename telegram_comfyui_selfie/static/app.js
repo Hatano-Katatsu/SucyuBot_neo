@@ -57,6 +57,7 @@ const configSections = [
     ["dynamic_appearance", "默认初始穿搭", "textarea"],
     ["style_pool", "画风池", "textarea"],
     ["current_style", "全局当前画风", "text"],
+    ["animatool_workflow", "AnimaTool 画图工作流", "select:turbo_v1,aesthetic_v1,turbo0.2,base"],
     ["width", "宽度", "number"],
     ["height", "高度", "number"],
     ["sampler", "Sampler", "text"],

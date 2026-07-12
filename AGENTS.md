@@ -91,7 +91,7 @@ telegram_comfyui_selfie/
 - 测试进程设置 `SUCYUBOT_TEST_FAST_SQLITE=1`，仅测试环境关闭 SQLite 同步/使用内存 journal，生产默认不受影响
 - 真实前缀缓存请求测试默认跳过；需要额外设置 `$env:SUCYUBOT_TEST_LIVE_CACHE_PROBE='1'` 后单独运行 `py -3 -m unittest tests.test_core.ServiceTestCase.test_live_chat_context_cache_probe_uses_current_config_when_available -v`
 
-## 当前架构状态（2026-06-24）
+## 当前架构状态（2026-07-12）
 
 ### 配置与存储
 
@@ -169,18 +169,36 @@ telegram_comfyui_selfie/
 
 - `PromptSlots` 是最终正向提示词来源；日志中会记录 `PROMPT_SLOTS`，实际 ComfyUI prompt 也保留旧版 `PROMPT` 日志方便对比。
 - 核心槽位顺序：`quality -> count -> identity -> style_artist -> effective_appearance -> style_general -> safety -> scene -> one_shot_appearance`。
-- `safety` 槽承载 `safe/nsfw` 等随纯良度和时段变化的评级词；不要再塞进最前面的 `quality` 槽，避免把高变动 token 放在提示词开头。AnimaTool Turbo 的 `quality_meta_year_safe` 字段仍在提交前临时组合 `quality + safety`，以兼容其 schema。
+- `safety` 槽承载 `safe/nsfw` 等随纯良度和时段变化的评级词；不要再塞进最前面的 `quality` 槽，避免把高变动 token 放在提示词开头。AnimaTool 的 `quality_meta_year_safe` 字段不再直接复制 `quality + safety` 全量标签，而是按工作流 schema 格式构造（见下文 AnimaTool 工作流）。
 - `scene` 只描述镜头、地点、动作、光线、道具和氛围，不重复稳定外貌。
 - `one_shot_appearance` 是本轮临时补充，不持久化。
-- `clothing_off` 对衣物/裸体默认仍是“仅本图生效”；但当它明确命中当前已穿戴的可持久配饰（如眼镜、项链、耳环、发夹）时，生图成功后会把该配饰从当前穿搭中移除，避免下一张图被稳定外貌重新加回去。
+- `clothing_off` 对衣物/裸体默认仍是"仅本图生效"；但当它明确命中当前已穿戴的可持久配饰（如眼镜、项链、耳环、发夹）时，生图成功后会把该配饰从当前穿搭中移除，避免下一张图被稳定外貌重新加回去。
 - OC 不把中文名、昵称或作品名塞进视觉 identity；只有已知公开角色才注入角色/作品 tag。
 - 亲密场景默认走 POV，只允许用户/伴侣身体局部入画；除非用户明确要求拍照、录像或对镜，才允许设备入画。
 - `/配图`（同义词 `/画图`、`/绘图` 等）按当前聊天场景生成图片，不强制自拍或看镜头；命令后的参数作为最高优先级场景/视角/机位/远近/局部特写要求，但规划器只消费瘦身后的短期连续性、最近已发图片的最终 `nltag/tags` 与短意图、世界状态和记忆，不再直接吞完整聊天流水、原始草案或整段外观快照。
-- `roleplay-image-plan` 在瘦身连续性之外保留“空间/身体关系硬约束”旁路：坐/站/躺/跪、脚边、腿上、身后、怀里、肩膀、背向、俯身等站位线索会单独进入 planner，并在 planner 漏写时追回到最终 `scene`，避免关键身体关系被每条 140 字截断吃掉。
+- `roleplay-image-plan` 在瘦身连续性之外保留"空间/身体关系硬约束"旁路：坐/站/躺/跪、脚边、腿上、身后、怀里、肩膀、背向、俯身等站位线索会单独进入 planner，并在 planner 漏写时追回到最终 `scene`，避免关键身体关系被每条 140 字截断吃掉。
 - `partner_in_frame` 区分日常局部同框和真正亲密/性爱场景；日常帮吹头发、坐脚边、靠肩等只去掉 `solo` 冲突并允许必要的手/脚/肩局部，不再自动追加 `male torso` / `intimate close-up`。
-- POV 正向开场只声明“用户视角看向角色”，不再默认强塞 `eye contact` / `solo`；翻译层允许保留 `she/the character` 动作主语，确保姿态和身体关系归属清楚。
+- POV 正向开场只声明"用户视角看向角色"，不再默认强塞 `eye contact` / `solo`；翻译层允许保留 `she/the character` 动作主语，确保姿态和身体关系归属清楚。
 - 画幅只允许 2:3（竖版）和 3:2（横版），模拟真实相机画幅；负向提示词包含 `split screen, grid, multiple panels, collage` 防止四宫格/分格出图。
-- AnimaTool Turbo 路径不再提交 `neg` / `negative` 字段；自然语言 `nltag` / `tags` 尾部统一追加 `no text, no logo, no ui, no mosaic, uncensored`。
+
+### AnimaTool 画图工作流
+
+- 配置键 `animatool_workflow`（默认 `turbo_v1`），WebUI「生图」面板下拉可选，不在 `YAML_ONLY_CONFIG_KEYS` 中故可在线修改；`/生图状态` 也会显示当前后端与工作流。仅在 `image_backend=animatool` 时生效。
+- 四种工作流各有独立 schema / knowledge / generate 端点，注册表 `ANIMATOOL_WORKFLOWS`（`generation.py`）：
+
+  | 工作流 | schema | knowledge | generate | 反词(neg) | 质量标签格式 |
+  |--------|--------|-----------|----------|-----------|-------------|
+  | `turbo_v1`（默认） | `/anima/schema_turbo_v1` | `/anima/knowledge_new_models` | `/anima/generate_turbo_v1` | 支持 | 简化：`masterpiece, best quality, <safety>` |
+  | `aesthetic_v1` | `/anima/schema_aesthetic_v1` | `/anima/knowledge_new_models` | `/anima/generate_aesthetic_v1` | 支持 | 简化：`masterpiece, best quality, <safety>` |
+  | `turbo0.2` | `/anima/schema_turbo` | `/anima/knowledge_turbo` | `/anima/generate_turbo` | 不支持 | 完整：`masterpiece, best quality, highres, newest, year 2025, <safety>` |
+  | `base` | `/anima/schema` | `/anima/knowledge` | `/anima/generate` | 支持 | 完整：`masterpiece, best quality, highres, newest, year 2025, <safety>` |
+
+- `_get_animatool_workflow(service)` 读配置并校验，非法值回退 `turbo_v1`；`_workflow_supports_neg(service)` 判断是否输出反词。
+- schema / knowledge 缓存按 `url|workflow` 分键（`_animatool_turbo_schema_cache` / `_animatool_turbo_knowledge_cache`），不同工作流互不覆盖。旧函数名保留（`_fetch_animatool_turbo_schema` / `_fetch_animatool_turbo_knowledge` 等）以兼容测试 patch，但已全部 workflow-aware。
+- **quality_meta_year_safe 不再直接复制项目内部 quality 槽位**：项目 quality 槽含 `highres, absurdres, anime coloring, clean lineart, soft cel shading, detailed illustration` 等标签，但 turbo_v1/aesthetic_v1 的 schema 只要求 `masterpiece, best quality, <safety>`。`_build_animatool_quality_meta(slots, workflow)` 按工作流格式构造，LLM planner 的 system prompt 也明确要求按 schema default 格式构造、不堆砌槽位额外质量标签。
+- **neg 不再直接复制项目内部 negative 槽位**：项目 negative 含 `no panties, 2girls, holding phone, mirror selfie` 等场景特定反词，但 AnimaTool schema 的 neg 只要求通用反词 + 安全等级反词。`_build_animatool_neg(slots, workflow)` 按标准格式构造（`bad anatomy, bad hands, bad feet, extra fingers, missing fingers, text, watermark, logo` + 安全等级反词；base 额外含 `worst quality, low quality, score_1..3, blurry, jpeg artifacts`）。LLM planner 的 system prompt 明确禁止复制槽位 negative。
+- **count 只取人数标签**：项目 count 槽可能含 `solo`，但 AnimaTool schema 的 count 只接受 `1girl/2girls/1boy/1other`。LLM planner 和 legacy 回退都会 strip `solo` 等非人数标签。
+- `plan_animatool_slots()` 的 slot_info 不再传 `quality` 和 `negative`，只传语义槽位（count/character/series/appearance/scene 等）；LLM 应按 schema + knowledge + safety_tag 构造 quality_meta_year_safe 和 neg。
 
 ### Telegram 输入增强
 
@@ -215,6 +233,17 @@ telegram_comfyui_selfie/
 - fire-and-forget `asyncio.create_task` 内异常可能被静默吞掉；排查生图/推送失败优先看 service log。
 - `_get_llm_value("chat", "temperature")` 的 legacy 回退会落到 `llm_temperature_scene`，除非 `chat_llm_temperature` 显式设置。
 
+## 今日变更（2026-07-12）
+
+1. **AnimaTool 四工作流支持**：新增 `animatool_workflow` 配置键（默认 `turbo_v1`），支持从 turbo_v1 / aesthetic_v1 / turbo0.2 / base 四种工作流中选择。`ANIMATOOL_WORKFLOWS` 注册表（`generation.py`）映射每种工作流到独立的 schema / knowledge / generate 端点 + `supports_neg` 标志。schema / knowledge 缓存按 `url|workflow` 分键。WebUI「生图」面板新增下拉选择器，`/生图状态` 命令也会显示当前后端与工作流。
+2. **turbo_v1 反词回归**：turbo_v1 / aesthetic_v1 / base 的 schema 含 `neg` 字段，turbo0.2 不含。`plan_animatool_slots()` 的 system prompt 按 `supports_neg` 条件化：支持时要求 LLM 按 schema 描述输出 neg，不支持时禁止输出 neg。`_build_animatool_turbo_payload()` / `submit_animatool_turbo()` 按 `_workflow_supports_neg()` 决定是否填充 neg。
+3. **quality_meta_year_safe 提示词去重**：修复 LLM 把项目内部 quality 槽位全量标签（highres / absurdres / anime coloring / clean lineart / soft cel shading / detailed illustration）堆进 quality_meta_year_safe 的问题。新增 `_build_animatool_quality_meta(slots, workflow)` 按工作流格式构造：turbo_v1/aesthetic_v1 → `masterpiece, best quality, <safety>`；turbo0.2/base → `masterpiece, best quality, highres, newest, year 2025, <safety>`。`plan_animatool_slots()` 的 slot_info 不再传 `quality`，system prompt 明确要求按 schema default 格式构造。
+4. **neg 提示词去重**：修复 LLM 把项目内部 negative 槽位全量反词（no panties / 2girls / holding phone / mirror selfie 等场景特定反词）堆进 neg 的问题。新增 `_build_animatool_neg(slots, workflow)` 按标准格式构造（通用反词 + 安全等级反词；base 额外含 worst quality / score / blurry 等）。`plan_animatool_slots()` 的 slot_info 不再传 `negative`，system prompt 明确禁止复制槽位 negative。
+5. **count 去 solo**：项目 count 槽可能含 `solo`，但 AnimaTool schema 的 count 只接受 `1girl/2girls/1boy/1other`。LLM planner 后处理和 legacy 回退都会 strip `solo` 等非人数标签。
+6. **API 侧代码同步**：`ComfyUI-AnimaTool/` 已从 `D:\ComfyUI\...\custom_nodes\ComfyUI-AnimaTool` 完整替换（排除 .git / __pycache__ / outputs），含新 `generate_v2` executor、turbo_v1 / aesthetic_v1 的 schema 和 new_models_expert / new_models_examples knowledge 文件。
+7. **配置同步**：`animatool_workflow` 加入 `defaults.py` / `CONFIG_GROUPS` / `config.example.yml` / `config.example.json` / `data/config.yml`。
+8. **本轮验证**：新增 5 个测试（payload 含 neg、turbo_v1 slots 含 neg、工作流端点映射、quality 简化格式、neg 标准格式）；更新 1 个测试（weather 注入测试设 workflow=turbo0.2 保留 no-neg 断言）。`py -3 -m pytest tests/test_core.py -q` 结果 `419 passed, 1 skipped`。
+
 ## 今日变更（2026-07-09）
 
 1. **拉取远端更新**：本轮先从 `origin/main` 快进到 `07c4bd0`，在最新代码上修复主动推送和续场推送容易复读上一句话的问题。
@@ -225,6 +254,17 @@ telegram_comfyui_selfie/
 6. **普通主动推送改用生活片段**：normal/morning/ntr 推送的动态 system 只放照片避重、空间摘要、世界动线和今日生活片段候选；最近对话原文只作为 checkpoint 后历史进入正式前缀，不再额外复制到动态块。`_life_plan_push_context()` 会把当前时间段内的所有 planned 今日片段都给 planner，并明确这些片段只是参考，可选择、混合或按天气/地点自然发散，不写成日程播报。
 7. **推送避重改为提示词约束**：推送 caption 可写 1-3 句、30-120 个中文字符以增加生活气息；planner 会在提示词中看到最近图片 forbidden caption 和最近 scheduled/followup/manual push 的 caption、scene、nltag 与意图作为避重材料，但不再在返回后做 exact/语义重复二次判断或 retry。
 8. **本轮验证**：新增/更新测试覆盖回复发送后再排续场、推送前 checkpoint 裁剪、续场 planner checkpoint 后历史进入前缀、followup 节拍推进、普通推送动态块不重复注入最近原句、今日片段候选注入、推送避重提示词注入且无二次 retry、早安转场清理临时裸体但保留照片避重。验证 `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`py -3 -m py_compile scripts\compare_llm_chat_prompts.py` 与 `py -3 -m unittest tests.test_core -v`，结果 `Ran 395 tests in 7.841s`，`OK (skipped=1)`。
+
+## 今日变更（2026-07-12）
+
+1. **AnimaTool 四工作流支持**：新增 `animatool_workflow` 配置键（默认 `turbo_v1`），支持从 turbo_v1 / aesthetic_v1 / turbo0.2 / base 四种工作流中选择。`ANIMATOOL_WORKFLOWS` 注册表（`generation.py`）映射每种工作流到独立的 schema / knowledge / generate 端点 + `supports_neg` 标志。schema / knowledge 缓存按 `url|workflow` 分键。WebUI「生图」面板新增下拉选择器，`/生图状态` 命令也会显示当前后端与工作流。
+2. **turbo_v1 反词回归**：turbo_v1 / aesthetic_v1 / base 的 schema 含 `neg` 字段，turbo0.2 不含。`plan_animatool_slots()` 的 system prompt 按 `supports_neg` 条件化：支持时要求 LLM 按 schema 描述输出 neg，不支持时禁止输出 neg。`_build_animatool_turbo_payload()` / `submit_animatool_turbo()` 按 `_workflow_supports_neg()` 决定是否填充 neg。
+3. **quality_meta_year_safe 提示词去重**：修复 LLM 把项目内部 quality 槽位全量标签（highres / absurdres / anime coloring / clean lineart / soft cel shading / detailed illustration）堆进 quality_meta_year_safe 的问题。新增 `_build_animatool_quality_meta(slots, workflow)` 按工作流格式构造：turbo_v1/aesthetic_v1 → `masterpiece, best quality, <safety>`；turbo0.2/base → `masterpiece, best quality, highres, newest, year 2025, <safety>`。`plan_animatool_slots()` 的 slot_info 不再传 `quality`，system prompt 明确要求按 schema default 格式构造。
+4. **neg 提示词去重**：修复 LLM 把项目内部 negative 槽位全量反词（no panties / 2girls / holding phone / mirror selfie 等场景特定反词）堆进 neg 的问题。新增 `_build_animatool_neg(slots, workflow)` 按标准格式构造（通用反词 + 安全等级反词；base 额外含 worst quality / score / blurry 等）。`plan_animatool_slots()` 的 slot_info 不再传 `negative`，system prompt 明确禁止复制槽位 negative。
+5. **count 去 solo**：项目 count 槽可能含 `solo`，但 AnimaTool schema 的 count 只接受 `1girl/2girls/1boy/1other`。LLM planner 后处理和 legacy 回退都会 strip `solo` 等非人数标签。
+6. **API 侧代码同步**：`ComfyUI-AnimaTool/` 已从 `D:\ComfyUI\...\custom_nodes\ComfyUI-AnimaTool` 完整替换（排除 .git / __pycache__ / outputs），含新 `generate_v2` executor、turbo_v1 / aesthetic_v1 的 schema 和 new_models_expert / new_models_examples knowledge 文件。
+7. **配置同步**：`animatool_workflow` 加入 `defaults.py` / `CONFIG_GROUPS` / `config.example.yml` / `config.example.json` / `data/config.yml`。
+8. **本轮验证**：新增 5 个测试（payload 含 neg、turbo_v1 slots 含 neg、工作流端点映射、quality 简化格式、neg 标准格式）；更新 1 个测试（weather 注入测试设 workflow=turbo0.2 保留 no-neg 断言）。`py -3 -m pytest tests/test_core.py -q` 结果 `419 passed, 1 skipped`。
 
 ## 今日变更（2026-07-09）
 
@@ -461,15 +501,9 @@ telegram_comfyui_selfie/
 
 ## 最新验证
 
-- `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m compileall -q telegram_comfyui_selfie tests`
-- `node --check telegram_comfyui_selfie\static\app.js`
-- `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m py_compile scripts\compare_llm_chat_prompts.py`
-- `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; py -3 -m unittest tests.test_core -v`
-- 最新结果：`Ran 389 tests in 9.567s`，`OK (skipped=1)`；默认跳过真实前缀缓存请求测试
-- 工具 schema 当前紧凑 JSON 长度：`1898` 字符；chat 回复请求体 key 顺序为 `model, max_tokens, temperature, top_p, frequency_penalty, tools, tool_choice, messages`（`presence_penalty` 留空时不下发；checkpoint/dream/memory 等内部任务不下发采样参数）
-- 本轮未改 prompt 比对脚本逻辑，未重新生成 `.tmp\llm_chat_prompt_compare_current.md`。
-- 真实 API 缓存探针沿用上一轮结论：拆分后 entry 3/4/5 改写请求首轮为冷缓存，第二轮分别命中 `7040/7099`、`7168/7198`、`7552/7562`。
-- 额外真实 API 缓存探针 `test_live_chat_context_cache_probe_uses_current_config_when_available`：默认跳过；设置 `SUCYUBOT_TEST_LIVE_CACHE_PROBE=1` 后才使用当前配置文件中的模型连接信息，通过真实 `handle_chat()` 链路连续回答三轮预设问题并输出缓存命中率。运行态 state / SQLite / 用户日志均隔离在测试临时目录；模型临时未返回可用回复时跳过。
+- `py -3 -m pytest tests/test_core.py -q` → `419 passed, 1 skipped`（2026-07-12）
+- `py -3 -c "import ast; [ast.parse(open(f,encoding='utf-8').read()) for f in [...]]"` 全部语法检查通过
+- 默认跳过真实前缀缓存请求测试；设置 `SUCYUBOT_TEST_LIVE_CACHE_PROBE=1` 后才运行
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示
 
 ## 已知限制

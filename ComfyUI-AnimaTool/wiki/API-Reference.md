@@ -260,7 +260,129 @@ MCP Server 返回：
 
 ---
 
-## 独立 FastAPI Server
+### Turbo 0.2（Legacy）端点
+
+Turbo 0.2 使用 base UNET + turbo LoRA 实现快速生成。简化字段，`tags` 使用自然语言。
+
+#### GET /anima/schema_turbo
+
+返回 Turbo 0.2 Tool Schema（简化字段，`aspect_ratio` 限 5 种，不含 `style`/`tags`/`environment`/`neg`）。
+
+#### GET /anima/knowledge_turbo
+
+返回 Turbo 0.2 专家知识：
+
+```json
+{
+  "turbo_expert": "...",
+  "artist_list": "...",
+  "turbo_examples": "..."
+}
+```
+
+#### POST /anima/generate_turbo
+
+执行 Turbo 0.2 快速生成（cfg=1, steps=10, 内置 turbo LoRA）。
+
+**请求体**：
+
+```json
+{
+  "quality_meta_year_safe": "masterpiece, best quality, highres, newest, year 2025, safe",
+  "count": "1girl",
+  "character": "hatsune miku",
+  "series": "vocaloid",
+  "appearance": "long teal hair, blue eyes, school uniform",
+  "artist": "@rurudo",
+  "tags": "A girl is standing in a classroom, smiling at the viewer. Upper body shot from the front. Soft daylight.",
+  "aspect_ratio": "1:1"
+}
+```
+
+> `tags` 使用英文自然语言，不是 Danbooru 标签。`cfg`/`steps`/`neg` 由后端固定，无需传入。
+
+**响应**：与 `/anima/generate` 一致。
+
+---
+
+### Turbo v1.0 端点
+
+Turbo v1.0 是独立完整 UNET 模型，不依赖 LoRA。简化字段，`tags` 使用自然语言，拥有 `neg` 字段。
+
+#### GET /anima/schema_turbo_v1
+
+返回 Turbo v1.0 Schema（简化字段，包含 `neg`，`cfg` 范围 0.7-1，`steps` 范围 8-12）。
+
+#### POST /anima/generate_turbo_v1
+
+执行 Turbo v1.0 生成。
+
+**请求体**：
+
+```json
+{
+  "quality_meta_year_safe": "masterpiece, best quality, safe",
+  "count": "1girl",
+  "character": "holo (spice and wolf)",
+  "series": "spice and wolf",
+  "appearance": "long brown hair, red eyes, wolf ears, brown cloak",
+  "artist": "@rurudo",
+  "tags": "A beautiful girl with long flowing brown hair and bright red eyes, wearing a brown hooded cloak. She has fluffy wolf ears and a bushy tail, holding a red apple, smiling at the viewer.",
+  "neg": "bad anatomy, bad hands, bad feet, extra fingers, missing fingers, text, watermark, logo, nsfw, explicit",
+  "aspect_ratio": "1:1",
+  "steps": 10,
+  "cfg": 1.0
+}
+```
+
+> `tags` 使用英文自然语言。`steps` 默认 10，`cfg` 默认 1。`neg` 可选，留空时后端按安全等级自动填充。
+
+**响应**：与 `/anima/generate` 一致。
+
+---
+
+### Aesthetic v1.0 端点
+
+Aesthetic v1.0 是完整 UNET 模型，在高质量图像上微调。简化字段与 Turbo v1.0 相同，但 `cfg`/`steps` 范围与 base 一致。
+
+#### GET /anima/schema_aesthetic_v1
+
+返回 Aesthetic v1.0 Schema（字段与 Turbo v1.0 相同，`cfg` 范围 3-8，`steps` 范围 20-60）。
+
+#### POST /anima/generate_aesthetic_v1
+
+执行 Aesthetic v1.0 生成。请求/响应格式与 `/anima/generate_turbo_v1` 一致，但 `steps` 默认 35，`cfg` 默认 4。
+
+---
+
+### 新模型共享端点
+
+#### GET /anima/knowledge_new_models
+
+返回 Turbo v1.0 / Aesthetic v1.0 共享的专家知识：
+
+```json
+{
+  "new_models_expert": "...",
+  "artist_list": "...",
+  "new_models_examples": "..."
+}
+```
+
+---
+
+### 模型对比
+
+| 模型 | 端点 | cfg | steps | neg | 字段 |
+|------|------|-----|-------|-----|------|
+| Base 1.0 | `/anima/generate` | 3-8, 默认 4 | 20-60, 默认 35 | 有 | 全部 14 字段 |
+| Turbo 0.2 | `/anima/generate_turbo` | 固定 1 | 固定 10 | 无 | 简化（无 style/tags/environment/neg） |
+| Turbo 1.0 | `/anima/generate_turbo_v1` | 0.7-1, 默认 1 | 8-12, 默认 10 | 有 | 简化（无 style/tags/environment） |
+| Aesthetic 1.0 | `/anima/generate_aesthetic_v1` | 3-8, 默认 4 | 20-60, 默认 35 | 有 | 简化（无 style/tags/environment） |
+
+> Turbo 1.0 / Aesthetic 1.0 的 `tags` 使用英文自然语言，`quality_meta_year_safe` 格式为 `masterpiece, best quality, <rating>`。
+
+---
 
 ### 启动
 

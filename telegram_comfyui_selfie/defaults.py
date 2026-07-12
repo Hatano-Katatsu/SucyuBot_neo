@@ -297,6 +297,7 @@ DEFAULT_CONFIG = {
     "comfyui_url": "http://127.0.0.1:8188",
     "comfyui_workflow_file": "",
     "image_backend": "native",
+    "animatool_workflow": "turbo_v1",
     "animatool_turbo_steps": "10",
     "animatool_turbo_cfg": "1.0",
     "animatool_filename_prefix": "sucyubot_turbo",

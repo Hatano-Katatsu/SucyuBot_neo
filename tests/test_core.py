@@ -7327,6 +7327,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "image_llm_api_key": "image-key",
                 "image_llm_model": "image-model",
                 "image_llm_api_base": "https://image.example",
+                "animatool_workflow": "turbo0.2",
             })
             sid = "telegram:123"
             svc._weather_caches[sid] = {
@@ -7500,7 +7501,123 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("neg", payload)
         self.assertNotIn("negative", payload)
         self.assertIn("nltag", payload)
-        self.assertEqual(payload["quality_meta_year_safe"], "masterpiece, nsfw")
+        # turbo_v1 简化格式：masterpiece, best quality, <safety>，不含 highres/newest/year 等
+        self.assertEqual(payload["quality_meta_year_safe"], "masterpiece, best quality, nsfw")
+
+    def test_animatool_payload_includes_neg_when_schema_supports(self):
+        """turbo_v1 工作流的 schema 含 neg 字段时，payload 应包含按 schema 格式构造的 neg。"""
+        svc = self.make_service()
+        svc.config["animatool_workflow"] = "turbo_v1"
+        slots = PromptSlots(
+            scene="A girl reads by the window.",
+            quality="masterpiece",
+            safety="safe",
+            count="1girl",
+            effective_appearance="school uniform",
+            negative="bad anatomy, bad hands",
+        )
+        schema = {
+            "parameters": {
+                "properties": {
+                    "quality_meta_year_safe": {"description": "quality and safety", "type": "string"},
+                    "count": {"description": "count", "type": "string"},
+                    "tags": {"description": "natural language scene", "type": "string"},
+                    "neg": {"description": "negative prompt", "type": "string", "default": ""},
+                },
+                "required": ["quality_meta_year_safe", "count", "tags"],
+            }
+        }
+
+        payload = _build_animatool_turbo_payload(svc, slots, "positive prompt", "bad anatomy, bad hands", 123, schema)
+
+        self.assertIn("neg", payload)
+        # neg 按 schema 格式构造，不直接复制槽位 negative；safe 时追加 nsfw, explicit
+        self.assertIn("bad anatomy, bad hands, bad feet, extra fingers, missing fingers, text, watermark, logo", payload["neg"])
+        self.assertIn("nsfw, explicit", payload["neg"])
+        # 不应包含槽位里的场景特定反词
+        self.assertNotIn("no panties", payload["neg"])
+        self.assertNotIn("2girls", payload["neg"])
+        self.assertIn("tags", payload)
+        # quality_meta_year_safe 简化格式
+        self.assertEqual(payload["quality_meta_year_safe"], "masterpiece, best quality, safe")
+
+    def test_animatool_slots_turbo_v1_supports_neg(self):
+        """turbo_v1 默认工作流应在 system prompt 中要求输出 neg，并保留 LLM 返回的 neg。"""
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+                "animatool_workflow": "turbo_v1",
+            })
+            sid = "telegram:123"
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "quality_meta_year_safe": "masterpiece, best quality, safe",
+                "count": "1girl",
+                "tags": "A girl stands by the window.",
+                "neg": "bad anatomy, bad hands, nsfw, explicit",
+            }, ensure_ascii=False))
+            slots = PromptSlots(
+                scene="A girl stands by the window.",
+                quality="masterpiece",
+                count="1girl",
+                effective_appearance="school uniform",
+                negative="bad hands",
+            )
+            schema = {
+                "parameters": {
+                    "properties": {
+                        "quality_meta_year_safe": {"description": "quality and safety"},
+                        "count": {"description": "count"},
+                        "tags": {"description": "natural language scene"},
+                        "neg": {"description": "negative prompt"},
+                    },
+                    "required": ["quality_meta_year_safe", "count", "tags"],
+                }
+            }
+
+            with patch("telegram_comfyui_selfie.image_planning._fetch_animatool_turbo_knowledge", new=AsyncMock(return_value={})), \
+                 patch("telegram_comfyui_selfie.image_planning._fetch_animatool_turbo_schema", new=AsyncMock(return_value=schema)):
+                payload = await plan_animatool_slots(svc, sid, slots)
+
+            self.assertIsNotNone(payload)
+            system_prompt = svc._call_llm.await_args.args[0]
+            self.assertIn("当前工作流支持 neg 字段", system_prompt)
+            self.assertIn("neg", payload)
+            self.assertEqual(payload["neg"], "bad anatomy, bad hands, nsfw, explicit")
+
+        asyncio.run(run())
+
+    def test_animatool_workflow_selects_correct_endpoints(self):
+        """不同工作流应映射到不同的 schema/knowledge/generate 端点。"""
+        from telegram_comfyui_selfie.generation import ANIMATOOL_WORKFLOWS, _get_animatool_workflow
+        from telegram_comfyui_selfie.generation import _workflow_supports_neg
+
+        svc = self.make_service()
+        # 默认 turbo_v1
+        self.assertEqual(_get_animatool_workflow(svc), "turbo_v1")
+        self.assertTrue(_workflow_supports_neg(svc))
+        self.assertEqual(ANIMATOOL_WORKFLOWS["turbo_v1"]["generate_path"], "/anima/generate_turbo_v1")
+        self.assertEqual(ANIMATOOL_WORKFLOWS["turbo_v1"]["schema_path"], "/anima/schema_turbo_v1")
+        self.assertEqual(ANIMATOOL_WORKFLOWS["turbo_v1"]["knowledge_path"], "/anima/knowledge_new_models")
+
+        svc.config["animatool_workflow"] = "turbo0.2"
+        self.assertEqual(_get_animatool_workflow(svc), "turbo0.2")
+        self.assertFalse(_workflow_supports_neg(svc))
+        self.assertEqual(ANIMATOOL_WORKFLOWS["turbo0.2"]["generate_path"], "/anima/generate_turbo")
+
+        svc.config["animatool_workflow"] = "base"
+        self.assertEqual(ANIMATOOL_WORKFLOWS["base"]["generate_path"], "/anima/generate")
+        self.assertTrue(_workflow_supports_neg(svc))
+
+        svc.config["animatool_workflow"] = "aesthetic_v1"
+        self.assertEqual(ANIMATOOL_WORKFLOWS["aesthetic_v1"]["generate_path"], "/anima/generate_aesthetic_v1")
+        self.assertTrue(_workflow_supports_neg(svc))
+
+        # 非法值回退默认
+        svc.config["animatool_workflow"] = "unknown"
+        self.assertEqual(_get_animatool_workflow(svc), "turbo_v1")
 
     def test_image_planner_writes_back_location_when_unpinned(self):
         async def run():

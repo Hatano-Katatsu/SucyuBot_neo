@@ -248,9 +248,17 @@ pip install mcp
 | 路由 | 方法 | 说明 |
 |------|------|------|
 | `/anima/health` | GET | 健康检查 |
-| `/anima/schema` | GET | Tool Schema |
-| `/anima/knowledge` | GET | 专家知识 |
-| `/anima/generate` | POST | 执行生成（支持 `repeat` 批量） |
+| `/anima/schema` | GET | Base 1.0 Tool Schema |
+| `/anima/knowledge` | GET | Base 1.0 专家知识 |
+| `/anima/generate` | POST | Base 1.0 生成（支持 `repeat` 批量） |
+| `/anima/schema_turbo` | GET | Turbo 0.2 Schema |
+| `/anima/knowledge_turbo` | GET | Turbo 0.2 专家知识 |
+| `/anima/generate_turbo` | POST | Turbo 0.2 快速生成（LoRA + cfg=1 + steps=10） |
+| `/anima/schema_turbo_v1` | GET | Turbo 1.0 Schema |
+| `/anima/generate_turbo_v1` | POST | Turbo 1.0 生成（独立 UNET，cfg 0.7-1，steps 8-12） |
+| `/anima/schema_aesthetic_v1` | GET | Aesthetic 1.0 Schema |
+| `/anima/generate_aesthetic_v1` | POST | Aesthetic 1.0 生成（高质量微调，cfg 3-8，steps 20-60） |
+| `/anima/knowledge_new_models` | GET | Turbo 1.0 / Aesthetic 1.0 共享专家知识 |
 | `/anima/history` | GET | 查看最近生成历史 |
 | `/anima/reroll` | POST | 基于历史记录重新生成 |
 

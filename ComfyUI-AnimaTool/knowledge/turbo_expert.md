@@ -31,9 +31,13 @@ tags 必须包含：**角色外观引用**、**动作/姿势**、**表情**、**
 - **使用共处式描述**，不要用位置分割词（❌ "On the left... On the right..."）
 - **character 字段**多个角色名用逗号分隔
 
-## tags 末尾追加
+## 模型能力限制（重要）
 
-tags 字段末尾必须加上 `no text, no logo, no ui`，用于替代负面提示词的作用。当分级为 nsfw 或 explicit 时，额外追加 `, no mosaic, uncensored`。
+本模型**不具备**生成文字、LOGO、UI 界面、对话框、气泡的能力。请遵守：
+
+- **tags 中禁止出现**以下相关描述：文字（text, sign, letter, caption, word, writing）、UI/界面（ui, interface, hud, menu, button, dialog）、气泡（speech bubble, thought bubble）、LOGO。模型无法生成这些内容，强行描述会干扰画面质量。
+- **不要使用** `no text, no logo, no ui` 之类的负面后缀，该写法效果不佳。
+- 当分级为 nsfw 或 explicit 时，tags 末尾追加 `no mosaic, uncensored`。
 
 ## 宽高比
 

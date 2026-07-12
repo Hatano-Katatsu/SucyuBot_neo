@@ -1633,27 +1633,84 @@ def build_anima_workflow(service: Any, positive: str, negative: str, seed: int) 
     return wf
 
 
-# AnimaTool turbo schema 缓存（按 comfyui_url 分键，避免多个服务互相覆盖）
+# AnimaTool 画图工作流注册表：每种工作流有独立的 schema / knowledge / generate 端点。
+# turbo_v1 / aesthetic_v1 使用新模型共享 knowledge（/anima/knowledge_new_models），
+# 且 schema 中包含 neg（反词）字段；turbo0.2 沿用旧 turbo 端点，不支持 neg；
+# base 使用通用 Anima 端点，schema 字段最多，支持 neg。
+ANIMATOOL_WORKFLOWS: dict[str, dict[str, Any]] = {
+    "turbo_v1": {
+        "label": "Turbo v1.0",
+        "schema_path": "/anima/schema_turbo_v1",
+        "knowledge_path": "/anima/knowledge_new_models",
+        "generate_path": "/anima/generate_turbo_v1",
+        "knowledge_keys": ("new_models_expert", "new_models_examples", "artist_list"),
+        "supports_neg": True,
+    },
+    "aesthetic_v1": {
+        "label": "Aesthetic v1.0",
+        "schema_path": "/anima/schema_aesthetic_v1",
+        "knowledge_path": "/anima/knowledge_new_models",
+        "generate_path": "/anima/generate_aesthetic_v1",
+        "knowledge_keys": ("new_models_expert", "new_models_examples", "artist_list"),
+        "supports_neg": True,
+    },
+    "turbo0.2": {
+        "label": "Turbo v0.2",
+        "schema_path": "/anima/schema_turbo",
+        "knowledge_path": "/anima/knowledge_turbo",
+        "generate_path": "/anima/generate_turbo",
+        "knowledge_keys": ("turbo_expert", "turbo_examples", "artist_list"),
+        "supports_neg": False,
+    },
+    "base": {
+        "label": "Base (Anima)",
+        "schema_path": "/anima/schema",
+        "knowledge_path": "/anima/knowledge",
+        "generate_path": "/anima/generate",
+        "knowledge_keys": ("anima_expert", "prompt_examples", "artist_list"),
+        "supports_neg": True,
+    },
+}
+DEFAULT_ANIMATOOL_WORKFLOW = "turbo_v1"
+
+
+def _get_animatool_workflow(service: Any) -> str:
+    """读取并校验当前 AnimaTool 画图工作流配置，非法值回退默认。"""
+    raw = str(service.config.get("animatool_workflow", DEFAULT_ANIMATOOL_WORKFLOW) or DEFAULT_ANIMATOOL_WORKFLOW).strip().lower()
+    if raw not in ANIMATOOL_WORKFLOWS:
+        return DEFAULT_ANIMATOOL_WORKFLOW
+    return raw
+
+
+def _workflow_supports_neg(service: Any) -> bool:
+    """当前工作流是否支持反词（neg）字段。"""
+    return bool(ANIMATOOL_WORKFLOWS.get(_get_animatool_workflow(service), {}).get("supports_neg"))
+
+
+# AnimaTool schema 缓存（按 comfyui_url + workflow 分键，避免不同工作流互相覆盖）
 _animatool_turbo_schema_cache: dict[str, tuple[dict[str, Any], float]] = {}
 _ANIMATOOL_SCHEMA_TTL = 300.0
 
 
-async def _fetch_animatool_turbo_schema(service: Any, ttl: float = _ANIMATOOL_SCHEMA_TTL) -> dict[str, Any]:
-    """从 AnimaTool 动态获取 turbo 接口的 JSON schema，带缓存。"""
+async def _fetch_animatool_turbo_schema(service: Any, ttl: float = _ANIMATOOL_SCHEMA_TTL, workflow: str | None = None) -> dict[str, Any]:
+    """从 AnimaTool 动态获取当前工作流对应接口的 JSON schema，带缓存。"""
     url = str(service.comfyui_url).rstrip("/")
+    wf = workflow or _get_animatool_workflow(service)
+    cache_key = f"{url}|{wf}"
     now = time.monotonic()
-    cached = _animatool_turbo_schema_cache.get(url)
+    cached = _animatool_turbo_schema_cache.get(cache_key)
     if cached and (now - cached[1]) < ttl:
         return cached[0]
+    schema_path = ANIMATOOL_WORKFLOWS.get(wf, {}).get("schema_path", "/anima/schema_turbo")
     schema: dict[str, Any] = {}
     try:
         ensure_comfy_session(service)
-        async with service.comfy_session.get(f"{url}/anima/schema_turbo", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with service.comfy_session.get(f"{url}{schema_path}", timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status == 200:
                 schema = await resp.json(content_type=None) or {}
     except Exception as exc:
-        logger.debug("fetch animatool turbo schema failed: %s", exc)
-    _animatool_turbo_schema_cache[url] = (schema, now)
+        logger.debug("fetch animatool schema (%s) failed: %s", wf, exc)
+    _animatool_turbo_schema_cache[cache_key] = (schema, now)
     return schema
 
 
@@ -1699,6 +1756,44 @@ def _schema_type_convert(name: str, value: Any, prop: dict[str, Any]) -> Any:
     return value
 
 
+def _animatool_safety_tag(slots: PromptSlots | None) -> str:
+    """从 PromptSlots 提取安全等级标签，空值兜底 safe。"""
+    if isinstance(slots, PromptSlots):
+        for tag in re.split(r"[,\s]+", str(slots.safety or "").strip()):
+            if tag.strip().lower() in ("safe", "sensitive", "nsfw", "explicit"):
+                return tag.strip().lower()
+    return "safe"
+
+
+def _build_animatool_quality_meta(slots: PromptSlots | None, workflow: str) -> str:
+    """按工作流格式构造 quality_meta_year_safe。
+
+    turbo_v1/aesthetic_v1 简化格式：masterpiece, best quality, <safety>
+    turbo0.2/base 完整格式：masterpiece, best quality, highres, newest, year 2025, <safety>
+    """
+    safety = _animatool_safety_tag(slots)
+    if workflow in ("turbo_v1", "aesthetic_v1"):
+        return f"masterpiece, best quality, {safety}"
+    return f"masterpiece, best quality, highres, newest, year 2025, {safety}"
+
+
+def _build_animatool_neg(slots: PromptSlots | None, workflow: str) -> str:
+    """按工作流格式构造 neg 反词。
+
+    turbo_v1/aesthetic_v1：通用反词 + 安全等级反词
+    base：worst quality 等额外反词 + 通用反词 + 安全等级反词
+    """
+    safety = _animatool_safety_tag(slots)
+    if safety in ("safe", "sensitive"):
+        safety_neg = "nsfw, explicit"
+    else:
+        safety_neg = "safe, sensitive, censored, mosaic, no mosaic, uncensored"
+    common_neg = "bad anatomy, bad hands, bad feet, extra fingers, missing fingers, text, watermark, logo"
+    if workflow == "base":
+        return f"worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, {common_neg}, extra toes, {safety_neg}"
+    return f"{common_neg}, {safety_neg}"
+
+
 def _build_animatool_turbo_payload(
     service: Any,
     slots: PromptSlots | None,
@@ -1707,18 +1802,20 @@ def _build_animatool_turbo_payload(
     seed: int,
     schema: dict[str, Any],
 ) -> dict[str, Any]:
-    """根据 AnimaTool turbo schema 字段构建请求体；schema 为空时按原来的字段映射兜底。"""
+    """根据 AnimaTool schema 字段构建请求体；schema 为空时按原来的字段映射兜底。"""
+    workflow = _get_animatool_workflow(service)
     params = schema.get("parameters", {}) if isinstance(schema, dict) else {}
     properties = params.get("properties", {}) if isinstance(params, dict) else {}
     required = set(params.get("required", []) if isinstance(params, dict) else [])
 
     # 槽位到 schema 候选字段的映射（按优先级）
-    # AnimaTool turbo 规范：
+    # AnimaTool 规范：
     # - tags 是英文自然语言场景描述，对应项目里的 scene；
     # - appearance 是逗号分隔的英文 danbooru 标签，对应 effective_appearance + one_shot_appearance；
     # - positive 字段会覆盖结构化字段，只在 schema 不支持 tags 时才发送。
+    # quality_meta_year_safe / neg 不走 slot_candidates——它们按工作流 schema 格式构造，
+    # 不直接复制项目内部的 quality/negative 全量标签（含 highres/anime coloring/no panties 等）。
     slot_candidates: dict[str, list[str]] = {
-        "quality": ["quality_meta_year_safe"],
         "count": ["count"],
         "character": ["character"],
         "series": ["series"],
@@ -1763,10 +1860,7 @@ def _build_animatool_turbo_payload(
             for field_name in schema_names:
                 if field_name not in properties or field_name in payload:
                     continue
-                if field_name == "quality_meta_year_safe":
-                    value = slots.quality_for_schema()
-                else:
-                    value = getattr(slots, slot_name, None)
+                value = getattr(slots, slot_name, None)
                 if value in (None, ""):
                     continue
                 prop = properties[field_name]
@@ -1776,7 +1870,19 @@ def _build_animatool_turbo_payload(
                 if field_name in ANIMATOOL_NLTAG_FIELDS and not value:
                     # 自然语言 tags/nltag 必填时，后面兜底
                     continue
+                # count 只取人数标签，去掉 solo 等非人数标签
+                if field_name == "count":
+                    count_tags = [t.strip() for t in re.split(r"[,\s]+", str(value)) if t.strip()]
+                    value = next((t for t in count_tags if t.lower() in ("1girl", "2girls", "1boy", "1other")), "")
+                    if not value:
+                        continue
                 payload[field_name] = _schema_type_convert(field_name, value, prop)
+        # quality_meta_year_safe：按工作流 schema 格式构造，不复制槽位全量质量标签
+        if "quality_meta_year_safe" in properties and "quality_meta_year_safe" not in payload:
+            payload["quality_meta_year_safe"] = _build_animatool_quality_meta(slots, workflow)
+        # neg：按工作流 schema 格式构造，不复制槽位全量反词
+        if "neg" in properties and "neg" not in payload and _workflow_supports_neg(service):
+            payload["neg"] = _build_animatool_neg(slots, workflow)
         # 一次性外观补充追加到 appearance（不覆盖有效外貌，只追加）
         one_shot = (getattr(slots, "one_shot_appearance", None) or "").strip()
         if one_shot and "appearance" in properties and "appearance" in payload:
@@ -1793,17 +1899,19 @@ def _build_animatool_turbo_payload(
             payload[nltag_field] = positive
         elif "positive" in properties:
             payload["positive"] = positive
+        # 无槽位时也按工作流格式构造 quality_meta_year_safe / neg
+        if "quality_meta_year_safe" in properties and "quality_meta_year_safe" not in payload:
+            payload["quality_meta_year_safe"] = _build_animatool_quality_meta(slots, workflow)
+        if "neg" in properties and "neg" not in payload and _workflow_supports_neg(service):
+            payload["neg"] = _build_animatool_neg(slots, workflow)
 
     # 必填字段兜底
     if "quality_meta_year_safe" in required:
         if "quality_meta_year_safe" not in payload or not payload["quality_meta_year_safe"]:
-            payload["quality_meta_year_safe"] = (
-                (slots.quality_for_schema() if isinstance(slots, PromptSlots) else "")
-                or "masterpiece, best quality, highres, newest, year 2025, safe"
-            )
+            payload["quality_meta_year_safe"] = _build_animatool_quality_meta(slots, workflow)
     if "count" in required:
         if "count" not in payload or not payload["count"]:
-            payload["count"] = getattr(slots, "count", "") or "1girl"
+            payload["count"] = "1girl"
     nltag_field = _preferred_animatool_nltag_field(properties, required)
     if nltag_field in required:
         if nltag_field not in payload or not payload[nltag_field]:
@@ -1883,20 +1991,22 @@ async def _post_animatool(
     seed: int,
     payload: dict[str, Any],
 ) -> tuple[bool, list[bytes], str]:
-    """POST /anima/generate_turbo 并下载图片。"""
+    """POST 当前工作流的 /anima/generate_* 并下载图片。"""
     payload = dict(payload or {})
+    wf = _get_animatool_workflow(service)
+    generate_path = ANIMATOOL_WORKFLOWS.get(wf, {}).get("generate_path", "/anima/generate_turbo")
     try:
         _remember_generated_nltag(service, session_id, _payload_nltag(payload))
         if hasattr(service, "_ulog") and isinstance(slots, PromptSlots):
             service._ulog(
                 session_id,
                 "ANIMATOOL_TURBO_PAYLOAD",
-                f"seed={seed} payload={json.dumps(payload, ensure_ascii=False)}",
+                f"seed={seed} workflow={wf} payload={json.dumps(payload, ensure_ascii=False)}",
             )
-        async with service.comfy_session.post(f"{service.comfyui_url}/anima/generate_turbo", json=payload) as resp:
+        async with service.comfy_session.post(f"{service.comfyui_url}{generate_path}", json=payload) as resp:
             data = await resp.json(content_type=None)
             if resp.status >= 400:
-                return False, [], f"AnimaTool turbo failed: {resp.status} {data}"
+                return False, [], f"AnimaTool {wf} failed: {resp.status} {data}"
         images = data.get("images", []) if isinstance(data, dict) else []
         result: list[bytes] = []
         for img in images:
@@ -1910,18 +2020,20 @@ async def _post_animatool(
                 if view_resp.status == 200:
                     result.append(await view_resp.read())
         if not result:
-            return False, [], f"AnimaTool turbo returned no images: {data}"
+            return False, [], f"AnimaTool {wf} returned no images: {data}"
         return True, result, ""
     except Exception as exc:
-        return False, [], f"AnimaTool turbo exception: {exc}"
+        return False, [], f"AnimaTool {wf} exception: {exc}"
 
 
 async def submit_animatool_turbo(service: Any, positive: str, negative: str, seed: int) -> tuple[bool, list[bytes], str]:
     slots = getattr(service, "_last_prompt_slots", None)
+    wf = _get_animatool_workflow(service)
+    generate_path = ANIMATOOL_WORKFLOWS.get(wf, {}).get("generate_path", "/anima/generate_turbo")
     schema = await _fetch_animatool_turbo_schema(service)
     if not schema:
         # schema 获取失败时回退到原来的硬编码字段，但尽量去掉 schema 中不存在的字段
-        logger.warning("animatool turbo schema not available, falling back to hardcoded fields")
+        logger.warning("animatool %s schema not available, falling back to hardcoded fields", wf)
         payload = {
             "filename_prefix": service.config.get("animatool_filename_prefix", "sucyubot_turbo"),
             "seed": seed,
@@ -1938,17 +2050,26 @@ async def submit_animatool_turbo(service: Any, positive: str, negative: str, see
                 appearance = f"{appearance}, {one_shot}"
             elif one_shot:
                 appearance = one_shot
+            # count 只取人数标签
+            count_tags = [t.strip() for t in re.split(r"[,\s]+", str(slots.count or "")) if t.strip()]
+            count_value = next((t for t in count_tags if t.lower() in ("1girl", "2girls", "1boy", "1other")), "1girl")
             payload.update({
-                "quality_meta_year_safe": slots.quality_for_schema(),
-                "count": slots.count,
+                "quality_meta_year_safe": _build_animatool_quality_meta(slots, wf),
+                "count": count_value,
                 "character": slots.character or slots.identity,
                 "series": slots.series,
                 "artist": slots.style_artist,
                 "appearance": appearance,
                 "tags": slots.scene or "",
             })
+            # 工作流支持反词时按 schema 格式构造 neg
+            if _workflow_supports_neg(service):
+                payload["neg"] = _build_animatool_neg(slots, wf)
         else:
             payload["tags"] = positive
+            payload["quality_meta_year_safe"] = _build_animatool_quality_meta(slots, wf)
+            if _workflow_supports_neg(service):
+                payload["neg"] = _build_animatool_neg(slots, wf)
         cleaned = {k: v for k, v in payload.items() if v not in (None, "")}
     else:
         cleaned = _build_animatool_turbo_payload(service, slots, positive, negative, seed, schema)
@@ -1958,12 +2079,12 @@ async def submit_animatool_turbo(service: Any, positive: str, negative: str, see
             service._ulog(
                 getattr(slots, "session_id", ""),
                 "ANIMATOOL_TURBO_PAYLOAD",
-                f"seed={seed} payload={json.dumps(cleaned, ensure_ascii=False)}",
+                f"seed={seed} workflow={wf} payload={json.dumps(cleaned, ensure_ascii=False)}",
             )
-        async with service.comfy_session.post(f"{service.comfyui_url}/anima/generate_turbo", json=cleaned) as resp:
+        async with service.comfy_session.post(f"{service.comfyui_url}{generate_path}", json=cleaned) as resp:
             data = await resp.json(content_type=None)
             if resp.status >= 400:
-                return False, [], f"AnimaTool turbo failed: {resp.status} {data}"
+                return False, [], f"AnimaTool {wf} failed: {resp.status} {data}"
         images = data.get("images", []) if isinstance(data, dict) else []
         result: list[bytes] = []
         for img in images:
@@ -1977,10 +2098,10 @@ async def submit_animatool_turbo(service: Any, positive: str, negative: str, see
                 if view_resp.status == 200:
                     result.append(await view_resp.read())
         if not result:
-            return False, [], f"AnimaTool turbo returned no images: {data}"
+            return False, [], f"AnimaTool {wf} returned no images: {data}"
         return True, result, ""
     except Exception as exc:
-        return False, [], f"AnimaTool turbo exception: {exc}"
+        return False, [], f"AnimaTool {wf} exception: {exc}"
 
 
 def _aspect_ratio_from_dimensions(service: Any, orientation: str = "") -> str:

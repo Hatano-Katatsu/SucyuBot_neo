@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urljoin
 
-from .config import AnimaToolConfig, BASE10_UNET_NAME
+from .config import AnimaToolConfig, BASE10_UNET_NAME, TURBO10_UNET_NAME, AESTHETIC10_UNET_NAME
 from .history import HistoryManager
 
 
@@ -93,6 +93,19 @@ def build_turbo_positive_text(prompt_json: Dict[str, Any]) -> str:
         prompt_json.get("artist", ""),
         prompt_json.get("tags", ""),
     )
+
+
+def build_new_models_negative_text(prompt_json: Dict[str, Any]) -> str:
+    """
+    新模型（turbo-v1.0 / aesthetic-v1.0）默认负面提示词。
+    保留 base 设计，但**不包含质量标签**。根据 quality_meta_year_safe 中的安全等级追加对立约束。
+    """
+    q = (prompt_json.get("quality_meta_year_safe") or "").lower()
+    explicit = "nsfw" in q or "explicit" in q
+    base = "bad anatomy, bad hands, bad feet, extra fingers, missing fingers, text, watermark, logo"
+    if explicit:
+        return f"{base}, safe, sensitive, censored, mosaic, no mosaic, uncensored"
+    return f"{base}, nsfw, explicit"
 
 
 def build_anima_positive_text(prompt_json: Dict[str, Any]) -> str:
@@ -560,26 +573,41 @@ class AnimaExecutor:
 
         return wf
 
-    def _inject(self, prompt_json: Dict[str, Any]) -> Dict[str, Any]:
-        wf = deepcopy(self._workflow_template)
+    def _inject_v2(self, prompt_json: Dict[str, Any], model: str) -> Dict[str, Any]:
+        """
+        新模型 v1.0 统一工作流注入：turbo-v1.0 与 aesthetic-v1.0 共用同一模板。
+        两者都是完整 UNET，不依赖额外 LoRA，因此 LoRA strength 固定为 0。
 
-        # 模型文件：优先使用参数指定，其次使用配置，最后使用模板默认值
+        model: "turbo1.0" 或 "aesthetic1.0"
+        """
+        if model not in ("turbo1.0", "aesthetic1.0"):
+            raise ValueError(f"不支持的 v2 model={model!r}，仅支持 turbo1.0 / aesthetic1.0")
+
+        wf = deepcopy(self._workflow_template_unified)
+
+        # 模型选择
+        if model == "turbo1.0":
+            unet_name = prompt_json.get("unet_name") or TURBO10_UNET_NAME
+        else:  # aesthetic1.0
+            unet_name = prompt_json.get("unet_name") or AESTHETIC10_UNET_NAME
+
         clip_name = prompt_json.get("clip_name") or self.config.clip_name
-        unet_name = prompt_json.get("unet_name") or self.config.unet_name
         vae_name = prompt_json.get("vae_name") or self.config.vae_name
-        
+
         wf["45"]["inputs"]["clip_name"] = str(clip_name)
         wf["44"]["inputs"]["unet_name"] = str(unet_name)
         wf["15"]["inputs"]["vae_name"] = str(vae_name)
 
-        # 可选：LoRA 注入（仅 UNET）
-        self._inject_loras(wf, prompt_json.get("loras"))
+        # 新模型均为完整 UNET，不需要额外 turbo LoRA
+        wf["60"]["inputs"]["strength_model"] = 0.0
 
-        # 文本
+        # 文本（与 turbo 一致的字段拼接顺序，使用自然语言 tags）
         positive = (prompt_json.get("positive") or "").strip()
         if not positive:
-            positive = build_anima_positive_text(prompt_json)
+            positive = build_turbo_positive_text(prompt_json)
         negative = (prompt_json.get("neg") or prompt_json.get("negative") or "").strip()
+        if not negative:
+            negative = build_new_models_negative_text(prompt_json)
 
         wf["11"]["inputs"]["text"] = positive
         wf["12"]["inputs"]["text"] = negative
@@ -591,7 +619,6 @@ class AnimaExecutor:
         round_to = int(prompt_json.get("round_to") or self.config.round_to)
 
         if (width is None or height is None) and aspect_ratio:
-            # 仅提供 aspect_ratio 时自动计算
             w, h = estimate_size_from_ratio(
                 aspect_ratio=aspect_ratio,
                 target_megapixels=float(prompt_json.get("target_megapixels") or self.config.target_megapixels),
@@ -599,33 +626,45 @@ class AnimaExecutor:
             )
             width, height = w, h
         elif width is not None and height is not None:
-            # 用户直接指定了 width/height，也需要对齐到 round_to 的倍数
-            # 避免 "should be divisible by spatial_patch_size" 错误
             width = align_dimension(width, round_to)
             height = align_dimension(height, round_to)
 
         if width is None or height is None:
-            # 默认方形 1MP（1024 是 16 的倍数）
             width, height = 1024, 1024
 
         wf["28"]["inputs"]["width"] = int(width)
         wf["28"]["inputs"]["height"] = int(height)
         wf["28"]["inputs"]["batch_size"] = int(prompt_json.get("batch_size") or 1)
 
-        # 采样参数
+        # 种子
         seed = prompt_json.get("seed")
         if seed is None:
             seed = int.from_bytes(uuid.uuid4().bytes[:4], "big", signed=False)
         wf["19"]["inputs"]["seed"] = int(seed)
 
-        wf["19"]["inputs"]["steps"] = int(prompt_json.get("steps") or wf["19"]["inputs"]["steps"])
-        wf["19"]["inputs"]["cfg"] = float(prompt_json.get("cfg") or wf["19"]["inputs"]["cfg"])
-        wf["19"]["inputs"]["sampler_name"] = str(prompt_json.get("sampler_name") or wf["19"]["inputs"]["sampler_name"])
-        wf["19"]["inputs"]["scheduler"] = str(prompt_json.get("scheduler") or wf["19"]["inputs"]["scheduler"])
-        wf["19"]["inputs"]["denoise"] = float(prompt_json.get("denoise") or wf["19"]["inputs"]["denoise"])
+        # 采样参数：turbo1.0 沿用 turbo 快速参数；aesthetic1.0 沿用 base 参数
+        if model == "turbo1.0":
+            steps = int(prompt_json.get("steps") or 10)
+            steps = max(8, min(12, steps))
+            wf["19"]["inputs"]["steps"] = steps
+            cfg = float(prompt_json.get("cfg") or 1.0)
+            cfg = max(0.7, min(1.0, cfg))
+            wf["19"]["inputs"]["cfg"] = cfg
+        else:  # aesthetic1.0
+            wf["19"]["inputs"]["steps"] = int(prompt_json.get("steps") or 35)
+            wf["19"]["inputs"]["cfg"] = float(prompt_json.get("cfg") or 4)
+
+        # 通用可覆盖参数
+        if prompt_json.get("sampler_name"):
+            wf["19"]["inputs"]["sampler_name"] = str(prompt_json["sampler_name"])
+        if prompt_json.get("scheduler"):
+            wf["19"]["inputs"]["scheduler"] = str(prompt_json["scheduler"])
+        if prompt_json.get("denoise") is not None:
+            wf["19"]["inputs"]["denoise"] = float(prompt_json["denoise"])
 
         # 文件名前缀
-        wf["52"]["inputs"]["filename_prefix"] = str(prompt_json.get("filename_prefix") or wf["52"]["inputs"]["filename_prefix"])
+        default_prefix = "AnimaTool_aesthetic_" if model == "aesthetic1.0" else "AnimaTool_turbo_v1_"
+        wf["52"]["inputs"]["filename_prefix"] = str(prompt_json.get("filename_prefix") or default_prefix)
 
         return wf
 
@@ -1124,6 +1163,72 @@ class AnimaExecutor:
         result = {
             "success": True,
             "mode": "turbo",
+            "prompt_id": prompt_id,
+            "positive": actual_positive,
+            "negative": actual_negative,
+            "seed": actual_seed,
+            "width": actual_width,
+            "height": actual_height,
+            "images": images_data,
+        }
+
+        record = self.history.add(
+            params=prompt_json,
+            positive_text=actual_positive,
+            negative_text=actual_negative,
+            prompt_id=prompt_id,
+            seed=actual_seed,
+            width=actual_width,
+            height=actual_height,
+        )
+        result["history_id"] = record.id
+
+        return result
+
+    def generate_v2(self, prompt_json: Dict[str, Any], model: str) -> Dict[str, Any]:
+        """
+        新模型 v1.0 统一生成入口。
+
+        参数：
+        - model: "turbo1.0" 或 "aesthetic1.0"
+        - 其余字段与 turbo 模式一致，使用自然语言 tags
+        """
+        prompt = self._inject_v2(prompt_json, model)
+
+        prompt_id = self.queue_prompt(prompt)
+        history_item = self.wait_history(prompt_id)
+        images = self._extract_images(prompt_id, history_item)
+        images = self._download_images(images)
+
+        images_data = []
+        for im in images:
+            mime_type = self._get_mime_type(im.filename)
+            b64 = base64.b64encode(im.content).decode("ascii") if im.content else None
+
+            img_info = {
+                "filename": im.filename,
+                "subfolder": im.subfolder,
+                "type": im.folder_type,
+                "url": im.view_url,
+                "view_url": im.view_url,
+                "file_path": im.saved_path,
+                "saved_path": im.saved_path,
+                "base64": b64,
+                "mime_type": mime_type,
+                "data_url": f"data:{mime_type};base64,{b64}" if b64 else None,
+                "markdown": f"![{im.filename}]({im.view_url})",
+            }
+            images_data.append(img_info)
+
+        actual_seed = int(prompt["19"]["inputs"]["seed"])
+        actual_positive = prompt["11"]["inputs"]["text"]
+        actual_negative = prompt["12"]["inputs"]["text"]
+        actual_width = int(prompt["28"]["inputs"]["width"])
+        actual_height = int(prompt["28"]["inputs"]["height"])
+
+        result = {
+            "success": True,
+            "mode": model,
             "prompt_id": prompt_id,
             "positive": actual_positive,
             "negative": actual_negative,

@@ -46,6 +46,10 @@ DEFAULT_VAE_NAME = "qwen_image_vae.safetensors"
 # base v1.0 模型文件名
 BASE10_UNET_NAME = "anima-base-v1.0.safetensors"
 
+# 新模型 v1.0 文件名
+TURBO10_UNET_NAME = "anima-turbo-v1.0.safetensors"
+AESTHETIC10_UNET_NAME = "anima-aesthetic-v1.0.safetensors"
+
 
 @dataclass
 class AnimaToolConfig:

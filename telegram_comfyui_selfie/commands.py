@@ -1630,11 +1630,15 @@ class CommandHandlersMixin:
             async with self.comfy_session.get(f"{self.comfyui_url}/system_stats") as resp:
                 stats = await resp.json()
             sys = stats.get("system", {})
+            backend = self.config.get("image_backend", "native")
+            workflow = self.config.get("animatool_workflow", "turbo_v1")
+            backend_line = f"后端: {backend}" + (f" / 工作流: {workflow}" if backend == "animatool" else "")
             await self.send_message(
                 chat_id,
                 f"ComfyUI {sys.get('comfyui_version', '?')}\n"
                 f"RAM: {sys.get('ram_total', 0)//(1024**3)}GB (free {sys.get('ram_free', 0)//(1024**3)}GB)\n"
-                f"{self.config.get('width')}x{self.config.get('height')} / {self.config.get('steps')} steps / {self.config.get('sampler')}",
+                f"{self.config.get('width')}x{self.config.get('height')} / {self.config.get('steps')} steps / {self.config.get('sampler')}\n"
+                f"{backend_line}",
             )
         except Exception as exc:
             await self.send_message(chat_id, f"无法连接 ComfyUI: {exc}")
