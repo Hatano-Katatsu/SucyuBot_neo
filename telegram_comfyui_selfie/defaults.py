@@ -298,7 +298,7 @@ DEFAULT_CONFIG = {
     "comfyui_workflow_file": "",
     "image_backend": "native",
     "animatool_workflow": "turbo_v1",
-    "animatool_turbo_steps": "10",
+    "animatool_turbo_steps": "12",
     "animatool_turbo_cfg": "1.0",
     "animatool_filename_prefix": "sucyubot_turbo",
     "unet_model": "anima-preview3-base.safetensors",

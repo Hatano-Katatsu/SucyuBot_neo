@@ -198,6 +198,8 @@ telegram_comfyui_selfie/
 - **quality_meta_year_safe 不再直接复制项目内部 quality 槽位**：项目 quality 槽含 `highres, absurdres, anime coloring, clean lineart, soft cel shading, detailed illustration` 等标签，但 turbo_v1/aesthetic_v1 的 schema 只要求 `masterpiece, best quality, <safety>`。`_build_animatool_quality_meta(slots, workflow)` 按工作流格式构造，LLM planner 的 system prompt 也明确要求按 schema default 格式构造、不堆砌槽位额外质量标签。
 - **neg 不再直接复制项目内部 negative 槽位**：项目 negative 含 `no panties, 2girls, holding phone, mirror selfie` 等场景特定反词，但 AnimaTool schema 的 neg 只要求通用反词 + 安全等级反词。`_build_animatool_neg(slots, workflow)` 按标准格式构造（`bad anatomy, bad hands, bad feet, extra fingers, missing fingers, text, watermark, logo` + 安全等级反词；base 额外含 `worst quality, low quality, score_1..3, blurry, jpeg artifacts`）。LLM planner 的 system prompt 明确禁止复制槽位 negative。
 - **count 只取人数标签**：项目 count 槽可能含 `solo`，但 AnimaTool schema 的 count 只接受 `1girl/2girls/1boy/1other`。LLM planner 和 legacy 回退都会 strip `solo` 等非人数标签。
+- **steps 按工作流区分默认值**：`_animatool_steps(service, workflow)` 对 turbo_v1/turbo0.2 默认 12 步，对 aesthetic_v1/base 默认 40 步；配置 `animatool_turbo_steps` 非空时覆盖所有工作流的默认值。schema 的 min/max 会做最终 clamp。
+- **filename_prefix 带角色名**：`_animatool_filename_prefix(service, slots, workflow)` 在 base prefix 后追加 sanitized 角色名（取 `slots.character` → `slots.identity` → `bot_name`），如 `sucyubot_turbo_shiroko`。
 - `plan_animatool_slots()` 的 slot_info 不再传 `quality` 和 `negative`，只传语义槽位（count/character/series/appearance/scene 等）；LLM 应按 schema + knowledge + safety_tag 构造 quality_meta_year_safe 和 neg。
 
 ### Telegram 输入增强
@@ -232,6 +234,11 @@ telegram_comfyui_selfie/
 - 长期记忆不写临时服装、上一轮场景台词、一次性道具；这些属于短期上下文、衣柜或照片历史。
 - fire-and-forget `asyncio.create_task` 内异常可能被静默吞掉；排查生图/推送失败优先看 service log。
 - `_get_llm_value("chat", "temperature")` 的 legacy 回退会落到 `llm_temperature_scene`，除非 `chat_llm_temperature` 显式设置。
+
+## 今日变更（2026-07-14）
+
+1. **steps 按工作流区分默认值**：`_animatool_steps(service, workflow)` 对 turbo_v1/turbo0.2 默认 12 步，对 aesthetic_v1/base 默认 40 步；配置 `animatool_turbo_steps` 非空时覆盖所有工作流。defaults.py / config.example / data/config.yml 的 `animatool_turbo_steps` 从 `"10"` 改为 `"12"`。
+2. **filename_prefix 带角色名**：`_animatool_filename_prefix(service, slots, workflow)` 在 base prefix 后追加 sanitized 角色名（取 `slots.character` → `slots.identity` → `bot_name`），如 `sucyubot_turbo_shiroko`。三处 payload 构造（`_build_animatool_turbo_payload` / `_do_generate_animatool` / `submit_animatool_turbo`）统一改用此函数。
 
 ## 今日变更（2026-07-12）
 

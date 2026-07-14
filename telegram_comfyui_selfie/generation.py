@@ -1794,6 +1794,57 @@ def _build_animatool_neg(slots: PromptSlots | None, workflow: str) -> str:
     return f"{common_neg}, {safety_neg}"
 
 
+# AnimaTool 采样步数默认值：turbo 工作流 12 步，非 turbo 工作流 40 步。
+# 均可在配置 animatool_turbo_steps 中覆盖。
+_TURBO_WORKFLOWS = frozenset({"turbo_v1", "turbo0.2"})
+_TURBO_DEFAULT_STEPS = 12
+_NON_TURBO_DEFAULT_STEPS = 40
+
+
+def _animatool_steps(service: Any, workflow: str) -> int:
+    """返回采样步数，从配置 animatool_turbo_steps 读取。
+
+    turbo_v1 / turbo0.2 默认 12；aesthetic_v1 / base 默认 40。
+    配置 animatool_turbo_steps 非空时覆盖所有工作流的默认值。
+    """
+    default = _TURBO_DEFAULT_STEPS if workflow in _TURBO_WORKFLOWS else _NON_TURBO_DEFAULT_STEPS
+    raw = service.config.get("animatool_turbo_steps", "")
+    if not raw or not str(raw).strip():
+        return default
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+def _sanitize_filename_segment(text: str) -> str:
+    """把角色名清理为可安全用于文件名的片段。"""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    # 去掉括号及括号内内容（如 "shiroko (blue archive)" → "shiroko"）
+    cleaned = re.sub(r"\s*\([^)]*\)\s*", " ", raw).strip()
+    # 只保留字母、数字、中文、下划线、连字符，其他字符替换为下划线
+    cleaned = re.sub(r"[^\w\u4e00-\u9fff\-]", "_", cleaned, flags=re.UNICODE)
+    # 合并连续下划线并去首尾
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+    return cleaned
+
+
+def _animatool_filename_prefix(service: Any, slots: PromptSlots | None, workflow: str) -> str:
+    """构造输出文件名前缀：base_prefix + 角色名。"""
+    base = service.config.get("animatool_filename_prefix", "sucyubot_turbo")
+    char_name = ""
+    if isinstance(slots, PromptSlots):
+        char_name = slots.character or slots.identity or ""
+    if not char_name:
+        char_name = service.config.get("bot_name", "") or ""
+    segment = _sanitize_filename_segment(char_name)
+    if segment:
+        return f"{base}_{segment}"
+    return base
+
+
 def _build_animatool_turbo_payload(
     service: Any,
     slots: PromptSlots | None,
@@ -1828,9 +1879,9 @@ def _build_animatool_turbo_payload(
     }
 
     payload: dict[str, Any] = {
-        "filename_prefix": service.config.get("animatool_filename_prefix", "sucyubot_turbo"),
+        "filename_prefix": _animatool_filename_prefix(service, slots, workflow),
         "seed": seed,
-        "steps": int(float(service.config.get("animatool_turbo_steps", "10") or 10)),
+        "steps": _animatool_steps(service, workflow),
         "cfg": float(service.config.get("animatool_turbo_cfg", "1.0") or 1.0),
     }
 
@@ -1960,9 +2011,10 @@ async def _do_generate_animatool(
 
     if llm_payload:
         # 补充固定超参数
+        wf = _get_animatool_workflow(service)
         llm_payload["seed"] = seed
-        llm_payload["filename_prefix"] = service.config.get("animatool_filename_prefix", "sucyubot_turbo")
-        llm_payload["steps"] = int(float(service.config.get("animatool_turbo_steps", "10") or 10))
+        llm_payload["filename_prefix"] = _animatool_filename_prefix(service, slots, wf)
+        llm_payload["steps"] = _animatool_steps(service, wf)
         llm_payload["cfg"] = float(service.config.get("animatool_turbo_cfg", "1.0") or 1.0)
         aspect = _aspect_ratio_from_dimensions(service, orientation)
         if aspect:
@@ -2035,9 +2087,9 @@ async def submit_animatool_turbo(service: Any, positive: str, negative: str, see
         # schema 获取失败时回退到原来的硬编码字段，但尽量去掉 schema 中不存在的字段
         logger.warning("animatool %s schema not available, falling back to hardcoded fields", wf)
         payload = {
-            "filename_prefix": service.config.get("animatool_filename_prefix", "sucyubot_turbo"),
+            "filename_prefix": _animatool_filename_prefix(service, slots, wf),
             "seed": seed,
-            "steps": int(float(service.config.get("animatool_turbo_steps", "10") or 10)),
+            "steps": _animatool_steps(service, wf),
             "cfg": float(service.config.get("animatool_turbo_cfg", "1.0") or 1.0),
         }
         aspect = _aspect_ratio_from_dimensions(service)

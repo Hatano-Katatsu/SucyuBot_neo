@@ -37,7 +37,7 @@ comfyui:
   clip_model: "qwen_3_06b_base.safetensors"
   vae_model: "qwen_image_vae.safetensors"
   turbo_lora_model: "anima-turbo-lora-v0.2.safetensors"
-  animatool_turbo_steps: "10"
+  animatool_turbo_steps: "12"
   animatool_turbo_cfg: "1.0"
   animatool_filename_prefix: "sucyubot_turbo"
   comfyui_local_socket_port: "7789"
