@@ -4148,11 +4148,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             state["last_interaction"] = ts - 1800
             state["last_message_time"] = ts - 1800
             state["recent_message_history"] = [
-                {"text": "切，不和姐姐扯了，晚上等着！", "time": ts - 1800},
+                {"text": "姐姐还在咖啡店窗边收拾杯子。", "time": ts - 1800},
             ]
             state["chat_history"] = [
-                {"role": "user", "content": "切，不和姐姐扯了，晚上等着！"},
-                {"role": "assistant", "content": "晚上七点，老地方见~"},
+                {"role": "user", "content": "姐姐还在咖啡店窗边收拾杯子。"},
+                {"role": "assistant", "content": "冰拿铁还剩一点，窗外的光正好。"},
             ]
             state["sent_photos_history"] = [{
                 "timestamp": ts - 1900,
@@ -4160,7 +4160,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "caption": "",
                 "appearance": "",
                 "view": "selfie",
-                "source_description": "意图: 咖啡店告别，约定晚上见面",
+                "source_description": "意图: 咖啡店窗边日常，晚些时候再看安排",
             }]
             svc._ensure_life_profile = AsyncMock(return_value={})
             self.mock_image_planner_messages(svc, {
@@ -4174,10 +4174,10 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             messages = svc._call_llm_messages.await_args.args[0]
             joined = "\n".join(m.get("content", "") for m in messages)
             prefix_joined = "\n".join(m.get("content", "") for m in messages[:-3])
-            self.assertIn("切，不和姐姐扯了", prefix_joined)
-            self.assertNotIn("切，不和姐姐扯了", messages[-2]["content"])
+            self.assertIn("姐姐还在咖啡店窗边收拾杯子", prefix_joined)
+            self.assertNotIn("姐姐还在咖啡店窗边收拾杯子", messages[-2]["content"])
             self.assertIn("最近图片视觉参考", joined)
-            self.assertIn("咖啡店告别", joined)
+            self.assertIn("咖啡店窗边日常", joined)
             self.assertIn("主动推送避重规则", joined)
 
         asyncio.run(run())
@@ -7085,6 +7085,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertNotIn("衣服脱了", system)
             self.assertNotIn("衣服脱了", user)
             self.assertIn("loose cotton knit cardigan", joined)
+            self.assertIn("最近图片仅用于避重", joined)
+            self.assertNotIn("最近图片视觉参考（checkpoint 后，仅用于承接或避重", joined)
             self.assertEqual(plan["clothing_off"], "")
             self.assertEqual(session_schema.get_nudity(state), "")
 
@@ -7119,6 +7121,31 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertTrue(decision["should_advance_beat"])
         self.assertEqual(svc._format_push_scene_transition_context(state, sid, now=now), "")
         self.assertIn("推送场景节拍推进", svc._format_push_scene_advance_context(state, sid, now=now))
+
+    def test_scheduled_push_continuity_ttl_hard_transitions_without_end_signal(self):
+        svc = self.make_service()
+        svc.config.update({
+            "scene_stale_minutes": "30",
+            "push_continuity_hours": "2",
+        })
+        sid = "telegram:123"
+        now = datetime.fromtimestamp(time.time(), timezone.utc)
+        ts = now.timestamp()
+        state = svc._get_session_state(sid)
+        session_schema.set_last_interaction(state, ts - 150 * 60)
+        session_schema.set_last_message_time(state, ts - 150 * 60)
+        session_schema.set_sent_photos_history(state, [{
+            "timestamp": ts - 150 * 60,
+            "scene": "A succubus lies in bed in the morning light.",
+            "caption": "早安。",
+        }])
+
+        decision = svc._push_scene_transition_decision(state, sid, now=now)
+
+        self.assertTrue(decision["too_old"])
+        self.assertFalse(decision["has_end_signal"])
+        self.assertTrue(decision["should_transition"])
+        self.assertFalse(decision["should_advance_beat"])
 
     def test_scheduled_push_stale_gap_advances_beat_without_dropping_place(self):
         async def run():
@@ -7168,6 +7195,62 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("地点锁定（最高优先", system)
 
         asyncio.run(run())
+
+    def test_scheduled_push_wake_scene_advances_after_waking_beat(self):
+        svc = self.make_service()
+        svc.config.update({
+            "scene_stale_minutes": "30",
+            "push_continuity_hours": "2",
+        })
+        sid = "telegram:123"
+        now = datetime.fromtimestamp(time.time(), timezone.utc)
+        ts = now.timestamp()
+        state = svc._get_session_state(sid)
+        session_schema.set_last_interaction(state, ts - 60 * 60)
+        session_schema.set_last_message_time(state, ts - 60 * 60)
+        session_schema.set_sent_photos_history(state, [{
+            "timestamp": ts - 60 * 60,
+            "scene": "A succubus wakes in bed, still sleepy in her sleep dress.",
+            "caption": "早安，刚醒。",
+            "source_description": "morning scheduled push",
+        }])
+
+        decision = svc._push_scene_transition_decision(state, sid, now=now)
+        context = svc._format_push_scene_advance_context(state, sid, now=now)
+
+        self.assertTrue(decision["should_advance_beat"])
+        self.assertFalse(decision["should_transition"])
+        self.assertEqual(decision["recent_scene_phase"], "wake_up")
+        self.assertFalse(decision["has_wake_hold_signal"])
+        self.assertIn("这一短阶段本次应视为已经自然完成", context)
+        self.assertIn("不要再次写醒来、半睡半醒、刚睁眼或躺在床上", context)
+        self.assertIn("不要因此强制角色离开原有地点", context)
+
+    def test_scheduled_push_wake_scene_hold_signal_preserves_bed_scene(self):
+        svc = self.make_service()
+        svc.config.update({
+            "scene_stale_minutes": "30",
+            "push_continuity_hours": "2",
+        })
+        sid = "telegram:123"
+        now = datetime.fromtimestamp(time.time(), timezone.utc)
+        ts = now.timestamp()
+        state = svc._get_session_state(sid)
+        session_schema.set_last_interaction(state, ts - 60 * 60)
+        session_schema.set_last_message_time(state, ts - 60 * 60)
+        session_schema.set_sent_photos_history(state, [{
+            "timestamp": ts - 60 * 60,
+            "scene": "A succubus wakes in bed and stays under the blanket.",
+            "caption": "还在床上，继续睡一会儿。",
+        }])
+
+        decision = svc._push_scene_transition_decision(state, sid, now=now)
+        context = svc._format_push_scene_advance_context(state, sid, now=now)
+
+        self.assertEqual(decision["recent_scene_phase"], "wake_up")
+        self.assertTrue(decision["has_wake_hold_signal"])
+        self.assertIn("本次允许保持这一阶段", context)
+        self.assertNotIn("这一短阶段本次应视为已经自然完成", context)
 
     def test_push_spatial_context_summarizes_without_replaying_dialogue(self):
         async def run():

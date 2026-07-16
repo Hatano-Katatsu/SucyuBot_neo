@@ -35,6 +35,14 @@ class SchedulerRuntimeMixin:
         r"(等你|等着你|等我|别走|别离开|留下来|继续|还没结束|正在|刚开始|马上回来|马上到|"
         r"一会回来|待会回来)"
     )
+    _PUSH_SCENE_WAKE_RE = re.compile(
+        r"(?:\b(?:wakes?\s+(?:up|in\s+bed)|woke\s+up|waking\s+up|just\s+woke|"
+        r"half[-\s]?asleep|sleepy)\b|刚刚?醒|醒来|睡醒|起床|起身|早安|半睡半醒|睡眼惺忪)",
+        re.IGNORECASE,
+    )
+    _PUSH_SCENE_WAKE_HOLD_RE = re.compile(
+        r"(还在床上|正在床上|继续睡|再睡|赖床|别起|不想起|不要起|让我睡|抱着睡|一起睡|继续躺|躺着不动)"
+    )
 
     # 对话后续场推送门控：用户最后一条消息若命中这些告别/中止关键词，则不安排 followup 推送。
     # 仅判定用户对 bot 的主动告别，不混入角色扮演情节里的转场词（如"出发""回家""下班"）。
@@ -59,6 +67,10 @@ class SchedulerRuntimeMixin:
             return False
         return any(word in text for word in self._POST_CHAT_PUSH_END_KEYWORDS)
 
+    def _detect_push_scene_phase(self, text: str) -> str:
+        """从最近场景中识别需要在软推进时消费掉的短阶段。"""
+        return "wake_up" if self._PUSH_SCENE_WAKE_RE.search(text or "") else ""
+
     def _push_scene_transition_decision(
         self,
         state: dict[str, Any],
@@ -72,6 +84,7 @@ class SchedulerRuntimeMixin:
         latest = float(session_schema.get_last_interaction(state) or 0)
         latest = max(latest, session_schema.get_last_message_time(state))
         texts: list[str] = []
+        latest_photo_text = ""
 
         for msg in session_schema.get_recent_message_history(state):
             msg_ts = float(msg.get("time", 0) or 0)
@@ -92,12 +105,20 @@ class SchedulerRuntimeMixin:
             if reset_time and photo_ts < reset_time:
                 continue
             latest = max(latest, photo_ts)
+            photo_text = "\n".join(
+                (photo.get(key) or "").strip()
+                for key in ("scene", "caption", "source_description")
+                if (photo.get(key) or "").strip()
+            )
+            if photo_text:
+                latest_photo_text = photo_text
             for key in ("scene", "caption", "source_description"):
                 text = (photo.get(key) or "").strip()
                 if text:
                     texts.append(text)
 
         joined = "\n".join(texts[-12:])
+        recent_phase_text = latest_photo_text or "\n".join(texts[-4:])
         try:
             stale_minutes = max(0.0, float(self.config.get("scene_stale_minutes", "30") or 0))
         except Exception:
@@ -109,6 +130,8 @@ class SchedulerRuntimeMixin:
         gap_minutes = (now_ts - latest) / 60.0 if latest else 0.0
         has_end_signal = bool(self._PUSH_SCENE_END_RE.search(joined))
         has_hold_signal = bool(self._PUSH_SCENE_HOLD_RE.search(joined))
+        recent_scene_phase = self._detect_push_scene_phase(recent_phase_text)
+        has_wake_hold_signal = bool(self._PUSH_SCENE_WAKE_HOLD_RE.search(joined))
         stale = bool(latest and stale_minutes > 0 and gap_minutes > stale_minutes)
         too_old = bool(latest and gap_minutes > continuity_hours * 60.0)
         morning = (mode or "").strip().lower() == "morning"
@@ -124,6 +147,8 @@ class SchedulerRuntimeMixin:
             "stale_minutes": stale_minutes,
             "has_end_signal": has_end_signal,
             "has_hold_signal": has_hold_signal,
+            "has_wake_hold_signal": has_wake_hold_signal,
+            "recent_scene_phase": recent_scene_phase,
             "too_old": too_old,
             "morning": morning,
         }
@@ -138,13 +163,27 @@ class SchedulerRuntimeMixin:
         decision = self._push_scene_transition_decision(state, session_id, now=now, mode=mode)
         if not decision.get("should_advance_beat"):
             return ""
-        return (
+        context = (
             "推送场景节拍推进: 距离上次互动已超过场景断档阈值，但尚未超过主动推送连续性时效。\n"
             "处理规则: 保留最近已建立的大地点、同处/异地关系、情绪和未完成约定；但时间已经自然流逝，"
             "不要把上一幕的短动作、手势、姿势、正在喝/吃的一份食物饮料、刚拿起的物件或同一句话原样冻结到此刻。"
             "如果上一幕有茶、咖啡、饭、点心、手机消息、书页等消耗品或瞬时动作，本次应写成已经喝完/放下/换了姿势/转入相邻动作，"
             "或另起同一空间里的新日常小片段；只有最近文本明确说明该动作仍在持续时才继续。"
         )
+        if decision.get("recent_scene_phase") == "wake_up":
+            if decision.get("has_wake_hold_signal"):
+                context += (
+                    "最近场景处于刚醒/起床阶段，但上下文明确要求继续睡、继续躺着或保持当前动作；"
+                    "本次允许保持这一阶段，不要为了推进而强行起床或切换地点。"
+                )
+            else:
+                context += (
+                    "阶段推进提示（只推进动作，不强制换地点）: 最近场景处于刚醒/起床阶段，"
+                    "这一短阶段本次应视为已经自然完成。请承接到原有大地点内的起床后相邻片段，"
+                    "例如洗漱、换好衣服、到附近空间准备早餐，或清醒后与用户互动；"
+                    "不要再次写醒来、半睡半醒、刚睁眼或躺在床上，也不要因此强制角色离开原有地点。"
+                )
+        return context
 
     def _format_push_scene_transition_context(
         self,

@@ -235,6 +235,12 @@ telegram_comfyui_selfie/
 - fire-and-forget `asyncio.create_task` 内异常可能被静默吞掉；排查生图/推送失败优先看 service log。
 - `_get_llm_value("chat", "temperature")` 的 legacy 回退会落到 `llm_temperature_scene`，除非 `chat_llm_temperature` 显式设置。
 
+## 今日变更（2026-07-16）
+
+1. **主动推送时间/场景推进修正**：保留 `scene_stale_minutes` 的软推进和 `push_continuity_hours` 的硬转场分层；软断档下识别“刚醒/起床”阶段并推进到同一大地点内的起床后相邻片段，明确继续睡/继续躺着时允许保持原阶段，不强制换地点。
+2. **硬转场图片参考降级**：超过连续性时效或命中早安/结束信号时，最近图片只作为避重规则，不再把完整视觉描述再次注入推送 planner，避免旧床上动作、地点和光线覆盖当前时间；软连续场仍保留最近图片用于自然承接。
+3. **回归测试**：新增刚醒阶段软推进、明确赖床例外和连续性 TTL 硬转场测试；更新连续场图片参考测试。`py -3 -m unittest tests.test_core -v` 结果 `423 tests, OK (skipped=1)`。
+
 ## 今日变更（2026-07-14）
 
 1. **steps 按工作流区分默认值**：`_animatool_steps(service, workflow)` 对 turbo_v1/turbo0.2 默认 12 步，对 aesthetic_v1/base 默认 40 步；配置 `animatool_turbo_steps` 非空时覆盖所有工作流。defaults.py / config.example / data/config.yml 的 `animatool_turbo_steps` 从 `"10"` 改为 `"12"`。

@@ -114,7 +114,13 @@ def _format_forbidden_caption_context(captions: list[str]) -> str:
     return "\n".join(lines)
 
 
-def _recent_push_texts_for_push(service: Any, state: dict[str, Any], session_id: str = "", limit: int = 3) -> list[str]:
+def _recent_push_texts_for_push(
+    service: Any,
+    state: dict[str, Any],
+    session_id: str = "",
+    limit: int = 3,
+    include_visual: bool = True,
+) -> list[str]:
     reset_time = session_schema.get_short_context_reset_time(state)
     push_kinds = {"scheduled_push", "followup_push", "manual_push"}
     photos = [
@@ -124,11 +130,10 @@ def _recent_push_texts_for_push(service: Any, state: dict[str, Any], session_id:
     ][-limit:]
     texts: list[str] = []
     for photo in photos:
-        parts = [
-            str(photo.get("caption") or "").strip(),
-            str(photo.get("nltag") or photo.get("scene") or "").strip(),
-            str(photo.get("source_intent") or "").strip(),
-        ]
+        parts = [str(photo.get("caption") or "").strip()]
+        if include_visual:
+            parts.append(str(photo.get("nltag") or photo.get("scene") or "").strip())
+        parts.append(str(photo.get("source_intent") or "").strip())
         text = "；".join(part for part in parts if part)
         if text:
             texts.append(text[:700])
@@ -935,6 +940,14 @@ async def plan_roleplay_image(
             logger.debug("life plan push context failed", exc_info=True)
     hard_scene_transition = bool(push_transition_decision.get("should_transition"))
     if hard_scene_transition:
+        # 硬转场仍需知道最近推送来避重，但不能把上一张图的地点/动作继续喂回规划器。
+        recent_push_texts = _recent_push_texts_for_push(
+            service,
+            state,
+            session_id,
+            include_visual=False,
+        )
+    if hard_scene_transition:
         session_schema.clear_nudity(state)
     continuity_context = (
         format_dialog_context(service, state, session_id, limit=16)
@@ -955,7 +968,10 @@ async def plan_roleplay_image(
     spatial_context = _summarize_spatial_context_for_push(raw_spatial_context) if is_push else raw_spatial_context
     prompt_spatial_context = None if is_push else spatial_context
     photo_context = None if is_push else format_recent_photo_dedup_context(service, state, session_id)
-    push_photo_context = format_sent_photo_context(service, state, session_id, limit=3) if is_push else None
+    if is_push:
+        push_photo_context = None if hard_scene_transition else format_sent_photo_context(service, state, session_id, limit=3)
+    else:
+        push_photo_context = None
     memory_query = "\n".join(part for part in (intent, mood, must_include, prompt, continuity_context or "") if part)
     memory_context = ""
     if not is_push and hasattr(service, "_long_term_memory_context"):
@@ -1235,6 +1251,11 @@ async def plan_roleplay_image(
         push_dynamic_parts.append(
             "最近图片视觉参考（checkpoint 后，仅用于承接或避重；照片 caption 不可原样复用）:\n"
             f"{push_photo_context}"
+        )
+    elif is_push and hard_scene_transition:
+        push_dynamic_parts.append(
+            "最近图片仅用于避重（硬转场后，不得承接其中的地点、时间、动作、姿势、服装、道具或光线；"
+            "照片 caption 不可原样复用）。"
         )
     forbidden_caption_context = _format_forbidden_caption_context(forbidden_captions)
     if forbidden_caption_context:
