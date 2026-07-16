@@ -797,12 +797,16 @@ def format_recent_photo_dedup_context(
     session_id: str = "",
     limit: int = 3,
     max_chars: int = 140,
+    exclude_latest: bool = False,
 ) -> str | None:
     reset_time = session_schema.get_short_context_reset_time(state)
     photos = [
         photo for photo in session_schema.get_sent_photos_history(state)
         if service._within(photo.get("timestamp", 0), since=reset_time)
-    ][-limit:]
+    ]
+    if exclude_latest and photos:
+        photos = photos[:-1]
+    photos = photos[-limit:]
     if not photos:
         return None
     lines = []
@@ -826,6 +830,56 @@ def format_recent_photo_dedup_context(
     return "\n".join(lines)
 
 
+def format_current_scene_anchor(
+    service: Any,
+    state: dict[str, Any],
+    session_id: str = "",
+    max_chars: int = 280,
+) -> str | None:
+    """返回最近一次成功发图的精简场景，作为当前画面终点。"""
+    reset_time = session_schema.get_short_context_reset_time(state)
+    photos = [
+        photo for photo in session_schema.get_sent_photos_history(state)
+        if service._within(photo.get("timestamp", 0), since=reset_time)
+    ]
+    if not photos:
+        return None
+    photo = photos[-1]
+    tz = service._session_tz(session_id)
+    ts = photo.get("timestamp", 0)
+    stamp = datetime.fromtimestamp(ts, tz).strftime("%H:%M") if ts else "unknown time"
+    view = (photo.get("view") or "").strip() or "unknown view"
+    scene = _compact_context_text(photo.get("nltag") or photo.get("scene"), max_chars=max_chars)
+    if not scene:
+        return None
+    line = f"[{stamp}] {view}: {scene}"
+    visual_state = _compact_context_text(photo.get("visual_state"), max_chars=max_chars)
+    if visual_state:
+        line += f" | {visual_state}"
+    return line
+
+
+_POST_SHOWER_SCENE_RE = re.compile(
+    r"\b(?:after (?:the )?shower|post[- ]shower|dried off|drying off|"
+    r"steps? out of (?:the )?bathroom|living room sofa|loung(?:es|ing|ed) on (?:the )?sofa|"
+    r"teacup|cup of tea)\b",
+    re.IGNORECASE,
+)
+_ACTIVE_SHOWER_SCENE_RE = re.compile(
+    r"\b(?:under (?:the )?shower|taking a shower|showering|water streaming|"
+    r"water still streaming|bathroom tiles|shower water|in the shower)\b",
+    re.IGNORECASE,
+)
+
+
+def _scene_regresses_from_latest_photo(latest_anchor: str, planned_scene: str) -> bool:
+    """只拦截明确的浴后退回洗澡中，避免把正常换构图误判成场景错误。"""
+    return bool(
+        _POST_SHOWER_SCENE_RE.search(latest_anchor or "")
+        and _ACTIVE_SHOWER_SCENE_RE.search(planned_scene or "")
+    )
+
+
 async def plan_roleplay_image(
     service: Any,
     session_id: str,
@@ -840,6 +894,7 @@ async def plan_roleplay_image(
     now: Any = None,
 ) -> dict[str, Any]:
     free_composition = (mode or "").strip().lower() == "illustration"
+    has_explicit_scene_request = bool((prompt or must_include).strip())
     requested_view = normalize_view(view)
     fallback_scene = (prompt or intent or must_include).strip()
     fallback_intimate_hint = _detect_intimate_context(intent, mood, prompt)
@@ -967,7 +1022,17 @@ async def plan_roleplay_image(
     ) if not hard_scene_transition else None
     spatial_context = _summarize_spatial_context_for_push(raw_spatial_context) if is_push else raw_spatial_context
     prompt_spatial_context = None if is_push else spatial_context
-    photo_context = None if is_push else format_recent_photo_dedup_context(service, state, session_id)
+    current_scene_anchor = (
+        format_current_scene_anchor(service, state, session_id)
+        if free_composition
+        else None
+    )
+    photo_context = None if is_push else format_recent_photo_dedup_context(
+        service,
+        state,
+        session_id,
+        exclude_latest=bool(free_composition and current_scene_anchor),
+    )
     if is_push:
         push_photo_context = None if hard_scene_transition else format_sent_photo_context(service, state, session_id, limit=3)
     else:
@@ -1171,6 +1236,8 @@ async def plan_roleplay_image(
                 "slot/外观/偏好只作为参考，不能覆盖用户本次明确要求。\n"
                 "自由构图: 不强制自拍、不强制看镜头、不强制 portrait/pov；允许低机位、俯拍、远景、极近特写、部位特写、背影、环境承接、道具或手机/相机入画。"
                 "若用户没有指定构图，再根据当前聊天场景自然选择。"
+                "With no explicit scene parameters, treat the latest successful image as the current scene endpoint: continue or advance one adjacent beat, never regress to an earlier action phase; older images are dedup references only.\n"
+                "With explicit scene parameters, those parameters override the endpoint and the endpoint only fills unspecified details.\n"
             )
         else:
             role_context = (
@@ -1351,12 +1418,30 @@ async def plan_roleplay_image(
             f"聊天模型画面草案: {prompt or '无'}\n"
             f"用户指定视角: {requested_view or '未指定'}"
         )
+    if current_scene_anchor:
+        if has_explicit_scene_request:
+            user += (
+                "\n\nLatest successful image anchor "
+                "(use only to fill details not specified by the current request):\n"
+                f"{current_scene_anchor}"
+            )
+        else:
+            user += (
+                "\n\nCurrent scene endpoint "
+                "(the latest successful image; continue from this point):\n"
+                f"{current_scene_anchor}"
+            )
     if prompt_continuity_context:
         user += f"\n\n短期连续性:\n{prompt_continuity_context}"
     if prompt_spatial_context:
         user += f"\n\n空间/身体关系硬约束（scene 主句必须保留，不要改成相反站位）:\n{prompt_spatial_context}"
     if photo_context:
-        user += f"\n\n最近已发图片摘要:\n{photo_context}"
+        photo_label = (
+            "Earlier sent image summaries (dedup only)"
+            if free_composition and current_scene_anchor
+            else "最近已发图片摘要"
+        )
+        user += f"\n\n{photo_label}:\n{photo_context}"
     if user_profile_context:
         user += (
             "\n\n用户画像（仅当用户/伴侣身体明确入画时参考；不得因为有画像就让用户入画；"
@@ -1441,6 +1526,25 @@ async def plan_roleplay_image(
             "device_in_frame": device_hint,
             "caption": "",
         }
+
+    if (
+        free_composition
+        and current_scene_anchor
+        and not has_explicit_scene_request
+        and _scene_regresses_from_latest_photo(
+            current_scene_anchor,
+            str(parsed.get("scene") or parsed.get("tags") or ""),
+        )
+    ):
+        logger.info("roleplay image plan scene regression detected; retrying from latest photo anchor")
+        try:
+            parsed = await call_planner(
+                "Scene consistency correction: the latest successful image is the current endpoint, "
+                "but the candidate regresses to an earlier active-shower phase. Keep the endpoint's "
+                "later phase and change only composition or an adjacent action."
+            )
+        except Exception as exc:
+            logger.warning("roleplay image plan anchor retry failed; keeping first plan: %s", exc)
 
     scene = _normalize_image_plan_scene(parsed, fallback_scene, strong_pin)
     if not free_composition:

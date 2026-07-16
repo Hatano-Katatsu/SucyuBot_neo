@@ -6508,6 +6508,107 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_roleplay_image_planner_anchors_no_arg_scene_to_latest_successful_photo(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            state["sent_photos_history"] = [{
+                "timestamp": time.time(),
+                "scene": "After the shower, she lounges on a living room sofa with a teacup.",
+                "nltag": "After the shower, she lounges on a living room sofa with a teacup.",
+                "view": "third",
+            }]
+            svc._fetch_weather = AsyncMock(return_value={"desc": "clear", "temp": "22"})
+            svc._call_llm = AsyncMock(side_effect=[
+                json.dumps({
+                    "scene": "She leans against bathroom tiles while water is still streaming.",
+                    "view": "third",
+                    "aspect_ratio": "2:3",
+                    "character_location": "home",
+                    "user_location": "unknown",
+                    "is_intimate": False,
+                    "partner_in_frame": False,
+                    "device_in_frame": False,
+                }),
+                json.dumps({
+                    "scene": "She relaxes on the living room sofa with the teacup beside her.",
+                    "view": "third",
+                    "aspect_ratio": "2:3",
+                    "character_location": "home",
+                    "user_location": "unknown",
+                    "is_intimate": False,
+                    "partner_in_frame": False,
+                    "device_in_frame": False,
+                }),
+            ])
+
+            plan = await plan_roleplay_image(
+                svc,
+                sid,
+                mode="illustration",
+                intent="根据当前聊天场景配一张图",
+            )
+
+            self.assertEqual(svc._call_llm.await_count, 2)
+            first_user = svc._call_llm.await_args_list[0].args[1]
+            retry_system = svc._call_llm.await_args_list[1].args[0]
+            self.assertIn("Current scene endpoint", first_user)
+            self.assertIn("living room sofa", first_user)
+            self.assertIn("Scene consistency correction", retry_system)
+            self.assertIn("living room sofa", plan["scene"])
+
+        asyncio.run(run())
+
+    def test_roleplay_image_planner_explicit_scene_overrides_latest_photo_anchor(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            state["sent_photos_history"] = [{
+                "timestamp": time.time(),
+                "scene": "After the shower, she lounges on a living room sofa with a teacup.",
+                "nltag": "After the shower, she lounges on a living room sofa with a teacup.",
+                "view": "third",
+            }]
+            svc._fetch_weather = AsyncMock(return_value={"desc": "clear", "temp": "22"})
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "scene": "She leans against bathroom tiles while water is still streaming.",
+                "view": "third",
+                "aspect_ratio": "2:3",
+                "character_location": "home",
+                "user_location": "unknown",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            }))
+
+            plan = await plan_roleplay_image(
+                svc,
+                sid,
+                mode="illustration",
+                intent="用户明确要求回到浴室洗澡",
+                prompt="回到浴室洗澡",
+                must_include="回到浴室洗澡",
+            )
+
+            self.assertEqual(svc._call_llm.await_count, 1)
+            planner_user = svc._call_llm.await_args.args[1]
+            self.assertIn("Latest successful image anchor", planner_user)
+            self.assertIn("bathroom tiles", plan["scene"])
+
+        asyncio.run(run())
+
     def test_roleplay_image_planner_uses_slim_continuity_and_photo_summary(self):
         async def run():
             svc = self.make_service()
