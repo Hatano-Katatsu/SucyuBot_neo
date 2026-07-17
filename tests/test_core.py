@@ -7127,7 +7127,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_morning_push_hard_transition_drops_temporary_undress_context(self):
+    def test_morning_push_hard_transition_drops_undress_context_but_keeps_state(self):
         async def run():
             svc = self.make_service()
             svc.config.update({
@@ -7160,6 +7160,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "source_description": "意图: 上一幕性爱后只披针织衫",
             }])
             session_schema.set_nudity(state, "completely nude", at=time.time())
+            session_schema.set_wardrobe(state, {"top": "white camisole"})
+            session_schema.set_outfit(state, "white camisole")
+            session_schema.set_wardrobe_item_state(state, "top", "half_off")
             svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
             photo_message = svc._format_photo_history_system_message(session_schema.get_sent_photos_history(state)[-1])
             session_schema.set_chat_history(state, session_schema.get_chat_history(state) + [photo_message])
@@ -7188,10 +7191,263 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("loose cotton knit cardigan", joined)
             self.assertIn("最近图片仅用于避重", joined)
             self.assertNotIn("最近图片视觉参考（checkpoint 后，仅用于承接或避重", joined)
-            self.assertEqual(plan["clothing_off"], "")
-            self.assertEqual(session_schema.get_nudity(state), "")
+            # 早安推送当次保留隔夜状态（刚睡醒还是昨晚半脱/裸睡的样子），推送发出后才由 _sched_fire 穿好。
+            self.assertEqual(plan["clothing_off"], "completely nude")
+            self.assertEqual(session_schema.get_nudity(state), "completely nude")
+            self.assertEqual(session_schema.get_wardrobe_item_states(state), {"top": "half_off"})
+            # morning 不再无条件强制 pov；隔夜状态要求 scene 自洽。
+            self.assertNotIn("morning: 必须使用 pov", joined)
+            self.assertIn("刚睡醒、厨房或卧室早安场景", joined)
+            self.assertIn("用户不在同一空间时严禁 pov", joined)
+            # planner 看到的当前可见外貌带部件状态渲染，避免写成"已穿戴整齐"与最终标签打架。
+            self.assertIn("half-removed white camisole", joined)
 
         asyncio.run(run())
+
+    def test_morning_push_dresses_up_after_successful_send(self):
+        """早安图保留隔夜状态发出；发出后进入新的一天，下一次推送/图片要恢复穿好衣服。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 7, 17, 7, 30, tzinfo=timezone.utc)
+            logs = []
+            svc._ulog = lambda session_id, kind, text: logs.append((kind, text))
+            state = svc._get_session_state(sid)
+            session_schema.set_wardrobe(state, {"top": "white camisole"})
+            session_schema.set_outfit(state, "white camisole")
+            session_schema.set_wardrobe_item_state(state, "top", "half_off")
+            session_schema.set_nudity(state, "completely nude", at=fixed_now.timestamp() - 8 * 3600)
+            svc._run_dream = AsyncMock()
+            svc.ensure_life_plan_for_today = AsyncMock()
+            svc._ensure_life_profile = AsyncMock()
+            svc._checkpoint_context_before_push = AsyncMock()
+            svc.build_world_state = lambda *a, **k: {}
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22", "code": "113"})
+            svc._llm_write_scene = AsyncMock(return_value=("morning kitchen scene", "早", "", "third", "2:3"))
+            svc._translate_to_tags = AsyncMock(return_value="english prompt")
+            svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
+            svc.send_photo = AsyncMock()
+
+            ok = await svc._sched_fire(sid, fixed_now, mode_override="morning", skip_active_check=True)
+
+            self.assertTrue(ok)
+            self.assertEqual(session_schema.get_nudity(state), "")
+            self.assertEqual(session_schema.get_wardrobe_item_states(state), {})
+
+        asyncio.run(run())
+
+    def test_non_morning_push_hard_transition_clears_undress_state(self):
+        """非早安硬转场（超过连续性时效）：新场景不再续上一幕的裸体与半脱状态。"""
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+                "scene_stale_minutes": "30",
+                "push_continuity_hours": "2",
+            })
+            sid = "telegram:123"
+            now = datetime.fromtimestamp(time.time(), timezone.utc)
+            ts = now.timestamp()
+            state = svc._get_session_state(sid)
+            session_schema.set_last_interaction(state, ts - 150 * 60)
+            session_schema.set_last_message_time(state, ts - 150 * 60)
+            session_schema.set_wardrobe(state, {"top": "white camisole"})
+            session_schema.set_outfit(state, "white camisole")
+            session_schema.set_wardrobe_item_state(state, "top", "half_off")
+            session_schema.set_nudity(state, "completely nude", at=ts - 150 * 60)
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            self.mock_image_planner_messages(svc, {
+                "scene": "afternoon cafe selfie",
+                "view": "selfie",
+                "character_location": "cafe",
+                "user_location": "unknown",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            })
+
+            await plan_roleplay_image(svc, sid, mode="normal", weather_data={"desc": "晴", "temp": "22"}, now=now)
+
+            self.assertEqual(session_schema.get_nudity(state), "")
+            self.assertEqual(session_schema.get_wardrobe_item_states(state), {})
+
+        asyncio.run(run())
+
+    def test_resolve_roleplay_view_downgrades_pov_when_apart(self):
+        from telegram_comfyui_selfie.image_planning import _resolve_roleplay_view
+
+        base = dict(
+            requested_view="", planned_view="pov", default_view="pov",
+            derived_co_located=False, two_person=False, free_composition=False,
+            scene="A fox-eared girl ties a bento box in the kitchen",
+            intent="", mood="", prompt="",
+        )
+        # 异地 + planner/默认 pov → 旁观机位，避免画出画外人的手
+        self.assertEqual(_resolve_roleplay_view(**base), "third")
+        # 用户显式要求 pov 仍优先
+        self.assertEqual(
+            _resolve_roleplay_view(**{**base, "requested_view": "pov", "planned_view": "", "default_view": ""}),
+            "pov",
+        )
+        # 同处时保留 pov
+        self.assertEqual(_resolve_roleplay_view(**{**base, "derived_co_located": True}), "pov")
+        # 伴侣明确入画时保留 pov
+        self.assertEqual(_resolve_roleplay_view(**{**base, "two_person": True}), "pov")
+        # 异地 selfie 不受影响
+        self.assertEqual(
+            _resolve_roleplay_view(**{**base, "planned_view": "selfie", "default_view": "selfie"}),
+            "selfie",
+        )
+
+    def test_plan_roleplay_image_stale_co_located_falls_back_to_selfie(self):
+        """隔夜同处标记（已超 world_user_place_ttl_hours）不再被生图链路继承为同处。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            session_schema.set_user_place(state, key="home", updated_at=time.time() - 8 * 3600, co_located=True)
+
+            plan = await plan_roleplay_image(svc, sid, mode="normal", intent="早安厨房做便当")
+
+            self.assertEqual(plan["view"], "selfie")
+
+        asyncio.run(run())
+
+    def test_plan_roleplay_image_fresh_co_located_keeps_pov_default(self):
+        """新鲜同处标记仍然生效：亲密 hint 缺席时默认 pov 也不变。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            session_schema.set_user_place(state, key="home", updated_at=time.time(), co_located=True)
+
+            plan = await plan_roleplay_image(svc, sid, mode="normal", intent="一起窝在沙发上看电影")
+
+            self.assertEqual(plan["view"], "pov")
+
+        asyncio.run(run())
+
+    def test_plan_roleplay_image_planner_pov_downgraded_when_apart(self):
+        """planner 返回 pov 但用户明确不在场（user_location 异地）时，最终视角压到 third。"""
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            now = datetime.fromtimestamp(time.time(), timezone.utc)
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            self.mock_image_planner_messages(svc, {
+                "scene": "A fox-eared girl ties a bento box in the kitchen",
+                "view": "pov",
+                "character_location": "home",
+                "user_location": "company",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            })
+
+            plan = await plan_roleplay_image(svc, sid, mode="normal", weather_data={"desc": "晴", "temp": "22"}, now=now)
+
+            self.assertEqual(plan["view"], "third")
+
+        asyncio.run(run())
+
+    def test_build_prompt_wardrobe_states_applied_once_without_bare_prefix(self):
+        """回归：部件状态重复应用会把 "half-removed white camisole" 洗成裸 "half-removed," 碎片。"""
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        svc._set_character_place(sid, "home", "家里", 0.95, source="test")
+        state["custom_positive_prefix"] = "1girl, long hair, blond hair, blue eyes, fox ears, fox tail"
+        session_schema.set_wardrobe(state, {
+            "top": "white camisole, slim fit, thin straps",
+            "bottom": "short pleated skirt, navy",
+        })
+        session_schema.set_outfit(state, appearance_rules.render_wardrobe(session_schema.get_wardrobe(state)))
+        session_schema.set_wardrobe_item_state(state, "top", "half_off")
+        session_schema.set_wardrobe_item_state(state, "bottom", "half_off")
+
+        pos, _ = svc._build_prompt("standing in the kitchen at home", session_id=sid)
+
+        self.assertIn("half-removed white camisole", pos)
+        self.assertIn("half-removed short pleated skirt", pos)
+        self.assertNotIn("half-removed,", pos, "不允许出现什么都不跟的裸 half-removed 碎片")
+        self.assertEqual(pos.count("half-removed white camisole"), 1)
+
+    def test_strip_non_mirror_camera_artifacts_removes_orphan_hand_fragments(self):
+        from telegram_comfyui_selfie.generation import _strip_non_mirror_camera_artifacts
+
+        scene = (
+            "The fox-eared girl curls up on the sofa with her legs tucked under her, "
+            "holding a phone in her hand. She holds her smartphone in both hands, "
+            "fingers paused over the screen."
+        )
+        out = _strip_non_mirror_camera_artifacts(scene)
+        self.assertNotIn("phone", out.lower())
+        self.assertNotIn("in her hand", out.lower())
+        self.assertNotIn("in both hands", out.lower())
+
+        # 正常依附在名词后的 "in her hand" 不是孤儿片段，不误伤。
+        keep = _strip_non_mirror_camera_artifacts("She holds a cup of tea in her hand, smiling softly.")
+        self.assertIn("in her hand", keep)
+
+        # 标点后但 hands 后仍有实质内容的合法从句，不误伤。
+        keep2 = _strip_non_mirror_camera_artifacts(
+            "She smiles at the dough, with her hands full of flour, humming softly."
+        )
+        self.assertIn("with her hands full of flour", keep2)
+
+    def test_build_prompt_sex_scene_keeps_user_body_and_adds_genital_tags(self):
+        """性爱场景：① 用户身体归属不再被改写到角色自己身上；② 明确提到的性器/体液补 tag。"""
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        svc._set_character_place(sid, "home", "家里", 0.95, source="test")
+        state["custom_positive_prefix"] = "1girl, long hair, blond hair, blue eyes, fox ears, fox tail"
+        session_schema.set_wardrobe(state, {"top": "white camisole", "bottom": "short pleated skirt"})
+        session_schema.set_outfit(state, "white camisole, short pleated skirt")
+        scene = (
+            "First-person POV from the user's viewpoint, looking toward the character, "
+            "A dimly lit bedroom. The character straddles your waist, her slick pussy grinding "
+            "against his penis, a streak of white semen trails down her inner thigh. straddling, intimate"
+        )
+
+        pos, _ = svc._build_prompt(scene, session_id=sid, is_intimate=True)
+        low = pos.lower()
+
+        self.assertIn("your waist", low)
+        self.assertNotIn("the character's waist", low)
+        self.assertIn("penis", low)
+        self.assertIn("pussy", low)
+        self.assertIn("cum", low)
+        self.assertNotIn("off-frame partner", low)
+        self.assertNotIn("no visible second person", low)
+
+    def test_build_prompt_sex_scene_without_explicit_mention_adds_no_genital_tags(self):
+        """没明确提到性器时不补 tag——日常亲密 POV 维持现状。"""
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        svc._set_character_place(sid, "home", "家里", 0.95, source="test")
+        state["custom_positive_prefix"] = "1girl, long hair, blond hair, blue eyes, fox ears, fox tail"
+        session_schema.set_wardrobe(state, {"top": "white camisole"})
+        session_schema.set_outfit(state, "white camisole")
+        scene = (
+            "First-person POV from the user's viewpoint, looking toward the character, "
+            "she leans into your chest with a soft sigh, straddling close"
+        )
+
+        pos, _ = svc._build_prompt(scene, session_id=sid, is_intimate=True)
+        low = pos.lower()
+
+        self.assertNotIn("penis", low)
+        self.assertNotIn("pussy", low)
+        self.assertNotIn("cum", low)
 
     def test_scheduled_push_stale_gap_alone_keeps_continuity(self):
         svc = self.make_service()
@@ -9787,24 +10043,46 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("moon-white nightgown", kept)
         self.assertNotIn("moon-wearing the current outfit", kept)
 
-        # 裸名词短语（做主语）替换成 "the current outfit"，避免旧的 "wearing the current outfit slips" 病句。
+        # 衣物短语连同其状态谓语整段删除，不再写回 "the current outfit" 占位语（对生图模型不可渲染）。
         replaced = _strip_conflicting_scene_outfit(
             "white nightgown slips to her elbows",
             ["current hanfu"],
             ["nightgown"],
         )
-        self.assertIn("the current outfit", replaced)
-        self.assertNotIn("white nightgown", replaced)
+        self.assertEqual(replaced, "")
 
-        # 动词短语（"wearing a red dress"）替换成完整从句，且不留悬空冠词。
+        # 介词短语删除后保留人物姿态：sitting/standing 不属于衣物状态谓语，不能跟着衣物一起删。
         verb_form = _strip_conflicting_scene_outfit(
             "a succubus in a black silk nightgown sitting on a sofa",
             ["current hanfu"],
             ["nightgown"],
         )
-        self.assertIn("the current outfit", verb_form)
-        self.assertNotIn("in a wearing", verb_form)
-        self.assertNotIn("black silk nightgown", verb_form)
+        self.assertEqual(verb_form, "a succubus sitting on a sofa")
+
+    def test_scene_outfit_cleanup_keeps_character_action(self):
+        """回归：旧实现的贪婪尾巴会把 "tying a bento box" 这类角色动作随衣物一起吃掉。"""
+        from telegram_comfyui_selfie.generation import _strip_conflicting_scene_outfit
+
+        scene = (
+            "A fox-eared girl in a white camisole and navy pleated skirt stands at the counter "
+            "tying a bento box with a cloth, her long hair slightly messy"
+        )
+        out = _strip_conflicting_scene_outfit(scene, ["white camisole"], ["camisole", "skirt", "dress"])
+        self.assertNotIn("camisole", out.lower())
+        self.assertNotIn("skirt", out.lower())
+        self.assertNotIn("the current outfit", out)
+        self.assertIn("stands at the counter", out)
+        self.assertIn("tying a bento box", out)
+
+        # 衣物状态谓语（rides up）随衣物删除，但不留下 "her the current outfit." 破句。
+        out2 = _strip_conflicting_scene_outfit(
+            "Her light dress rides up slightly as she shifts, revealing a sliver of bare thigh.",
+            ["light dress"],
+            ["dress"],
+        )
+        self.assertNotIn("dress", out2.lower())
+        self.assertNotIn("rides up", out2.lower())
+        self.assertIn("revealing a sliver of bare thigh", out2)
 
     def test_daytime_prompt_rewrites_premature_sunset_terms(self):
         svc = self.make_service()

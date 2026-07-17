@@ -1527,6 +1527,11 @@ class SchedulerRuntimeMixin:
                     source_description=source,
                     source_kind=source_kind,
                 )
+                if mode == "morning":
+                    # 早安图保留了隔夜的衣服状态（刚睡醒的样子）；发出后进入新的一天，
+                    # 下一次推送/图片要恢复穿好衣服，清掉临时裸体与半脱状态。
+                    session_schema.clear_nudity(state)
+                    session_schema.clear_wardrobe_item_states(state)
                 return True
             else:
                 self._ulog(session_id, "PUSH", f"生图失败 mode={mode}: {err}")

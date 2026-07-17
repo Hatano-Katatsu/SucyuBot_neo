@@ -179,6 +179,10 @@ telegram_comfyui_selfie/
 - `roleplay-image-plan` 在瘦身连续性之外保留"空间/身体关系硬约束"旁路：坐/站/躺/跪、脚边、腿上、身后、怀里、肩膀、背向、俯身等站位线索会单独进入 planner，并在 planner 漏写时追回到最终 `scene`，避免关键身体关系被每条 140 字截断吃掉。
 - `partner_in_frame` 区分日常局部同框和真正亲密/性爱场景；日常帮吹头发、坐脚边、靠肩等只去掉 `solo` 冲突并允许必要的手/脚/肩局部，不再自动追加 `male torso` / `intimate close-up`。
 - POV 正向开场只声明"用户视角看向角色"，不再默认强塞 `eye contact` / `solo`；翻译层允许保留 `she/the character` 动作主语，确保姿态和身体关系归属清楚。
+- **异地禁 POV**：`_resolve_roleplay_view()` 在用户不在场（`derived_co_located=False`）且无伴侣入画时把 planner/默认给的 `pov` 一律压到 `third`，避免画出画外人的手/第二人；用户显式要求的 `pov` 仍优先。`plan_roleplay_image()` 的持久同处标记走 `_active_user_place()`（带 `world_user_place_ttl_hours` TTL），不再直接读 `user_co_located`，隔夜同处不会被继承。
+- **衣柜部件状态只渲染一次**：`build_prompt()` 在 char+override 合并后应用一次 `_apply_wardrobe_item_states()`；重复应用会在已渲染的 `half-removed X` 里再做子串删除，产生裸 `half-removed,` 碎片。
+- **场景衣物冲突改为删除式清洗**：`_strip_conflicting_scene_outfit()` 直接删除场景里的衣物描述（连同前导动词/介词和衣物状态谓语），不再替换成不可渲染的 `the current outfit` 占位语；`sit/stand` 等人物姿态谓语保留，角色动作（如 `tying a bento box`）不再被贪婪尾巴吃掉。翻译 LLM 的三个分支同步声明不重述稳定 clothing。
+- **性爱场景**：`_normalize_second_person_visual_subject()` 在伴侣/性爱场景保留 `your <body>`（用户身体归属），不再改写成 `the character's` 导致伴侣检测落空；`build_prompt()` 对明确提到的性器/体液（`_EXPLICIT_SEXUAL_TAG_MAP`）补 tag 级正向（penis/pussy/anus/testicles/cum），男性性器被提到会并入第二人信号。
 - 画幅只允许 2:3（竖版）和 3:2（横版），模拟真实相机画幅；负向提示词包含 `split screen, grid, multiple panels, collage` 防止四宫格/分格出图。
 
 ### AnimaTool 画图工作流
@@ -234,6 +238,16 @@ telegram_comfyui_selfie/
 - 长期记忆不写临时服装、上一轮场景台词、一次性道具；这些属于短期上下文、衣柜或照片历史。
 - fire-and-forget `asyncio.create_task` 内异常可能被静默吞掉；排查生图/推送失败优先看 service log。
 - `_get_llm_value("chat", "temperature")` 的 legacy 回退会落到 `llm_temperature_scene`，除非 `chat_llm_temperature` 显式设置。
+
+## 今日变更（2026-07-17）
+
+1. **排查三类画图问题**：通过 `data/logs/telegram_*.log` 的 `PROMPT_SLOTS`/`IMAGE` 记录与 `scripts/repro_image_issues.py` 模拟调用坐实根因——① 角色单人（异地）场景被画成第一人称/画入画外人的手；② 构图与人形错误来自 prompt 碎片；③ 奇怪 POV 视角与①同源。
+2. **异地 POV 误用修复（问题①③）**：根因有三——planner 提示词 `morning: 必须使用 pov` 无条件强制第一人称；`plan_roleplay_image()` 直接读 `user_co_located` 绕过 `_active_user_place()` 的 4h TTL，隔夜同处标记带进第二天推送；`_resolve_roleplay_view()` 没有"非同处降级 pov"的闸门。现分别改为：morning/异地按通用同处规则选视角（提示词明确"用户不在同一空间时严禁 pov"）；持久同处标记走 TTL 感知的 `_active_user_place()`；裁决层新增异地闸门（`not co_located and not two_person and requested_view != "pov" and final_view == "pov"` → `third`）。
+3. **prompt 碎片修复（问题②）**：`_apply_wardrobe_item_states()` 之前在 `build_prompt()` 里应用两次，配合 `remove_tag` 的裸子串删除把 `half-removed white camisole` 洗成裸 `half-removed,` 碎片，现只在 char+override 合并后应用一次；`_strip_conflicting_scene_outfit()` 旧实现把场景衣物替换成不可渲染的 `the current outfit` 占位语且贪婪尾巴吃掉角色动作（`tying a bento box` 被删），现改为按"衣物短语+衣物状态谓语"精确删除，保留 `sit/stand` 等人物姿态；`_strip_non_mirror_camera_artifacts()` 删 `holding a phone` 留下 `in her hand` 孤儿介词，现模式吃掉尾随 `in her/both hands` 并只清理标点后无后续内容的孤儿片段（不误伤 `with her hands full of flour` 这类合法从句）。
+4. **隔夜衣服状态（按用户要求）**：早安推送当次保留隔夜的半脱/裸体状态（刚睡醒还是昨晚的样子），planner 的"当前可见外貌"同步带部件状态渲染，保证 scene 自洽；`_sched_fire()` 在早安图成功发出后统一 `clear_nudity` + `clear_wardrobe_item_states`，下一次推送恢复穿好衣服。非早安硬转场（结束信号/超连续性时效）仍在规划前清理两种状态（原先只清 nudity，漏了 `wardrobe_item_states`）。
+5. **性爱场景身体归属与性器 tag**：`_normalize_second_person_visual_subject()` 此前把 `straddles your waist` 里的 `your waist` 改写成 `the character's waist`，用户身体消失且伴侣检测全部落空；现在伴侣/性爱场景保留 `your <body>`。`build_prompt()` 新增 `_explicit_sexual_scene_tags()`：场景明确提到性器/体液时补 tag 级正向（penis/testicles/pussy/anus/cum），男性性器被提到并入第二人信号；未提到时不补，日常亲密 POV 不变。
+6. **正则 vs LLM 的分层结论**：不新增 LLM 阶段；判断类工作继续交给 planner/翻译两个既有 LLM（翻译三个分支的 "Stable appearance" 规则补上 clothing 不重述，并移除"重点保留服装"的矛盾表述），正则只做词级硬保证（手机/镜子压制、冲突删除、视角闸门），且全部改为精确匹配+标点清理，不再做整句重写。
+7. **本轮验证**：新增/更新测试覆盖异地 pov 降级（含显式 pov 豁免、同处/伴侣保留）、隔夜/新鲜同处标记、planner pov 压 third、早安保留状态与发出后穿好、非早安硬转场清理、部件状态单次渲染无裸碎片、衣物删除式清洗保留角色动作、手机孤儿片段清理与合法从句保留、性爱场景身体归属与性器 tag/未提到不补。`py -3 -m unittest tests.test_core -q` 结果 `436 tests, OK (skipped=1)`；`py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`git diff --check` 全部通过。
 
 ## 今日变更（2026-07-16）
 
@@ -516,8 +530,8 @@ telegram_comfyui_selfie/
 
 ## 最新验证
 
-- `py -3 -m pytest tests/test_core.py -q` → `419 passed, 1 skipped`（2026-07-12）
-- `py -3 -c "import ast; [ast.parse(open(f,encoding='utf-8').read()) for f in [...]]"` 全部语法检查通过
+- `py -3 -m unittest tests.test_core -q` → `436 tests, OK (skipped=1)`（2026-07-17）
+- `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js` 通过
 - 默认跳过真实前缀缓存请求测试；设置 `SUCYUBOT_TEST_LIVE_CACHE_PROBE=1` 后才运行
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示
 

@@ -378,23 +378,45 @@ def _strip_conflicting_scene_outfit(scene_desc: str, outfit_override: list[str],
         return scene_desc
     outfit_alt = "|".join(sorted(keywords, key=len, reverse=True))
     color_alt = "black|white|blue|red|pink|purple|green|yellow|brown|gray|grey|dark|light"
-    # (正则, 替换) 成对：动词短语("wearing a red dress")替换成完整从句；名词短语("a red dress"/"red dress")
-    # 连同前导冠词一起吃掉、替换成 "the current outfit"，避免留下悬空冠词（"in a wearing the current outfit"）。
-    replacements = [
-        (rf"\b(?:wears?|wearing|dressed\s+in)\s+[^,.;]*(?:{outfit_alt})[^,.;]*", "wearing the current outfit"),
-        (rf"(?<![A-Za-z-])(?:a|an|the)\s+(?:{color_alt})\s+[^,.;]*(?:{outfit_alt})[^,.;]*", "the current outfit"),
-        (rf"(?<![A-Za-z-])(?:{color_alt})\s+[^,.;]*(?:{outfit_alt})[^,.;]*", "the current outfit"),
+    # 单件衣物短语：前导读（冠词/物主代词/颜色/修饰词）+ 可选修饰词/颜色 + 衣物关键词，
+    # 允许 "and" 连接另一件（"a white camisole and navy pleated skirt"）。衣物本身由当前衣柜标签
+    # 承载，场景里只删不重述。裸名词形态（pattern 3）必须带前导读，否则 "moon-white nightgown"
+    # 这类连字符复合词里的关键词会被单独挖掉。
+    head = rf"(?:(?:a|an|the|her|his|their)\s+|(?:{color_alt})\s+|(?:[a-z]+\s+))"
+    core = rf"(?:[a-z]+\s+){{0,2}}?(?:{color_alt}\s+)?(?:[a-z]+\s+){{0,2}}?(?:{outfit_alt})\b"
+    garment = rf"{head}{core}"
+    garment_loose = rf"(?:{head})?{core}"
+    garment_phrase = rf"{garment}(?:\s+and\s+{garment})*"
+    garment_phrase_loose = rf"{garment_loose}(?:\s+and\s+{garment})*"
+    # 衣物做主语时的状态谓语尾巴（"rides up slightly as she shifts"）随衣物一起删；
+    # 只收衣物状态动词，保留 sit/stand 等人物姿态谓语，避免把角色动作吃掉。
+    state_tail = (
+        rf"(?:\s+(?:rides?|slips?|slides?|pools?|gathers?|bunches?|clings?|hugs?|hangs?|drapes?|falls?|"
+        rf"fits?|flares?|billows?|rises?|shifts?|opens?|splits?|slipping|hanging|pooling|riding|"
+        rf"gathered|bunched|clinging|hugging|draped)\b[^,.;]*)?"
+    )
+    # 直接删除场景里的衣物描述（连同前导动词/介词/冠词），不再替换成 "the current outfit" 占位语——
+    # 占位语对生图模型不可渲染；旧实现句中替换还会产生 "her the current outfit" 破句，
+    # 且贪婪尾巴会把 "tying a bento box" 这类角色动作一起吃掉。
+    patterns = [
+        # 动词短语："wearing a red dress" / "dressed in ..."
+        rf"\b(?:wears?|wearing|dressed\s+in)\s+{garment_phrase_loose}{state_tail}",
+        # 介词短语："in a white camisole" / "with a red dress"
+        rf"\b(?:in|with)\s+{garment_phrase_loose}{state_tail}",
+        # 裸名词短语："her light dress (rides up ...)" / "a white camisole"
+        rf"(?<![A-Za-z-]){garment_phrase}{state_tail}",
     ]
     text = scene_desc
-    for pattern, repl in replacements:
-        text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
-    # 折叠相邻重复的占位短语（如上下装两件都被替换成相邻的 "the current outfit"）。
-    text = re.sub(r"(wearing the current outfit)(?:\s*,\s*\1)+", r"\1", text, flags=re.IGNORECASE)
-    text = re.sub(r"(the current outfit)(?:\s*,\s*\1)+", r"\1", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bwearing the current outfit\s*,\s*the current outfit\b", "wearing the current outfit", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s{2,}", " ", text)
+    for pattern in patterns:
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+    # 清理悬空冠词/物主代词与多余标点空白（"her ."、"a ,"、"under her, ."）。
+    text = re.sub(r"\b(?:a|an|the|her|his|their)\s+(?=[,.;]|$)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*,\s*,+", ", ", text)
+    text = re.sub(r"\s*,\s*(?=[.!?;])", "", text)
+    text = re.sub(r"([.!?])\s*,\s*", r"\1 ", text)
     text = re.sub(r"\s+([,.;])", r"\1", text)
-    return text
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip(" ,")
 
 
 def _strip_conflicting_scene_appearance(
@@ -656,6 +678,30 @@ _FULL_NUDE_RE = re.compile(
     r"\b(nude|naked|fully undressed|completely undressed|stark naked|no clothes|nothing on)\b",
     re.IGNORECASE,
 )
+# 性爱场景关键词（判定 is_sex_scene / 二人称身体保留都要用，提前到模块级共享）。
+SEX_SCENE_KEYWORDS = [
+    "sex", "make love", "penetration", "penetrating", "vaginal", "missionary", "doggystyle",
+    "cowgirl", "girl on top", "straddling", "straddle", "riding", "grinding", "thrust",
+    "thrusting", "squelch", "impaled", "insertion", "humping", "creampie", "naked together",
+]
+# 性爱场景里明确提到性器/体液时，把对应 danbooru tag 补进最终正向——
+# 自然语言长句里的提及会被生图模型稀释，tag 级补强才能真正画出来。
+_EXPLICIT_SEXUAL_TAG_MAP = (
+    (re.compile(r"\b(?:penis|cock|dick|erection|shaft|glans|phallus)\b", re.IGNORECASE), "penis"),
+    (re.compile(r"\b(?:testicles|balls|scrotum)\b", re.IGNORECASE), "testicles"),
+    (re.compile(r"\b(?:pussy|vagina|vaginal|clitoris|clit|labia|cervix|womb|uterus)\b", re.IGNORECASE), "pussy"),
+    (re.compile(r"\b(?:anus|anal|asshole|butthole|rectum)\b", re.IGNORECASE), "anus"),
+    (re.compile(r"\b(?:cum|semen|creampie|ejaculat\w*|sperm)\b", re.IGNORECASE), "cum"),
+)
+
+
+def _explicit_sexual_scene_tags(scene_desc: str) -> list[str]:
+    """扫描最终英文场景，返回被明确提到的性器/体液 tag（未提到不返回）。"""
+    tags: list[str] = []
+    for rx, tag in _EXPLICIT_SEXUAL_TAG_MAP:
+        if rx.search(scene_desc or "") and tag not in tags:
+            tags.append(tag)
+    return tags
 _NUDE_STATE_WORDS = (
     "topless", "bottomless", "barefoot", "no panties", "no underwear", "no bra",
     "exposed breasts", "exposed nipples", "bare shoulders",
@@ -979,19 +1025,19 @@ def _strip_non_mirror_camera_artifacts(scene_desc: str) -> str:
         flags=re.IGNORECASE,
     )
     phrase_patterns = [
-        r"\b(?:she|he|the\s+character|the\s+woman|the\s+girl|the\s+man|the\s+boy)\s+(?:holds?|holding|grips?|gripping|checks?|checking|scrolls?\s+through|scrolling\s+through|plays?\s+with|using|uses?|shakes?|shaking|types?\s+on|typing\s+on|texts?\s+on|texting\s+on)\s+(?:a\s+|an\s+|one\s+|her\s+|his\s+|the\s+)?(?:smartphone|phone|cellphone|mobile phone)(?:\s+with\s+[^,.;]*)?",
+        r"\b(?:she|he|the\s+character|the\s+woman|the\s+girl|the\s+man|the\s+boy)\s+(?:holds?|holding|grips?|gripping|checks?|checking|scrolls?\s+through|scrolling\s+through|plays?\s+with|using|uses?|shakes?|shaking|types?\s+on|typing\s+on|texts?\s+on|texting\s+on)\s+(?:a\s+|an\s+|one\s+|her\s+|his\s+|the\s+)?(?:smartphone|phone|cellphone|mobile phone)(?:\s+in\s+(?:her|his|both|one)\s+hands?)?(?:\s+with\s+[^,.;]*)?",
         r"\b(?:as|while)\s+(?:she|he|the\s+character|the\s+woman|the\s+girl|the\s+man|the\s+boy)\s+(?:types?|typing|texts?|texting)\s+(?:a\s+)?message\b",
         r"\b(?:typing|texting)\s+(?:a\s+)?message\b",
         r"\b(?:while\s+)?(?:the\s+)?(?:other|another|one)\s+(?:hand\s+)?(?:is\s+)?(?:idly\s+|casually\s+)?(?:holds?|holding|grips?|gripping|checks?|checking|scrolls?\s+through|scrolling\s+through|plays?\s+with|using)\s+(?:a\s+|an\s+|one\s+|her\s+|his\s+|the\s+)?(?:smartphone|phone|cellphone|mobile phone)\b",
         r"\b(?:one|another|the other)\s+hand\s+(?:is\s+)?(?:on|near|around)\s+(?:a\s+|one\s+|her\s+|his\s+|the\s+)?(?:smartphone|phone|cellphone|mobile phone)\b",
-        r"\bholding\s+(?:a\s+|one\s+|her\s+)?(?:smartphone|phone|cellphone|mobile phone)\b",
+        r"\bholding\s+(?:a\s+|one\s+|her\s+)?(?:smartphone|phone|cellphone|mobile phone)\b(?:\s+in\s+(?:her|his|both|one)\s+hands?)?",
         r"\b(?:smartphone|phone|cellphone|mobile phone)\s+in\s+(?:her\s+)?hand\b",
         r"\bvisible\s+(?:smartphone|phone|cellphone|mobile phone)\b",
         r"\b(?:smartphone|phone|cellphone|mobile phone)\s+screen\b",
         r"\b(?:message|chat)\s+interface(?:\s+countdown\s+prompt)?\b",
         r"\bcountdown\s+prompt\b",
         r"\bcountdown\b",
-        r"\bwith\s+(?:a\s+|one\s+|her\s+)?(?:smartphone|phone|cellphone|mobile phone)\b",
+        r"\bwith\s+(?:a\s+|one\s+|her\s+)?(?:smartphone|phone|cellphone|mobile phone)\b(?:\s+in\s+(?:her|his|both|one)\s+hands?)?",
         r"\bmirror\s+selfie\b",
         r"\bmirror\s+reflection\b",
         r"\bin\s+(?:a\s+)?mirror\b",
@@ -1008,7 +1054,14 @@ def _strip_non_mirror_camera_artifacts(scene_desc: str) -> str:
         flags=re.IGNORECASE,
     )
     text = re.sub(r"\b(?:with|holding|holds?|using|uses?|gripping|grips?)\s+(?:a|an|one|her|his|the)\s*(?=[,.;]|$)", "", text, flags=re.IGNORECASE)
+    # 手机短语被删后留下的孤儿介词片段（"in her hand." / "in both hands,"）：只清标点之后或句首、
+    # 且后面不再跟实质内容的（hands 后紧跟标点/结尾）。像 ", with her hands full of flour," 这种
+    # 合法从句 hands 后还有内容，不能误删。
+    text = re.sub(r"(?<=[,.;])\s*(?:in|with)\s+(?:her|his|both|one|the other)\s+hands?\s*,?\s*(?=[,.;]|$)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\s*(?:in|with)\s+(?:her|his|both|one|the other)\s+hands?\s*,?\s*(?=[,.;]|$)", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*,\s*,+", ", ", text)
+    text = re.sub(r"\s*,\s*(?=[.!?;])", "", text)
+    text = re.sub(r"([.!?])\s*,\s*", r"\1 ", text)
     text = re.sub(r"\s+([,.;])", r"\1", text)
     text = re.sub(r"\s{2,}", " ", text)
     text = re.sub(r"(^|,\s*)(?:and\s*)?(?=,|$)", "", text, flags=re.IGNORECASE)
@@ -1107,19 +1160,23 @@ SELF_CAMERA_FRAMING_RE = re.compile(
 )
 
 
-def _normalize_second_person_visual_subject(scene_desc: str) -> str:
+def _normalize_second_person_visual_subject(scene_desc: str, keep_user_body: bool = False) -> str:
     text = (scene_desc or "").strip()
     if not text:
         return text
 
     text = SECOND_PERSON_VISUAL_SUBJECT_RE.sub(lambda m: f"{m.group('prefix')}The character", text, count=1)
     text = SECOND_PERSON_SUBJECT_ACTION_RE.sub("the character ", text)
-    text = re.sub(
-        r"\byour\s+(hair|face|body|shoulder|shoulders|chest|waist|leg|legs|shirt|dress|clothes|outfit|hand|hands|arm|arms|eyes|mouth)\b",
-        r"the character's \1",
-        text,
-        flags=re.IGNORECASE,
-    )
+    if not keep_user_body:
+        # 单人场景：用户不该被画进去，"your waist" 之类归到角色自己身体。
+        # 伴侣/性爱场景（keep_user_body=True）必须保留用户身体归属——改写成 "the character's waist"
+        # 会让 "straddles your waist" 变成跨坐在自己身上，后面的伴侣局部检测也全部落空。
+        text = re.sub(
+            r"\byour\s+(hair|face|body|shoulder|shoulders|chest|waist|leg|legs|shirt|dress|clothes|outfit|hand|hands|arm|arms|eyes|mouth)\b",
+            r"the character's \1",
+            text,
+            flags=re.IGNORECASE,
+        )
 
     verb_fixes = {
         "are": "is",
@@ -1278,7 +1335,16 @@ def build_prompt(
 ) -> tuple[str, str]:
     raw_scene_desc = scene_desc
     state = service._get_session_state(session_id) if session_id else {}
-    scene_desc = _normalize_second_person_visual_subject(scene_desc)
+    # 伴侣/性爱信号要在二人称归一化之前判："straddles your waist" 里的用户身体是合法入画内容，
+    # 一旦被改写成 "the character's waist"，后面的伴侣局部检测就再也匹配不到。
+    pre_scene_lower = (scene_desc or "").lower()
+    keep_user_body = (
+        partner_in_frame
+        or is_intimate
+        or any(k in pre_scene_lower for k in SEX_SCENE_KEYWORDS)
+        or bool(USER_BODY_PART_RE.search(scene_desc or ""))
+    )
+    scene_desc = _normalize_second_person_visual_subject(scene_desc, keep_user_body=keep_user_body)
     scene_desc = _strip_non_visual_role_names(service, state, session_id, scene_desc)
 
     purity = service._get_purity(session_id) if session_id else 1
@@ -1292,13 +1358,11 @@ def build_prompt(
     prefix_parts = _split_prompt_prefix(base_char)
     char = prefix_parts.base
     char = inject_appearance(service, char, session_id)
+    # 衣柜部件状态只在后面合并完 appearance_override 后应用一次（见 effective_appearance 处）——
+    # 重复应用会在已渲染的 "half-removed white camisole" 里再做子串删除，留下裸 "half-removed," 碎片。
     wardrobe_state_worn_src = ""
     wardrobe_state_removed_tags: list[str] = []
     wardrobe_state_exposure_tags: list[str] = []
-    if session_id and session_schema.get_wardrobe_item_states(state):
-        char, wardrobe_state_worn_src, wardrobe_state_removed_tags, wardrobe_state_exposure_tags = _apply_wardrobe_item_states(
-            service, state, char
-        )
     scene_desc = _strip_conflicting_scene_appearance(service, state, char, scene_desc)
     scene_desc = _strip_conflicting_scene_light(service, session_id, scene_desc)
     if service._parse_appearance(scene_desc).get("outfit"):
@@ -1314,17 +1378,20 @@ def build_prompt(
     )
 
     scene_lower = scene_desc.lower()
-    sex_keywords = [
-        "sex", "make love", "penetration", "penetrating", "vaginal", "missionary", "doggystyle",
-        "cowgirl", "girl on top", "straddling", "straddle", "riding", "grinding", "thrust",
-        "thrusting", "squelch", "impaled", "insertion", "humping", "creampie", "naked together",
-    ]
+    sex_keywords = SEX_SCENE_KEYWORDS
     is_ntr_scene = is_ntr or any(k in scene_lower for k in ["ntr", "netorare", "cuckold", "split screen"])
     # 第二人/设备：规划器主判（partner_in_frame / device_in_frame）+ 确定性正则兜底（覆盖无规划器的
     # /自拍、调度推送等路径）。场景里混进与角色性别相反的伴侣，但本该是单人图，是 1girl/solo 与
     # “画面里有第二人”的硬矛盾，最易画出断臂/双人；非 NTR 时按亲密/伴侣场景处理，让伴侣只入局部。
     partner_re = FEMALE_PARTNER_RE if male else MALE_PARTNER_RE
-    scene_has_partner = partner_in_frame or bool(partner_re.search(scene_desc)) or bool(USER_BODY_PART_RE.search(scene_desc))
+    # 性爱场景明确提到的性器/体液 tag：男性性器被提到意味着伴侣必然在场，并入第二人信号。
+    explicit_sex_tags = _explicit_sexual_scene_tags(scene_desc)
+    scene_has_partner = (
+        partner_in_frame
+        or bool(partner_re.search(scene_desc))
+        or bool(USER_BODY_PART_RE.search(scene_desc))
+        or any(tag in {"penis", "testicles"} for tag in explicit_sex_tags)
+    )
     device_present = device_in_frame or bool(DEVICE_SCENE_RE.search(scene_desc))
     scene_has_sex_keyword = any(k in scene_lower for k in sex_keywords)
     is_partner_scene = scene_has_partner and not is_ntr_scene
@@ -1490,6 +1557,15 @@ def build_prompt(
         elif not has_phone and not has_mirror and not is_ntr_scene:
             neg = _append_negatives(neg, *VISIBLE_PHONE_NEGATIVES)
 
+    # 性爱场景明确提到性器/体液时，补 tag 级正向——自然语言长句里的提及会被生图模型稀释。
+    if is_sex_scene and explicit_sex_tags:
+        missing_sex_tags = [
+            tag for tag in explicit_sex_tags
+            if not re.search(rf"\b{re.escape(tag)}\b", scene_desc, re.IGNORECASE)
+        ]
+        if missing_sex_tags:
+            scene_desc += ", " + ", ".join(missing_sex_tags)
+
     effective = safety.get("level", purity)
     if purity <= 2:
         neg = ", ".join(t for t in [x.strip() for x in neg.split(",")] if t.lower() not in {"child", "loli", "censor bar", "mosaic", "pixelated"})
@@ -1507,15 +1583,11 @@ def build_prompt(
     if appearance_override:
         effective_appearance = f"{effective_appearance}, {appearance_override}" if effective_appearance else appearance_override
     if session_id and session_schema.get_wardrobe_item_states(state):
-        effective_appearance, wardrobe_state_worn_src, removed_again, exposure_again = _apply_wardrobe_item_states(
+        # 全链路唯一一次部件状态渲染：char + override 合并后的完整文本上应用，
+        # 原始标签全部移除（remove_tag 全局替换）再追加一次带前缀标签，不会产生重复或碎片。
+        effective_appearance, wardrobe_state_worn_src, wardrobe_state_removed_tags, wardrobe_state_exposure_tags = _apply_wardrobe_item_states(
             service, state, effective_appearance
         )
-        for tag in removed_again:
-            if tag not in wardrobe_state_removed_tags:
-                wardrobe_state_removed_tags.append(tag)
-        for tag in exposure_again:
-            if tag not in wardrobe_state_exposure_tags:
-                wardrobe_state_exposure_tags.append(tag)
     one_shot_effective = (one_shot_appearance or "").strip()
     # 当前衣柜标签单独传给公开场合兜底，避免误删角色 base 里的标志性暴露服装/装甲/原皮造型。
     worn_src = wardrobe_state_worn_src or (

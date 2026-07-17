@@ -13,6 +13,7 @@ from . import session_schema
 from .defaults import DEFAULT_CONFIG, WEEKDAY_NAMES
 from .generation import (
     ANIMATOOL_NLTAG_FIELDS,
+    _apply_wardrobe_item_states,
     _infer_prompt_view,
     _scene_breaks_pov_facing,
     _strip_non_mirror_camera_artifacts,
@@ -490,6 +491,15 @@ def _resolve_roleplay_view(
     breaks_facing = _scene_breaks_pov_facing(scene, intent, mood, prompt, dialog_context)
     if breaks_facing and final_view in {"pov", "selfie", "mirror", "portrait", ""}:
         return "third"
+    # 异地闸门：用户不在场时第一人称视角不成立（POV 隐含用户正看着角色），
+    # 退回旁观机位，避免画出画外人的手/第二人。用户显式要求的 pov 仍优先。
+    if (
+        not derived_co_located
+        and not two_person
+        and requested_view != "pov"
+        and final_view == "pov"
+    ):
+        return "third"
     if (
         derived_co_located
         and not explicit_self_camera
@@ -902,7 +912,15 @@ async def plan_roleplay_image(
     fallback_clothing_off = _infer_clothing_off_fallback(intent, mood, prompt)
     needs_caption = mode not in ("chat", "illustration")
     state = service._get_session_state(session_id)
+    # 持久同处标记必须过用户位置 TTL（world_user_place_ttl_hours）：直接读 user_co_located 会把
+    # 昨晚的同处状态带进第二天早晨的推送，异地单人场景因此被误判成同处 → 强制 POV、画出画外人的手。
     persisted_co_located = session_schema.get_user_co_located(state)
+    if hasattr(service, "_active_user_place"):
+        try:
+            active_user_place = service._active_user_place(state)
+            persisted_co_located = bool(active_user_place and active_user_place.get("co_located"))
+        except Exception:
+            logger.debug("active user place lookup failed, fallback to raw co_located", exc_info=True)
     if now is None:
         now = service._session_now(session_id)
     if not service.has_llm_config("image", session_id):
@@ -947,6 +965,15 @@ async def plan_roleplay_image(
         if hasattr(service, "_effective_visual_prompt_tags")
         else ""
     )
+    # planner 看到的"当前可见外貌"必须包含衣柜部件状态渲染（half-removed/torn/裸体暴露），
+    # 否则早安等保留隔夜状态的场景会被写成"已穿戴整齐"，和 build_prompt 实际渲染的半脱标签打架。
+    if session_schema.get_wardrobe_item_states(state):
+        try:
+            rendered_visible, _, _, _ = _apply_wardrobe_item_states(service, state, visible_appearance)
+            if rendered_visible:
+                visible_appearance = rendered_visible
+        except Exception:
+            logger.debug("render wardrobe item states into planner appearance failed", exc_info=True)
     prompt_prefs = service._prompt_scene_preferences(session_id) if hasattr(service, "_prompt_scene_preferences") else {}
     spatial = service._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])
     spatial_line = f"默认物理空间关系: {spatial}\n" if str(spatial).strip() else ""
@@ -1003,7 +1030,14 @@ async def plan_roleplay_image(
             include_visual=False,
         )
     if hard_scene_transition:
-        session_schema.clear_nudity(state)
+        if (mode or "").strip().lower() == "morning":
+            # 早安推送当次保留隔夜的衣服状态（刚睡醒还是昨晚半脱/裸睡的样子），
+            # 由 _sched_fire 在早安图成功发出后再统一穿好（clear_nudity + clear_wardrobe_item_states）。
+            pass
+        else:
+            # 非早安硬转场（结束信号/超过连续性时效）：新场景不再续上一幕的裸体与半脱状态。
+            session_schema.clear_nudity(state)
+            session_schema.clear_wardrobe_item_states(state)
     continuity_context = (
         format_dialog_context(service, state, session_id, limit=16)
         if is_push
@@ -1103,10 +1137,11 @@ async def plan_roleplay_image(
     )
     stable_mode_rules = (
         "通用模式要求:\n"
-        "morning: 必须使用 pov，刚睡醒、厨房或卧室早安场景。\n"
+        "morning: 刚睡醒、厨房或卧室早安场景；视角同样按通用同处规则（同处 pov，异地 selfie/mirror/third），不要因为是早安就强制 pov。"
+        "若当前可见外貌仍带着昨晚的半脱/裸体状态，scene 要与之自洽（刚醒未整理、衣衫不整或裸睡刚起），不要写成已经穿戴整齐。\n"
         "followup: 用户刚结束对话后的短时间续场推送，优先保持最近地点、关系、情绪和相邻动作；"
         "若节拍推进/转场判定已触发，则按判定让时间自然推进一拍，不要停在上一句话附近。\n"
-        f"normal: 根据{spatial_label}和近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror。\n"
+        f"normal: 根据{spatial_label}和近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror/third。\n"
         "ntr: 用户长时间未互动的冷落惩罚推送，强烈 NTR 危机感，通常 portrait（他人帮角色拍）、selfie 或分屏。\n"
         "推送转场通用规则: 最近对话/照片只能作为情绪、约定和避免重复的参考；判定应转场时，不要把上一幕地点、姿势或话题强行续写成此刻仍在发生。\n"
     )
@@ -1191,6 +1226,8 @@ async def plan_roleplay_image(
         view_rules = (
             "\n视角规则: 身处同一空间或用户明确要靠近互动时优先 pov；"
             "异地、展示穿搭或回复照片请求时优先 selfie/mirror；需要叙事全景时用 third。"
+            "用户不在同一空间时严禁 pov——第一人称视角意味着用户正看着角色，异地使用会画出画外人的手或第二个人的局部；"
+            "亲密/事后氛围但用户不在场时同样只写角色单人，用 third 或 selfie。"
             "取景物理规则: view=selfie 是前摄自拍（角色伸手举着手机自拍），但画面中【不得出现手机本体、手机屏幕 UI、相机、镜子或拿手机的手】，只靠伸手取景和看向镜头表现自拍；"
             "view=portrait 是别人（用户或他人）帮角色拍的照片：角色看向镜头、为镜头摆姿势，拍摄者在画面外，画面里只有角色一个人，同样不得出现手机、相机、镜子。"
             "portrait 只在两种情况下用：①用户与角色【同处一地】且角色明确说想让用户/他人帮忙拍一张照片；②NTR 场景（他人给角色拍照）。其余展示穿搭/异地/回复照片仍用 selfie。"
