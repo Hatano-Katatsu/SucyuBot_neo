@@ -36,11 +36,11 @@
       },
       "tags": {
         "type": "string",
-        "description": "通用标签，直接使用英文自然语言描述场景、动作、服装、表情等。nsfw/explicit 分级额外追加 ', no mosaic, uncensored'。"
+        "description": "通用标签，直接使用英文自然语言描述场景、动作、服装、表情等。"
       },
       "neg": {
         "type": "string",
-        "description": "负面提示词。safe/sensitive 时追加 'nsfw, explicit'；nsfw/explicit 时追加 'safe, sensitive, censored, mosaic, no mosaic, uncensored'。同时包含 'bad anatomy, bad hands, bad feet, extra fingers, missing fingers, text, watermark, logo'。",
+        "description": "负面提示词。safe/sensitive 时追加 'nsfw, explicit'；nsfw/explicit 时追加 'safe, sensitive, censored, mosaic'。同时包含 'bad anatomy, bad hands, bad feet, extra fingers, missing fingers, text, watermark, logo'。",
         "default": ""
       },
       "cfg": {

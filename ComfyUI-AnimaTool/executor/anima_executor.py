@@ -654,9 +654,8 @@ class AnimaExecutor:
             wf["19"]["inputs"]["steps"] = int(prompt_json.get("steps") or 35)
             wf["19"]["inputs"]["cfg"] = float(prompt_json.get("cfg") or 4)
 
-        # 通用可覆盖参数
-        if prompt_json.get("sampler_name"):
-            wf["19"]["inputs"]["sampler_name"] = str(prompt_json["sampler_name"])
+        # 采样器：新模型默认使用 euler_ancestral（老工作流 base/turbo0.2 用 er_sde）
+        wf["19"]["inputs"]["sampler_name"] = str(prompt_json.get("sampler_name") or "euler_ancestral")
         if prompt_json.get("scheduler"):
             wf["19"]["inputs"]["scheduler"] = str(prompt_json["scheduler"])
         if prompt_json.get("denoise") is not None:

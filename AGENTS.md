@@ -175,6 +175,9 @@ telegram_comfyui_selfie/
 - `clothing_off` 对衣物/裸体默认仍是"仅本图生效"；但当它明确命中当前已穿戴的可持久配饰（如眼镜、项链、耳环、发夹）时，生图成功后会把该配饰从当前穿搭中移除，避免下一张图被稳定外貌重新加回去。
 - OC 不把中文名、昵称或作品名塞进视觉 identity；只有已知公开角色才注入角色/作品 tag。
 - 亲密场景默认走 POV，只允许用户/伴侣身体局部入画；除非用户明确要求拍照、录像或对镜，才允许设备入画。
+- 性爱伴侣构图默认 `character full body in frame`（交合类动作需要身体和交合处入画），不再强制 `intimate close-up`；伴侣/性爱场景保留 `your <body>` 用户身体归属；场景明确提到性器/体液或交合委婉语时补 tag 级正向（penis/pussy/anus/testicles/cum/sex）。
+- AnimaTool neg 以服务端实时 schema 为唯一来源（项目不抄词表）；legacy 回退 `_build_animatool_neg()` 与服务端对齐：`safe, sensitive, censored, mosaic`（显式）/ `nsfw, explicit`（安全），不再含 `no mosaic, uncensored` 双重否定。
+- AnimaTool 文件名角色名解析顺序：`slots.character → slots.identity → _session_role_identity(session_id) → 会话 bot_name → 全局 bot_name`；OC 不会再错落成全局默认角色。
 - `/配图`（同义词 `/画图`、`/绘图` 等）按当前聊天场景生成图片，不强制自拍或看镜头；命令后的参数作为最高优先级场景/视角/机位/远近/局部特写要求，但规划器只消费瘦身后的短期连续性、最近已发图片的最终 `nltag/tags` 与短意图、世界状态和记忆，不再直接吞完整聊天流水、原始草案或整段外观快照。
 - `roleplay-image-plan` 在瘦身连续性之外保留"空间/身体关系硬约束"旁路：坐/站/躺/跪、脚边、腿上、身后、怀里、肩膀、背向、俯身等站位线索会单独进入 planner，并在 planner 漏写时追回到最终 `scene`，避免关键身体关系被每条 140 字截断吃掉。
 - `partner_in_frame` 区分日常局部同框和真正亲密/性爱场景；日常帮吹头发、坐脚边、靠肩等只去掉 `solo` 冲突并允许必要的手/脚/肩局部，不再自动追加 `male torso` / `intimate close-up`。
@@ -248,6 +251,11 @@ telegram_comfyui_selfie/
 5. **性爱场景身体归属与性器 tag**：`_normalize_second_person_visual_subject()` 此前把 `straddles your waist` 里的 `your waist` 改写成 `the character's waist`，用户身体消失且伴侣检测全部落空；现在伴侣/性爱场景保留 `your <body>`。`build_prompt()` 新增 `_explicit_sexual_scene_tags()`：场景明确提到性器/体液时补 tag 级正向（penis/testicles/pussy/anus/cum），男性性器被提到并入第二人信号；未提到时不补，日常亲密 POV 不变。
 6. **正则 vs LLM 的分层结论**：不新增 LLM 阶段；判断类工作继续交给 planner/翻译两个既有 LLM（翻译三个分支的 "Stable appearance" 规则补上 clothing 不重述，并移除"重点保留服装"的矛盾表述），正则只做词级硬保证（手机/镜子压制、冲突删除、视角闸门），且全部改为精确匹配+标点清理，不再做整句重写。
 7. **本轮验证**：新增/更新测试覆盖异地 pov 降级（含显式 pov 豁免、同处/伴侣保留）、隔夜/新鲜同处标记、planner pov 压 third、早安保留状态与发出后穿好、非早安硬转场清理、部件状态单次渲染无裸碎片、衣物删除式清洗保留角色动作、手机孤儿片段清理与合法从句保留、性爱场景身体归属与性器 tag/未提到不补。`py -3 -m unittest tests.test_core -q` 结果 `436 tests, OK (skipped=1)`；`py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`git diff --check` 全部通过。
+8. **sex 场景真实链路验证与修正**：`scripts/live_sex_chain_test.py` 用配置文件里的真实 LLM（planner/翻译/slots planner）+ AnimaTool turbo_v1 全链路跑图三轮。第一轮暴露：伴侣场景主语改写把 `Both of you are naked` 洗成 `Both of the character is naked` 破句（现 keep_user_body 时跳过全部二人称改写）；翻译把交合委婉化导致性器 tag 不触发（委婉语映射补 `point of union/joined/intercourse/penetration` → `sex` tag）。第二轮暴露 `intimate close-up` 把骑乘场景裁成脸部特写、无性描绘：性爱伴侣构图改为默认 `character full body in frame`（交合类动作需要身体和交合处入画），planner 亲密构图规则从"近距离特写或半身近景"改为"默认全身/大半身中景"，翻译亲密 override 要求保持角色全身、如实翻译性内容不委婉化。第三轮图达成预期：POV 男方手/下腹局部、女方全身、交合清晰可见无马赛克。
+9. **neg 无码 tag 遗留清理**：`no mosaic, uncensored` 混入 neg 有一方面是服务端 schema/knowledge 的旧格式（双重否定，无意义且可能反向诱导），服务端已修复为 `safe, sensitive, censored, mosaic`；项目侧同步清理 `_build_animatool_neg()` 的同款残留。`plan_animatool_slots()` 的 neg_rule 不再硬抄词表（正是这次"服务端修了项目侧过期"的成因），改为让 LLM 严格按实时 schema 的 neg description 构造，只保留"不复制槽位 negative、不含场景特定反词"两条约束；legacy 回退 `_build_animatool_neg()` 保留与服务端对齐的最小确定性格式（该路径无 LLM）。
+10. **filename_prefix 角色名修复**：OC 没有视觉 identity，`_animatool_filename_prefix()` 旧回退读全局 `bot_name`，导致所有 OC 生成图文件名都错成全局默认角色（"蕾伊"）；现按 `slots.character → slots.identity → _session_role_identity(session_id) → 会话 bot_name → 全局 bot_name` 解析。
+11. **AnimaTool 后端同步**：`ComfyUI-AnimaTool/` 已从 `D:\ComfyUI\...\custom_nodes\ComfyUI-AnimaTool` 完整替换（排除 .git / __pycache__ / outputs），含修复后的 turbo_v1/aesthetic_v1 schema（neg 不再含 `no mosaic, uncensored`，tags 不再要求追加无码尾注）、new_models knowledge 与 executor 更新。
+12. **本轮追加验证**：新增测试覆盖性爱构图全身默认、neg 无双重否定、OC 文件名角色名；`py -3 -m unittest tests.test_core -q` 结果 `439 tests, OK (skipped=1)`；`py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`git diff --check` 全部通过。
 
 ## 今日变更（2026-07-16）
 
@@ -530,7 +538,7 @@ telegram_comfyui_selfie/
 
 ## 最新验证
 
-- `py -3 -m unittest tests.test_core -q` → `436 tests, OK (skipped=1)`（2026-07-17）
+- `py -3 -m unittest tests.test_core -q` → `439 tests, OK (skipped=1)`（2026-07-17）
 - `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js` 通过
 - 默认跳过真实前缀缓存请求测试；设置 `SUCYUBOT_TEST_LIVE_CACHE_PROBE=1` 后才运行
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示

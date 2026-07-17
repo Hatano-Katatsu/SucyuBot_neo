@@ -41,7 +41,7 @@
   "count": "2girls",
   "appearance": "short crimson red hair, amber eyes, wolf ears, dark leather armor, fur trim, heavy boots, long silver-white hair, emerald green eyes, pointed ears, blue and white robe, glowing runes, pointed shoes",
   "artist": "@makihitsuji",
-  "tags": "Two girls stand side by side in an ancient forest clearing. The beastgirl warrior with crimson hair and wolf ears wields a battle axe with a fierce grin. The elven mage with silver-white hair and pointed ears holds a crystal staff with a serene smile. Dappled sunlight filters through the canopy with floating golden particles, no mosaic, uncensored.",
-  "neg": "bad anatomy, bad hands, bad feet, extra fingers, missing fingers, text, watermark, logo, safe, sensitive, censored, mosaic, no mosaic, uncensored"
+  "tags": "Two girls stand side by side in an ancient forest clearing. The beastgirl warrior with crimson hair and wolf ears wields a battle axe with a fierce grin. The elven mage with silver-white hair and pointed ears holds a crystal staff with a serene smile. Dappled sunlight filters through the canopy with floating golden particles.",
+  "neg": "bad anatomy, bad hands, bad feet, extra fingers, missing fingers, text, watermark, logo, safe, sensitive, censored, mosaic"
 }
 ```

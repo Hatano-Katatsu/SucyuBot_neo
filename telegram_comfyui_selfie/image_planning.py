@@ -1185,7 +1185,8 @@ async def plan_roleplay_image(
             "除非用户明确要求双人同框，画面里被完整刻画的人物只有角色一名。\n"
             f"- 只画用户身体局部（手/臂/胸/腹/背/腿），不要画完整的{user_g_zh}全身或面部。\n"
             "- 人物优先: 重点在角色的表情（迷离、红晕、咬唇）、身体反应（汗水、潮红、轻颤）和互动姿态，弱化环境背景。\n"
-            "- 场景精简: 环境灯光压到最短；构图近距离特写或半身近景。\n"
+            "- 场景精简: 环境灯光压到最短；构图默认能看到角色全身或大半身的中景——交合/骑乘等动作需要身体和交合处入画，"
+            "不要用脸部/上半身特写把身体裁掉；只有原文明确要求局部特写时才用近景。\n"
             "- 自拍物理规则不变: 默认不得出现手机、相机、镜子或拿手机的手；"
             "但若用户明确要求在亲密时拍照/录像/对镜（device_in_frame=true），则按其要求放行对应的 selfie/mirror 视角与手机/镜子入画。\n"
             "- new_appearance_tags 仍只填临时外观变化，不要把情绪或动作写进去。"
@@ -1798,13 +1799,12 @@ async def plan_animatool_slots(
         except Exception:
             logger.debug("time/light context for animatool tags failed", exc_info=True)
 
-    # 反词规则：工作流支持 neg 时要求按 schema 格式构造，否则禁止。
+    # 反词规则：工作流支持 neg 时按实时 schema 的 neg description 构造（服务端维护，项目不再抄词表），否则禁止。
     if supports_neg:
         neg_rule = (
             "## neg（反词）规则（重要）\n"
-            "当前工作流支持 neg 字段。按 schema 中 neg 字段的 description 构造反词，不要把任何槽位中的 negative 直接复制进来。\n"
-            "- 必须包含通用反词：'bad anatomy, bad hands, bad feet, extra fingers, missing fingers, text, watermark, logo'。\n"
-            f"- 安全等级为 {safety_tag}。safe/sensitive 时追加 'nsfw, explicit'；nsfw/explicit 时追加 'safe, sensitive, censored, mosaic, no mosaic, uncensored'。\n"
+            f"当前工作流支持 neg 字段。严格按 schema 中 neg 字段的 description 构造反词（安全等级用 {safety_tag}），"
+            "不要把任何槽位中的 negative 直接复制进来。\n"
             "- 不要包含场景特定反词（如 no panties/2girls/male/holding phone/mirror selfie/split screen/grid 等），它们不属于 neg 字段。\n\n"
         )
     else:

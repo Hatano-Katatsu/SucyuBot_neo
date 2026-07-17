@@ -7414,7 +7414,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         scene = (
             "First-person POV from the user's viewpoint, looking toward the character, "
             "A dimly lit bedroom. The character straddles your waist, her slick pussy grinding "
-            "against his penis, a streak of white semen trails down her inner thigh. straddling, intimate"
+            "against his penis, a streak of white semen trails down her inner thigh. "
+            "Both of you are completely naked, the point of union clearly visible. straddling, intimate"
         )
 
         pos, _ = svc._build_prompt(scene, session_id=sid, is_intimate=True)
@@ -7422,9 +7423,14 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         self.assertIn("your waist", low)
         self.assertNotIn("the character's waist", low)
+        # 伴侣场景的二人称主语不再被改写："Both of you are..." 必须原样保留
+        self.assertIn("both of you are completely naked", low)
+        self.assertNotIn("both of the character", low)
         self.assertIn("penis", low)
         self.assertIn("pussy", low)
         self.assertIn("cum", low)
+        # 交合委婉说法（point of union）也要补 "sex" tag
+        self.assertIn("sex", low)
         self.assertNotIn("off-frame partner", low)
         self.assertNotIn("no visible second person", low)
 
@@ -7448,6 +7454,58 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("penis", low)
         self.assertNotIn("pussy", low)
         self.assertNotIn("cum", low)
+
+    def test_build_prompt_sex_scene_full_body_framing_replaces_close_up(self):
+        """性爱伴侣构图：不再强制 intimate close-up（会裁掉身体和交合处），默认角色全身在画面里。"""
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        svc._set_character_place(sid, "home", "家里", 0.95, source="test")
+        state["custom_positive_prefix"] = "1girl, long hair, blond hair, blue eyes, fox ears, fox tail"
+        state["custom_user_gender"] = "male"
+        session_schema.set_wardrobe(state, {"top": "white camisole"})
+        session_schema.set_outfit(state, "white camisole")
+
+        pos, _ = svc._build_prompt(
+            "First-person POV from the user's viewpoint, she straddles your waist in cowgirl position, sex",
+            session_id=sid,
+            is_intimate=True,
+            partner_in_frame=True,
+        )
+        low = pos.lower()
+
+        self.assertIn("partial male body visible", low)
+        self.assertIn("character full body in frame", low)
+        self.assertNotIn("intimate close-up", low)
+
+    def test_build_animatool_neg_explicit_has_no_uncensored_double_negative(self):
+        """与服务端修复后的 schema 一致：显式场景 neg 不再含 "no mosaic, uncensored" 双重否定。"""
+        from telegram_comfyui_selfie.generation import _build_animatool_neg, PromptSlots
+
+        neg = _build_animatool_neg(PromptSlots(safety="explicit"), "turbo_v1")
+        self.assertIn("safe, sensitive, censored, mosaic", neg)
+        self.assertNotIn("uncensored", neg)
+        self.assertNotIn("no mosaic", neg)
+
+        neg_safe = _build_animatool_neg(PromptSlots(safety="safe"), "turbo_v1")
+        self.assertIn("nsfw, explicit", neg_safe)
+
+    def test_animatool_filename_prefix_uses_session_character_name_for_oc(self):
+        """OC 没有视觉 identity：文件名角色名回退到会话内角色名，而不是全局默认 bot_name（蕾伊）。"""
+        from telegram_comfyui_selfie.generation import _animatool_filename_prefix
+
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["custom_character"] = "狐雪"
+        state["custom_bot_name"] = "狐雪"
+        state["custom_positive_prefix"] = "1girl, fox ears, blond hair, blue eyes"
+
+        svc._build_prompt("standing in the kitchen", session_id=sid)
+        prefix = _animatool_filename_prefix(svc, svc._last_prompt_slots, "turbo_v1")
+
+        self.assertIn("狐雪", prefix)
+        self.assertNotIn("蕾伊", prefix)
 
     def test_scheduled_push_stale_gap_alone_keeps_continuity(self):
         svc = self.make_service()

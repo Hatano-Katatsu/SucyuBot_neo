@@ -2538,7 +2538,10 @@ class TelegramComfyUIService(
                 f"The user appears only as an intimate partner's partial {body} body (hands, arms, chest, torso, back, thighs), "
                 "never as a complete second character with their own face, hair, or expression. "
                 f"Chinese 你的手/你的胸/你的背/你的腿 must become visible partial {body} body parts of the partner, not a second person. "
-                "Do not turn the user into a second full character."
+                "Do not turn the user into a second full character. "
+                "Keep the character's full or three-quarter body in frame; do not crop her into a face or bust close-up "
+                "when the scene describes intercourse or straddling. "
+                "Translate explicit sexual content faithfully: do not euphemize genitals, penetration, or bodily fluids."
             )
         text = await self._call_llm(
             system,

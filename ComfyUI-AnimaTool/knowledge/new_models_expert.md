@@ -11,7 +11,7 @@
 | `artist` | 画师名，需要时以 `@` 开头，如 `@wlop`。 |
 | `appearance` | 逗号分隔的 Danbooru 标签，描述角色外观：发型发色、瞳色、服装、饰品等。多角色时写在一起。 |
 | `tags` | 英文自然语言，完整句子描述场景。至少 3-5 句话，包含角色外观引用、动作/姿势、表情、构图/视角，可补充氛围和光影。 |
-| `neg` | 负面提示词。safe/sensitive 时追加 `nsfw, explicit`；nsfw/explicit 时追加 `safe, sensitive, censored, mosaic, no mosaic, uncensored`。同时包含 `bad anatomy, bad hands, bad feet, extra fingers, missing fingers, text, watermark, logo`。 |
+| `neg` | 负面提示词。safe/sensitive 时追加 `nsfw, explicit`；nsfw/explicit 时追加 `safe, sensitive, censored, mosaic`。同时包含 `bad anatomy, bad hands, bad feet, extra fingers, missing fingers, text, watermark, logo`。 |
 | `aspect_ratio` | 可选 `16:9`、`3:2`、`1:1`、`2:3`、`9:16`，默认 `1:1`。 |
 | `steps` / `cfg` | 由系统根据所选模型固定，无需填写。 |
 
@@ -30,5 +30,3 @@ A girl with long flowing silver hair and bright blue eyes is standing in a vast 
 ## 模型能力限制
 
 模型不具备生成文字、LOGO、UI 界面、对话框、气泡的能力。`tags` 中不要出现 `text`、`sign`、`letter`、`caption`、`ui`、`interface`、`hud`、`menu`、`button`、`dialog`、`speech bubble`、`thought bubble`、`logo` 等描述。
-
-当分级为 `nsfw` 或 `explicit` 时，`tags` 末尾追加 `no mosaic, uncensored`。

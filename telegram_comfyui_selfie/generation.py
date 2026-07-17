@@ -692,6 +692,9 @@ _EXPLICIT_SEXUAL_TAG_MAP = (
     (re.compile(r"\b(?:pussy|vagina|vaginal|clitoris|clit|labia|cervix|womb|uterus)\b", re.IGNORECASE), "pussy"),
     (re.compile(r"\b(?:anus|anal|asshole|butthole|rectum)\b", re.IGNORECASE), "anus"),
     (re.compile(r"\b(?:cum|semen|creampie|ejaculat\w*|sperm)\b", re.IGNORECASE), "cum"),
+    # 交合的委婉说法（point of union / joined / intercourse / penetration）：补 "sex" tag，
+    # 否则翻译层把性器委婉化后，"清晰可见的交合" 不一定画得出来。
+    (re.compile(r"\b(?:point of union|join(?:ed|ing|s)?|intercourse|copulation|lovemaking|mating|coupling|penetrat\w+|impaled)\b", re.IGNORECASE), "sex"),
 )
 
 
@@ -1164,19 +1167,21 @@ def _normalize_second_person_visual_subject(scene_desc: str, keep_user_body: boo
     text = (scene_desc or "").strip()
     if not text:
         return text
-
+    if keep_user_body:
+        # 伴侣/性爱场景：用户的身体与动作是合法入画内容，任何二人称改写都会破坏伴侣归属——
+        # "straddles your waist" 会变成跨坐在自己身上，"Both of you are naked" 会变成
+        # "Both of the character is naked" 破句。用户只做画面边缘局部由 build_prompt 的
+        # 伴侣局部规则保证，不需要在这里改写。
+        return text
     text = SECOND_PERSON_VISUAL_SUBJECT_RE.sub(lambda m: f"{m.group('prefix')}The character", text, count=1)
     text = SECOND_PERSON_SUBJECT_ACTION_RE.sub("the character ", text)
-    if not keep_user_body:
-        # 单人场景：用户不该被画进去，"your waist" 之类归到角色自己身体。
-        # 伴侣/性爱场景（keep_user_body=True）必须保留用户身体归属——改写成 "the character's waist"
-        # 会让 "straddles your waist" 变成跨坐在自己身上，后面的伴侣局部检测也全部落空。
-        text = re.sub(
-            r"\byour\s+(hair|face|body|shoulder|shoulders|chest|waist|leg|legs|shirt|dress|clothes|outfit|hand|hands|arm|arms|eyes|mouth)\b",
-            r"the character's \1",
-            text,
-            flags=re.IGNORECASE,
-        )
+    # 单人场景：用户不该被画进去，"your waist" 之类归到角色自己身体。
+    text = re.sub(
+        r"\byour\s+(hair|face|body|shoulder|shoulders|chest|waist|leg|legs|shirt|dress|clothes|outfit|hand|hands|arm|arms|eyes|mouth)\b",
+        r"the character's \1",
+        text,
+        flags=re.IGNORECASE,
+    )
 
     verb_fixes = {
         "are": "is",
@@ -1482,7 +1487,8 @@ def build_prompt(
         elif user_gender == "female":
             # 用户是女性（百合/女用户）：只有明确入画时才画女性局部，并放开“双女”负向。
             if is_sex_scene:
-                scene_desc += ", partner's hands or arms visible only as required by the pose, intimate close-up"
+                # 不强制 intimate close-up：交合类动作需要角色全身/大半身在画面里，特写会裁掉身体和交合处。
+                scene_desc += ", partner's hands or arms visible only as required by the pose, character full body in frame"
             elif partner_behind:
                 # 第三人称双人：伴侣是完整第二人（角色在其身后），不压成画面边缘局部。
                 scene_desc += ", female partner fully in frame, everyday close interaction"
@@ -1491,7 +1497,7 @@ def build_prompt(
             neg = _remove_negatives(neg, "2girls", "multiple girls", "extra girls", "multiple characters", "second body", "duplicate body")
         elif user_gender == "male":
             if is_sex_scene:
-                scene_desc += ", partial male body visible, male hands, male torso, intimate close-up"
+                scene_desc += ", partial male body visible, male hands, male torso, character full body in frame"
             elif partner_behind:
                 # 第三人称双人：伴侣是完整第二人（角色从背后环抱他），不压成画面边缘局部。
                 scene_desc += ", male partner fully in frame, everyday close interaction"
@@ -1509,7 +1515,7 @@ def build_prompt(
             neg = _remove_negatives(neg, "male", "boy", "man", "1boy")
         else:
             if is_sex_scene:
-                scene_desc += ", partner's hands or arms visible only as required by the pose, intimate close-up"
+                scene_desc += ", partner's hands or arms visible only as required by the pose, character full body in frame"
             elif partner_behind:
                 scene_desc += ", partner fully in frame, everyday close interaction"
             else:
@@ -1859,7 +1865,9 @@ def _build_animatool_neg(slots: PromptSlots | None, workflow: str) -> str:
     if safety in ("safe", "sensitive"):
         safety_neg = "nsfw, explicit"
     else:
-        safety_neg = "safe, sensitive, censored, mosaic, no mosaic, uncensored"
+        # 与服务端修复后的 schema 一致：显式场景的反向安全词不再包含 "no mosaic, uncensored"
+        # （负向里压"无码"是双重否定，属于旧服务端 schema 的错误格式残留）。
+        safety_neg = "safe, sensitive, censored, mosaic"
     common_neg = "bad anatomy, bad hands, bad feet, extra fingers, missing fingers, text, watermark, logo"
     if workflow == "base":
         return f"worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, {common_neg}, extra toes, {safety_neg}"
@@ -1907,8 +1915,21 @@ def _animatool_filename_prefix(service: Any, slots: PromptSlots | None, workflow
     """构造输出文件名前缀：base_prefix + 角色名。"""
     base = service.config.get("animatool_filename_prefix", "sucyubot_turbo")
     char_name = ""
+    session_id = ""
     if isinstance(slots, PromptSlots):
         char_name = slots.character or slots.identity or ""
+        session_id = slots.session_id or ""
+    if not char_name and session_id:
+        # OC 没有视觉 identity 标签：回退到会话内当前角色名，而不是全局默认 bot_name——
+        # 否则所有 OC 生成的图片文件名都错变成全局默认角色（如"蕾伊"）。
+        if hasattr(service, "_session_role_identity"):
+            try:
+                _, bot_name, _ = service._session_role_identity(session_id)
+                char_name = bot_name or ""
+            except Exception:
+                char_name = ""
+        if not char_name:
+            char_name = service._get_session_cfg(session_id, "bot_name", "") or ""
     if not char_name:
         char_name = service.config.get("bot_name", "") or ""
     segment = _sanitize_filename_segment(char_name)
