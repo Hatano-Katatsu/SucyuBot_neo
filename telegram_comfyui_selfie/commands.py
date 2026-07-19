@@ -1740,11 +1740,9 @@ class CommandHandlersMixin:
 
     @staticmethod
     def _character_context_key_from_state(state: dict[str, Any]) -> str:
-        return (
-            session_schema.get_character_value(state, "custom_character", "")
-            or session_schema.get_character_value(state, "custom_bot_name", "")
-            or "__default__"
-        ).strip() or "__default__"
+        # 冻结/恢复上下文的键与记忆键（custom_character）保持一致，不再回退 bot_name，
+        # 避免默认角色在 "蕾伊" 与 "__default__" 两个键之间分裂。
+        return (session_schema.get_character_value(state, "custom_character", "") or "").strip() or "__default__"
 
     @staticmethod
     def _conversation_context_payload(state: dict[str, Any]) -> dict[str, Any]:
@@ -1991,7 +1989,8 @@ class CommandHandlersMixin:
                 )
             if "style" not in data:
                 payload.pop("style", None)
-            if data.get("purity") is None or session_schema.get_character_value(state, "purity_user_set", False):
+            # 切换角色时应用目标卡自己的 purity；旧角色的手动 purity 只在非切换时保留。
+            if data.get("purity") is None or (not switching and session_schema.get_character_value(state, "purity_user_set", False)):
                 payload.pop("purity", None)
             self._apply_character_payload(state, payload)
             if switching:
@@ -2068,7 +2067,8 @@ class CommandHandlersMixin:
                 )
             if "style" not in data:
                 payload.pop("style", None)
-            if data.get("purity") is None or session_schema.get_character_value(state, "purity_user_set", False):
+            # 切换角色时应用目标卡自己的 purity；旧角色的手动 purity 只在非切换时保留。
+            if data.get("purity") is None or (not switching and session_schema.get_character_value(state, "purity_user_set", False)):
                 payload.pop("purity", None)
             self._apply_character_payload(state, payload)
             if switching:

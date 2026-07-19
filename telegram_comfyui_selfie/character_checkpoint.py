@@ -382,6 +382,18 @@ class CharacterCheckpointMixin:
                 if hasattr(self, "_restore_character_context"):
                     self._restore_character_context(session_id, state)
                 context_restored = True
+            elif should_apply_to_current and hasattr(self, "_clear_transient_state"):
+                # full 导入无冻结上下文时，清掉上一个角色残留的短期态（对话/衣柜/位置），
+                # 避免从未激活过的角色带着旧角色的完整上下文继续。
+                self._clear_transient_state(state, keep_appearance=False)
+                if hasattr(self, "_apply_card_outfit_after_switch"):
+                    self._apply_card_outfit_after_switch(state, card_for_apply, has_clothing_context=False)
+            elif should_apply_to_current and hasattr(self, "_clear_transient_state"):
+                # full 导入没有冻结上下文时，清掉上一个角色残留的短期态（对话/衣柜/位置），
+                # 避免导入从未激活过的角色后仍带着旧角色的完整上下文；穿搭按新卡 outfit 初始化。
+                self._clear_transient_state(state, keep_appearance=False)
+                if hasattr(self, "_apply_card_outfit_after_switch"):
+                    self._apply_card_outfit_after_switch(state, card_for_apply, has_clothing_context=False)
 
         background = payload.get("background") if isinstance(payload.get("background"), dict) else {}
         checkpoint = background.get("sqlite_checkpoint") if isinstance(background.get("sqlite_checkpoint"), dict) else {}

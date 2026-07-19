@@ -257,6 +257,25 @@ telegram_comfyui_selfie/
 11. **AnimaTool 后端同步**：`ComfyUI-AnimaTool/` 已从 `D:\ComfyUI\...\custom_nodes\ComfyUI-AnimaTool` 完整替换（排除 .git / __pycache__ / outputs），含修复后的 turbo_v1/aesthetic_v1 schema（neg 不再含 `no mosaic, uncensored`，tags 不再要求追加无码尾注）、new_models knowledge 与 executor 更新。
 12. **本轮追加验证**：新增测试覆盖性爱构图全身默认、neg 无双重否定、OC 文件名角色名；`py -3 -m unittest tests.test_core -q` 结果 `439 tests, OK (skipped=1)`；`py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`git diff --check` 全部通过。
 
+## 今日变更（2026-07-19）
+
+### Phase 0：角色状态隔离与后台任务守卫（代码审查修复，P0）
+
+1. **后台任务 character_key 守卫**：后台任务（checkpoint 摘要/记忆提取/dream 写 `last_dream_at`/角色历史提要）在 LLM await 之后统一校验 `_context_character_key(session_id) == 捕获的 key`；不一致时只落 SQLite（按 key 隔离安全）、跳过新角色的 live state 写和 chat_history 裁剪，并写日志标记"角色已切换, 仅落库"。`_generate_character_history_summary` 改用传入的 key 而非现取活动角色；meta/检查点/记忆均按 key 读取；非活动角色当前窗口改从 `app_store.list_messages` 按 key 取未折叠消息。
+2. **记忆提取显式透传 character**：`_extract_long_term_memories_from_messages` 与 `_extract_long_term_memories` 新增 `character` 参数；所有后台调用方在任务启动时捕获 key 并透传；写入时直接使用捕获 key 而非 `_memory_character` 现取。已有记忆查询内容在非活动角色时按显式 key 查。
+3. **service 级角色操作锁提升**：`character_operation_lock(session_id)` 定义在 service 本体；`handle_update` 收到 Telegram 新消息时等待锁 60s（超时提示用户）；`_sched_fire` 跳过自动推送；`api_save_character`(activate=true) 与 `api_activate_character` 纳入锁，与头像生成/手动推送等所有角色操作互斥。
+4. **import full 无冻结上下文自动清短期态**：`import_character_checkpoint` mode=full 在无 `frozen_context` 可恢复时，先 `_clear_transient_state(keep_appearance=False)` 再按新卡 `outfit` 初始化穿搭，避免导入从未激活过的角色后仍带着旧角色的完整对话/衣柜/位置。
+5. **WebUI 默认角色 key 归一**：`required_character_key_from_request` 对 `__default__`/`default` 及默认角色 payload id（bot_name 回退值）统一映射到空串键；前端 `characterApiKey()` 对 `is_default` 卡发送 `__default__` 占位，保证 WebUI 记忆/日记/历史页与 Telegram 侧读写同一套数据。
+6. **角色键统一**：`_character_context_key_from_state` 冻结/恢复上下文键不再回退 `custom_bot_name`，统一为 `custom_character.strip() or "__default__"`；`api_save_character` 对自定义角色卡强制 `payload["character"] = key`，防止 id≠character 键分裂。
+7. **非活动角色整理不读 live 窗口**：`_incremental_organize_memories` 在 `character_key != 活动角色` 时改从 `app_store.list_messages` 按 key 取该角色自己的未折叠消息，避免读到其他角色的 live 窗口作为整理材料。
+8. **头像生成清理展示缓存**：`_generate_character_avatar_locked` 的 finally 块额外清理 `_last_prompt_slots_by_session` / `_last_generated_nltag_by_session` 中该会话条目，避免头像角色的生图中间结果覆盖活动角色的最近 `/查看提示词` 和照片 nltag。
+9. **纯度切换修复**：commands.py 两处 `cmd_role` 切换路径与 webui.py `api_activate_character` / `_switch_state_to_selected_character` 共四处，旧角色的 `purity_user_set` 不再在切换时压制目标卡自身的 purity；仅在非切换（重复激活同一角色）时保留手动纯度。
+
+**测试新增**：
+- `test_checkpoint_character_switch_does_not_write_live_state`：摘要期间切换角色 → 新角色 live state 不被污染，SQLite 按旧 key 落库
+- `test_import_full_without_frozen_context_clears_transient_state`：full 导入无 frozen_context → 旧角色残留清空，新卡 outfit 生效
+- `test_default_character_webui_key_normalization`：`__default__` / 默认 id / 自定义角色三种归一 + 空串键记忆一致性
+
 ## 今日变更（2026-07-16）
 
 1. **主动推送时间/场景推进修正**：保留 `scene_stale_minutes` 的软推进和 `push_continuity_hours` 的硬转场分层；软断档下识别“刚醒/起床”阶段并推进到同一大地点内的起床后相邻片段，明确继续睡/继续躺着时允许保持原阶段，不强制换地点。
@@ -538,7 +557,7 @@ telegram_comfyui_selfie/
 
 ## 最新验证
 
-- `py -3 -m unittest tests.test_core -q` → `439 tests, OK (skipped=1)`（2026-07-17）
+- `py -3 -m unittest tests.test_core -q` → `442 tests, OK (skipped=1)`（2026-07-19）
 - `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js` 通过
 - 默认跳过真实前缀缓存请求测试；设置 `SUCYUBOT_TEST_LIVE_CACHE_PROBE=1` 后才运行
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示

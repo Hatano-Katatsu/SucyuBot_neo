@@ -249,6 +249,13 @@ function escapeHtml(value) {
   }[ch]));
 }
 
+function characterApiKey(id) {
+  // 默认角色卡的 id 是 bot_name（如"蕾伊"），运行态键是空串；对 is_default 卡统一发
+  // __default__ 占位，由后端归一，保证 WebUI 记忆/日记/历史与 Telegram 侧同键。
+  const char = state.characterData?.characters?.[id];
+  return char && char.is_default === true ? "__default__" : id;
+}
+
 function compactText(value, max = 80) {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   if (!text) return "";
@@ -1337,7 +1344,7 @@ async function loadHistorySummary() {
   if (!editor || !state.selectedSession) return;
   const sid = encodeURIComponent(state.selectedSession);
   const rawCharKey = state.selectedCharacter || "";
-  const charKey = rawCharKey;
+  const charKey = characterApiKey(rawCharKey);
   try {
     const data = await api(`/api/sessions/${sid}/history-summary?character_key=${encodeURIComponent(charKey)}`);
     if (state.selectedCharacter !== rawCharKey) return;
@@ -1406,7 +1413,7 @@ async function loadMemories() {
   }
   const sid = encodeURIComponent(state.selectedSession);
   const rawCharKey = state.selectedCharacter;
-  const charKey = encodeURIComponent(rawCharKey);
+  const charKey = encodeURIComponent(characterApiKey(rawCharKey));
   try {
     const data = await api(`/api/sessions/${sid}/memories?character_key=${charKey}`);
     if (state.selectedCharacter !== rawCharKey) return;
@@ -1482,7 +1489,7 @@ async function loadDiaries() {
   }
   const sid = encodeURIComponent(state.selectedSession);
   const rawCharKey = state.selectedCharacter;
-  const charKey = encodeURIComponent(rawCharKey);
+  const charKey = encodeURIComponent(characterApiKey(rawCharKey));
   try {
     const data = await api(`/api/sessions/${sid}/diaries?character_key=${charKey}&limit=30`);
     if (state.selectedCharacter !== rawCharKey) return;
@@ -2808,7 +2815,7 @@ async function initEvents() {
     if (!window.confirm("这会让 AI 根据最近日记和对话自动整理非手动记忆（增删改）。手动记忆不会被修改。继续吗？")) return;
     setBusy(btn, true);
     try {
-      const charKey = state.selectedCharacter || "";
+      const charKey = characterApiKey(state.selectedCharacter || "");
       const data = await api(`/api/sessions/${state.selectedSession}/organize-memories?character_key=${encodeURIComponent(charKey)}`, { method: "POST" });
       toast(data.message || "记忆整理完成");
       await loadMemories();
@@ -2835,7 +2842,7 @@ async function initEvents() {
       try {
         const data = await api(`/api/sessions/${encodeURIComponent(state.selectedSession)}/test-push`, {
           method: "POST",
-          body: { character_key: state.selectedCharacter, mode },
+          body: { character_key: characterApiKey(state.selectedCharacter), mode },
         });
         toast(data.message || `${mode} 手动推送已触发`);
       } catch (err) {

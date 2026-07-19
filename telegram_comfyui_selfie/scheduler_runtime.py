@@ -14,6 +14,7 @@ import aiohttp
 
 from . import session_schema
 from .defaults import DEFAULT_CONFIG, WEEKDAY_NAMES
+from .memory import format_memory_lines
 from .image_planning import (
     VALID_VIEWS,
     format_dialog_context,
@@ -669,7 +670,7 @@ class SchedulerRuntimeMixin:
         )
         if messages and self.has_llm_config("chat", session_id) and hasattr(self, "_extract_long_term_memories_from_messages"):
             try:
-                await self._extract_long_term_memories_from_messages(session_id, messages, source_type="dream")
+                await self._extract_long_term_memories_from_messages(session_id, messages, source_type="dream", character=character_key)
             except Exception:
                 logger.warning("dream memory extraction failed", exc_info=True)
         memory_result = await self._organize_memories_after_dream(session_id, character_key)
@@ -697,10 +698,13 @@ class SchedulerRuntimeMixin:
                 extract_memory=False,
             )
         self.app_store.mark_dream(session_id, character_key, to_id)
-        state = self._get_session_state(session_id)
-        session_schema.set_last_dream_at(state, time.time())
-        session_schema.set_last_dream_message_id(state, to_id)
-        self._save_session_state(session_id, state)
+        live_key = self._context_character_key(session_id) if hasattr(self, "_context_character_key") else character_key
+        if live_key == character_key:
+            # dream 期间用户已切换角色时跳过 live state 写；app_store 按 key 落库天然隔离。
+            state = self._get_session_state(session_id)
+            session_schema.set_last_dream_at(state, time.time())
+            session_schema.set_last_dream_message_id(state, to_id)
+            self._save_session_state(session_id, state)
         self._ulog(session_id, "DREAM", f"reason={reason} date={diary_date} messages={len(messages)}")
 
     @staticmethod
@@ -875,12 +879,25 @@ class SchedulerRuntimeMixin:
         self, session_id: str, character_key: str,
         editable: list[dict[str, Any]], *, diaries: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        checkpoint = self.app_store.get_checkpoint(session_id, character_key).get("summary", "")
-        current = self._format_store_messages(
-            self._active_chat_history(self._get_session_state(session_id), self._checkpoint_keep_message_limit()),
-            limit_chars=12000,
-            roles={"user", "assistant"},
-        )
+        checkpoint_row = self.app_store.get_checkpoint(session_id, character_key)
+        checkpoint = checkpoint_row.get("summary", "")
+        live_key = self._context_character_key(session_id) if hasattr(self, "_context_character_key") else character_key
+        if live_key == character_key:
+            current = self._format_store_messages(
+                self._active_chat_history(self._get_session_state(session_id), self._checkpoint_keep_message_limit()),
+                limit_chars=12000,
+                roles={"user", "assistant"},
+            )
+        else:
+            # 非活动角色整理时 live 窗口属于别的角色，改从 app_store 按 key 取该角色未折叠消息。
+            recent = self.app_store.list_messages(
+                session_id, character_key, after_id=int(checkpoint_row.get("source_until_id") or 0)
+            )
+            current = self._format_store_messages(
+                recent[-self._checkpoint_keep_message_limit():],
+                limit_chars=12000,
+                roles={"user", "assistant"},
+            )
         role_legend = self._dialog_role_legend() if hasattr(self, "_dialog_role_legend") else "User = human user; Assistant = the current bot roleplay character."
         limit = self._long_memory_limit()
         threshold = max(1, limit // 2)
@@ -1107,13 +1124,23 @@ class SchedulerRuntimeMixin:
         if not diaries or not self.has_llm_config("chat", session_id):
             return
         limit = self._checkpoint_hard_limit_chars()
-        key = self._context_character_key(session_id) if hasattr(self, "_context_character_key") else character_key
+        # meta/检查点/记忆的读写一律使用传入的 character_key，不在生成途中现取活动角色，
+        # 避免 LLM 等待期间用户切换角色导致旧角色提要写进新角色。
+        key = str(character_key or "").strip()
         meta = self.app_store.get_context_meta(session_id, key)
         previous = (meta.get("character_history_summary") or "").strip()
         diary_text = "\n\n".join(f"[{d.get('diary_date')}]\n{d.get('content','')}" for d in diaries)
         long_memory = ""
         try:
-            long_memory = self._long_term_memory_context(session_id, limit=10)
+            live_key = self._context_character_key(session_id) if hasattr(self, "_context_character_key") else key
+            if live_key == key and hasattr(self, "_long_term_memory_context"):
+                # 活动角色：沿用现有 long_term_memory_context（读取当前角色的长期记忆）
+                long_memory = self._long_term_memory_context(session_id, limit=10)
+            else:
+                # 非活动角色：character-scoped 按 key 查
+                mems = self.memory.context_memories(session_id, "", character=key, limit=10)
+                if mems:
+                    long_memory = format_memory_lines(mems, with_ids=False)
         except Exception:
             logger.debug("history summary long memory lookup failed", exc_info=True)
         checkpoint = ""
@@ -1123,11 +1150,26 @@ class SchedulerRuntimeMixin:
             logger.debug("history summary checkpoint lookup failed", exc_info=True)
         current = ""
         try:
-            current = self._format_store_messages(
-                self._active_chat_history(self._get_session_state(session_id), self._checkpoint_keep_message_limit()),
-                limit_chars=8000,
-                roles={"user", "assistant"},
-            )
+            live_key = self._context_character_key(session_id) if hasattr(self, "_context_character_key") else key
+            if live_key == key:
+                current = self._format_store_messages(
+                    self._active_chat_history(self._get_session_state(session_id), self._checkpoint_keep_message_limit()),
+                    limit_chars=8000,
+                    roles={"user", "assistant"},
+                )
+            else:
+                # 非活动角色没有 live 窗口可读，改从 app_store 按 key 取该角色未折叠消息。
+                source_until = 0
+                try:
+                    source_until = int(self.app_store.get_checkpoint(session_id, key).get("source_until_id") or 0)
+                except Exception:
+                    source_until = 0
+                recent = self.app_store.list_messages(session_id, key, after_id=source_until)
+                current = self._format_store_messages(
+                    recent[-self._checkpoint_keep_message_limit():],
+                    limit_chars=8000,
+                    roles={"user", "assistant"},
+                )
         except Exception:
             logger.debug("history summary current context lookup failed", exc_info=True)
         system = (
@@ -1167,9 +1209,12 @@ class SchedulerRuntimeMixin:
             if len(summary) > hard:
                 summary = summary[-hard:]
             self.app_store.upsert_character_history_summary(session_id, key, summary)
-            state = self._get_session_state(session_id)
-            session_schema.set_character_history_summary(state, summary)
-            self._save_session_state(session_id, state)
+            live_key = self._context_character_key(session_id) if hasattr(self, "_context_character_key") else key
+            if live_key == key:
+                # 生成期间角色已切换时只保留 app_store 落库，不写新角色的 live state。
+                state = self._get_session_state(session_id)
+                session_schema.set_character_history_summary(state, summary)
+                self._save_session_state(session_id, state)
             self._ulog(session_id, "HISTORY", f"角色历史提要更新 chars={len(summary)} output={self._log_excerpt(summary)}")
         except Exception as exc:
             self._ulog(session_id, "ERROR", f"HISTORY_FAILED: {exc}")
@@ -1433,6 +1478,12 @@ class SchedulerRuntimeMixin:
     async def _sched_fire(self, session_id: str, local_dt: datetime, mode_override=None, skip_active_check=False) -> bool:
         if not session_id or (not skip_active_check and session_id in self._active_pushes):
             return False
+        if not skip_active_check:
+            # WebUI 角色操作（头像/手动推送/激活）持锁期间不触发自动推送，避免按临时角色发图。
+            op_lock = self.character_operation_lock(session_id) if hasattr(self, "character_operation_lock") else None
+            if op_lock is not None and op_lock.locked():
+                self._ulog(session_id, "PUSH", "跳过推送: 角色操作进行中")
+                return False
         self._active_pushes.add(session_id)
         chat_id = self.chat_id_from_session(session_id)
         try:

@@ -180,6 +180,18 @@ class TelegramIOMixin:
             logger.info("ignored chat_id not in allowlist: %s", chat_id)
             return
 
+        # WebUI 头像生成/手动推送等角色操作会临时切换会话角色；窗口期内按错误角色
+        # 处理消息会串味并错误落库，这里等待操作结束（超时则提示用户稍后再发）。
+        op_lock = self.character_operation_lock(session_id) if hasattr(self, "character_operation_lock") else None
+        if op_lock is not None and op_lock.locked():
+            try:
+                await asyncio.wait_for(op_lock.acquire(), timeout=60)
+            except asyncio.TimeoutError:
+                await self.send_message(chat_id, "正在切换角色/执行角色操作，请稍后再发一次。")
+                return
+            else:
+                op_lock.release()
+
         state = self._get_session_state(session_id)
         if session_schema.get_frozen(state):
             session_schema.set_frozen(state, False)

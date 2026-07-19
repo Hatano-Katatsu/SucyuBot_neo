@@ -767,6 +767,19 @@ class TelegramComfyUIService(
                 return override
         return self.config.get(key, default)
 
+    def character_operation_lock(self, session_id: str) -> asyncio.Lock:
+        """会话级角色操作锁：WebUI 头像生成/手动推送/角色激活等临时切角色操作，
+        与 Telegram 消息处理、定时推送互斥，避免窗口期内按错误角色处理并落库。"""
+        locks = getattr(self, "_character_op_locks", None)
+        if not isinstance(locks, dict):
+            locks = {}
+            self._character_op_locks = locks
+        lock = locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[session_id] = lock
+        return lock
+
     @staticmethod
     def _persona_with_character_identity(character: Any, series: Any, persona: Any) -> str:
         """确保既有角色的人设里有明确身份，避免模型回落到全局默认角色。"""

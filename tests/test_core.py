@@ -24,7 +24,7 @@ from telegram_comfyui_selfie.commands import (
 )
 from telegram_comfyui_selfie.command_aliases import COMMAND_ALIAS_GROUPS, resolve_command_alias
 from telegram_comfyui_selfie.prompt_intake import heuristic_intake
-from telegram_comfyui_selfie.webui import api_character_avatar_image, api_diaries, api_generate_character_avatar, api_get_history_summary, api_organize_memories, api_save_character, api_save_diary, api_save_history_summary, api_system_error_log, api_test_push_selected_character, api_update_wardrobe, api_world_life_plan_generate, api_world_life_plan_goal_create, api_world_life_plan_goal_delete, api_world_life_plan_goal_update, build_world_route_preview, cast_config_value, masked_config, serialize_prompt_slots, session_summary
+from telegram_comfyui_selfie.webui import api_character_avatar_image, api_diaries, api_generate_character_avatar, api_get_history_summary, api_organize_memories, api_save_character, api_save_diary, api_save_history_summary, api_system_error_log, api_test_push_selected_character, api_update_wardrobe, api_world_life_plan_generate, api_world_life_plan_goal_create, api_world_life_plan_goal_delete, api_world_life_plan_goal_update, build_world_route_preview, cast_config_value, masked_config, required_character_key_from_request, serialize_prompt_slots, session_summary
 
 
 os.environ.setdefault("SUCYUBOT_TEST_FAST_SQLITE", "1")
@@ -11420,6 +11420,116 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         messages = svc._build_chat_messages(sid, "你好")
         all_system = "\n".join(m["content"] for m in messages if m.get("role") == "system")
         self.assertNotIn("距离上次对话已过超过半小时", all_system)
+
+    def test_checkpoint_character_switch_does_not_write_live_state(self):
+        """checkpoint 摘要期间用户切换角色时，新角色 live state 不被旧摘要污染。"""
+        async def run():
+            svc = self.make_service()
+            svc.config["context_window_message_limit"] = "10"
+            svc.config["checkpoint_keep_message_limit"] = "2"
+            svc.config["checkpoint_hard_limit_chars"] = "9999"
+            sid = "telegram:checkpoint-race"
+            # 初始活动角色 A
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "角色A")
+            svc._save_session_state(sid, state)
+            key_a = svc._context_character_key(sid)
+            # 给 A 写够消息触发 checkpoint
+            msgs = [{"role": "user", "content": f"ua{i}"} for i in range(12)]
+            svc.app_store.append_messages(sid, key_a, msgs)
+
+            # 模拟 LLM 摘要：在 await 期间把活动角色切到 B
+            switched = False
+
+            async def fake_summarize(session_id, previous, msgs_list):
+                nonlocal switched
+                if not switched:
+                    state_b = svc._get_session_state(sid)
+                    session_schema.set_character_value(state_b, "custom_character", "角色B")
+                    svc._save_session_state(sid, state_b)
+                    switched = True
+                return "CHAR_A_CHECKPOINT"
+
+            svc._summarize_checkpoint = fake_summarize
+            svc._extract_long_term_memories_from_messages = AsyncMock()
+            svc._sync_wardrobe_checkpoint_events = lambda sid, st, pending, overflow: None
+
+            await svc._run_context_checkpoint(sid, key_a, keep=2)
+
+            # 活动角色现在是 B——字符 B 的 live state 不应被 A 的摘要污染
+            after = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_character_value(after, "custom_character", ""), "角色B")
+            self.assertNotEqual(session_schema.get_checkpoint_summary(after), "CHAR_A_CHECKPOINT")
+            # SQLite 按旧 key（A）安全落库
+            cp_a = svc.app_store.get_checkpoint(sid, key_a)
+            self.assertEqual(cp_a.get("summary"), "CHAR_A_CHECKPOINT")
+
+        asyncio.run(run())
+
+    def test_import_full_without_frozen_context_clears_transient_state(self):
+        """full 导入无冻结上下文时，旧角色残留短期态被清空。"""
+        svc = self.make_service()
+        sid = "telegram:import-clear"
+        state = svc._get_session_state(sid)
+        session_schema.set_character_value(state, "custom_character", "旧角色")
+        session_schema.set_chat_history(state, [
+            {"role": "user", "content": "旧对话"},
+            {"role": "assistant", "content": "旧回复"},
+        ])
+        session_schema.set_outfit(state, "old t-shirt, old jeans")
+        svc._save_session_state(sid, state)
+
+        # 构造一个不带 frozen_context 的 checkpoint payload
+        payload = {
+            "schema": "sucyubot.character_checkpoint.v1",
+            "character_key": "新角色",
+            "character_card": {
+                "character": "新角色",
+                "persona": "新人设",
+                "outfit": "white dress",
+                "appearance": "silver hair, blue eyes",
+            },
+            "state": {},
+            "background": {},
+        }
+        result = svc.import_character_checkpoint(sid, payload, mode="full")
+
+        after = svc._get_session_state(sid)
+        # 旧角色的 live state 已被清空和替换
+        self.assertEqual(session_schema.get_character_value(after, "custom_character", ""), "新角色")
+        self.assertEqual(session_schema.get_outfit(after), "white dress")
+        # 旧对话被清空
+        history = session_schema.get_chat_history(after)
+        self.assertEqual(len(history), 0)
+
+    def test_default_character_webui_key_normalization(self):
+        """WebUI required_character_key_from_request 把默认角色 id / __default__ 归一为空串。"""
+        from aiohttp import web
+        from aiohttp.test_utils import make_mocked_request
+        svc = self.make_service()
+        sid = "telegram:key-norm"
+        # 设置默认角色名 "蕾伊"（bot_name）
+        svc.config["bot_name"] = "蕾伊"
+        app = web.Application()
+        app["service"] = svc
+
+        def _req(key):
+            r = make_mocked_request("GET", f"/?character_key={key}", app=app, match_info={"session_id": sid})
+            return r
+
+        # 1) __default__ → ""
+        self.assertEqual(required_character_key_from_request(_req("__default__")), "")
+        # 2) default → ""
+        self.assertEqual(required_character_key_from_request(_req("default")), "")
+        # 3) 默认角色 payload id（bot_name）→ ""（未在 saved 中）
+        self.assertEqual(required_character_key_from_request(_req("蕾伊")), "")
+        # 4) 普通自定义角色不受影响
+        self.assertEqual(required_character_key_from_request(_req("白子")), "白子")
+
+        # 5) 添加记忆到空串键后，WebUI 用归一后的 key 也能读到同一记忆
+        svc.memory.add_memory(sid, "manual", "默认角色记忆", character="")
+        memories = svc.memory.list_memories(sid, character="")
+        self.assertTrue(any("默认角色记忆" in (m.get("summary") or "") for m in memories))
 
 
 class CheckpointTrimTestCase(ServiceFixtureMixin, unittest.TestCase):

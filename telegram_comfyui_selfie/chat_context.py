@@ -1651,9 +1651,15 @@ class ChatContextMixin:
             # Extract stable long-term memories from the overflow before committing checkpoint.
             if extract_memory:
                 try:
-                    await self._extract_long_term_memories_from_messages(session_id, overflow, source_type="checkpoint")
+                    await self._extract_long_term_memories_from_messages(session_id, overflow, source_type="checkpoint", character=character_key)
                 except Exception:
                     logger.warning("checkpoint memory extraction failed", exc_info=True)
+            if self._context_character_key(session_id) != character_key:
+                # 摘要/提取期间用户已切换角色：SQLite 按旧 key 落库是安全的，
+                # 但不能把旧角色摘要写进新角色的 live state，更不能裁剪新角色的 chat_history。
+                self.app_store.upsert_checkpoint(session_id, character_key, merged, until_id)
+                self._ulog(session_id, "CHECKPOINT", f"until=#{until_id} chars={len(merged)} (角色已切换, 仅落库)")
+                return
             state = self._get_session_state(session_id)
             if hasattr(self, "_sync_wardrobe_checkpoint_events"):
                 self._sync_wardrobe_checkpoint_events(session_id, state, pending, overflow)
@@ -1710,9 +1716,13 @@ class ChatContextMixin:
                 merged = merged[-hard:]
             until_id = int(overflow[-1]["id"])
             try:
-                await self._extract_long_term_memories_from_messages(session_id, overflow, source_type="push-checkpoint")
+                await self._extract_long_term_memories_from_messages(session_id, overflow, source_type="push-checkpoint", character=key)
             except Exception:
                 logger.warning("push checkpoint memory extraction failed", exc_info=True)
+            if self._context_character_key(session_id) != key:
+                # 摘要期间角色已切换：只按旧 key 落库，不动新角色的 live state 与历史。
+                self.app_store.upsert_checkpoint(session_id, key, merged, until_id)
+                return True
             state = self._get_session_state(session_id)
             if hasattr(self, "_sync_wardrobe_checkpoint_events"):
                 self._sync_wardrobe_checkpoint_events(session_id, state, pending, overflow)
@@ -1853,11 +1863,11 @@ class ChatContextMixin:
         selected.reverse()
         return "\n".join(selected)
 
-    async def _extract_long_term_memories_from_messages(self, session_id: str, messages: list[dict[str, Any]], source_type: str = "checkpoint"):
+    async def _extract_long_term_memories_from_messages(self, session_id: str, messages: list[dict[str, Any]], source_type: str = "checkpoint", character: str | None = None):
         if not messages or not hasattr(self, "_extract_long_term_memories"):
             return
         dialog = self._format_store_messages(messages, limit_chars=20000)
-        await self._extract_long_term_memories(session_id, f"[{source_type}]\n{dialog}", "")
+        await self._extract_long_term_memories(session_id, f"[{source_type}]\n{dialog}", "", character=character)
 
     async def _checkpoint_current_context_before_reset(self, session_id: str) -> int:
         """新场景/短期硬切换前，先把当前未折叠上下文过一遍 checkpoint 侧的摘要与记忆提取。"""
@@ -1883,7 +1893,7 @@ class ChatContextMixin:
                 merged = merged[-hard:]
             until_id = int(pending[-1]["id"])
             try:
-                await self._extract_long_term_memories_from_messages(session_id, pending, source_type="checkpoint")
+                await self._extract_long_term_memories_from_messages(session_id, pending, source_type="checkpoint", character=key)
             except Exception:
                 logger.warning("pre-reset checkpoint memory extraction failed", exc_info=True)
             self.app_store.upsert_checkpoint(session_id, key, merged, until_id)

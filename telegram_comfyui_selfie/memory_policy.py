@@ -122,8 +122,15 @@ class MemoryPolicyMixin:
         """
         return
 
-    async def _extract_long_term_memories(self, session_id: str, user_text: str, assistant_text: str):
-        existing = self._long_term_memory_context(session_id, f"{user_text}\n{assistant_text}", limit=10)
+    async def _extract_long_term_memories(self, session_id: str, user_text: str, assistant_text: str, character: str | None = None):
+        # character 为 None 时沿用当前活动角色；后台任务应在启动时捕获 key 并显式透传，
+        # 避免摘要 LLM 等待期间用户切换角色导致记忆写进新角色的记忆空间。
+        character_key = self._memory_character(session_id) if character is None else str(character or "").strip()
+        existing = ""
+        if self._long_memory_enabled():
+            mems = self.memory.context_memories(session_id, f"{user_text}\n{assistant_text}", character=character_key, limit=10)
+            if mems:
+                existing = format_memory_lines(mems, with_ids=False)
         structured = self._long_memory_structured_boundary_text(session_id)
         system = (
             "你是长期记忆提取器。请从一轮用户与角色的对话中提取值得长期保存的信息。\n"
@@ -201,7 +208,7 @@ class MemoryPolicyMixin:
                 session_id,
                 item.get("kind", "event"),
                 summary,
-                character=self._memory_character(session_id),
+                character=character_key,
                 importance=item.get("importance", 3),
                 tags=item.get("tags") or [],
                 source=source,
