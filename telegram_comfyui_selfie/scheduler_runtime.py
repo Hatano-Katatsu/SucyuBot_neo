@@ -1679,6 +1679,11 @@ class SchedulerRuntimeMixin:
             partner_in_frame = bool(plan.get("partner_in_frame"))
             device_in_frame = bool(plan.get("device_in_frame"))
             clothing_off = plan.get("clothing_off") or ""
+            source = self._format_image_source_description(
+                intent=f"{mode} 模式自动推送，时段: {time_period}，天气: {weather}",
+                prompt=caption or "",
+            )
+            state_mutation = self._image_state_mutation_from_plan(plan, source, scene)
             english = await self._translate_to_tags(
                 scene,
                 session_id=session_id,
@@ -1686,34 +1691,33 @@ class SchedulerRuntimeMixin:
                 is_intimate=is_intimate,
                 free_composition=False,
             )
-            ok, imgs, err = await self._do_generate(
-                english,
-                is_ntr=(mode == "ntr"),
-                session_id=session_id,
-                one_shot_appearance=new_app or "",
-                orientation=orientation or "",
-                is_intimate=is_intimate,
-                partner_in_frame=partner_in_frame,
-                device_in_frame=device_in_frame,
-                clothing_off=clothing_off,
-                view=view,
-            )
+            generation_kwargs = {
+                "is_ntr": mode == "ntr",
+                "session_id": session_id,
+                "one_shot_appearance": new_app or "",
+                "orientation": orientation or "",
+                "is_intimate": is_intimate,
+                "partner_in_frame": partner_in_frame,
+                "device_in_frame": device_in_frame,
+                "clothing_off": clothing_off,
+                "view": view,
+            }
+            if state_mutation.get("clear_undress_state"):
+                generation_kwargs["ignore_wardrobe_item_states"] = True
+            ok, imgs, err = await self._do_generate(english, **generation_kwargs)
             if ok and imgs:
                 await self.send_photo(chat_id, imgs[0], caption or "")
-                source = self._format_image_source_description(
-                    intent=f"{mode} 模式自动推送，时段: {time_period}，天气: {weather}",
-                    prompt=caption or "",
-                )
                 source_kind = "followup_push" if mode == "followup" else ("manual_push" if skip_active_check else "scheduled_push")
                 self._record_sent_photo(
                     session_id,
                     scene,
                     caption or "",
-                    appearance=new_app or None,
+                    appearance=new_app or self._preview_image_mutation_appearance(session_id, state_mutation),
                     view=view,
                     source_description=source,
                     source_kind=source_kind,
                 )
+                self._commit_image_state_mutation(session_id, state_mutation)
                 if mode == "morning":
                     # 早安图保留了隔夜的衣服状态（刚睡醒的样子）；发出后进入新的一天，
                     # 下一次推送/图片要恢复穿好衣服，清掉临时裸体与半脱状态。

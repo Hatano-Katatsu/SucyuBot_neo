@@ -1384,7 +1384,7 @@ class WorldLifePlanTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_image_planner_writes_back_location_when_unpinned(self):
+    def test_image_planner_proposes_location_when_unpinned_and_commits_after_success(self):
         async def run():
             svc = self.make_service()
             svc.config.update({
@@ -1397,9 +1397,15 @@ class WorldLifePlanTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._call_llm = AsyncMock(return_value=json.dumps({
                 "scene": "在咖啡店窗边", "view": "selfie", "character_location": "cafe",
             }, ensure_ascii=False))
-            await plan_roleplay_image(svc, sid, intent="看看你在干嘛")
+            plan = await plan_roleplay_image(svc, sid, intent="看看你在干嘛")
             system = svc._call_llm.await_args.args[0]
             self.assertNotIn("地点锁定", system)  # 无持久位置，不钉
-            self.assertEqual(session_schema.get_character_place(svc._get_session_state(sid)), "cafe")  # 规划器判断回写
+            self.assertEqual(session_schema.get_character_place(svc._get_session_state(sid)), "")
+            self.assertEqual(plan["state_mutation"]["character_location"]["value"], "cafe")
+
+            # 图片发送并写入照片历史成功后，统一提交规划阶段提出的位置变更。
+            svc._record_sent_photo(sid, plan["scene"], source_kind="test")
+            svc._commit_image_state_mutation(sid, plan["state_mutation"])
+            self.assertEqual(session_schema.get_character_place(svc._get_session_state(sid)), "cafe")
 
         asyncio.run(run())

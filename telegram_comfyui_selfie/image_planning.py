@@ -892,6 +892,49 @@ def _scene_regresses_from_latest_photo(latest_anchor: str, planned_scene: str) -
     )
 
 
+def _build_image_state_mutation(
+    *,
+    clothing_off: str = "",
+    user_location: str = "",
+    user_co_located: bool = False,
+    character_location: str = "",
+    character_location_allowed: bool = False,
+    clear_undress_state: bool = False,
+    planned_at: float = 0.0,
+    accessory_sources: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """构造生图成功后才可提交的会话状态变更，不在规划阶段触碰共享状态。"""
+    mutation: dict[str, Any] = {}
+    clothing_off = str(clothing_off or "").strip()
+    if clear_undress_state:
+        mutation["clear_undress_state"] = True
+    if "nude" in clothing_off.lower():
+        mutation["nudity"] = "completely nude"
+
+    raw_user_location = str(user_location or "").strip().lower()
+    if user_co_located or raw_user_location in PLACE_TYPES:
+        mutation["user_location"] = {
+            "value": raw_user_location,
+            "co_located": bool(user_co_located),
+            "planned_at": float(planned_at or 0.0),
+        }
+
+    raw_character_location = str(character_location or "").strip().lower()
+    if character_location_allowed and raw_character_location in PLACE_TYPES:
+        mutation["character_location"] = {
+            "value": raw_character_location,
+            "confidence": 0.6,
+            "source": "image",
+        }
+
+    if clothing_off:
+        mutation["persistent_accessory_removal"] = {
+            "clothing_off": clothing_off,
+            "sources": [str(value or "") for value in accessory_sources if str(value or "").strip()],
+        }
+    return mutation
+
+
 async def plan_roleplay_image(
     service: Any,
     session_id: str,
@@ -949,6 +992,10 @@ async def plan_roleplay_image(
             "partner_in_frame": False,
             "device_in_frame": fallback_device_hint,
             "caption": "",
+            "state_mutation": _build_image_state_mutation(
+                clothing_off=fallback_clothing_off,
+                accessory_sources=(intent, prompt, fallback_scene),
+            ),
         }
 
     if weather_data is None:
@@ -1023,6 +1070,9 @@ async def plan_roleplay_image(
         except Exception:
             logger.debug("life plan push context failed", exc_info=True)
     hard_scene_transition = bool(push_transition_decision.get("should_transition"))
+    clear_undress_state_after_success = bool(
+        hard_scene_transition and (mode or "").strip().lower() != "morning"
+    )
     if hard_scene_transition:
         # 硬转场仍需知道最近推送来避重，但不能把上一张图的地点/动作继续喂回规划器。
         recent_push_texts = _recent_push_texts_for_push(
@@ -1031,15 +1081,8 @@ async def plan_roleplay_image(
             session_id,
             include_visual=False,
         )
-    if hard_scene_transition:
-        if (mode or "").strip().lower() == "morning":
-            # 早安推送当次保留隔夜的衣服状态（刚睡醒还是昨晚半脱/裸睡的样子），
-            # 由 _sched_fire 在早安图成功发出后再统一穿好（clear_nudity + clear_wardrobe_item_states）。
-            pass
-        else:
-            # 非早安硬转场（结束信号/超过连续性时效）：新场景不再续上一幕的裸体与半脱状态。
-            session_schema.clear_nudity(state)
-            session_schema.clear_wardrobe_item_states(state)
+    # 非早安硬转场只提出清理临时裸体/半脱状态；实际提交必须等图片发送并写入照片历史成功。
+    # 本轮规划通过 hard_scene_transition 分支丢弃上一幕连续性，且下方不会续用持久裸体。
     continuity_context = (
         format_dialog_context(service, state, session_id, limit=16)
         if is_push
@@ -1569,6 +1612,11 @@ async def plan_roleplay_image(
             "partner_in_frame": False,
             "device_in_frame": device_hint,
             "caption": "",
+            "state_mutation": _build_image_state_mutation(
+                clothing_off=clothing_off_hint,
+                clear_undress_state=clear_undress_state_after_success,
+                accessory_sources=(intent, prompt, text_scene),
+            ),
         }
 
     if (
@@ -1608,24 +1656,9 @@ async def plan_roleplay_image(
                 derived_co_located = True
         except Exception:
             logger.debug("build_world_state for co_located derivation failed", exc_info=True)
-    # 持久化 user_location（co_located 由代码推导，不需要持久化）
-    if hasattr(service, "_apply_llm_user_location"):
-        try:
-            service._apply_llm_user_location(
-                session_id,
-                user_location=raw_user_loc,
-                co_located=derived_co_located,
-                now=now,
-            )
-        except Exception:
-            logger.debug("persist llm user location failed", exc_info=True)
-    # 角色地点回写：strong pin（已锁死）不回写，避免规划器二次发挥覆盖对话确立的位置；
-    # 冷启动（无 pin）或 weak pin（已陈旧）时，允许规划器重新判断并刷新——冷启动写入、weak 同地只是
-    # 重置新鲜度/轮次（去重不新增轨迹），weak 异地则更新到本轮判断，让陈旧 pin 不再卡死画面。
-    if not strong_pin and hasattr(service, "_set_character_place"):
-        char_loc = (parsed.get("character_location") or "").strip().lower()
-        if char_loc and char_loc not in ("with_user", "unknown"):
-            service._set_character_place(session_id, char_loc, char_loc, 0.6, source="image")
+    # 角色地点拟议变更：strong pin（已锁死）不提出覆盖；冷启动或 weak pin（已陈旧）时，
+    # 允许规划器重新判断。实际写入要等图片发送且照片历史记录成功。
+    char_loc = (parsed.get("character_location") or "").strip().lower()
     # LLM 自判优先，关键词检测作 OR 兜底（尤其 LLM 漏判时）。
     is_intimate = bool(parsed.get("is_intimate")) or intimate_hint
     partner_in_frame = bool(parsed.get("partner_in_frame"))
@@ -1657,13 +1690,10 @@ async def plan_roleplay_image(
         clothing_off = clothing_off_hint
     # 持久裸体态（根治）：一旦剧情脱光，后续每张图自动续上裸体，直到换装/新场景/超 TTL。
     # 续上（规划器本图没判脱衣，但新鲜期内仍处裸体）：
-    if not clothing_off and session_schema.get_nudity(state) and service._within(
+    if not clear_undress_state_after_success and not clothing_off and session_schema.get_nudity(state) and service._within(
         session_schema.get_nudity_at(state), NUDITY_PERSIST_TTL_SECONDS
     ):
         clothing_off = session_schema.get_nudity(state)
-    # 确立/刷新：本图全裸 → 记成持久裸体态（带时间戳供 TTL 老化）。
-    if "nude" in clothing_off.lower():
-        session_schema.set_nudity(state, "completely nude", at=time.time())
     # aspect_ratio 校验：只允许 2:3 和 3:2，默认 2:3
     raw_ar = (parsed.get("aspect_ratio") or "").strip()
     aspect_ratio = "3:2" if raw_ar == "3:2" else "2:3"
@@ -1685,6 +1715,16 @@ async def plan_roleplay_image(
         "is_intimate": is_intimate,
         "partner_in_frame": partner_in_frame,
         "device_in_frame": device_in_frame,
+        "state_mutation": _build_image_state_mutation(
+            clothing_off=clothing_off,
+            user_location=raw_user_loc,
+            user_co_located=derived_co_located,
+            character_location=char_loc,
+            character_location_allowed=not bool(strong_pin),
+            clear_undress_state=clear_undress_state_after_success,
+            planned_at=now.timestamp() if isinstance(now, datetime) else 0.0,
+            accessory_sources=(intent, prompt, scene),
+        ),
     }
 
 

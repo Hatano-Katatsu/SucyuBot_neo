@@ -29,6 +29,7 @@ from .appearance_runtime import (
 from .character_checkpoint import CharacterCheckpointMixin
 from .defaults import DEFAULT_CONFIG
 from .image_planning import VALID_VIEWS, plan_roleplay_image
+from .image_state_runtime import ImageStateRuntimeMixin
 from .memory import LongTermMemoryStore
 from .chat_context import ChatContextMixin
 from .commands import CommandHandlersMixin
@@ -90,6 +91,7 @@ class TelegramComfyUIService(
     LLMRuntimeMixin,
     ServiceStateMixin,
     AppearanceRuntimeMixin,
+    ImageStateRuntimeMixin,
     TelegramIOMixin,
     CharacterCheckpointMixin,
     CommandHandlersMixin,
@@ -986,11 +988,13 @@ class TelegramComfyUIService(
         partner_in_frame: bool = False,
         device_in_frame: bool = False,
         clothing_off: str = "",
+        ignore_wardrobe_item_states: bool = False,
     ) -> tuple[str, str]:
         return image_generation.build_prompt(
             self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
             is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
             clothing_off=clothing_off,
+            ignore_wardrobe_item_states=ignore_wardrobe_item_states,
         )
 
     def _format_last_prompt_slots(self, session_id: str = "") -> str:
@@ -1347,11 +1351,13 @@ class TelegramComfyUIService(
         clothing_off: str = "",
         orientation: str = "",
         view: str = "",
+        ignore_wardrobe_item_states: bool = False,
     ) -> tuple[bool, list[bytes], str]:
         return await image_generation.do_generate(
             self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
             is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
             clothing_off=clothing_off, orientation=orientation, view=view,
+            ignore_wardrobe_item_states=ignore_wardrobe_item_states,
         )
 
     async def _do_generate_locked(
@@ -1366,11 +1372,13 @@ class TelegramComfyUIService(
         clothing_off: str = "",
         orientation: str = "",
         view: str = "",
+        ignore_wardrobe_item_states: bool = False,
     ) -> tuple[bool, list[bytes], str]:
         return await image_generation.do_generate_locked(
             self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
             is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
             clothing_off=clothing_off, orientation=orientation, view=view,
+            ignore_wardrobe_item_states=ignore_wardrobe_item_states,
         )
 
     async def _await_protected_image_task(
@@ -1465,7 +1473,12 @@ class TelegramComfyUIService(
         partner_in_frame = bool(plan.get("partner_in_frame"))
         device_in_frame = bool(plan.get("device_in_frame"))
         orientation = (plan.get("aspect_ratio") or "").strip()
-        state = self._get_session_state(session_id)
+        state_mutation = self._image_state_mutation_from_plan(
+            plan,
+            intent,
+            prompt,
+            scene,
+        )
         # 伴侣同框时也套用翻译护栏（对方只画局部、不画成完整第二人）。
         free_composition = (planning_mode or "").strip().lower() == "illustration"
         translate_kwargs = {
@@ -1476,33 +1489,35 @@ class TelegramComfyUIService(
         if free_composition:
             translate_kwargs["free_composition"] = True
         english = await self._translate_to_tags(scene, **translate_kwargs)
-        ok, imgs, err = await self._do_generate(
-            english, session_id=session_id, one_shot_appearance=new_app or "",
-            is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
-            clothing_off=clothing_off, orientation=orientation, view=final_view,
-        )
+        generation_kwargs = {
+            "session_id": session_id,
+            "one_shot_appearance": new_app or "",
+            "is_intimate": is_intimate,
+            "partner_in_frame": partner_in_frame,
+            "device_in_frame": device_in_frame,
+            "clothing_off": clothing_off,
+            "orientation": orientation,
+            "view": final_view,
+        }
+        if state_mutation.get("clear_undress_state"):
+            generation_kwargs["ignore_wardrobe_item_states"] = True
+        ok, imgs, err = await self._do_generate(english, **generation_kwargs)
         if not ok or not imgs:
             self._ulog(session_id, "ERROR", f"工具生图失败: {err}")
             return f"生图失败: {err}"
         # 聊天途中的配图不带配文：聊天模型已经在文字回复里说话了，再加配文会重复。
         await self.send_photo(chat_id, imgs[0], "")
-        self._persist_removed_accessories_from_image(
-            session_id,
-            clothing_off,
-            intent,
-            prompt,
-            scene,
-        )
         self._record_sent_photo(
             session_id,
             scene,
             "",
-            appearance=new_app or session_schema.get_outfit(state),
+            appearance=new_app or self._preview_image_mutation_appearance(session_id, state_mutation),
             view=final_view,
             source_description=source_description,
             source_kind="chat_image",
             defer_history_message=defer_photo_history,
         )
+        self._commit_image_state_mutation(session_id, state_mutation)
         return f"图片已生成并发送。画面: {scene}"
 
 

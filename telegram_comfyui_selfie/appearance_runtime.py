@@ -262,19 +262,13 @@ class AppearanceRuntimeMixin:
         *sources: str,
     ) -> str:
         state = self._get_session_state(session_id)
-        remove_tags = self._resolve_persistent_accessory_removals(state, clothing_off, *sources)
+        rendered, remove_tags = self._apply_removed_accessories_from_image(
+            state,
+            clothing_off,
+            *sources,
+        )
         if not remove_tags:
             return ""
-        wardrobe_before = self._get_wardrobe(state)
-        wardrobe_after = appearance_rules.apply_wardrobe_change(
-            wardrobe_before,
-            {"accessory_remove": ", ".join(remove_tags)},
-        )
-        if wardrobe_after == wardrobe_before:
-            return ""
-        session_schema.set_wardrobe(state, wardrobe_after)
-        rendered = appearance_rules.render_wardrobe(wardrobe_after)
-        session_schema.set_outfit(state, rendered)
         self._save_session_state(session_id, state)
         self._ulog(
             session_id,
@@ -282,6 +276,28 @@ class AppearanceRuntimeMixin:
             f'图像后持久化 accessory_remove={remove_tags} 来源=clothing_off="{clothing_off[:80]}" | 结果="{rendered[:140]}"',
         )
         return rendered
+
+    def _apply_removed_accessories_from_image(
+        self,
+        state: dict[str, Any],
+        clothing_off: str,
+        *sources: str,
+    ) -> tuple[str, list[str]]:
+        """把已确认图片中的持久配饰摘除应用到给定状态；调用方负责统一落盘。"""
+        remove_tags = self._resolve_persistent_accessory_removals(state, clothing_off, *sources)
+        if not remove_tags:
+            return "", []
+        wardrobe_before = self._get_wardrobe(state)
+        wardrobe_after = appearance_rules.apply_wardrobe_change(
+            wardrobe_before,
+            {"accessory_remove": ", ".join(remove_tags)},
+        )
+        if wardrobe_after == wardrobe_before:
+            return "", []
+        session_schema.set_wardrobe(state, wardrobe_after)
+        rendered = appearance_rules.render_wardrobe(wardrobe_after)
+        session_schema.set_outfit(state, rendered)
+        return rendered, remove_tags
 
     def _chat_visible_appearance_context(self, session_id: str) -> str:
         effective = self._effective_visual_prompt_tags(session_id)

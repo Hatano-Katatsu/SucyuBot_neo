@@ -1433,6 +1433,7 @@ def build_prompt(
     device_in_frame: bool = False,
     clothing_off: str = "",
     view: str = "",
+    ignore_wardrobe_item_states: bool = False,
 ) -> tuple[str, str]:
     raw_scene_desc = scene_desc
     state = service._get_session_state(session_id) if session_id else {}
@@ -1694,7 +1695,7 @@ def build_prompt(
     effective_appearance = char
     if appearance_override:
         effective_appearance = f"{effective_appearance}, {appearance_override}" if effective_appearance else appearance_override
-    if session_id and session_schema.get_wardrobe_item_states(state):
+    if session_id and not ignore_wardrobe_item_states and session_schema.get_wardrobe_item_states(state):
         # 全链路唯一一次部件状态渲染：char + override 合并后的完整文本上应用，
         # 原始标签全部移除（remove_tag 全局替换）再追加一次带前缀标签，不会产生重复或碎片。
         effective_appearance, wardrobe_state_worn_src, wardrobe_state_removed_tags, wardrobe_state_exposure_tags = _apply_wardrobe_item_states(
@@ -2545,6 +2546,7 @@ async def do_generate(
     clothing_off: str = "",
     orientation: str = "",
     view: str = "",
+    ignore_wardrobe_item_states: bool = False,
 ) -> tuple[bool, list[bytes], str]:
     async with service._gen_lock:
         service._generating = True
@@ -2553,6 +2555,7 @@ async def do_generate(
                 service, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
                 is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
                 clothing_off=clothing_off, orientation=orientation, view=view,
+                ignore_wardrobe_item_states=ignore_wardrobe_item_states,
             )
         finally:
             service._generating = False
@@ -2570,12 +2573,14 @@ async def do_generate_locked(
     clothing_off: str = "",
     orientation: str = "",
     view: str = "",
+    ignore_wardrobe_item_states: bool = False,
 ) -> tuple[bool, list[bytes], str]:
     ensure_comfy_session(service)
     positive, negative = build_prompt(
         service, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
         is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
         clothing_off=clothing_off, view=view,
+        ignore_wardrobe_item_states=ignore_wardrobe_item_states,
     )
     seed = random.randint(0, 2**63 - 1)
     if session_id and hasattr(service, "_ulog"):

@@ -1438,21 +1438,28 @@ class CommandHandlersMixin:
         partner_in_frame = bool(plan.get("partner_in_frame")) if plan else False
         device_in_frame = bool(plan.get("device_in_frame")) if plan else False
         clothing_off = plan.get("clothing_off") or "" if plan else ""
+        state_mutation = self._image_state_mutation_from_plan(
+            plan,
+            f"自拍命令生成的 normal 模式画面，时段: {time_period}，天气: {weather}",
+            scene,
+        ) if isinstance(plan, dict) else {}
         english = await self._translate_to_tags(scene, session_id=session_id, view=view, is_intimate=is_intimate)
         cancelled = {"value": False}
 
         async def generate_and_send_selfie():
-            ok, imgs, err = await self._do_generate(
-                english,
-                session_id=session_id,
-                one_shot_appearance=new_app or "",
-                orientation=orientation or "",
-                is_intimate=is_intimate,
-                partner_in_frame=partner_in_frame,
-                device_in_frame=device_in_frame,
-                clothing_off=clothing_off,
-                view=view,
-            )
+            generation_kwargs = {
+                "session_id": session_id,
+                "one_shot_appearance": new_app or "",
+                "orientation": orientation or "",
+                "is_intimate": is_intimate,
+                "partner_in_frame": partner_in_frame,
+                "device_in_frame": device_in_frame,
+                "clothing_off": clothing_off,
+                "view": view,
+            }
+            if state_mutation.get("clear_undress_state"):
+                generation_kwargs["ignore_wardrobe_item_states"] = True
+            ok, imgs, err = await self._do_generate(english, **generation_kwargs)
             if not ok or not imgs:
                 self._ulog(session_id, "ERROR", f"自拍生图失败: {err}")
                 if not cancelled["value"]:
@@ -1461,7 +1468,6 @@ class CommandHandlersMixin:
             await self.send_photo(chat_id, imgs[0], caption or "")
             for extra in imgs[1:]:
                 await self.send_photo(chat_id, extra)
-            state = self._get_session_state(session_id)
             source = self._format_image_source_description(
                 intent=f"自拍命令生成的 normal 模式画面，时段: {time_period}，天气: {weather}",
                 prompt=caption or "",
@@ -1470,10 +1476,14 @@ class CommandHandlersMixin:
                 session_id,
                 scene,
                 caption or "",
-                appearance=new_app or session_schema.get_outfit(state),
+                appearance=new_app or self._preview_image_mutation_appearance(session_id, state_mutation),
                 view=view,
                 source_description=source,
                 source_kind="chat_image",
+            )
+            self._commit_image_state_mutation(
+                session_id,
+                state_mutation,
             )
             return True
 

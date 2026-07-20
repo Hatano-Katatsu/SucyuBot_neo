@@ -4875,7 +4875,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "device_in_frame": False,
             })
 
-            await plan_roleplay_image(svc, sid, mode="normal", weather_data={"desc": "晴", "temp": "22"}, now=now)
+            plan = await plan_roleplay_image(svc, sid, mode="normal", weather_data={"desc": "晴", "temp": "22"}, now=now)
 
             messages = svc._call_llm_messages.await_args.args[0]
             system = "\n".join(m.get("content", "") for m in messages if m.get("role") == "system")
@@ -4886,6 +4886,10 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("不要把上一场景的地点", system)
             self.assertNotIn("地点锁定（最高优先", system)
             self.assertIn("地点参考（较弱", system)
+            self.assertEqual(session_schema.get_character_place(svc._get_session_state(sid)), "cafe")
+            self.assertEqual(plan["state_mutation"]["character_location"]["value"], "transit")
+            svc._record_sent_photo(sid, plan["scene"], source_kind="test")
+            svc._commit_image_state_mutation(sid, plan["state_mutation"])
             self.assertEqual(session_schema.get_character_place(svc._get_session_state(sid)), "transit")
 
         asyncio.run(run())
@@ -5003,8 +5007,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_non_morning_push_hard_transition_clears_undress_state(self):
-        """非早安硬转场（超过连续性时效）：新场景不再续上一幕的裸体与半脱状态。"""
+    def test_non_morning_push_hard_transition_defers_undress_cleanup_until_success(self):
+        """非早安硬转场先提出清理；图片成功并写照片历史后才清除裸体与半脱状态。"""
         async def run():
             svc = self.make_service()
             svc.config.update({
@@ -5035,8 +5039,13 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "device_in_frame": False,
             })
 
-            await plan_roleplay_image(svc, sid, mode="normal", weather_data={"desc": "晴", "temp": "22"}, now=now)
+            plan = await plan_roleplay_image(svc, sid, mode="normal", weather_data={"desc": "晴", "temp": "22"}, now=now)
 
+            self.assertEqual(session_schema.get_nudity(state), "completely nude")
+            self.assertEqual(session_schema.get_wardrobe_item_states(state), {"top": "half_off"})
+            self.assertTrue(plan["state_mutation"]["clear_undress_state"])
+            svc._record_sent_photo(sid, plan["scene"], source_kind="test")
+            svc._commit_image_state_mutation(sid, plan["state_mutation"])
             self.assertEqual(session_schema.get_nudity(state), "")
             self.assertEqual(session_schema.get_wardrobe_item_states(state), {})
 
@@ -7634,10 +7643,13 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
             state = svc._get_session_state(sid)
 
-            # 图1：性爱意图 → 兜底全裸 + 持久化
+            # 图1：性爱意图 → 兜底全裸，但规划器只提出 mutation。
             svc._call_llm = AsyncMock(return_value=json.dumps({"scene": "床上", "view": "pov"}, ensure_ascii=False))
             plan1 = await plan_roleplay_image(svc, sid, intent="两人做爱中")
             self.assertEqual(plan1["clothing_off"], "completely nude")
+            self.assertEqual(session_schema.get_nudity(state), "")
+            svc._record_sent_photo(sid, plan1["scene"], source_kind="test")
+            svc._commit_image_state_mutation(sid, plan1["state_mutation"])
             self.assertEqual(session_schema.get_nudity(state), "completely nude")
 
             # 图2：普通意图、规划器不判脱衣 → 仍续上裸体（不再被衣服画回去）
@@ -7654,7 +7666,10 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             # 再次裸体后 /新场景 → 解除
             svc._call_llm = AsyncMock(return_value=json.dumps({"scene": "床上", "view": "pov"}, ensure_ascii=False))
-            await plan_roleplay_image(svc, sid, intent="插入她")
+            plan4 = await plan_roleplay_image(svc, sid, intent="插入她")
+            self.assertEqual(session_schema.get_nudity(state), "")
+            svc._record_sent_photo(sid, plan4["scene"], source_kind="test")
+            svc._commit_image_state_mutation(sid, plan4["state_mutation"])
             self.assertEqual(session_schema.get_nudity(state), "completely nude")
             svc._reset_short_context(state, "test-new-scene")
             self.assertEqual(session_schema.get_nudity(state), "")
