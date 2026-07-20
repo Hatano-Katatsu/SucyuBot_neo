@@ -32,7 +32,7 @@ CONFIG_GROUPS: dict[str, list[str]] = {
     "memory": [
         "long_memory_enabled", "long_memory_extract_enabled", "long_memory_context_limit",
         "context_window_message_limit", "checkpoint_keep_message_limit",
-        "checkpoint_soft_limit_chars", "checkpoint_hard_limit_chars",
+        "checkpoint_soft_limit_chars", "checkpoint_hard_limit_chars", "checkpoint_source_hard_limit_chars",
         "dream_source_hard_limit_chars", "dream_morning_hour", "dream_idle_hours",
         "short_context_reset_gap_hours",
     ],

@@ -1559,6 +1559,164 @@ class ChatContextMixin:
         cleaned["content"] = cls._sanitize_user_history_text(str(cleaned.get("content") or ""))
         return cleaned
 
+    def _checkpoint_lock(self, session_id: str, character_key: str) -> asyncio.Lock:
+        """返回 session + character 作用域的 checkpoint 提交锁。"""
+        scope = f"{session_id}\n{character_key}"
+        locks = getattr(self, "_checkpoint_locks", None)
+        if not isinstance(locks, dict):
+            locks = {}
+            self._checkpoint_locks = locks
+        lock = locks.get(scope)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[scope] = lock
+        return lock
+
+    def _checkpoint_source_limit_chars(self) -> int:
+        try:
+            return max(1, int(self.config.get("checkpoint_source_hard_limit_chars", "18000") or 18000))
+        except Exception:
+            return 18000
+
+    @classmethod
+    def _store_message_groups(
+        cls,
+        messages: list[dict[str, Any]],
+        *,
+        roles: set[str] | None = None,
+    ) -> list[list[dict[str, Any]]]:
+        """按最旧端的完整对话轮次分组，同时保留被过滤行供游标推进。"""
+        groups: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] = []
+        current_has_prompt_entry = False
+        for raw in messages:
+            message = dict(raw)
+            role = str(message.get("role") or "")
+            content = str(message.get("content") or "").strip()
+            if role == "user":
+                content = cls._sanitize_user_history_text(content)
+            included = bool(content) and (roles is None or role in roles)
+            if included and role == "user" and current_has_prompt_entry:
+                groups.append(current)
+                current = []
+                current_has_prompt_entry = False
+            current.append(message)
+            current_has_prompt_entry = current_has_prompt_entry or included
+        if current:
+            groups.append(current)
+        return groups
+
+    @classmethod
+    def _paginate_store_messages(
+        cls,
+        messages: list[dict[str, Any]],
+        *,
+        limit_chars: int,
+        roles: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """从最旧消息开始按字符预算分页，正常页不拆轮次。
+
+        某一完整轮次自身超预算时才把已格式化文本显式切成多个 prompt 块；该页仍只
+        暴露一个提交边界，调用者必须等所有块成功后才能推进到该轮最后一条消息 ID。
+        """
+        limit = max(1, int(limit_chars or 1))
+        pages: list[dict[str, Any]] = []
+        page_messages: list[dict[str, Any]] = []
+        page_text = ""
+
+        def append_page(source: list[dict[str, Any]], text: str, *, split: bool = False):
+            if not source:
+                return
+            if split and text:
+                chunks = [text[index:index + limit] for index in range(0, len(text), limit)]
+                prompt_batches = [
+                    [{
+                        "role": "system",
+                        "content": chunk,
+                        "_formatted_chunk": chunk,
+                        "_source_chunk_index": index + 1,
+                        "_source_chunk_count": len(chunks),
+                    }]
+                    for index, chunk in enumerate(chunks)
+                ]
+            else:
+                prompt_batches = [list(source)]
+            try:
+                until_id = int(source[-1].get("id") or 0)
+            except (TypeError, ValueError):
+                until_id = 0
+            pages.append({
+                "source_messages": list(source),
+                "prompt_batches": prompt_batches,
+                "source_text": text,
+                "until_id": until_id,
+            })
+
+        for group in cls._store_message_groups(messages, roles=roles):
+            group_text = cls._format_store_messages(group, limit_chars=None, roles=roles)
+            if not group_text:
+                page_messages.extend(group)
+                continue
+            if len(group_text) > limit:
+                if page_messages and page_text:
+                    append_page(page_messages, page_text)
+                    page_messages = []
+                    page_text = ""
+                elif page_messages:
+                    group = page_messages + group
+                    page_messages = []
+                append_page(group, group_text, split=True)
+                continue
+            candidate = f"{page_text}\n{group_text}" if page_text else group_text
+            if page_messages and page_text and len(candidate) > limit:
+                append_page(page_messages, page_text)
+                page_messages = list(group)
+                page_text = group_text
+            else:
+                page_messages.extend(group)
+                page_text = candidate
+        if page_messages:
+            append_page(page_messages, page_text)
+        return pages
+
+    def _load_next_store_message_page(
+        self,
+        session_id: str,
+        character_key: str,
+        *,
+        after_id: int,
+        before_or_equal_id: int,
+        limit_chars: int,
+        roles: set[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """增量读取一页最旧积压，避免 dream 一次把全部历史载入内存。"""
+        loaded: list[dict[str, Any]] = []
+        cursor = int(after_id or 0)
+        while cursor < int(before_or_equal_id or 0):
+            chunk = self.app_store.list_messages(
+                session_id,
+                character_key,
+                after_id=cursor,
+                before_or_equal_id=before_or_equal_id,
+                limit=128,
+            )
+            if not chunk:
+                break
+            loaded.extend(chunk)
+            cursor = int(chunk[-1].get("id") or cursor)
+            pages = self._paginate_store_messages(loaded, limit_chars=limit_chars, roles=roles)
+            # 第二页的出现证明第一页已经遇到下一个轮次边界，可以安全返回。
+            if len(pages) >= 2:
+                return pages[0]
+            # 被 roles 明确过滤的纯 system/空消息不进入 dream 来源，可按读取块直接越过，
+            # 避免极端积压为了寻找下一条 user 而一次载入全部无效行。
+            if pages and not pages[0].get("source_text") and len(loaded) >= 128:
+                return pages[0]
+            if len(chunk) < 128:
+                break
+        pages = self._paginate_store_messages(loaded, limit_chars=limit_chars, roles=roles)
+        return pages[0] if pages else None
+
     def _queue_checkpoint_if_needed(self, session_id: str, history_snapshot: list[dict[str, Any]] | None = None):
         if not session_id:
             return
@@ -1596,48 +1754,148 @@ class ChatContextMixin:
         extract_memory: bool = True,
     ):
         try:
-            checkpoint = self.app_store.get_checkpoint(session_id, character_key)
-            pending = self.app_store.list_messages(session_id, character_key, after_id=int(checkpoint.get("source_until_id") or 0))
-            if (
-                not force
-                and len(pending) <= self._context_window_message_limit()
-                and sum(len(str(m.get("content") or "")) for m in pending) <= 30000
-            ):
-                return
-            overflow, _kept = self._split_checkpoint_overflow(pending, keep)
-            if not overflow:
-                return
-            previous = checkpoint.get("summary") or ""
-            merged = await self._summarize_checkpoint(session_id, previous, overflow, character_key=character_key)
-            hard = self._checkpoint_hard_limit_chars()
-            if len(merged) > hard:
-                merged = merged[-hard:]
-            until_id = int(overflow[-1]["id"])
-            # Extract stable long-term memories from the overflow before committing checkpoint.
-            if extract_memory and self._long_memory_extract_enabled():
-                try:
-                    await self._extract_long_term_memories_from_messages(session_id, overflow, source_type="checkpoint", character=character_key)
-                except Exception:
-                    logger.warning("checkpoint memory extraction failed", exc_info=True)
-            if self._context_character_key(session_id) != character_key:
-                # 摘要/提取期间用户已切换角色：SQLite 按旧 key 落库是安全的，
-                # 但不能把旧角色摘要写进新角色的 live state，更不能裁剪新角色的 chat_history。
-                self.app_store.upsert_checkpoint(session_id, character_key, merged, until_id)
-                self._ulog(session_id, "CHECKPOINT", f"until=#{until_id} chars={len(merged)} (角色已切换, 仅落库)")
-                return
-            state = self._get_session_state(session_id)
-            if hasattr(self, "_sync_wardrobe_checkpoint_events"):
-                self._sync_wardrobe_checkpoint_events(session_id, state, pending, overflow)
-            self.app_store.upsert_checkpoint(session_id, character_key, merged, until_id)
-            session_schema.set_checkpoint_summary(state, merged)
-            session_schema.set_checkpoint_message_id(state, until_id)
-            session_schema.set_last_checkpoint_at(state, time.time())
-            # Trim only after the summary has been committed (同步 short_context_start)。
-            self._apply_history_trim(state, keep)
-            self._save_session_state(session_id, state)
-            self._ulog(session_id, "CHECKPOINT", f"until=#{until_id} chars={len(merged)}")
+            async with self._checkpoint_lock(session_id, character_key):
+                # 获取锁后重新读取边界；排队期间可能已有普通 checkpoint 或 dream 推进过游标。
+                checkpoint = self.app_store.get_checkpoint(session_id, character_key)
+                pending = self.app_store.list_messages(
+                    session_id,
+                    character_key,
+                    after_id=int(checkpoint.get("source_until_id") or 0),
+                )
+                if (
+                    not force
+                    and len(pending) <= self._context_window_message_limit()
+                    and sum(len(str(m.get("content") or "")) for m in pending) <= 30000
+                ):
+                    return
+                overflow, _kept = self._split_checkpoint_overflow(pending, keep)
+                if not overflow:
+                    return
+                await self._commit_checkpoint_pages(
+                    session_id,
+                    character_key,
+                    checkpoint,
+                    pending,
+                    overflow,
+                    extract_memory=extract_memory,
+                    source_type="checkpoint",
+                    log_label="",
+                )
         except Exception:
             logger.warning("context checkpoint failed", exc_info=True)
+
+    async def _commit_checkpoint_pages(
+        self,
+        session_id: str,
+        character_key: str,
+        checkpoint: dict[str, Any],
+        pending: list[dict[str, Any]],
+        source_messages: list[dict[str, Any]],
+        *,
+        extract_memory: bool,
+        source_type: str,
+        log_label: str,
+    ) -> tuple[int, bool]:
+        """顺序提交 checkpoint 页；失败时只保留此前成功页的真实 ID 边界。
+
+        调用方必须已经持有 ``_checkpoint_lock(session_id, character_key)``。
+        """
+        pages = self._paginate_store_messages(
+            source_messages,
+            limit_chars=self._checkpoint_source_limit_chars(),
+        )
+        if not pages:
+            return int(checkpoint.get("source_until_id") or 0), True
+        previous = str(checkpoint.get("summary") or "")
+        expected_version = int(checkpoint.get("version") or 0)
+        committed_until = int(checkpoint.get("source_until_id") or 0)
+        processed: list[dict[str, Any]] = []
+        hard = self._checkpoint_hard_limit_chars()
+        for page in pages:
+            merged = previous
+            try:
+                for prompt_batch in page["prompt_batches"]:
+                    merged = await self._summarize_checkpoint(
+                        session_id,
+                        merged,
+                        prompt_batch,
+                        character_key=character_key,
+                    )
+                    if len(merged) > hard:
+                        merged = merged[-hard:]
+            except Exception:
+                logger.warning(
+                    "%s page failed before checkpoint boundary #%s",
+                    source_type,
+                    page.get("until_id") or committed_until,
+                    exc_info=True,
+                )
+                return committed_until, False
+            if extract_memory and self._long_memory_extract_enabled():
+                for prompt_batch in page["prompt_batches"]:
+                    try:
+                        await self._extract_long_term_memories_from_messages(
+                            session_id,
+                            prompt_batch,
+                            source_type=source_type,
+                            character=character_key,
+                        )
+                    except Exception:
+                        logger.warning("%s memory extraction failed", source_type, exc_info=True)
+            until_id = int(page.get("until_id") or committed_until)
+            try:
+                accepted = self.app_store.upsert_checkpoint(
+                    session_id,
+                    character_key,
+                    merged,
+                    until_id,
+                    expected_version=expected_version,
+                )
+            except Exception:
+                logger.warning("checkpoint database commit failed before boundary #%s", until_id, exc_info=True)
+                return committed_until, False
+            if not accepted:
+                self._ulog(
+                    session_id,
+                    "CHECKPOINT",
+                    f"CAS_REJECTED until=#{until_id} expected_version={expected_version}",
+                )
+                return committed_until, False
+            expected_version += 1
+            previous = merged
+            committed_until = until_id
+            processed.extend(page["source_messages"])
+            if self._context_character_key(session_id) != character_key:
+                self._ulog(
+                    session_id,
+                    "CHECKPOINT",
+                    f"{log_label}until=#{until_id} chars={len(merged)} (角色已切换, 仅落库)",
+                )
+                continue
+            try:
+                state = self._get_session_state(session_id)
+                if hasattr(self, "_sync_wardrobe_checkpoint_events"):
+                    self._sync_wardrobe_checkpoint_events(session_id, state, pending, processed)
+                session_schema.set_checkpoint_summary(state, merged)
+                session_schema.set_checkpoint_message_id(state, until_id)
+                session_schema.set_last_checkpoint_at(state, time.time())
+                session_schema.set_chat_history(state, [
+                    {
+                        "role": str(message.get("role") or ""),
+                        "content": str(message.get("content") or ""),
+                    }
+                    for message in pending
+                    if int(message.get("id") or 0) > until_id
+                    and str(message.get("role") or "").strip()
+                    and str(message.get("content") or "").strip()
+                ])
+                session_schema.set_short_context_start(state, 0)
+                self._save_session_state(session_id, state)
+            except Exception:
+                logger.warning("checkpoint live state sync failed at boundary #%s", until_id, exc_info=True)
+                return committed_until, False
+            self._ulog(session_id, "CHECKPOINT", f"{log_label}until=#{until_id} chars={len(merged)}")
+        return committed_until, True
 
     async def _checkpoint_context_before_push(self, session_id: str) -> bool:
         """推送前把未折叠上下文收敛到最近一个用户起点之后。
@@ -1660,50 +1918,31 @@ class ChatContextMixin:
             except Exception:
                 logger.debug("cancelled pending checkpoint before push", exc_info=True)
         try:
-            checkpoint = self.app_store.get_checkpoint(session_id, key)
-            source_until = int(checkpoint.get("source_until_id") or 0)
-            pending = self.app_store.list_messages(session_id, key, after_id=source_until)
-            if not pending:
-                return False
-            keep_start = -1
-            for idx in range(len(pending) - 1, -1, -1):
-                if pending[idx].get("role") == "user":
-                    keep_start = idx
-                    break
-            if keep_start <= 0:
-                return False
-            overflow = pending[:keep_start]
-            kept = pending[keep_start:]
-            previous = checkpoint.get("summary") or ""
-            merged = await self._summarize_checkpoint(session_id, previous, overflow, character_key=key)
-            hard = self._checkpoint_hard_limit_chars()
-            if len(merged) > hard:
-                merged = merged[-hard:]
-            until_id = int(overflow[-1]["id"])
-            try:
-                await self._extract_long_term_memories_from_messages(session_id, overflow, source_type="push-checkpoint", character=key)
-            except Exception:
-                logger.warning("push checkpoint memory extraction failed", exc_info=True)
-            if self._context_character_key(session_id) != key:
-                # 摘要期间角色已切换：只按旧 key 落库，不动新角色的 live state 与历史。
-                self.app_store.upsert_checkpoint(session_id, key, merged, until_id)
-                return True
-            state = self._get_session_state(session_id)
-            if hasattr(self, "_sync_wardrobe_checkpoint_events"):
-                self._sync_wardrobe_checkpoint_events(session_id, state, pending, overflow)
-            self.app_store.upsert_checkpoint(session_id, key, merged, until_id)
-            session_schema.set_checkpoint_summary(state, merged)
-            session_schema.set_checkpoint_message_id(state, until_id)
-            session_schema.set_last_checkpoint_at(state, time.time())
-            session_schema.set_chat_history(state, [
-                {"role": str(msg.get("role") or ""), "content": str(msg.get("content") or "")}
-                for msg in kept
-                if str(msg.get("role") or "").strip() and str(msg.get("content") or "").strip()
-            ])
-            session_schema.set_short_context_start(state, 0)
-            self._save_session_state(session_id, state)
-            self._ulog(session_id, "CHECKPOINT", f"push-prep until=#{until_id} kept={len(kept)} chars={len(merged)}")
-            return True
+            async with self._checkpoint_lock(session_id, key):
+                checkpoint = self.app_store.get_checkpoint(session_id, key)
+                source_until = int(checkpoint.get("source_until_id") or 0)
+                pending = self.app_store.list_messages(session_id, key, after_id=source_until)
+                if not pending:
+                    return False
+                keep_start = -1
+                for idx in range(len(pending) - 1, -1, -1):
+                    if pending[idx].get("role") == "user":
+                        keep_start = idx
+                        break
+                if keep_start <= 0:
+                    return False
+                overflow = pending[:keep_start]
+                committed_until, completed = await self._commit_checkpoint_pages(
+                    session_id,
+                    key,
+                    checkpoint,
+                    pending,
+                    overflow,
+                    extract_memory=True,
+                    source_type="push-checkpoint",
+                    log_label="push-prep ",
+                )
+                return completed and committed_until > source_until
         except Exception:
             logger.warning("push pre-checkpoint failed", exc_info=True)
             return False
@@ -1723,7 +1962,8 @@ class ChatContextMixin:
         character_key: str | None = None,
     ) -> str:
         soft = str(self.config.get("checkpoint_soft_limit_chars", "2000") or "2000")
-        dialog = self._format_store_messages(messages, limit_chars=18000)
+        # 调用者已按真实字符预算分页；这里不得再次截尾，否则提交边界会跨过未入 prompt 的消息。
+        dialog = self._format_store_messages(messages, limit_chars=None)
         role_legend = self._dialog_role_legend()
         durable_context = self._checkpoint_summary_durable_context(session_id, character_key)
         durable_rules = (
@@ -1791,9 +2031,18 @@ class ChatContextMixin:
         return "User = human user; Assistant = the current bot roleplay character."
 
     @staticmethod
-    def _format_store_messages(messages: list[dict[str, Any]], limit_chars: int = 50000, roles: set[str] | None = None) -> str:
+    def _format_store_messages(
+        messages: list[dict[str, Any]],
+        limit_chars: int | None = 50000,
+        roles: set[str] | None = None,
+    ) -> str:
         entries: list[tuple[str, str]] = []
         for msg in messages:
+            if "_formatted_chunk" in msg:
+                chunk = str(msg.get("_formatted_chunk") or "")
+                if chunk:
+                    entries.append(("_chunk", chunk))
+                continue
             role = msg.get("role") or ""
             if roles is not None and role not in roles:
                 continue
@@ -1818,7 +2067,7 @@ class ChatContextMixin:
 
         group_texts = ["\n".join(group) for group in groups]
         text = "\n".join(group_texts)
-        if len(text) <= limit_chars:
+        if limit_chars is None or len(text) <= limit_chars:
             return text
 
         selected: list[str] = []
@@ -1838,8 +2087,25 @@ class ChatContextMixin:
     async def _extract_long_term_memories_from_messages(self, session_id: str, messages: list[dict[str, Any]], source_type: str = "checkpoint", character: str | None = None):
         if not messages or not hasattr(self, "_extract_long_term_memories") or not self._long_memory_extract_enabled():
             return
-        dialog = self._format_store_messages(messages, limit_chars=20000, roles={"user", "assistant"})
-        await self._extract_long_term_memories(session_id, f"[{source_type}]\n{dialog}", "", character=character)
+        pages = self._paginate_store_messages(
+            messages,
+            limit_chars=20000,
+            roles={"user", "assistant"},
+        )
+        for page in pages:
+            for prompt_batch in page["prompt_batches"]:
+                dialog = self._format_store_messages(
+                    prompt_batch,
+                    limit_chars=None,
+                    roles={"user", "assistant"},
+                )
+                if dialog:
+                    await self._extract_long_term_memories(
+                        session_id,
+                        f"[{source_type}]\n{dialog}",
+                        "",
+                        character=character,
+                    )
 
     async def _checkpoint_current_context_before_reset(self, session_id: str) -> int:
         """新场景/短期硬切换前，先把当前未折叠上下文过一遍 checkpoint 侧的摘要与记忆提取。"""
@@ -1850,39 +2116,41 @@ class ChatContextMixin:
         task = getattr(self, "_checkpoint_tasks", {}).get(scope)
         if task and not task.done():
             task.cancel()
-        latest_id = 0
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.debug("cancelled pending checkpoint before reset", exc_info=True)
+        committed_until = 0
         try:
-            checkpoint = self.app_store.get_checkpoint(session_id, key)
-            source_until = int(checkpoint.get("source_until_id") or 0)
-            latest_id = self.app_store.latest_message_id(session_id, key)
-            pending = self.app_store.list_messages(session_id, key, after_id=source_until, before_or_equal_id=latest_id)
-            if not pending:
-                return latest_id
-            previous = checkpoint.get("summary") or ""
-            merged = await self._summarize_checkpoint(session_id, previous, pending, character_key=key)
-            hard = self._checkpoint_hard_limit_chars()
-            if len(merged) > hard:
-                merged = merged[-hard:]
-            until_id = int(pending[-1]["id"])
-            if self._long_memory_extract_enabled():
-                try:
-                    await self._extract_long_term_memories_from_messages(session_id, pending, source_type="checkpoint", character=key)
-                except Exception:
-                    logger.warning("pre-reset checkpoint memory extraction failed", exc_info=True)
-            self.app_store.upsert_checkpoint(session_id, key, merged, until_id)
-            state = self._get_session_state(session_id)
-            session_schema.set_checkpoint_summary(state, merged)
-            session_schema.set_checkpoint_message_id(state, until_id)
-            session_schema.set_last_checkpoint_at(state, time.time())
-            self._save_session_state(session_id, state)
-            self._ulog(session_id, "CHECKPOINT", f"pre-reset until=#{until_id} chars={len(merged)}")
-            return until_id
+            async with self._checkpoint_lock(session_id, key):
+                checkpoint = self.app_store.get_checkpoint(session_id, key)
+                source_until = int(checkpoint.get("source_until_id") or 0)
+                committed_until = source_until
+                latest_id = self.app_store.latest_message_id(session_id, key)
+                pending = self.app_store.list_messages(
+                    session_id,
+                    key,
+                    after_id=source_until,
+                    before_or_equal_id=latest_id,
+                )
+                if not pending:
+                    return source_until
+                committed_until, _completed = await self._commit_checkpoint_pages(
+                    session_id,
+                    key,
+                    checkpoint,
+                    pending,
+                    pending,
+                    extract_memory=True,
+                    source_type="checkpoint",
+                    log_label="pre-reset ",
+                )
+                return committed_until
         except Exception:
             logger.warning("pre-reset context checkpoint failed", exc_info=True)
-            try:
-                return latest_id or self.app_store.latest_message_id(session_id, key)
-            except Exception:
-                return latest_id
+            return committed_until
 
     def _short_context_reset_reason(self, text: str, previous_interaction: float = 0) -> str:
         if SHORT_CONTEXT_RESET_RE.search(text or ""):
@@ -1914,7 +2182,11 @@ class ChatContextMixin:
             if task and not task.done():
                 task.cancel()
             try:
-                latest_id = self.app_store.latest_message_id(session_id, key)
+                checkpoint = self.app_store.get_checkpoint(session_id, key)
+                latest_id = max(
+                    self.app_store.latest_message_id(session_id, key),
+                    int(checkpoint.get("source_until_id") or 0),
+                )
                 self.app_store.clear_checkpoint(session_id, key, source_until_id=latest_id)
             except Exception:
                 logger.warning("short context checkpoint clear failed", exc_info=True)

@@ -335,6 +335,7 @@ DEFAULT_CONFIG = {
     "checkpoint_keep_message_limit": "10",
     "checkpoint_soft_limit_chars": "2000",
     "checkpoint_hard_limit_chars": "3000",
+    "checkpoint_source_hard_limit_chars": "18000",
     "dream_source_hard_limit_chars": "50000",
     "dream_memory_summarize_max_tokens": "8192",
     "dream_morning_hour": "8",

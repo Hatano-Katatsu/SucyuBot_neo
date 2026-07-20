@@ -622,15 +622,32 @@ class SchedulerRuntimeMixin:
     async def _dream_once(self, session_id: str, character_key: str, local_dt: datetime, *, reason: str):
         meta = self.app_store.get_context_meta(session_id, character_key)
         from_id = int(meta.get("last_dream_message_id") or 0)
-        to_id = self.app_store.latest_message_id(session_id, character_key)
-        messages = self.app_store.list_messages(session_id, character_key, after_id=from_id, before_or_equal_id=to_id)
+        latest_id = self.app_store.latest_message_id(session_id, character_key)
         if hasattr(self, "_ensure_style_pool_entry"):
             try:
                 self._ensure_style_pool_entry(self._get_current_style(session_id))
             except Exception:
                 logger.warning("dream style pool sync failed", exc_info=True)
-        source_limit = max(1000, int(self.config.get("dream_source_hard_limit_chars", "50000") or 50000))
-        source_text = self._format_store_messages(messages, limit_chars=source_limit, roles={"user", "assistant"}) if hasattr(self, "_format_store_messages") else ""
+        source_limit = max(1, int(self.config.get("dream_source_hard_limit_chars", "50000") or 50000))
+        page = None
+        if latest_id > from_id and hasattr(self, "_load_next_store_message_page"):
+            page = self._load_next_store_message_page(
+                session_id,
+                character_key,
+                after_id=from_id,
+                before_or_equal_id=latest_id,
+                limit_chars=source_limit,
+                roles={"user", "assistant"},
+            )
+        messages = list(page.get("source_messages") or []) if isinstance(page, dict) else []
+        to_id = int(page.get("until_id") or from_id) if isinstance(page, dict) else from_id
+        prompt_batches = list(page.get("prompt_batches") or []) if isinstance(page, dict) else [[]]
+        source_chunks = [
+            self._format_store_messages(batch, limit_chars=None, roles={"user", "assistant"})
+            for batch in prompt_batches
+        ] if hasattr(self, "_format_store_messages") else [""]
+        if not source_chunks:
+            source_chunks = [""]
         diary_date = self._dream_diary_date(local_dt, force_previous_day=(reason == "morning"), session_id=session_id)
         if hasattr(self, "write_character_checkpoint"):
             try:
@@ -655,19 +672,31 @@ class SchedulerRuntimeMixin:
         diary_kwargs: dict[str, Any] = {"reason": reason}
         if life_plan_diary_context:
             diary_kwargs["life_plan_context"] = life_plan_diary_context
-        diary = await self._write_dream_diary(
+        diary = str(existing.get("content", "") or "")
+        for source_text in source_chunks:
+            diary = await self._write_dream_diary(
+                session_id,
+                diary_date,
+                source_text,
+                diary,
+                **diary_kwargs,
+            )
+        source_chars = sum(len(text) for text in source_chunks)
+        first_message_id = int(messages[0].get("id") or from_id + 1) if messages else from_id + 1
+        self.app_store.upsert_diary(
             session_id,
+            character_key,
             diary_date,
-            source_text,
-            existing.get("content", ""),
-            **diary_kwargs,
+            diary,
+            from_message_id=first_message_id,
+            to_message_id=to_id,
         )
-        self.app_store.upsert_diary(session_id, character_key, diary_date, diary, from_message_id=from_id + 1, to_message_id=to_id)
         self._ulog(
             session_id,
             "DREAM",
             f"日记更新 reason={reason} date={diary_date} messages={len(messages)} "
-            f"source_chars={len(source_text)} diary_chars={len(diary or '')} output={self._log_excerpt(diary)}",
+            f"source_chars={source_chars} chunks={len(source_chunks)} "
+            f"diary_chars={len(diary or '')} output={self._log_excerpt(diary)}",
         )
         if (
             messages
@@ -679,6 +708,7 @@ class SchedulerRuntimeMixin:
                 await self._extract_long_term_memories_from_messages(session_id, messages, source_type="dream", character=character_key)
             except Exception:
                 logger.warning("dream memory extraction failed", exc_info=True)
+                raise
         memory_result = await self._organize_memories_after_dream(session_id, character_key)
         if isinstance(memory_result, dict):
             self._ulog(session_id, "MEMORY", f"dream整理结果 {json.dumps(memory_result, ensure_ascii=False, default=str)}")
@@ -703,15 +733,22 @@ class SchedulerRuntimeMixin:
                 force=True,
                 extract_memory=False,
             )
-        self.app_store.mark_dream(session_id, character_key, to_id)
+        marked = self.app_store.mark_dream(session_id, character_key, to_id)
         live_key = self._context_character_key(session_id) if hasattr(self, "_context_character_key") else character_key
-        if live_key == character_key:
+        if marked and live_key == character_key:
             # dream 期间用户已切换角色时跳过 live state 写；app_store 按 key 落库天然隔离。
             state = self._get_session_state(session_id)
             session_schema.set_last_dream_at(state, time.time())
-            session_schema.set_last_dream_message_id(state, to_id)
+            session_schema.set_last_dream_message_id(
+                state,
+                max(session_schema.get_last_dream_message_id(state), to_id),
+            )
             self._save_session_state(session_id, state)
-        self._ulog(session_id, "DREAM", f"reason={reason} date={diary_date} messages={len(messages)}")
+        self._ulog(
+            session_id,
+            "DREAM",
+            f"reason={reason} date={diary_date} messages={len(messages)} until=#{to_id} latest=#{latest_id}",
+        )
 
     @staticmethod
     def _diary_body_without_heading(text: str) -> str:

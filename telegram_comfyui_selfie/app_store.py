@@ -334,58 +334,57 @@ class AppStateStore:
             return {"summary": "", "source_until_id": 0, "version": 0, "updated_at": 0}
         return dict(row)
 
-    def upsert_checkpoint(self, session_id: str, character_key: str, summary: str, source_until_id: int):
-        now = _now()
-        with closing(self._connect()) as conn:
-            conn.execute(
-                """
-                INSERT INTO checkpoints(session_id, character_key, summary, source_until_id, updated_at, version)
-                VALUES (?, ?, ?, ?, ?, 1)
-                ON CONFLICT(session_id, character_key) DO UPDATE SET
-                    summary = excluded.summary,
-                    source_until_id = excluded.source_until_id,
-                    updated_at = excluded.updated_at,
-                    version = checkpoints.version + 1
-                """,
-                (session_id, character_key or "", summary, int(source_until_id or 0), now),
-            )
-            conn.execute(
-                """
-                INSERT INTO context_meta(session_id, character_key, last_checkpoint_at, last_checkpoint_message_id)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(session_id, character_key) DO UPDATE SET
-                    last_checkpoint_at = excluded.last_checkpoint_at,
-                    last_checkpoint_message_id = excluded.last_checkpoint_message_id
-                """,
-                (session_id, character_key or "", now, int(source_until_id or 0)),
-            )
-            conn.execute(
-                "UPDATE chat_messages SET checkpointed = 1 WHERE session_id = ? AND character_key = ? AND id <= ?",
-                (session_id, character_key or "", int(source_until_id or 0)),
-            )
-            conn.commit()
+    def upsert_checkpoint(
+        self,
+        session_id: str,
+        character_key: str,
+        summary: str,
+        source_until_id: int,
+        *,
+        expected_version: int | None = None,
+        allow_regression: bool = False,
+    ) -> bool:
+        """以单调边界和可选版本 CAS 提交 checkpoint。
 
-    def clear_checkpoint(self, session_id: str, character_key: str, *, source_until_id: int = 0):
-        """清空 checkpoint 摘要，并把 checkpoint 边界推进到指定消息。
-
-        /新场景 需要让旧摘要不再进入模型上下文，但旧聊天仍保留在 chat_messages，
-        供 dream 之后继续整理。因此这里不删除消息，只建立新的 checkpoint 边界。
+        普通运行时禁止较旧任务把 ``source_until_id`` 写回更小值；调用者在摘要前读取
+        ``version`` 并作为 ``expected_version`` 传入，可进一步阻止同一边界上的旧摘要
+        覆盖新摘要。``allow_regression`` 仅供用户显式导入完整检查点这类受控替换使用。
         """
         now = _now()
         until = int(source_until_id or 0)
         with closing(self._connect()) as conn:
-            conn.execute(
-                """
-                INSERT INTO checkpoints(session_id, character_key, summary, source_until_id, updated_at, version)
-                VALUES (?, ?, '', ?, ?, 1)
-                ON CONFLICT(session_id, character_key) DO UPDATE SET
-                    summary = '',
-                    source_until_id = excluded.source_until_id,
-                    updated_at = excluded.updated_at,
-                    version = checkpoints.version + 1
-                """,
-                (session_id, character_key or "", until, now),
-            )
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT source_until_id, version FROM checkpoints WHERE session_id = ? AND character_key = ?",
+                (session_id, character_key or ""),
+            ).fetchone()
+            current_version = int(row["version"] or 0) if row else 0
+            current_until = int(row["source_until_id"] or 0) if row else 0
+            if expected_version is not None and current_version != int(expected_version):
+                conn.rollback()
+                return False
+            if row and not allow_regression and until < current_until:
+                conn.rollback()
+                return False
+            if row:
+                conn.execute(
+                    """
+                    UPDATE checkpoints
+                    SET summary = ?, source_until_id = ?, updated_at = ?, version = version + 1
+                    WHERE session_id = ? AND character_key = ? AND version = ?
+                    """,
+                    (
+                        summary, until, now, session_id, character_key or "", current_version,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO checkpoints(session_id, character_key, summary, source_until_id, updated_at, version)
+                    VALUES (?, ?, ?, ?, ?, 1)
+                    """,
+                    (session_id, character_key or "", summary, until, now),
+                )
             conn.execute(
                 """
                 INSERT INTO context_meta(session_id, character_key, last_checkpoint_at, last_checkpoint_message_id)
@@ -396,12 +395,33 @@ class AppStateStore:
                 """,
                 (session_id, character_key or "", now, until),
             )
-            if until > 0:
-                conn.execute(
-                    "UPDATE chat_messages SET checkpointed = 1 WHERE session_id = ? AND character_key = ? AND id <= ?",
-                    (session_id, character_key or "", until),
-                )
+            conn.execute(
+                "UPDATE chat_messages SET checkpointed = 1 WHERE session_id = ? AND character_key = ? AND id <= ?",
+                (session_id, character_key or "", until),
+            )
             conn.commit()
+        return True
+
+    def clear_checkpoint(
+        self,
+        session_id: str,
+        character_key: str,
+        *,
+        source_until_id: int = 0,
+        expected_version: int | None = None,
+    ) -> bool:
+        """清空 checkpoint 摘要，并把 checkpoint 边界推进到指定消息。
+
+        /新场景 需要让旧摘要不再进入模型上下文，但旧聊天仍保留在 chat_messages，
+        供 dream 之后继续整理。因此这里不删除消息，只建立新的 checkpoint 边界。
+        """
+        return self.upsert_checkpoint(
+            session_id,
+            character_key,
+            "",
+            source_until_id,
+            expected_version=expected_version,
+        )
 
     def get_context_meta(self, session_id: str, character_key: str) -> dict[str, Any]:
         with closing(self._connect()) as conn:
@@ -419,19 +439,23 @@ class AppStateStore:
             }
         return dict(row)
 
-    def mark_dream(self, session_id: str, character_key: str, to_message_id: int):
+    def mark_dream(self, session_id: str, character_key: str, to_message_id: int) -> bool:
+        """单调推进 dream 游标，避免旧任务完成较晚时回滚边界。"""
+        until = int(to_message_id or 0)
         with closing(self._connect()) as conn:
-            conn.execute(
+            cur = conn.execute(
                 """
                 INSERT INTO context_meta(session_id, character_key, last_dream_at, last_dream_message_id)
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(session_id, character_key) DO UPDATE SET
                     last_dream_at = excluded.last_dream_at,
                     last_dream_message_id = excluded.last_dream_message_id
+                WHERE context_meta.last_dream_message_id <= excluded.last_dream_message_id
                 """,
-                (session_id, character_key or "", _now(), int(to_message_id or 0)),
+                (session_id, character_key or "", _now(), until),
             )
             conn.commit()
+        return bool(cur.rowcount)
 
     def upsert_character_history_summary(self, session_id: str, character_key: str, summary: str):
         with closing(self._connect()) as conn:
@@ -463,8 +487,12 @@ class AppStateStore:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id, character_key, diary_date) DO UPDATE SET
                     content = excluded.content,
-                    from_message_id = excluded.from_message_id,
-                    to_message_id = excluded.to_message_id,
+                    from_message_id = CASE
+                        WHEN diaries.from_message_id <= 0 THEN excluded.from_message_id
+                        WHEN excluded.from_message_id <= 0 THEN diaries.from_message_id
+                        ELSE MIN(diaries.from_message_id, excluded.from_message_id)
+                    END,
+                    to_message_id = MAX(diaries.to_message_id, excluded.to_message_id),
                     updated_at = excluded.updated_at
                 """,
                 (

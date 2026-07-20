@@ -130,6 +130,7 @@ class TelegramComfyUIService(
         self._offset = 0
         self._bot_tasks: list[asyncio.Task] = []
         self._checkpoint_tasks: dict[str, asyncio.Task] = {}
+        self._checkpoint_locks: dict[str, asyncio.Lock] = {}
         self._dream_tasks: dict[str, asyncio.Task] = {}
         self._life_plan_tasks: dict[str, asyncio.Task] = {}
         self._post_chat_push_tasks: dict[str, asyncio.Task] = {}

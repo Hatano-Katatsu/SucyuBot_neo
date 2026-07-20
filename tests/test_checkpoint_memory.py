@@ -131,6 +131,304 @@ class CheckpointTrimTestCase(ServiceFixtureMixin, unittest.TestCase):
         asyncio.run(run())
 
 
+class CheckpointBoundaryTestCase(ServiceFixtureMixin, unittest.TestCase):
+    """P1-1/P1-3：checkpoint 分页边界、超长消息和并发提交。"""
+
+    @staticmethod
+    def _rounds(count: int, width: int = 15) -> list[dict[str, str]]:
+        messages: list[dict[str, str]] = []
+        for index in range(count):
+            messages.extend([
+                {"role": "user", "content": f"U{index}-" + "u" * width},
+                {"role": "assistant", "content": f"A{index}-" + "a" * width},
+            ])
+        return messages
+
+    def test_checkpoint_pages_oldest_complete_rounds_within_character_budget(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["checkpoint_source_hard_limit_chars"] = "70"
+            svc.config["checkpoint_hard_limit_chars"] = "9999"
+            sid = "telegram:checkpoint-pages"
+            key = svc._context_character_key(sid)
+            messages = self._rounds(4)
+            ids = svc.app_store.append_messages(sid, key, messages)
+            captured: list[str] = []
+
+            async def summarize(_sid, previous, batch, **_kwargs):
+                text = svc._format_store_messages(batch, limit_chars=None)
+                captured.append(text)
+                return f"{previous}|{len(captured)}"
+
+            svc._summarize_checkpoint = summarize
+            svc._extract_long_term_memories_from_messages = AsyncMock()
+
+            await svc._run_context_checkpoint(sid, key, keep=2, force=True)
+
+            self.assertGreater(len(captured), 1)
+            self.assertTrue(all(len(text) <= 70 for text in captured), captured)
+            flattened = "\n".join(captured)
+            for index in range(3):
+                self.assertEqual(flattened.count(f"U{index}-"), 1)
+                self.assertEqual(flattened.count(f"A{index}-"), 1)
+                self.assertTrue(any(f"U{index}-" in text and f"A{index}-" in text for text in captured))
+            self.assertLess(flattened.index("U0-"), flattened.index("U1-"))
+            self.assertLess(flattened.index("U1-"), flattened.index("U2-"))
+            self.assertEqual(svc.app_store.get_checkpoint(sid, key)["source_until_id"], ids[5])
+
+        asyncio.run(run())
+
+    def test_checkpoint_explicitly_chunks_one_oversized_message_before_advancing_id(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["checkpoint_source_hard_limit_chars"] = "64"
+            svc.config["checkpoint_hard_limit_chars"] = "9999"
+            sid = "telegram:checkpoint-one-long-message"
+            key = svc._context_character_key(sid)
+            long_message = {"role": "user", "content": "LONG-" + "x" * 220}
+            messages = [
+                long_message,
+                {"role": "user", "content": "保留的用户消息"},
+                {"role": "assistant", "content": "保留的角色回复"},
+            ]
+            ids = svc.app_store.append_messages(sid, key, messages)
+            captured: list[dict] = []
+
+            async def summarize(_sid, previous, batch, **_kwargs):
+                captured.append(dict(batch[0]))
+                return f"{previous}|chunk"
+
+            svc._summarize_checkpoint = summarize
+            svc._extract_long_term_memories_from_messages = AsyncMock()
+
+            await svc._run_context_checkpoint(sid, key, keep=2, force=True)
+
+            self.assertGreater(len(captured), 1)
+            self.assertEqual(
+                "".join(str(item.get("_formatted_chunk") or "") for item in captured),
+                svc._format_store_messages([long_message], limit_chars=None),
+            )
+            self.assertTrue(all(len(str(item.get("_formatted_chunk") or "")) <= 64 for item in captured))
+            self.assertEqual(
+                [item.get("_source_chunk_index") for item in captured],
+                list(range(1, len(captured) + 1)),
+            )
+            self.assertEqual(svc.app_store.get_checkpoint(sid, key)["source_until_id"], ids[0])
+
+        asyncio.run(run())
+
+    def test_checkpoint_oversized_message_chunk_failure_keeps_boundary_before_message(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["checkpoint_source_hard_limit_chars"] = "64"
+            sid = "telegram:checkpoint-long-message-failure"
+            key = svc._context_character_key(sid)
+            ids = svc.app_store.append_messages(sid, key, [
+                {"role": "user", "content": "UNFINISHED-" + "x" * 180},
+                {"role": "user", "content": "保留的用户消息"},
+                {"role": "assistant", "content": "保留的角色回复"},
+            ])
+            calls = 0
+
+            async def summarize(_sid, previous, _batch, **_kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise RuntimeError("long message chunk failed")
+                return f"{previous}|partial"
+
+            svc._summarize_checkpoint = summarize
+            svc._extract_long_term_memories_from_messages = AsyncMock()
+
+            await svc._run_context_checkpoint(sid, key, keep=2, force=True)
+
+            self.assertGreaterEqual(calls, 2)
+            self.assertEqual(svc.app_store.get_checkpoint(sid, key)["source_until_id"], 0)
+            self.assertEqual(svc.app_store.list_messages(sid, key, after_id=0)[0]["id"], ids[0])
+
+        asyncio.run(run())
+
+    def test_checkpoint_failed_second_batch_stops_at_first_batch_boundary(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["checkpoint_source_hard_limit_chars"] = "70"
+            svc.config["checkpoint_hard_limit_chars"] = "9999"
+            sid = "telegram:checkpoint-batch-failure"
+            key = svc._context_character_key(sid)
+            messages = self._rounds(4)
+            ids = svc.app_store.append_messages(sid, key, messages)
+            calls: list[list[int]] = []
+
+            async def summarize(_sid, previous, batch, **_kwargs):
+                calls.append([int(message.get("id") or 0) for message in batch])
+                if len(calls) == 2:
+                    raise RuntimeError("second checkpoint batch failed")
+                return f"{previous}|first"
+
+            svc._summarize_checkpoint = summarize
+            svc._extract_long_term_memories_from_messages = AsyncMock()
+
+            await svc._run_context_checkpoint(sid, key, keep=2, force=True)
+
+            checkpoint = svc.app_store.get_checkpoint(sid, key)
+            self.assertEqual(checkpoint["source_until_id"], ids[1])
+            remaining = svc.app_store.list_messages(sid, key, after_id=ids[1])
+            self.assertEqual(remaining[0]["id"], ids[2])
+            state_contents = [message["content"] for message in session_schema.get_chat_history(svc._get_session_state(sid))]
+            self.assertIn(messages[2]["content"], state_contents)
+
+        asyncio.run(run())
+
+    def test_checkpoint_lock_serializes_same_character(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["checkpoint_source_hard_limit_chars"] = "9999"
+            sid = "telegram:checkpoint-lock"
+            key = svc._context_character_key(sid)
+            svc.app_store.append_messages(sid, key, self._rounds(3))
+            entered = asyncio.Event()
+            release = asyncio.Event()
+            active = 0
+            max_active = 0
+            calls = 0
+
+            async def summarize(_sid, previous, _batch, **_kwargs):
+                nonlocal active, max_active, calls
+                calls += 1
+                active += 1
+                max_active = max(max_active, active)
+                entered.set()
+                await release.wait()
+                active -= 1
+                return f"{previous}|summary"
+
+            svc._summarize_checkpoint = summarize
+            svc._extract_long_term_memories_from_messages = AsyncMock()
+            first = asyncio.create_task(svc._run_context_checkpoint(sid, key, keep=2, force=True))
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            second = asyncio.create_task(svc._run_context_checkpoint(sid, key, keep=2, force=True))
+            await asyncio.sleep(0)
+            self.assertEqual(calls, 1)
+            release.set()
+            await asyncio.gather(first, second)
+
+            self.assertEqual(max_active, 1)
+            self.assertEqual(calls, 1)
+
+        asyncio.run(run())
+
+    def test_stale_slow_checkpoint_cannot_rollback_newer_same_boundary(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["checkpoint_source_hard_limit_chars"] = "9999"
+            sid = "telegram:checkpoint-cas"
+            key = svc._context_character_key(sid)
+            messages = self._rounds(3)
+            ids = svc.app_store.append_messages(sid, key, messages)
+            entered = asyncio.Event()
+            release = asyncio.Event()
+
+            async def slow_summarize(_sid, _previous, _batch, **_kwargs):
+                entered.set()
+                await release.wait()
+                return "OLD SLOW SUMMARY"
+
+            svc._summarize_checkpoint = slow_summarize
+            svc._extract_long_term_memories_from_messages = AsyncMock()
+            stale = asyncio.create_task(svc._run_context_checkpoint(sid, key, keep=2, force=True))
+            await asyncio.wait_for(entered.wait(), timeout=1)
+
+            self.assertTrue(svc.app_store.upsert_checkpoint(sid, key, "NEW SUMMARY", ids[3], expected_version=0))
+            state = svc._get_session_state(sid)
+            session_schema.set_checkpoint_summary(state, "NEW SUMMARY")
+            session_schema.set_checkpoint_message_id(state, ids[3])
+            original_history = list(session_schema.get_chat_history(state))
+            release.set()
+            await stale
+
+            checkpoint = svc.app_store.get_checkpoint(sid, key)
+            self.assertEqual(checkpoint["summary"], "NEW SUMMARY")
+            self.assertEqual(checkpoint["source_until_id"], ids[3])
+            self.assertEqual(session_schema.get_checkpoint_summary(state), "NEW SUMMARY")
+            self.assertEqual(session_schema.get_chat_history(state), original_history)
+            self.assertFalse(svc.app_store.upsert_checkpoint(sid, key, "OLDER", ids[1]))
+            self.assertEqual(svc.app_store.get_context_meta(sid, key)["last_checkpoint_message_id"], ids[3])
+            current_version = int(checkpoint["version"])
+            self.assertTrue(
+                svc.app_store.clear_checkpoint(
+                    sid,
+                    key,
+                    source_until_id=ids[3],
+                    expected_version=current_version,
+                )
+            )
+            self.assertFalse(
+                svc.app_store.upsert_checkpoint(
+                    sid,
+                    key,
+                    "STALE SAME-ID SUMMARY",
+                    ids[3],
+                    expected_version=current_version,
+                )
+            )
+            self.assertEqual(svc.app_store.get_checkpoint(sid, key)["summary"], "")
+
+        asyncio.run(run())
+
+
+class DreamPaginationTestCase(ServiceFixtureMixin, unittest.TestCase):
+    """P1-2：dream 只推进本次实际纳入预算的最旧消息页。"""
+
+    def test_dream_backlog_over_50000_chars_continues_from_exact_boundary_next_time(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["dream_source_hard_limit_chars"] = "50000"
+            svc.config["long_memory_extract_enabled"] = False
+            sid = "telegram:dream-pages"
+            key = svc._context_character_key(sid)
+            messages: list[dict[str, str]] = []
+            for index in range(30):
+                user_marker = "EARLY" if index == 0 else "LATE" if index == 29 else f"U{index}"
+                messages.extend([
+                    {"role": "user", "content": user_marker + "-" + "u" * 1000},
+                    {"role": "assistant", "content": f"A{index}-" + "a" * 1000},
+                ])
+            ids = svc.app_store.append_messages(sid, key, messages)
+            sources: list[str] = []
+
+            async def write_diary(_sid, _date, source_text, existing_diary="", **_kwargs):
+                sources.append(source_text)
+                return (existing_diary + "\n梦境页").strip()
+
+            svc.write_character_checkpoint = lambda *args, **kwargs: Path("fake-checkpoint.json")
+            svc._write_dream_diary = write_diary
+            svc._organize_memories_after_dream = AsyncMock()
+            svc._update_life_plan_after_dream = AsyncMock()
+            svc._generate_character_history_summary = AsyncMock()
+            svc._run_context_checkpoint = AsyncMock()
+
+            now = datetime(2026, 7, 20, tzinfo=timezone.utc)
+            await svc._dream_once(sid, key, now, reason="manual")
+            first_boundary = int(svc.app_store.get_context_meta(sid, key)["last_dream_message_id"])
+
+            self.assertGreater(first_boundary, 0)
+            self.assertLess(first_boundary, ids[-1])
+            self.assertIn("EARLY-", sources[0])
+            self.assertNotIn("LATE-", sources[0])
+
+            await svc._dream_once(sid, key, now, reason="manual")
+            final_boundary = int(svc.app_store.get_context_meta(sid, key)["last_dream_message_id"])
+
+            self.assertEqual(final_boundary, ids[-1])
+            self.assertNotIn("EARLY-", sources[1])
+            self.assertIn("LATE-", sources[1])
+            diary = svc.app_store.recent_diaries(sid, key, limit=1)[0]
+            self.assertEqual(diary["from_message_id"], ids[0])
+            self.assertEqual(diary["to_message_id"], ids[-1])
+
+        asyncio.run(run())
+
+
 class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
     """TODO #9.5: dream 记忆整理测试 — manual 记忆不被 update/delete。"""
 

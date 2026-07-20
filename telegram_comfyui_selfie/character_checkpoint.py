@@ -398,7 +398,13 @@ class CharacterCheckpointMixin:
                 source_until_id = int(checkpoint.get("source_until_id") or 0)
             except (TypeError, ValueError):
                 source_until_id = 0
-            self.app_store.upsert_checkpoint(session_id, character_key, summary, source_until_id)
+            self.app_store.upsert_checkpoint(
+                session_id,
+                character_key,
+                summary,
+                source_until_id,
+                allow_regression=True,
+            )
             session_schema.set_checkpoint_summary(state, summary)
             session_schema.set_checkpoint_message_id(state, source_until_id)
             checkpoint_replaced = True
