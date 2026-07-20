@@ -86,6 +86,7 @@ STATE_SCHEMA: dict[str, Field] = {
     "ntr_affection_reset": Field(G),  # 动态写入，不进默认表
     "frozen": Field(G, default=False),
     "frozen_at": Field(G, default=0),
+    "web_hidden": Field(G, default=False),
     # —— session box：会话全局字段的嵌套容器（非破坏共存，保留上方 G 字段注册）——
     "session": Field(G, default={
         "last_interaction": 0,
@@ -106,6 +107,7 @@ STATE_SCHEMA: dict[str, Field] = {
         "ntr_affection_reset": False,
         "frozen": False,
         "frozen_at": 0,
+        "web_hidden": False,
     }),
 
     # —— 角色配置：custom_* 身份/人设/外貌设定 ——
@@ -1341,6 +1343,15 @@ def get_frozen_at(state):
 
 def set_frozen_at(state, value):
     _session_set(state, "frozen_at", float(value or 0))
+
+
+# ── Web 会话可见性 ──
+
+def get_web_hidden(state):
+    return bool(_session_get(state, "web_hidden"))
+
+def set_web_hidden(state, value):
+    _session_set(state, "web_hidden", bool(value))
 
 
 # ── 容器（返回 live 对象，扁平与盒绑同一引用）──

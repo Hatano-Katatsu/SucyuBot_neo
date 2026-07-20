@@ -33,6 +33,8 @@ telegram_comfyui_selfie/
 ├── llm_runtime.py           # 模型 profile、LLM HTTP 调用、用量与调试日志
 ├── state_runtime.py         # 配置、状态迁移、会话访问与活动日志
 ├── task_runtime.py          # 后台任务 registry、作用域取消、停机排空与失败退避
+├── deletion_runtime.py      # 角色/会话统一删除事务、文件隔离回滚与缓存清理
+├── character_artifacts.py   # 角色头像等文件路径的安全单一来源
 ├── appearance_runtime.py    # 画风、稳定外观、衣柜状态与换装工具
 ├── defaults.py              # 默认配置
 ├── commands.py              # Telegram 命令处理
@@ -94,6 +96,7 @@ telegram_comfyui_selfie/
 - 手动记忆不可被自动整理删除。自动提取可通过配置关闭，但角色历史总结与 dream 仍可独立工作。
 - 增量整理允许只调整重要性；只有记忆显著超限才执行全量重写。重写失败时不得先删除旧记忆。
 - `character_card.py` 是角色卡字段单一来源。角色切换必须保存并恢复该角色的上下文、衣柜、地点和照片历史。
+- Telegram 与 Web 删除角色必须共用 `delete_character()`；彻底删除会话必须共用 `delete_session()`，先停稳作用域任务，再以单事务清库并清理检查点、头像和缓存。Web“隐藏”不得删除业务数据，彻底删除必须校验完整 session_id 二次确认。
 - dream、checkpoint、记忆与角色历史必须保持视角：User 是人类用户，Assistant/第一人称“我”是 bot 角色。
 
 ## 外观、衣柜与纯良度

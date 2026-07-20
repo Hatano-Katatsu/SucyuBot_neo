@@ -306,6 +306,8 @@ class ServiceStateMixin:
     def _write_state(self):
         """将所有脏会话写入 SQLite（替代旧版全量 JSON 写入）。"""
         for session_id in self._dirty_sessions:
+            if getattr(self, "_session_deletion_in_progress", lambda _sid: False)(session_id):
+                continue
             state = self.sessions.get(session_id)
             if state is not None:
                 self.app_store.save_session_state(session_id, state)
@@ -313,7 +315,11 @@ class ServiceStateMixin:
         self._last_state_write = time.time()
 
     def _mark_dirty(self, session_id: str):
-        if session_id:
+        if session_id and not getattr(
+            self,
+            "_session_deletion_in_progress",
+            lambda _sid: False,
+        )(session_id):
             self._dirty_sessions.add(session_id)
 
     def _flush_sessions(self, force=False):
@@ -326,6 +332,9 @@ class ServiceStateMixin:
 
     def _save_session_state(self, session_id: str, state: dict[str, Any]):
         if not session_id:
+            return
+        if getattr(self, "_session_deletion_in_progress", lambda _sid: False)(session_id):
+            logger.warning("忽略删除事务期间的会话状态写回: %s", session_id)
             return
         self.sessions[session_id] = state
         self.app_store.save_session_state(session_id, state)

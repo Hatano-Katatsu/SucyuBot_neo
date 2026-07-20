@@ -15,6 +15,11 @@ from . import prompt_intake
 from . import session_schema
 from .command_aliases import resolve_command_alias
 from .defaults import INIT_GUIDE, MENU_BODY, MENU_TOPICS, MENU_TOPIC_ALIASES, OC_CREATE_HELP, SCENES, WEEKDAY_NAMES
+from .deletion_runtime import (
+    DeletionBusyError,
+    DeletionForbiddenError,
+    DeletionNotFoundError,
+)
 from .memory import format_memory_lines
 from .model_security import validate_public_model_base_url
 
@@ -2062,38 +2067,20 @@ class CommandHandlersMixin:
             await self.send_message(chat_id, f"已载入角色 {sub_arg}。")
             return
         if sub == "delete" and sub_arg:
-            if sub_arg == (self._default_character_payload().get("id") or ""):
+            is_current = (session_schema.get_character_value(state, "custom_character", "") or "") == sub_arg
+            try:
+                await self.delete_character(session_id, sub_arg)
+            except DeletionForbiddenError:
                 await self.send_message(chat_id, "系统默认角色不可删除。")
                 return
-            if sub_arg not in saved:
+            except DeletionNotFoundError:
                 await self.send_message(chat_id, f"未找到角色 {sub_arg}。")
                 return
-            del saved[sub_arg]
-            if hasattr(self, "delete_life_plan"):
-                self.delete_life_plan(session_id, sub_arg)
-            # 删的若是当前角色，必须同步清空当前角色态：否则下次 _snapshot_character（load/
-            # 切换/create_oc/设定角色都会触发）会用 state["custom_character"] 把刚删的角色重新
-            # 写回 saved_characters，表现为"删了又出现"。这里只复用字段清理原语，不动其它角色。
-            is_current = (session_schema.get_character_value(state, "custom_character", "") or "") == sub_arg
-            note = ""
-            contexts = session_schema.get_character_contexts(state)
-            if isinstance(contexts, dict):
-                contexts.pop(sub_arg, None)
-            if is_current:
-                for key in SESSION_CUSTOM_RESET_KEYS:
-                    session_schema.set_character_value(state, key, "")
-                session_schema.set_outfit(state, "")
-                session_schema.set_wardrobe(state, {})
-                session_schema.set_closet(state, {})
-                session_schema.clear_public_fallback_outfit(state)
-                session_schema.clear_nudity(state)
-                session_schema.set_character_value(state, "persona_user_set", False)
-                session_schema.set_character_value(state, "purity", None)
-                session_schema.set_character_value(state, "purity_user_set", False)
-                self._clear_conversation_context(state)
-                self._ulog(session_id, "DELETE", f"删除当前角色 {sub_arg} 并回退全局默认")
-                note = "\n当前角色已回退到全局默认。"
-            self._save_session_state(session_id, state)
+            except DeletionBusyError:
+                await self.send_message(chat_id, "角色仍有任务未停止，请稍后重试删除。")
+                return
+            note = "\n当前角色已回退到全局默认。" if is_current else ""
+            self._ulog(session_id, "DELETE", f"删除角色 {sub_arg}" + (" 并回退全局默认" if is_current else ""))
             await self.send_message(chat_id, f"已删除角色 {sub_arg}。{note}")
             return
         if sub in ("load", "delete"):

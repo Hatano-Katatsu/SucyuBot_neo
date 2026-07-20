@@ -4,6 +4,7 @@ const state = {
   config: null,
   secretPresent: {},
   sessions: [],
+  showHiddenSessions: false,
   selectedSession: null,
   selectedCharacter: null,
   characterData: null,
@@ -312,7 +313,10 @@ async function loadAll() {
   });
 
   // 管理员才请求 /api/config（非 admin 调用会 403）
-  const tasks = [api("/api/status"), api("/api/sessions")];
+  const sessionListPath = isAdmin && state.showHiddenSessions
+    ? "/api/sessions?include_hidden=1"
+    : "/api/sessions";
+  const tasks = [api("/api/status"), api(sessionListPath)];
   if (isAdmin) tasks.push(api("/api/config"));
   const results = await Promise.all(tasks);
   const status = results[0];
@@ -365,10 +369,14 @@ function renderSessionSelector() {
     if (state.selectedSession !== fixedSid) {
       state.selectedSession = fixedSid;
     }
+    updateSessionActionButtons();
     return;
   }
   select.hidden = false;
   fixed.hidden = true;
+  if (state.selectedSession && !state.sessions.some(item => item.session_id === state.selectedSession)) {
+    state.selectedSession = null;
+  }
   // 管理员默认选中第一个会话，避免角色页空白
   if (!state.selectedSession && state.sessions.length) {
     state.selectedSession = state.sessions[0].session_id;
@@ -377,18 +385,22 @@ function renderSessionSelector() {
   state.sessions.forEach(item => {
     const selected = item.session_id === state.selectedSession ? " selected" : "";
     const frozenTag = item.frozen ? " [已冻结]" : "";
-    const label = item.character ? `${item.character}${frozenTag} · ${item.chat_id}` : `${String(item.chat_id || item.session_id)}${frozenTag}`;
+    const hiddenTag = item.hidden ? " [已隐藏]" : "";
+    const label = item.character
+      ? `${item.character}${frozenTag}${hiddenTag} · ${item.chat_id}`
+      : `${String(item.chat_id || item.session_id)}${frozenTag}${hiddenTag}`;
     opts.push(`<option value="${escapeHtml(item.session_id)}"${selected}>${escapeHtml(label)}</option>`);
   });
   select.innerHTML = opts.join("");
   // 确保选中状态与 state 一致
   select.value = state.selectedSession || "";
+  updateSessionActionButtons();
 }
 
 async function selectSession(sessionId) {
-  if (!sessionId) return;
-  state.selectedSession = sessionId;
+  state.selectedSession = sessionId || null;
   renderSessionSelector();
+  if (!sessionId) return;
   loadFeedbackBoard();
   if (document.querySelector('.nav[data-view="characters"].active')) {
     await loadCharacterPage();
@@ -560,6 +572,24 @@ function formValues(form) {
   const values = {};
   new FormData(form).forEach((value, key) => { values[key] = value; });
   return values;
+}
+
+function updateSessionActionButtons() {
+  const current = state.sessions.find(item => item.session_id === state.selectedSession);
+  const hideButton = $("#session-hide-btn");
+  const purgeButton = $("#session-purge-btn");
+  const toggleButton = $("#session-hidden-toggle");
+  if (hideButton) {
+    hideButton.disabled = !current;
+    hideButton.textContent = current?.hidden ? "恢复显示" : "隐藏";
+    hideButton.title = current?.hidden
+      ? "恢复当前会话在默认列表中的显示"
+      : "隐藏当前会话但保留角色、记忆、聊天和文件";
+  }
+  if (purgeButton) purgeButton.disabled = !current;
+  if (toggleButton) {
+    toggleButton.textContent = state.showHiddenSessions ? "收起隐藏" : "显示隐藏";
+  }
 }
 
 function renderChatIdOptions() {
@@ -765,6 +795,69 @@ async function initEvents() {
   document.addEventListener("click", handleLifePlanAction);
   $all(".nav").forEach(btn => btn.onclick = () => switchView(btn.dataset.view));
   $("#refresh-btn").onclick = () => loadAll().then(() => toast("已刷新"));
+  $("#session-hidden-toggle").onclick = async (event) => {
+    const btn = event.currentTarget;
+    state.showHiddenSessions = !state.showHiddenSessions;
+    setBusy(btn, true);
+    try {
+      await loadAll();
+      toast(state.showHiddenSessions ? "已显示隐藏会话" : "已收起隐藏会话");
+    } catch (err) {
+      state.showHiddenSessions = !state.showHiddenSessions;
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+      updateSessionActionButtons();
+    }
+  };
+  $("#session-hide-btn").onclick = async (event) => {
+    const current = state.sessions.find(item => item.session_id === state.selectedSession);
+    if (!current) return;
+    const mode = current.hidden ? "unhide" : "hide";
+    const verb = current.hidden ? "恢复显示" : "隐藏";
+    if (!window.confirm(`${verb}会话 ${current.session_id}？\n\n隐藏不会删除角色、记忆、聊天或文件。`)) return;
+    const btn = event.currentTarget;
+    setBusy(btn, true);
+    try {
+      await api(`/api/sessions/${encodeURIComponent(current.session_id)}`, {
+        method: "DELETE",
+        body: { mode },
+      });
+      if (mode === "hide" && !state.showHiddenSessions) state.selectedSession = null;
+      await loadAll();
+      toast(mode === "hide" ? "会话已隐藏，数据仍保留" : "会话已恢复显示");
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+    }
+  };
+  $("#session-purge-btn").onclick = async (event) => {
+    const sessionId = state.selectedSession;
+    if (!sessionId) return;
+    if (!window.confirm(`彻底删除会话 ${sessionId}？\n\n角色、记忆、聊天、检查点、日记、生活线、头像和日志都会被删除，且无法恢复。`)) return;
+    const typed = window.prompt(`请输入完整 session_id 进行二次确认：\n${sessionId}`, "");
+    if (typed === null) return;
+    if (typed !== sessionId) {
+      toast("session_id 不匹配，已取消彻底删除", "error");
+      return;
+    }
+    const btn = event.currentTarget;
+    setBusy(btn, true);
+    try {
+      await api(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+        method: "DELETE",
+        body: { mode: "purge", confirm: typed },
+      });
+      state.selectedSession = null;
+      await loadAll();
+      toast("会话及全部业务数据已彻底删除");
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+    }
+  };
   $("#restart-btn").onclick = async () => {
     if (!confirm("确认重启服务？\n\n服务将短暂中断后自动恢复。")) return;
     const btn = $("#restart-btn");

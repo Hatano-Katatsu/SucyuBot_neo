@@ -3,33 +3,18 @@ from __future__ import annotations
 import copy
 import re
 import time
-from pathlib import Path
 from typing import Any
 
 from aiohttp import web
 
 from . import session_schema
+from .character_artifacts import (
+    avatar_file_path as _avatar_file_path,
+    avatar_public_marker as _avatar_public_marker,
+    safe_avatar_part as _safe_avatar_part,
+)
 from .webui_characters import _character_for_avatar, character_operation_lock
 from .webui_common import json_error, json_ok, service_from, session_allowed
-
-
-def _safe_avatar_part(value: str) -> str:
-    text = str(value or "").strip().replace("..", "_")
-    return re.sub(r"[\s/\\:*?\"<>|]+", "_", text).strip("._") or "unknown"
-
-
-def _avatar_file_path(service, session_id: str, character_id: str) -> Path:
-    session_part = _safe_avatar_part(session_id)
-    character_part = _safe_avatar_part(character_id)
-    return service.state_path.parent / "avatars" / session_part / f"{character_part}.png"
-
-
-def _avatar_public_marker(service, session_id: str, character_id: str) -> str:
-    try:
-        rel = _avatar_file_path(service, session_id, character_id).relative_to(service.state_path.parent)
-        return rel.as_posix()
-    except Exception:
-        return f"avatars/{_safe_avatar_part(session_id)}/{_safe_avatar_part(character_id)}.png"
 
 
 def _avatar_scene_from_character(character: dict[str, Any]) -> tuple[str, str]:

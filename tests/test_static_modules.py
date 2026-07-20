@@ -107,6 +107,16 @@ class StaticModuleBoundaryTestCase(unittest.TestCase):
         self.assertIn('params.set("before", String(before))', admin_logs)
         self.assertIn("data.next_before", admin_logs)
 
+    def test_session_hide_and_purge_are_distinct_confirmed_actions(self):
+        index = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+        app = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="session-hide-btn"', index)
+        self.assertIn('id="session-purge-btn"', index)
+        self.assertIn('body: { mode }', app)
+        self.assertIn('body: { mode: "purge", confirm: typed }', app)
+        self.assertIn("请输入完整 session_id 进行二次确认", app)
+
 
 if __name__ == "__main__":
     unittest.main()

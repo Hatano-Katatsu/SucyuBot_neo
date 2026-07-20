@@ -9,6 +9,11 @@ from aiohttp import web
 from . import appearance as appearance_rules
 from . import session_schema
 from .commands import SESSION_CUSTOM_RESET_KEYS
+from .deletion_runtime import (
+    DeletionBusyError,
+    DeletionForbiddenError,
+    DeletionNotFoundError,
+)
 from .webui_common import (
     character_value,
     json_error,
@@ -408,40 +413,19 @@ async def api_delete_character(request: web.Request):
         return json_error("无权访问此会话", status=403)
     character_id = request.match_info["character_id"]
     async with character_operation_lock(service, sid):
-        return _delete_character_locked(service, sid, character_id)
-
-
-def _delete_character_locked(service, sid: str, character_id: str):
-    default_id = service._default_character_payload().get("id") or ""
-    state = service._get_session_state(sid)
-    saved = session_schema.get_saved_characters(state)
-    existing = saved.get(character_id)
-    is_default_card = character_id == default_id and (
-        not isinstance(existing, dict) or existing.get("is_default") is True
-    )
-    if is_default_card:
-        return json_error("系统默认角色不能删除", status=403)
-    saved.pop(character_id, None)
-    character_key = service._web_character_checkpoint_key(sid, character_id) if hasattr(service, "_web_character_checkpoint_key") else character_id
-    if hasattr(service, "memory") and hasattr(service.memory, "delete_character_memories"):
-        service.memory.delete_character_memories(sid, character_key)
-    if hasattr(service, "app_store") and hasattr(service.app_store, "delete_character_runtime_data"):
-        service.app_store.delete_character_runtime_data(sid, character_key)
-    if character_value(state, "custom_character", "") == character_id:
-        for key in SESSION_CUSTOM_RESET_KEYS:
-            session_schema.set_character_value(state, key, "")
-        session_schema.set_outfit(state, "")
-        session_schema.set_wardrobe(state, {})
-        session_schema.set_closet(state, {})
-        session_schema.clear_public_fallback_outfit(state)
-        session_schema.clear_nudity(state)
-        session_schema.set_character_value(state, "persona_user_set", False)
-        session_schema.set_character_value(state, "purity", None)
-        session_schema.set_character_value(state, "purity_user_set", False)
-        if hasattr(service, "_clear_conversation_context"):
-            service._clear_conversation_context(state)
-    service._save_session_state(sid, state)
-    return json_ok({"active_id": character_value(state, "custom_character", "") or "", "characters": saved})
+        try:
+            result = await service.delete_character(sid, character_id)
+        except DeletionForbiddenError as exc:
+            return json_error(str(exc), status=403)
+        except DeletionNotFoundError as exc:
+            return json_error(str(exc), status=404)
+        except DeletionBusyError as exc:
+            return json_error(str(exc), status=409)
+    return json_ok({
+        "active_id": result["active_id"],
+        "characters": result["characters"],
+        "deleted": result["deleted"],
+    })
 
 
 async def api_activate_character(request: web.Request):

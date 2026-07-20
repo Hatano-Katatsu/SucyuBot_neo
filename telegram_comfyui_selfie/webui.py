@@ -14,6 +14,10 @@ from aiohttp import web
 from . import session_schema
 from . import appearance as appearance_rules
 from .command_aliases import COMMAND_ALIAS_GROUPS
+from .deletion_runtime import (
+    DeletionBusyError,
+    DeletionNotFoundError,
+)
 from .webui_characters import (
     PUBLIC_FALLBACK_CLOSET_PREFIX,
     SESSION_CUSTOM_RESET_KEYS,
@@ -482,12 +486,28 @@ async def write_feedback_text(path: Path, text: str) -> None:
     await asyncio.to_thread(_write)
 
 
-def visible_sessions(request: web.Request) -> list[tuple[str, dict[str, Any]]]:
+def visible_sessions(
+    request: web.Request,
+    *,
+    include_hidden: bool = False,
+) -> list[tuple[str, dict[str, Any]]]:
     service = service_from(request)
     if _is_admin(request):
-        return list(service.sessions.items())
-    user_id = (request.get("web_auth") or {}).get("user_id", "")
-    return [(sid, state) for sid, state in service.sessions.items() if service._user_id_for_session(sid) == user_id]
+        visible = list(service.sessions.items())
+    else:
+        user_id = (request.get("web_auth") or {}).get("user_id", "")
+        visible = [
+            (sid, state)
+            for sid, state in service.sessions.items()
+            if service._user_id_for_session(sid) == user_id
+        ]
+    if include_hidden:
+        return visible
+    return [
+        (sid, state)
+        for sid, state in visible
+        if not session_schema.get_web_hidden(state)
+    ]
 
 
 def session_summary(service, session_id: str, state: dict[str, Any]) -> dict[str, Any]:
@@ -508,6 +528,7 @@ def session_summary(service, session_id: str, state: dict[str, Any]) -> dict[str
         "photos": len(session_schema.get_sent_photos_history(state)),
         "saved_characters": len(session_schema.get_saved_characters(state)),
         "frozen": session_schema.get_frozen(state),
+        "hidden": session_schema.get_web_hidden(state),
     }
 
 
@@ -1069,7 +1090,13 @@ async def api_commands(request: web.Request):
 
 async def api_sessions(request: web.Request):
     service = service_from(request)
-    sessions = [session_summary(service, sid, state) for sid, state in visible_sessions(request)]
+    include_hidden = _is_admin(request) and parse_bool(
+        request.query.get("include_hidden", False)
+    )
+    sessions = [
+        session_summary(service, sid, state)
+        for sid, state in visible_sessions(request, include_hidden=include_hidden)
+    ]
     return json_ok({"sessions": sessions})
 
 
@@ -1215,13 +1242,43 @@ def _update_session_locked(service, sid: str, payload: dict[str, Any]):
 async def api_delete_session(request: web.Request):
     service = service_from(request)
     sid = request.match_info["session_id"]
-    if sid not in service.sessions:
-        return json_error("会话不存在", status=404)
     if not _session_allowed(request, sid):
         return json_error("无权删除此会话", status=403)
-    service.sessions.pop(sid, None)
-    service.app_store.delete_session_state(sid)
-    return json_ok()
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_error("请提交 JSON 并明确选择 hide、unhide 或 purge")
+    if not isinstance(payload, dict):
+        return json_error("会话操作参数必须是 JSON 对象")
+    mode = str(payload.get("mode") or "").strip().lower()
+    if mode in ("hide", "unhide"):
+        async with character_operation_lock(service, sid):
+            try:
+                state = service.set_session_hidden(sid, mode == "hide")
+            except DeletionNotFoundError as exc:
+                return json_error(str(exc), status=404)
+        return json_ok({
+            "mode": mode,
+            "session": session_summary(service, sid, state),
+        })
+    if mode != "purge":
+        return json_error("mode 只允许 hide、unhide 或 purge")
+    if str(payload.get("confirm") or "") != sid:
+        return json_error("彻底删除需要输入完整 session_id 二次确认")
+    purge_identity = parse_bool(payload.get("purge_identity", False))
+    if purge_identity and not _is_admin(request):
+        return json_error("只有管理员可以同时删除 Web 身份与模型配置", status=403)
+    async with character_operation_lock(service, sid):
+        try:
+            result = await service.delete_session(
+                sid,
+                purge_identity=purge_identity,
+            )
+        except DeletionNotFoundError as exc:
+            return json_error(str(exc), status=404)
+        except DeletionBusyError as exc:
+            return json_error(str(exc), status=409)
+    return json_ok({"mode": "purge", **result})
 
 
 async def api_memories(request: web.Request):

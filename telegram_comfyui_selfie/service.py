@@ -28,6 +28,7 @@ from .appearance_runtime import (
 )
 from .character_checkpoint import CharacterCheckpointMixin
 from .defaults import DEFAULT_CONFIG
+from .deletion_runtime import DeletionRuntimeMixin
 from .image_planning import VALID_VIEWS, plan_roleplay_image
 from .image_state_runtime import ImageStateRuntimeMixin
 from .memory import LongTermMemoryStore
@@ -95,6 +96,7 @@ class TelegramComfyUIService(
     AppearanceRuntimeMixin,
     ImageStateRuntimeMixin,
     TaskRuntimeMixin,
+    DeletionRuntimeMixin,
     TelegramUpdateRuntimeMixin,
     TelegramIOMixin,
     CharacterCheckpointMixin,
@@ -135,6 +137,7 @@ class TelegramComfyUIService(
         self._bot_username = ""
         self._offset = 0
         self._init_task_runtime()
+        self._init_deletion_runtime()
         self._init_telegram_update_runtime()
         self._bot_tasks: list[asyncio.Task] = []
         self._checkpoint_tasks: dict[str, asyncio.Task] = {}

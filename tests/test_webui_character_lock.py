@@ -59,6 +59,18 @@ class WebUICharacterLockTestCase(ServiceFixtureMixin, unittest.TestCase):
                 return original_save(session_id, current)
 
             svc._save_session_state = save_with_lock
+            delete_lock_states = []
+            original_delete_character = svc.delete_character
+
+            async def delete_with_lock(session_id, character_id, **kwargs):
+                delete_lock_states.append(lock.locked())
+                return await original_delete_character(
+                    session_id,
+                    character_id,
+                    **kwargs,
+                )
+
+            svc.delete_character = delete_with_lock
 
             update_request = self._request(
                 app,
@@ -79,7 +91,7 @@ class WebUICharacterLockTestCase(ServiceFixtureMixin, unittest.TestCase):
             )
             delete_response = await api_delete_character(delete_request)
             self.assertTrue(json.loads(delete_response.text)["ok"])
-            self.assertTrue(save_lock_states[-1])
+            self.assertTrue(delete_lock_states[-1])
 
             observed = {}
 
