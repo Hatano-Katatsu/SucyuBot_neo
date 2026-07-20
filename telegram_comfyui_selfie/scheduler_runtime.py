@@ -257,18 +257,12 @@ class SchedulerRuntimeMixin:
     async def _llm_write_scene(self, mode, weather, weekday, time_period, recent_chat=None, session_id="", now=None, weather_data=None):
         from .image_planning import plan_roleplay_image
         if not self.has_llm_config("image", session_id):
-            return None, None, None, None, None
+            return None
         plan = await plan_roleplay_image(
             self, session_id, mode=mode or "normal",
             weather_data=weather_data, now=now,
         )
-        return (
-            plan.get("scene") or "",
-            plan.get("caption") or "",
-            plan.get("new_appearance_tags") or "",
-            plan.get("view") or "",
-            plan.get("aspect_ratio") or "",
-        )
+        return plan
     # ---------------------------------------------------------------------
     # Weather / scheduler
     # ---------------------------------------------------------------------
@@ -1555,7 +1549,7 @@ class SchedulerRuntimeMixin:
                         )
                 except Exception:
                     logger.debug("world route log failed for scheduler push", exc_info=True)
-            scene, caption, new_app, view, orientation = await self._llm_write_scene(
+            plan = await self._llm_write_scene(
                 mode,
                 weather,
                 WEEKDAY_NAMES[local_dt.weekday()],
@@ -1565,16 +1559,36 @@ class SchedulerRuntimeMixin:
                 now=local_dt,
                 weather_data=w,
             )
-            if not scene:
+            if not plan or not plan.get("scene"):
                 self._ulog(session_id, "PUSH", f"推送规划为空 mode={mode}")
                 return False
-            english = await self._translate_to_tags(scene, session_id=session_id, view=view)
+            scene = plan.get("scene") or ""
+            caption = plan.get("caption") or ""
+            new_app = plan.get("new_appearance_tags") or ""
+            view = plan.get("view") or ""
+            orientation = plan.get("aspect_ratio") or ""
+            is_intimate = bool(plan.get("is_intimate"))
+            partner_in_frame = bool(plan.get("partner_in_frame"))
+            device_in_frame = bool(plan.get("device_in_frame"))
+            clothing_off = plan.get("clothing_off") or ""
+            english = await self._translate_to_tags(
+                scene,
+                session_id=session_id,
+                view=view,
+                is_intimate=is_intimate,
+                free_composition=False,
+            )
             ok, imgs, err = await self._do_generate(
                 english,
                 is_ntr=(mode == "ntr"),
                 session_id=session_id,
                 one_shot_appearance=new_app or "",
                 orientation=orientation or "",
+                is_intimate=is_intimate,
+                partner_in_frame=partner_in_frame,
+                device_in_frame=device_in_frame,
+                clothing_off=clothing_off,
+                view=view,
             )
             if ok and imgs:
                 await self.send_photo(chat_id, imgs[0], caption or "")

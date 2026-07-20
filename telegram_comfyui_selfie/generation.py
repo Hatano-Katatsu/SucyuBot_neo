@@ -40,6 +40,7 @@ VISIBLE_PHONE_NEGATIVES = (
 )
 BOTTOM_EXPOSURE_NEGATIVES = ("no panties", "no underwear", "bottomless", "crotchless")
 ANIMATOOL_NLTAG_FIELDS = ("nltag", "nl_tag", "nl_tags", "tags")
+VALID_VIEWS = {"selfie", "mirror", "pov", "third", "portrait"}
 
 
 def _remember_generated_nltag(service: Any, session_id: str, nltag: str):
@@ -683,6 +684,8 @@ SEX_SCENE_KEYWORDS = [
     "sex", "make love", "penetration", "penetrating", "vaginal", "missionary", "doggystyle",
     "cowgirl", "girl on top", "straddling", "straddle", "riding", "grinding", "thrust",
     "thrusting", "squelch", "impaled", "insertion", "humping", "creampie", "naked together",
+    "fellatio", "blowjob", "oral", "cunnilingus", "handjob", "paizuri", "footjob",
+    "fingering", "orgasm", "climax", "mating press", "squirting",
 ]
 # 性爱场景里明确提到性器/体液时，把对应 danbooru tag 补进最终正向——
 # 自然语言长句里的提及会被生图模型稀释，tag 级补强才能真正画出来。
@@ -692,6 +695,10 @@ _EXPLICIT_SEXUAL_TAG_MAP = (
     (re.compile(r"\b(?:pussy|vagina|vaginal|clitoris|clit|labia|cervix|womb|uterus)\b", re.IGNORECASE), "pussy"),
     (re.compile(r"\b(?:anus|anal|asshole|butthole|rectum)\b", re.IGNORECASE), "anus"),
     (re.compile(r"\b(?:cum|semen|creampie|ejaculat\w*|sperm)\b", re.IGNORECASE), "cum"),
+    (re.compile(r"\b(?:fellatio|blowjob)\b", re.IGNORECASE), "fellatio"),
+    (re.compile(r"\b(?:orgasm|climax|cumming)\b", re.IGNORECASE), "orgasm"),
+    (re.compile(r"\b(?:pussy juice|love juice|wetness)\b", re.IGNORECASE), "pussy juice"),
+    (re.compile(r"\b(?:squirt\w*|squirting)\b", re.IGNORECASE), "squirting"),
     # 交合的委婉说法（point of union / joined / intercourse / penetration）：补 "sex" tag，
     # 否则翻译层把性器委婉化后，"清晰可见的交合" 不一定画得出来。
     (re.compile(r"\b(?:point of union|join(?:ed|ing|s)?|intercourse|copulation|lovemaking|mating|coupling|penetrat\w+|impaled)\b", re.IGNORECASE), "sex"),
@@ -1337,6 +1344,7 @@ def build_prompt(
     partner_in_frame: bool = False,
     device_in_frame: bool = False,
     clothing_off: str = "",
+    view: str = "",
 ) -> tuple[str, str]:
     raw_scene_desc = scene_desc
     state = service._get_session_state(session_id) if session_id else {}
@@ -1400,7 +1408,7 @@ def build_prompt(
     device_present = device_in_frame or bool(DEVICE_SCENE_RE.search(scene_desc))
     scene_has_sex_keyword = any(k in scene_lower for k in sex_keywords)
     is_partner_scene = scene_has_partner and not is_ntr_scene
-    is_sex_scene = is_intimate or scene_has_sex_keyword
+    is_sex_scene = is_intimate or scene_has_sex_keyword or bool(explicit_sex_tags)
 
     quality = "masterpiece, best quality, highres, absurdres, newest, year 2025, anime coloring, clean lineart, soft cel shading, detailed illustration"
     safety_tag = str(safety.get("tag") or "").strip()
@@ -1438,7 +1446,9 @@ def build_prompt(
     elif not male and "male" not in neg.lower():
         neg += ", male, boy, man"
 
-    prompt_view = _infer_prompt_view(scene_desc)
+    prompt_view = (view or "").strip().lower()
+    if prompt_view not in VALID_VIEWS:
+        prompt_view = _infer_prompt_view(scene_desc)
     # 角色背对相机/在相机背后（从背后环抱面向屏幕的用户等）：POV 看不到她，这类同框场景应走
     # 第三人称双人取景，而非贴身 POV。此处与规划器的几何闸门同源，覆盖无规划器/规划器漏判路径。
     partner_behind = is_partner_scene and not is_ntr_scene and _scene_breaks_pov_facing(scene_desc)
@@ -1471,7 +1481,8 @@ def build_prompt(
                 if not re.search(r"\b1boy\b", scene_desc, re.IGNORECASE):
                     scene_desc = f"{subjects}, {scene_desc}".strip(", ")
             # 取景清空后若已无 POV/对视开头，补一个 POV 取景，确保是“贴身视角”而非无主语近景。
-            elif not re.search(r"first-person pov|looking at a (?:woman|man)", scene_desc, re.IGNORECASE):
+            # 外部显式指定 third/portrait/selfie/mirror 时尊重该视角，不再强制 POV。
+            elif view not in {"third", "portrait", "selfie", "mirror"} and not re.search(r"first-person pov|looking at a (?:woman|man)", scene_desc, re.IGNORECASE):
                 scene_desc = f"{view_opener('pov', 'boy' if male else 'girl')}, {scene_desc}".strip(", ")
             if is_partner_scene:
                 scene_desc = re.sub(r"\bsolo\b,?\s*", "", scene_desc)
@@ -1482,7 +1493,10 @@ def build_prompt(
         user_gender = service._get_user_gender(session_id) if session_id and hasattr(service, "_get_user_gender") else "male"
         if not is_partner_scene:
             if is_sex_scene:
-                scene_desc += ", off-frame partner, no visible second person, intimate close-up"
+                if explicit_sex_tags:
+                    scene_desc += ", off-frame partner, no visible second person, character full body in frame"
+                else:
+                    scene_desc += ", off-frame partner, no visible second person, intimate close-up"
                 neg = _append_negatives(neg, "full second person", "second body", "duplicate body", "extra face", "unrelated extra person")
         elif user_gender == "female":
             # 用户是女性（百合/女用户）：只有明确入画时才画女性局部，并放开“双女”负向。
@@ -1515,7 +1529,10 @@ def build_prompt(
             neg = _remove_negatives(neg, "male", "boy", "man", "1boy")
         else:
             if is_sex_scene:
-                scene_desc += ", partner's hands or arms visible only as required by the pose, character full body in frame"
+                if any(tag in {"penis", "testicles"} for tag in explicit_sex_tags):
+                    scene_desc += ", partial male body visible, male torso, male hands, character full body in frame"
+                else:
+                    scene_desc += ", partner's hands or arms visible only as required by the pose, character full body in frame"
             elif partner_behind:
                 scene_desc += ", partner fully in frame, everyday close interaction"
             else:
@@ -1574,9 +1591,10 @@ def build_prompt(
 
     effective = safety.get("level", purity)
     if purity <= 2:
-        neg = ", ".join(t for t in [x.strip() for x in neg.split(",")] if t.lower() not in {"child", "loli", "censor bar", "mosaic", "pixelated"})
+        # 最露骨档：去掉未成年/儿童向安全底线，但保留 censor bar / mosaic / pixelated 等去马赛克反词。
+        neg = ", ".join(t for t in [x.strip() for x in neg.split(",")] if t.lower() not in {"child", "loli"})
     elif purity <= 7:
-        if effective > 5:
+        if effective > 5 and not is_sex_scene:
             neg += ", nsfw, explicit, naked, nude, sex"
     elif purity <= 9:
         neg += ", nsfw, explicit, naked, nude, sex, suggestive, lewd, ecchi, revealing clothes"
@@ -1856,21 +1874,20 @@ def _build_animatool_quality_meta(slots: PromptSlots | None, workflow: str) -> s
 
 
 def _build_animatool_neg(slots: PromptSlots | None, workflow: str) -> str:
-    """按工作流格式构造 neg 反词。
-
-    turbo_v1/aesthetic_v1：通用反词 + 安全等级反词
-    base：worst quality 等额外反词 + 通用反词 + 安全等级反词
-    """
+    """按工作流格式构造 neg 反词，安全等级按四档对齐。"""
     safety = _animatool_safety_tag(slots)
-    if safety in ("safe", "sensitive"):
-        safety_neg = "nsfw, explicit"
-    else:
-        # 与服务端修复后的 schema 一致：显式场景的反向安全词不再包含 "no mosaic, uncensored"
-        # （负向里压"无码"是双重否定，属于旧服务端 schema 的错误格式残留）。
-        safety_neg = "safe, sensitive, censored, mosaic"
     common_neg = "bad anatomy, bad hands, bad feet, extra fingers, missing fingers, text, watermark, logo"
+    base_extra = "worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, extra toes"
+    if safety == "safe":
+        safety_neg = "nsfw, explicit, sensitive, naked, nude, sex"
+    elif safety == "sensitive":
+        safety_neg = "nsfw, explicit, naked, nude, sex"
+    elif safety == "nsfw":
+        safety_neg = "safe, sensitive, censored, mosaic"
+    else:  # explicit
+        safety_neg = "safe, sensitive, censored, mosaic"
     if workflow == "base":
-        return f"worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, {common_neg}, extra toes, {safety_neg}"
+        return f"{base_extra}, {common_neg}, {safety_neg}"
     return f"{common_neg}, {safety_neg}"
 
 
@@ -2280,6 +2297,7 @@ async def do_generate(
     device_in_frame: bool = False,
     clothing_off: str = "",
     orientation: str = "",
+    view: str = "",
 ) -> tuple[bool, list[bytes], str]:
     async with service._gen_lock:
         service._generating = True
@@ -2287,7 +2305,7 @@ async def do_generate(
             return await do_generate_locked(
                 service, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
                 is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
-                clothing_off=clothing_off, orientation=orientation,
+                clothing_off=clothing_off, orientation=orientation, view=view,
             )
         finally:
             service._generating = False
@@ -2304,12 +2322,13 @@ async def do_generate_locked(
     device_in_frame: bool = False,
     clothing_off: str = "",
     orientation: str = "",
+    view: str = "",
 ) -> tuple[bool, list[bytes], str]:
     ensure_comfy_session(service)
     positive, negative = build_prompt(
         service, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
         is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
-        clothing_off=clothing_off,
+        clothing_off=clothing_off, view=view,
     )
     seed = random.randint(0, 2**63 - 1)
     if session_id and hasattr(service, "_ulog"):

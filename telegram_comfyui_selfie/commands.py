@@ -1410,14 +1410,27 @@ class CommandHandlersMixin:
         weather = f"{w['desc']} {w['temp']} C" if w else "未知"
         time_ctx = self._get_time_context(session_id, now=now, weather=w)
         time_period = time_ctx.get("period") or self._get_time_period(now.hour)
-        scene, caption, new_app, view, orientation = await self._llm_write_scene(
+        plan = await self._llm_write_scene(
             "normal", weather, WEEKDAY_NAMES[now.weekday()], time_period, None, session_id, now=now, weather_data=w
         )
-        if not scene:
+        if not plan or not plan.get("scene"):
             scene, caption = random.choice(SCENES)
+            new_app = ""
+            view = "selfie"
+            orientation = ""
+        else:
+            scene = plan.get("scene") or ""
+            caption = plan.get("caption") or ""
+            new_app = plan.get("new_appearance_tags") or ""
+            view = plan.get("view") or ""
+            orientation = plan.get("aspect_ratio") or ""
         # /自拍 命令明确要求自拍视角，强制 view=selfie，不受场景生成器偶然返回的 third 影响。
         view = "selfie"
-        english = await self._translate_to_tags(scene, session_id=session_id, view=view)
+        is_intimate = bool(plan.get("is_intimate")) if plan else False
+        partner_in_frame = bool(plan.get("partner_in_frame")) if plan else False
+        device_in_frame = bool(plan.get("device_in_frame")) if plan else False
+        clothing_off = plan.get("clothing_off") or "" if plan else ""
+        english = await self._translate_to_tags(scene, session_id=session_id, view=view, is_intimate=is_intimate)
         cancelled = {"value": False}
 
         async def generate_and_send_selfie():
@@ -1426,6 +1439,11 @@ class CommandHandlersMixin:
                 session_id=session_id,
                 one_shot_appearance=new_app or "",
                 orientation=orientation or "",
+                is_intimate=is_intimate,
+                partner_in_frame=partner_in_frame,
+                device_in_frame=device_in_frame,
+                clothing_off=clothing_off,
+                view=view,
             )
             if not ok or not imgs:
                 self._ulog(session_id, "ERROR", f"自拍生图失败: {err}")

@@ -2670,11 +2670,12 @@ class TelegramComfyUIService(
         device_in_frame: bool = False,
         clothing_off: str = "",
         orientation: str = "",
+        view: str = "",
     ) -> tuple[bool, list[bytes], str]:
         return await image_generation.do_generate(
             self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
             is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
-            clothing_off=clothing_off, orientation=orientation,
+            clothing_off=clothing_off, orientation=orientation, view=view,
         )
 
     async def _do_generate_locked(
@@ -2688,11 +2689,12 @@ class TelegramComfyUIService(
         device_in_frame: bool = False,
         clothing_off: str = "",
         orientation: str = "",
+        view: str = "",
     ) -> tuple[bool, list[bytes], str]:
         return await image_generation.do_generate_locked(
             self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
             is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
-            clothing_off=clothing_off, orientation=orientation,
+            clothing_off=clothing_off, orientation=orientation, view=view,
         )
 
     async def _await_protected_image_task(
@@ -2801,7 +2803,7 @@ class TelegramComfyUIService(
         ok, imgs, err = await self._do_generate(
             english, session_id=session_id, one_shot_appearance=new_app or "",
             is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
-            clothing_off=clothing_off, orientation=orientation,
+            clothing_off=clothing_off, orientation=orientation, view=final_view,
         )
         if not ok or not imgs:
             self._ulog(session_id, "ERROR", f"工具生图失败: {err}")
@@ -3447,8 +3449,9 @@ class TelegramComfyUIService(
     async def _push_image_from_text(self, session_id: str, scene: str):
         chat_id = self.chat_id_from_session(session_id)
         try:
-            english = await self._translate_to_tags(scene, session_id=session_id)
-            ok, imgs, err = await self._do_generate(english, session_id=session_id)
+            is_intimate = self._detect_intimate_context(scene)
+            english = await self._translate_to_tags(scene, session_id=session_id, is_intimate=is_intimate)
+            ok, imgs, err = await self._do_generate(english, session_id=session_id, is_intimate=is_intimate)
             if ok and imgs:
                 await self.send_photo(chat_id, imgs[0])
                 self._record_sent_photo(
