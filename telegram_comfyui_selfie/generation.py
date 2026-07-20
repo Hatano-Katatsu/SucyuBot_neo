@@ -1689,30 +1689,79 @@ def build_prompt(
     return positive, neg
 
 
+def _replace_workflow_placeholders(value: Any, replacements: dict[str, str]) -> Any:
+    """只替换已解析工作流中的字符串值，绝不对序列化后的 JSON 做文本手术。"""
+    if isinstance(value, dict):
+        return {key: _replace_workflow_placeholders(item, replacements) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_replace_workflow_placeholders(item, replacements) for item in value]
+    if isinstance(value, str):
+        rendered = value
+        for placeholder, replacement in replacements.items():
+            rendered = rendered.replace(placeholder, replacement)
+        return rendered
+    return value
+
+
 def build_workflow(service: Any, positive: str, negative: str, seed: int) -> dict[str, Any]:
     wf_file = service.config.get("comfyui_workflow_file", "")
     if wf_file:
         try:
             raw = Path(wf_file).read_text(encoding="utf-8")
             wf = json.loads(raw)
+            if not isinstance(wf, dict):
+                raise ValueError("工作流根节点必须是 JSON 对象")
             replacements = {
-                "{{positive}}": positive,
-                "{{negative}}": negative,
+                "{{positive}}": str(positive),
+                "{{negative}}": str(negative),
                 "{{seed}}": str(seed),
                 "{{width}}": str(int(service.config.get("width", "1024"))),
                 "{{height}}": str(int(service.config.get("height", "1024"))),
                 "{{steps}}": str(int(service.config.get("steps", "30"))),
                 "{{cfg}}": str(float(service.config.get("cfg", "4"))),
-                "{{sampler}}": service.config.get("sampler", "er_sde"),
-                "{{scheduler}}": service.config.get("scheduler", "simple"),
+                "{{sampler}}": str(service.config.get("sampler", "er_sde")),
+                "{{scheduler}}": str(service.config.get("scheduler", "simple")),
             }
-            wf_text = json.dumps(wf)
-            for old, new in replacements.items():
-                wf_text = wf_text.replace(old, new)
-            return json.loads(wf_text)
+            return _replace_workflow_placeholders(wf, replacements)
         except Exception as exc:
-            logger.error("自定义工作流加载失败，回退内置工作流: %s", exc)
+            raise RuntimeError(f"自定义 ComfyUI 工作流加载失败: {wf_file}: {exc}") from exc
     return build_anima_workflow(service, positive, negative, seed)
+
+
+def _configured_output_nodes(service: Any) -> set[str] | None:
+    raw = service.config.get("comfyui_output_nodes", service.config.get("comfyui_output_node", ""))
+    if isinstance(raw, (list, tuple, set)):
+        nodes = {str(item).strip() for item in raw if str(item).strip()}
+    else:
+        nodes = {part.strip() for part in re.split(r"[,;\s]+", str(raw or "")) if part.strip()}
+    return nodes or None
+
+
+def _collect_output_images(outputs: Any, output_nodes: set[str] | None = None) -> list[dict[str, Any]]:
+    """从任意 SaveImage/PreviewImage 输出节点收集图片，保持节点与图片原顺序。"""
+    if not isinstance(outputs, dict):
+        return []
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for node_id, payload in outputs.items():
+        if output_nodes is not None and str(node_id) not in output_nodes:
+            continue
+        images = payload.get("images") if isinstance(payload, dict) else None
+        if not isinstance(images, list):
+            continue
+        for image in images:
+            if not isinstance(image, dict) or not str(image.get("filename") or "").strip():
+                continue
+            key = (
+                str(image.get("filename") or ""),
+                str(image.get("subfolder") or ""),
+                str(image.get("type") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(image)
+    return result
 
 
 def build_anima_workflow(service: Any, positive: str, negative: str, seed: int) -> dict[str, Any]:
@@ -2377,7 +2426,7 @@ async def do_generate_locked(
             if prompt_id not in history:
                 continue
             outputs = history[prompt_id].get("outputs", {})
-            images = outputs.get("46", {}).get("images", [])
+            images = _collect_output_images(outputs, _configured_output_nodes(service))
             if not images:
                 continue
             result = []
