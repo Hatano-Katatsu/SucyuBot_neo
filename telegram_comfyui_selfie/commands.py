@@ -16,6 +16,7 @@ from . import session_schema
 from .command_aliases import resolve_command_alias
 from .defaults import INIT_GUIDE, MENU_BODY, MENU_TOPICS, MENU_TOPIC_ALIASES, OC_CREATE_HELP, SCENES, WEEKDAY_NAMES
 from .memory import format_memory_lines
+from .model_security import validate_public_model_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -768,6 +769,13 @@ class CommandHandlersMixin:
                 return
             if not isinstance(data, dict):
                 await self.send_message(chat_id, "Profile JSON must be an object.")
+                return
+            try:
+                for key in ("base_url", "base_url_no_think"):
+                    if data.get(key):
+                        validate_public_model_base_url(data[key])
+            except ValueError as exc:
+                await self.send_message(chat_id, f"模型 Base URL 不安全: {exc}")
                 return
             self.app_store.upsert_model_profile(user_id, profile_id, data)
             await self.send_message(chat_id, f"Profile saved: {profile_id}")

@@ -8,6 +8,7 @@ from typing import Any
 from aiohttp import web
 
 from . import session_schema
+from .model_security import validate_public_model_base_url
 from .webui_common import (
     is_admin,
     json_error,
@@ -292,6 +293,12 @@ async def api_save_model_profile(request: web.Request):
         return json_ok({"global_profiles": mask_model_profiles(profiles)})
     current = service.app_store.list_model_profiles(user_id).get(profile_id) or {}
     payload = merge_model_profile_secrets(payload, current)
+    try:
+        for key in ("base_url", "base_url_no_think"):
+            if payload.get(key):
+                validate_public_model_base_url(payload[key])
+    except ValueError as exc:
+        return json_error(str(exc))
     service.app_store.upsert_model_profile(user_id, profile_id, payload)
     return json_ok({"user_profiles": mask_model_profiles(service.app_store.list_model_profiles(user_id))})
 

@@ -11,6 +11,8 @@ from typing import Any
 
 import aiohttp
 
+from .model_security import PublicOnlyResolver, validate_public_model_base_url
+
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +74,11 @@ class LLMRuntimeMixin:
         profiles = self.config.get("global_model_profiles") or {}
         return profiles if isinstance(profiles, dict) else {}
 
-    def _resolve_llm_profile(self, purpose: str, session_id: str = "") -> tuple[str, dict[str, Any], bool]:
+    def _resolve_llm_profile_entry(
+        self,
+        purpose: str,
+        session_id: str = "",
+    ) -> tuple[str, dict[str, Any], bool, str]:
         """解析当前会话实际使用的 LLM profile。
 
         chat 使用 chat_profile_id，image/fast 使用 fast_profile_id，vision 使用 vision_profile_id。
@@ -88,28 +94,42 @@ class LLMRuntimeMixin:
             profile_id = settings.get("vision_profile_id") or self.config.get("default_vision_model_profile") or ""
         else:
             profile_id = settings.get("fast_profile_id") or self.config.get("default_fast_model_profile") or ""
-        profile = user_profiles.get(profile_id) or global_profiles.get(profile_id) or {}
+        profile = user_profiles.get(profile_id) or {}
+        profile_scope = "user" if profile else ""
+        if not profile:
+            profile = global_profiles.get(profile_id) or {}
+            profile_scope = "global" if profile else ""
         if purpose == "vision" and not profile:
-            return str(profile_id or ""), {}, False
+            return str(profile_id or ""), {}, False, ""
         if not profile and global_profiles:
             profile_id, profile = next(iter(global_profiles.items()))
+            profile_scope = "global"
         disable = profile.get("disable_thinking", self._get_llm_value(purpose, "disable_thinking", False))
         if isinstance(disable, str):
             disable = disable.lower() in ("true", "1", "yes", "on")
         thinking = not bool(disable)
-        return str(profile_id or ""), dict(profile or {}), thinking
+        return str(profile_id or ""), dict(profile or {}), thinking, profile_scope
+
+    def _resolve_llm_profile(self, purpose: str, session_id: str = "") -> tuple[str, dict[str, Any], bool]:
+        """兼容旧调用者的三元组 profile 解析接口。"""
+        profile_id, profile, thinking, _ = self._resolve_llm_profile_entry(purpose, session_id)
+        return profile_id, profile, thinking
 
     def _resolved_llm_config(self, purpose: str, session_id: str = "", disable_thinking: bool | None = None) -> dict[str, Any]:
-        profile_id, profile, thinking = self._resolve_llm_profile(purpose, session_id)
+        profile_id, profile, thinking, profile_scope = self._resolve_llm_profile_entry(purpose, session_id)
         model, api_base, api_key = self._llm_profile_model_name(profile, thinking)
         if purpose != "vision" and not api_base:
-            api_base = self._get_llm_value(purpose, "api_base", "https://api.deepseek.com/v1") or "https://api.deepseek.com/v1"
-        if purpose != "vision" and not api_key:
+            if profile_scope == "user":
+                api_base = "https://api.deepseek.com/v1"
+            else:
+                api_base = self._get_llm_value(purpose, "api_base", "https://api.deepseek.com/v1") or "https://api.deepseek.com/v1"
+        if purpose != "vision" and not api_key and profile_scope != "user":
             api_key = self._get_llm_value(purpose, "api_key", "") or ""
         if purpose != "vision" and not model:
             model = self._get_llm_value(purpose, "model", "deepseek-chat") or "deepseek-chat"
         return {
             "profile_id": profile_id,
+            "profile_scope": profile_scope,
             "profile": profile,
             "thinking": thinking,
             "api_base": str(api_base).rstrip("/"),
@@ -450,10 +470,18 @@ class LLMRuntimeMixin:
         elif control == "enable_thinking" and not thinking:
             body["enable_thinking"] = False
         request_url = f"{api_base}/chat/completions"
+        private_profile = resolved.get("profile_scope") == "user"
+        if private_profile:
+            try:
+                validate_public_model_base_url(api_base)
+            except ValueError as exc:
+                raise RuntimeError(f"用户模型 Base URL 不安全: {exc}") from exc
         last_error = None
         for attempt in range(2):
+            connector = aiohttp.TCPConnector(resolver=PublicOnlyResolver()) if private_profile else None
             async with aiohttp.ClientSession(
-                trust_env=True,
+                trust_env=not private_profile,
+                connector=connector,
                 timeout=aiohttp.ClientTimeout(total=float(resolved.get("timeout") or 120)),
                 headers={"Accept-Encoding": "gzip, deflate"},
             ) as s:
@@ -461,6 +489,7 @@ class LLMRuntimeMixin:
                     request_url,
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept-Encoding": "gzip, deflate"},
                     json=body,
+                    allow_redirects=False,
                 ) as resp:
                     if resp.status != 200:
                         text = await resp.text()
