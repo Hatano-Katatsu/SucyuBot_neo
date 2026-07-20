@@ -1701,7 +1701,13 @@ async def plan_animatool_slots(
     返回 dict（可直接 POST 当前工作流的 /anima/generate_* + seed/steps/cfg/filename_prefix），
     失败时返回 None，调用方应回退到旧逻辑。
     """
-    from .generation import _get_animatool_workflow, ANIMATOOL_WORKFLOWS, _workflow_supports_neg
+    from .generation import (
+        ANIMATOOL_NEGATIVE_FIELDS,
+        ANIMATOOL_WORKFLOWS,
+        _apply_animatool_guard_contract,
+        _build_animatool_guard_contract,
+        _get_animatool_workflow,
+    )
 
     if not service.has_llm_config("image", session_id):
         return None
@@ -1710,7 +1716,6 @@ async def plan_animatool_slots(
     wf_meta = ANIMATOOL_WORKFLOWS.get(workflow, {})
     wf_label = wf_meta.get("label", workflow or "AnimaTool")
     knowledge_keys = wf_meta.get("knowledge_keys", ("turbo_expert", "turbo_examples", "artist_list"))
-    supports_neg = bool(wf_meta.get("supports_neg", False))
 
     try:
         knowledge = await _fetch_animatool_turbo_knowledge(service, workflow=workflow)
@@ -1724,6 +1729,7 @@ async def plan_animatool_slots(
     required = params.get("required", []) if isinstance(params, dict) else []
     if not properties:
         return None
+    supports_neg = any(field in properties for field in ANIMATOOL_NEGATIVE_FIELDS)
 
     # 过滤掉固定超参数，只列出内容字段
     _HYPER_KEYS = {"steps", "cfg", "width", "height", "batch_size", "filename_prefix", "seed", "aspect_ratio"}
@@ -1811,13 +1817,17 @@ async def plan_animatool_slots(
             "## neg（反词）规则（重要）\n"
             f"当前工作流支持 neg 字段。严格按 schema 中 neg 字段的 description 构造反词（安全等级用 {safety_tag}），"
             "不要把任何槽位中的 negative 直接复制进来。\n"
-            "- 不要包含场景特定反词（如 no panties/2girls/male/holding phone/mirror selfie/split screen/grid 等），它们不属于 neg 字段。\n\n"
+            "- 你可以补充 schema 允许的反词；系统会在输出后强制合并独立终裁护栏，禁止尝试删除或抵消它们。\n\n"
         )
     else:
         neg_rule = (
             "## nltag 规则（重要）\n"
-            "不要输出 neg 或 negative 字段；它们对当前工作流无意义。\n"
+            "不要输出 neg 或 negative 字段；它们对当前工作流无意义。"
+            "系统会在输出后把独立终裁护栏确定性追加到 nltag/tags。\n"
         )
+
+    guard_contract = _build_animatool_guard_contract(slots)
+    guard_constraint = guard_contract.nltag_constraint()
 
     # quality_meta_year_safe 构造指引：按 schema 的 default 格式，不要堆砌槽位里的额外质量标签。
     qmws_prop = properties.get("quality_meta_year_safe", {})
@@ -1851,6 +1861,11 @@ async def plan_animatool_slots(
         "- style_general → style\n"
         "- scene → tags/nltag（改写成 3-5 句完整英文，把末尾的逗号标签堆融进句子，不要保留 Danbooru 逗号串）\n\n"
         + neg_rule
+        + (
+            "## 系统终裁护栏（只可补充，不可删除）\n"
+            f"{guard_constraint}\n\n"
+            if guard_constraint else ""
+        )
         + "selfie/portrait/pov 场景中，仍要在自然语言描述里避免手机、相机、UI 界面、取景框、快门按钮等拍摄设备元素；"
         "mirror 场景允许镜子和镜中反射，但不要写手机 UI。\n\n"
         "## 时间与光线（重要，必须体现）\n"
@@ -1945,6 +1960,7 @@ async def plan_animatool_slots(
 
     # 清理空值和超参数泄漏
     cleaned = {k: v for k, v in parsed.items() if v not in (None, "") and k not in _HYPER_KEYS}
+    cleaned = _apply_animatool_guard_contract(cleaned, schema, slots, workflow)
 
     logger.info("ANIMATOOL_SLOTS_LLM: %s", json.dumps(cleaned, ensure_ascii=False)[:600])
     return cleaned

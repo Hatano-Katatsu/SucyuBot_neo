@@ -40,7 +40,29 @@ VISIBLE_PHONE_NEGATIVES = (
 )
 BOTTOM_EXPOSURE_NEGATIVES = ("no panties", "no underwear", "bottomless", "crotchless")
 ANIMATOOL_NLTAG_FIELDS = ("nltag", "nl_tag", "nl_tags", "tags")
+ANIMATOOL_NEGATIVE_FIELDS = ("neg", "negative", "negative_prompt")
 VALID_VIEWS = {"selfie", "mirror", "pov", "third", "portrait"}
+
+ANIMATOOL_AGE_GUARD_TERMS = (
+    "child", "loli", "underage", "minor",
+)
+ANIMATOOL_PHONE_GUARD_TERMS = (
+    "holding phone", "visible phone", "phone", "smartphone", "cellphone", "mobile phone",
+    "phone in hand", "hand holding phone", "viewfinder", "phone screen", "camera ui",
+    "camera interface", "shutter button", "two phones", "multiple phones",
+)
+ANIMATOOL_MIRROR_GUARD_TERMS = (
+    "mirror", "mirror reflection", "mirror selfie", "multiple reflections",
+)
+ANIMATOOL_EXTRA_PERSON_GUARD_TERMS = (
+    "2girls", "multiple girls", "extra girls", "2boys", "multiple boys", "extra boys",
+    "multiple characters", "full second person", "second body", "duplicate body", "extra face",
+    "unrelated extra person", "foreground person", "person outside mirror",
+    "male", "boy", "man", "1boy",
+)
+ANIMATOOL_PANEL_GUARD_TERMS = (
+    "split screen", "grid", "multiple panels", "collage",
+)
 
 
 def _remember_generated_nltag(service: Any, session_id: str, nltag: str):
@@ -168,6 +190,71 @@ class PromptSlots:
     def quality_for_schema(self) -> str:
         """AnimaTool schema 把质量词与安全评级放在同一字段时使用。"""
         return _dedupe_prompt_modules([self.quality, self.safety])
+
+
+@dataclass(frozen=True)
+class AnimaToolGuardContract:
+    """不能交给 LLM 自由删改的 AnimaTool 安全与构图终裁项。"""
+
+    age: tuple[str, ...] = ()
+    phone: tuple[str, ...] = ()
+    mirror: tuple[str, ...] = ()
+    extra_people: tuple[str, ...] = ()
+    panels: tuple[str, ...] = ()
+    public_exposure: tuple[str, ...] = ()
+
+    def negative_terms(self) -> tuple[str, ...]:
+        seen: set[str] = set()
+        terms: list[str] = []
+        for group in (
+            self.age,
+            self.phone,
+            self.mirror,
+            self.extra_people,
+            self.panels,
+            self.public_exposure,
+        ):
+            for term in group:
+                key = _tag_key(term)
+                if key and key not in seen:
+                    seen.add(key)
+                    terms.append(term)
+        return tuple(terms)
+
+    def nltag_constraint(self) -> str:
+        """无 neg 字段的工作流以单句自然语言保留同一份终裁语义。"""
+        clauses: list[str] = []
+        if self.age:
+            clauses.append("every visible person is an adult")
+        if self.phone:
+            forbidden_phone = {
+                _tag_key(term)
+                for term in ANIMATOOL_PHONE_GUARD_TERMS
+                if term not in {"two phones", "multiple phones"}
+            }
+            if any(_tag_key(term) in forbidden_phone for term in self.phone):
+                clauses.append("no phone, camera interface, viewfinder, or shutter control is visible")
+            else:
+                clauses.append("no duplicate phone is visible")
+        if self.mirror:
+            forbidden_mirror = {
+                _tag_key(term)
+                for term in ANIMATOOL_MIRROR_GUARD_TERMS
+                if term != "multiple reflections"
+            }
+            if any(_tag_key(term) in forbidden_mirror for term in self.mirror):
+                clauses.append("no mirror or reflected duplicate is visible")
+            else:
+                clauses.append("there is at most one intended reflection")
+        if self.extra_people:
+            clauses.append("no unrelated extra person, duplicate body, or extra face is visible")
+        if self.panels:
+            clauses.append("the image is one undivided single frame, never a grid, collage, split screen, or multiple panels")
+        if self.public_exposure:
+            clauses.append("the specified outfit fully covers intimate areas with no unintended nudity or exposure")
+        if not clauses:
+            return ""
+        return "Deterministic rendering constraints: " + "; ".join(clauses) + "."
 
 HAIR_COLOR_WORDS = (
     "blonde", "blond", "golden", "silver", "white", "black", "brown", "red",
@@ -1847,6 +1934,91 @@ def _workflow_supports_neg(service: Any) -> bool:
     return bool(ANIMATOOL_WORKFLOWS.get(_get_animatool_workflow(service), {}).get("supports_neg"))
 
 
+def _guard_terms_from_negative(negative: str, candidates: tuple[str, ...]) -> tuple[str, ...]:
+    allowed = {_tag_key(term) for term in candidates}
+    seen: set[str] = set()
+    matched: list[str] = []
+    for term in _split_tags(negative):
+        key = _tag_key(term)
+        if key in allowed and key not in seen:
+            seen.add(key)
+            matched.append(term)
+    return tuple(matched)
+
+
+def _build_animatool_guard_contract(slots: PromptSlots | None) -> AnimaToolGuardContract:
+    """从 native 已终裁的 negative 中提取不可被 AnimaTool LLM 删除的子集。"""
+    negative = str(slots.negative or "") if isinstance(slots, PromptSlots) else ""
+    return AnimaToolGuardContract(
+        age=_guard_terms_from_negative(negative, ANIMATOOL_AGE_GUARD_TERMS),
+        phone=_guard_terms_from_negative(negative, ANIMATOOL_PHONE_GUARD_TERMS),
+        mirror=_guard_terms_from_negative(negative, ANIMATOOL_MIRROR_GUARD_TERMS),
+        extra_people=_guard_terms_from_negative(negative, ANIMATOOL_EXTRA_PERSON_GUARD_TERMS),
+        panels=_guard_terms_from_negative(negative, ANIMATOOL_PANEL_GUARD_TERMS),
+        public_exposure=_guard_terms_from_negative(
+            negative,
+            (*PUBLIC_EXPOSURE_NEGATIVE_GUARDS, *BOTTOM_EXPOSURE_NEGATIVES, "revealing public outfit"),
+        ),
+    )
+
+
+def _append_animatool_nltag_constraint(text: Any, constraint: str) -> str:
+    value = str(text or "").strip()
+    guard = str(constraint or "").strip()
+    if not guard or guard.lower() in value.lower():
+        return value
+    if value and value[-1] not in ".!?":
+        value += "."
+    return f"{value} {guard}".strip()
+
+
+def _apply_animatool_guard_contract(
+    payload: dict[str, Any],
+    schema: dict[str, Any],
+    slots: PromptSlots | None,
+    workflow: str,
+) -> dict[str, Any]:
+    """按实时 schema 映射终裁项；LLM 返回值只能补充，不能覆盖或删除。"""
+    result = dict(payload or {})
+    guards = _build_animatool_guard_contract(slots)
+    negative_terms = guards.negative_terms()
+    if not negative_terms:
+        return result
+
+    params = schema.get("parameters", {}) if isinstance(schema, dict) else {}
+    properties = params.get("properties", {}) if isinstance(params, dict) else {}
+    if not isinstance(properties, dict):
+        properties = {}
+    required = set(params.get("required", []) if isinstance(params, dict) else [])
+    negative_field = next((field for field in ANIMATOOL_NEGATIVE_FIELDS if field in properties), "")
+    if not properties and bool(ANIMATOOL_WORKFLOWS.get(workflow, {}).get("supports_neg")):
+        negative_field = next((field for field in ANIMATOOL_NEGATIVE_FIELDS if field in result), "neg")
+    if negative_field:
+        result[negative_field] = _append_negatives(
+            str(result.get(negative_field) or ""),
+            *negative_terms,
+        )
+        for field in ANIMATOOL_NEGATIVE_FIELDS:
+            if field != negative_field:
+                result.pop(field, None)
+        return result
+
+    for field in ANIMATOOL_NEGATIVE_FIELDS:
+        result.pop(field, None)
+
+    nltag_field = _preferred_animatool_nltag_field(properties, required) if properties else ""
+    if not nltag_field:
+        nltag_field = next((field for field in ANIMATOOL_NLTAG_FIELDS if field in result), "")
+    if not nltag_field and (not properties or "positive" in properties):
+        nltag_field = "positive" if "positive" in result or properties else "tags"
+    if nltag_field:
+        result[nltag_field] = _append_animatool_nltag_constraint(
+            result.get(nltag_field),
+            guards.nltag_constraint(),
+        )
+    return result
+
+
 # AnimaTool schema 缓存（按 comfyui_url + workflow 分键，避免不同工作流互相覆盖）
 _animatool_turbo_schema_cache: dict[str, tuple[dict[str, Any], float]] = {}
 _ANIMATOOL_SCHEMA_TTL = 300.0
@@ -1951,8 +2123,13 @@ def _build_animatool_neg(slots: PromptSlots | None, workflow: str) -> str:
     else:  # explicit
         safety_neg = "safe, sensitive, censored, mosaic"
     if workflow == "base":
-        return f"{base_extra}, {common_neg}, {safety_neg}"
-    return f"{common_neg}, {safety_neg}"
+        negative = f"{base_extra}, {common_neg}, {safety_neg}"
+    else:
+        negative = f"{common_neg}, {safety_neg}"
+    return _append_negatives(
+        negative,
+        *_build_animatool_guard_contract(slots).negative_terms(),
+    )
 
 
 # AnimaTool 采样步数默认值：turbo 工作流 12 步，非 turbo 工作流 40 步。
@@ -2105,9 +2282,10 @@ def _build_animatool_turbo_payload(
         # quality_meta_year_safe：按工作流 schema 格式构造，不复制槽位全量质量标签
         if "quality_meta_year_safe" in properties and "quality_meta_year_safe" not in payload:
             payload["quality_meta_year_safe"] = _build_animatool_quality_meta(slots, workflow)
-        # neg：按工作流 schema 格式构造，不复制槽位全量反词
-        if "neg" in properties and "neg" not in payload and _workflow_supports_neg(service):
-            payload["neg"] = _build_animatool_neg(slots, workflow)
+        # 反词字段完全以实时 schema 为准，注册表只在 schema 不可用时兜底。
+        negative_field = next((field for field in ANIMATOOL_NEGATIVE_FIELDS if field in properties), "")
+        if negative_field and negative_field not in payload:
+            payload[negative_field] = _build_animatool_neg(slots, workflow)
         # 一次性外观补充追加到 appearance（不覆盖有效外貌，只追加）
         one_shot = (getattr(slots, "one_shot_appearance", None) or "").strip()
         if one_shot and "appearance" in properties and "appearance" in payload:
@@ -2127,8 +2305,9 @@ def _build_animatool_turbo_payload(
         # 无槽位时也按工作流格式构造 quality_meta_year_safe / neg
         if "quality_meta_year_safe" in properties and "quality_meta_year_safe" not in payload:
             payload["quality_meta_year_safe"] = _build_animatool_quality_meta(slots, workflow)
-        if "neg" in properties and "neg" not in payload and _workflow_supports_neg(service):
-            payload["neg"] = _build_animatool_neg(slots, workflow)
+        negative_field = next((field for field in ANIMATOOL_NEGATIVE_FIELDS if field in properties), "")
+        if negative_field and negative_field not in payload:
+            payload[negative_field] = _build_animatool_neg(slots, workflow)
 
     # 必填字段兜底
     if "quality_meta_year_safe" in required:
@@ -2151,6 +2330,8 @@ def _build_animatool_turbo_payload(
     # 如果 schema 支持自然语言 tags/nltag 且已提供，就不要再发送 positive（positive 会覆盖结构化字段）
     if nltag_field and nltag_field in payload and payload[nltag_field]:
         payload.pop("positive", None)
+
+    payload = _apply_animatool_guard_contract(payload, schema, slots, workflow)
 
     # 最终按 schema 类型转换并过滤掉 None/空串
     cleaned: dict[str, Any] = {}
@@ -2202,6 +2383,7 @@ async def _do_generate_animatool(
         if props:
             hyper_keys = {"seed", "filename_prefix", "steps", "cfg", "aspect_ratio", "width", "height", "batch_size"}
             llm_payload = {k: v for k, v in llm_payload.items() if k in props or k in hyper_keys}
+        llm_payload = _apply_animatool_guard_contract(llm_payload, schema, slots, wf)
         _remember_generated_nltag(service, session_id, _payload_nltag(llm_payload))
         return await _post_animatool(service, session_id, slots, seed, llm_payload)
 
@@ -2299,6 +2481,7 @@ async def submit_animatool_turbo(service: Any, positive: str, negative: str, see
         cleaned = {k: v for k, v in payload.items() if v not in (None, "")}
     else:
         cleaned = _build_animatool_turbo_payload(service, slots, positive, negative, seed, schema)
+    cleaned = _apply_animatool_guard_contract(cleaned, schema, slots, wf)
     _remember_generated_nltag(service, getattr(slots, "session_id", "") if isinstance(slots, PromptSlots) else "", _payload_nltag(cleaned))
     try:
         if hasattr(service, "_ulog") and isinstance(slots, PromptSlots):
