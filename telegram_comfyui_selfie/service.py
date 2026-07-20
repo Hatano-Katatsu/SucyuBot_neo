@@ -346,7 +346,7 @@ class TelegramComfyUIService(
     @staticmethod
     def _compute_ntr_threshold(purity: int) -> int:
         if purity < 0:
-            return 99999
+            return 0
         if purity <= 0:
             return 1
         if purity >= 10:

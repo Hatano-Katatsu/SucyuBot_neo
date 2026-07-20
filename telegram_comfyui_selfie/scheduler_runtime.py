@@ -1702,7 +1702,9 @@ class SchedulerRuntimeMixin:
             last = session_schema.get_last_interaction(state)
             purity = self._get_purity(session_id)
             mode = mode_override or "normal"
-            if last and time.time() - last > self._compute_ntr_threshold(purity) * 86400:
+            if purity < 0:
+                mode = "ntr"
+            elif last and time.time() - last > self._compute_ntr_threshold(purity) * 86400:
                 mode = "ntr"
             if mode == "normal" and purity == 0 and random.random() < 0.4:
                 mode = "ntr"
