@@ -2340,7 +2340,9 @@ def _build_animatool_turbo_payload(
             payload["quality_meta_year_safe"] = _build_animatool_quality_meta(slots, workflow)
     if "count" in required:
         if "count" not in payload or not payload["count"]:
-            payload["count"] = "1girl"
+            count_slot = (getattr(slots, "count", None) or "").strip()
+            if count_slot:
+                payload["count"] = "1girl"
     nltag_field = _preferred_animatool_nltag_field(properties, required)
     if nltag_field in required:
         if nltag_field not in payload or not payload[nltag_field]:

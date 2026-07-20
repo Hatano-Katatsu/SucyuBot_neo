@@ -1945,8 +1945,8 @@ async def plan_animatool_slots(
         f"## 必填字段: {', '.join(content_required) if content_required else '（未指定）'}\n\n"
         "## 槽位→字段\n"
         + qmws_guidance
-        + "- count: 只输出人数标签（1girl/2girls/1boy/1other），不要包含 solo 或其他标签。\n"
-        "- character → character（仅已知公开角色；OC 留空）\n"
+        + ("- count: 只输出人数标签（1girl/2girls/1boy/1other），不要包含 solo 或其他标签。\n" if (slots.count or "").strip() else "- count: 槽位为空，不要输出 count 字段。\n")
+        + "- character → character（仅已知公开角色；OC 留空）\n"
         "- series → series（仅已知公开角色；OC 留空）\n"
         "- effective_appearance + one_shot_appearance → appearance\n"
         "- style_artist → artist（@ 开头，为空留空）\n"
