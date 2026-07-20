@@ -572,7 +572,14 @@ class ChatContextMixin:
                 content = self._strip_photo_memory_echo(content)
             else:
                 image_emitted = True
-                asyncio.create_task(self._push_image_from_text(session_id, scene))
+                self._spawn_background(
+                    self._push_image_from_text(session_id, scene),
+                    name=f"leaked-chat-image:{session_id}",
+                    session_id=session_id,
+                    character_key=self._context_character_key(session_id),
+                    scope="auto-image",
+                    drain=True,
+                )
         else:
             content = self._strip_photo_memory_echo(content)
 
@@ -625,7 +632,13 @@ class ChatContextMixin:
                     )
                 except Exception:
                     logger.warning("background location extract failed", exc_info=True)
-            asyncio.create_task(_bg_extract())
+            self._spawn_background(
+                _bg_extract(),
+                name=f"location-extract:{session_id}:{location_character_key}",
+                session_id=session_id,
+                character_key=location_character_key,
+                scope="location-extract",
+            )
 
         history = session_schema.get_chat_history(state)
         stored_user_text = self._sanitize_user_history_text(history_user_text if history_user_text is not None else user_text)
@@ -653,13 +666,20 @@ class ChatContextMixin:
                 self._ulog(session_id, "JUDGE", f"配图时机=发 view={judge_view} intent={judge_decision.get('intent','')[:60]}")
             else:
                 self._ulog(session_id, "JUDGE", f"配图时机=发 intent={judge_decision.get('intent','')[:60]}")
-            asyncio.create_task(self._run_background_roleplay_image(
-                chat_id, session_id,
-                intent=judge_decision.get("intent", ""),
-                mood=judge_decision.get("mood", ""),
-                prompt=content,
-                view=judge_decision.get("view", ""),
-            ))
+            self._spawn_background(
+                self._run_background_roleplay_image(
+                    chat_id, session_id,
+                    intent=judge_decision.get("intent", ""),
+                    mood=judge_decision.get("mood", ""),
+                    prompt=content,
+                    view=judge_decision.get("view", ""),
+                ),
+                name=f"auto-roleplay-image:{session_id}",
+                session_id=session_id,
+                character_key=self._context_character_key(session_id),
+                scope="auto-image",
+                drain=True,
+            )
         return content
 
     def _build_chat_messages(
@@ -1306,7 +1326,7 @@ class ChatContextMixin:
         if not session_id:
             return False
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             return False
         key = self._context_character_key(session_id)
@@ -1322,9 +1342,14 @@ class ChatContextMixin:
         task = getattr(self, "_checkpoint_tasks", {}).get(scope)
         if task and not task.done():
             return False
-        self._checkpoint_tasks[scope] = loop.create_task(
-            self._run_context_checkpoint(session_id, key, self._checkpoint_keep_message_limit(), force=force)
+        task = self._spawn_background(
+            self._run_context_checkpoint(session_id, key, self._checkpoint_keep_message_limit(), force=force),
+            name=f"checkpoint:{session_id}:{key}",
+            session_id=session_id,
+            character_key=key,
+            scope="checkpoint",
         )
+        self._bind_background_task_slot(self._checkpoint_tasks, scope, task)
         return True
 
     def _image_min_gap(self, freq: str | None = None) -> int:
@@ -1763,7 +1788,14 @@ class ChatContextMixin:
             if not msg_over and not char_over:
                 return
         # 只排后台任务，不 await；checkpoint 摘要和记忆提取不能阻塞本轮聊天回复。
-        self._checkpoint_tasks[scope] = asyncio.create_task(self._run_context_checkpoint(session_id, key, keep))
+        task = self._spawn_background(
+            self._run_context_checkpoint(session_id, key, keep),
+            name=f"checkpoint:{session_id}:{key}",
+            session_id=session_id,
+            character_key=key,
+            scope="checkpoint",
+        )
+        self._bind_background_task_slot(self._checkpoint_tasks, scope, task)
 
     async def _run_context_checkpoint(
         self,

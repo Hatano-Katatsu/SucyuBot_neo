@@ -212,4 +212,9 @@ class GitUpdateMixin:
             except Exception as exc:
                 await self.send_message(chat_id, f"准备重启失败：{exc}\n请手动重启服务。")
                 return
-            asyncio.create_task(self.shutdown_for_process_restart(delay=3.0))
+            self._spawn_background(
+                self.shutdown_for_process_restart(delay=3.0),
+                name="telegram-git-update-restart",
+                scope="service-lifecycle",
+                drain=True,
+            )

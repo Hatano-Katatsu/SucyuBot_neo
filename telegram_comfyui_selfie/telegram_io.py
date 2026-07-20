@@ -303,9 +303,12 @@ class TelegramIOMixin:
         old_task = entry.get("task")
         if old_task and not old_task.done():
             old_task.cancel()
-        entry["task"] = asyncio.create_task(
+        entry["task"] = self._spawn_background(
             self._process_media_group_input_after_delay(key),
             name=f"media-group:{session_id}:{group_id}",
+            session_id=session_id,
+            character_key=self._context_character_key(session_id),
+            scope="telegram-media-group",
         )
         self._ulog(session_id, "PHOTO", f"收到相册图片 media_group_id={group_id} count={len(entry['messages'])}")
         return True
@@ -330,9 +333,12 @@ class TelegramIOMixin:
         if old_task and not old_task.done():
             old_task.cancel()
         key = f"{entry.get('session_id')}\n{entry.get('media_group_id')}"
-        entry["task"] = asyncio.create_task(
+        entry["task"] = self._spawn_background(
             self._process_media_group_input_after_delay(key),
             name=f"media-group:{entry.get('session_id')}:{entry.get('media_group_id')}",
+            session_id=session_id,
+            character_key=self._context_character_key(session_id),
+            scope="telegram-media-group",
         )
         self._ulog(session_id, "PHOTO", "收到相册后续配文，合并后处理")
         return True
@@ -472,9 +478,12 @@ class TelegramIOMixin:
             self._ulog(session_id, "PHOTO", "图片等待窗口超过 5 张，仅保留前 5 张")
         else:
             messages.append(msg)
-        task = asyncio.create_task(
+        task = self._spawn_background(
             self._process_pending_photo_input(chat_id, session_id, future),
             name=f"pending-photo-caption:{session_id}",
+            session_id=session_id,
+            character_key=self._context_character_key(session_id),
+            scope="telegram-photo-caption",
         )
         pending[session_id] = {"future": future, "task": task, "messages": messages}
         self._ulog(

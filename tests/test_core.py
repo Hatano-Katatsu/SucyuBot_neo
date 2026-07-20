@@ -985,13 +985,21 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
             # 无缓存 → 调度刷新
             self.assertTrue(svc._schedule_weather_refresh(sid))
+            first = svc._find_background_task(scope="weather", session_id=sid)
+            self.assertIsNotNone(first)
+            # 同一会话已有 in-flight 时不重复调度。
+            self.assertFalse(svc._schedule_weather_refresh(sid))
+            await first
+            await asyncio.sleep(0)
             # 新鲜缓存（30 分钟内）→ 不刷新
             svc._weather_caches[sid] = {"data": {}, "ts": time.time()}
             self.assertFalse(svc._schedule_weather_refresh(sid))
             # 过期缓存 → 刷新
             svc._weather_caches[sid] = {"data": {}, "ts": time.time() - 2000}
             self.assertTrue(svc._schedule_weather_refresh(sid))
-            await asyncio.sleep(0)  # 让后台刷新任务启动，避免 pending task 警告
+            second = svc._find_background_task(scope="weather", session_id=sid)
+            await second
+            await asyncio.sleep(0)
 
         asyncio.run(run())
 

@@ -32,6 +32,7 @@ telegram_comfyui_selfie/
 ├── service.py               # 服务初始化与 mixin 组合
 ├── llm_runtime.py           # 模型 profile、LLM HTTP 调用、用量与调试日志
 ├── state_runtime.py         # 配置、状态迁移、会话访问与活动日志
+├── task_runtime.py          # 后台任务 registry、作用域取消、停机排空与失败退避
 ├── appearance_runtime.py    # 画风、稳定外观、衣柜状态与换装工具
 ├── defaults.py              # 默认配置
 ├── commands.py              # Telegram 命令处理
@@ -121,6 +122,7 @@ telegram_comfyui_selfie/
 
 - dream 的每日执行独立于推送开关和推送次数限制；到角色起床时间后可单独运行。
 - dream 从最旧未处理消息开始按完整轮次和字符预算分页，日记、记忆链全部成功后只推进本页真实消息边界，剩余积压留给下一次继续。
+- 业务后台协程统一通过 `_spawn_background()` 登记作用域与停机策略；完成回调必须消费异常并清理兼容 task map，停机在关闭 HTTP 前取消或排空。
 - 同一会话的推送使用 `asyncio.Lock` 串行化，避免 morning/daily/continuity 并发重复发图。
 - 多阶段 NTR/连续推送按阶段顺序 await；单阶段失败要隔离并记录，不阻塞后续调度循环。
 - 场景结束和晚安判断只读取近期用户消息，不让 assistant 台词或照片 system 误触发。

@@ -1529,7 +1529,14 @@ class CommandHandlersMixin:
                 skip_active_check=True,
             )
         else:
-            asyncio.create_task(self._sched_fire(session_id, now, mode_override=mode, skip_active_check=True))
+            self._spawn_background(
+                self._sched_fire(session_id, now, mode_override=mode, skip_active_check=True),
+                name=f"manual-push:{session_id}:{mode}",
+                session_id=session_id,
+                character_key=self._context_character_key(session_id),
+                scope="scheduled-push",
+                drain=True,
+            )
 
     async def cmd_style(self, chat_id, session_id, arg):
         sub = arg.strip()

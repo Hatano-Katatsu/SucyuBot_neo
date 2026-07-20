@@ -280,6 +280,14 @@ class SchedulerRuntimeMixin:
     # Weather / scheduler
     # ---------------------------------------------------------------------
     async def _fetch_weather(self, location: str = "", session_id: str = ""):
+        retry_scope = "weather"
+        retry_key = session_id or "__default__"
+        if (
+            not location
+            and not self._background_retry_ready(retry_scope, retry_key)
+        ):
+            cached_retry = self._weather_caches.get(retry_key)
+            return cached_retry.get("data") if isinstance(cached_retry, dict) else None
         if not location:
             now = time.time()
             loc = self._get_session_cfg(session_id, "location", self.config.get("location", "上海"))
@@ -301,6 +309,10 @@ class SchedulerRuntimeMixin:
                     proxy=proxy,
                 ) as resp:
                     if resp.status != 200:
+                        self._record_weather_retry_failure(
+                            retry_key,
+                            f"HTTP {resp.status}",
+                        )
                         return None
                     data = await resp.json(content_type=None)
             cur = data.get("current_condition", [{}])[0]
@@ -338,10 +350,36 @@ class SchedulerRuntimeMixin:
             }
             if cache_key:
                 self._weather_caches[cache_key] = {"data": weather, "ts": time.time(), "city": location}
+            self._clear_background_retry(retry_scope, retry_key)
             return weather
         except Exception as exc:
+            self._record_weather_retry_failure(retry_key, exc)
             logger.warning("weather fetch failed: %s", exc)
             return None
+
+    def _record_weather_retry_failure(self, retry_key: str, error: Any) -> dict[str, Any]:
+        try:
+            base = max(1.0, float(self.config.get("weather_retry_base_seconds", 60) or 60))
+        except (TypeError, ValueError):
+            base = 60.0
+        try:
+            maximum = max(base, float(self.config.get("weather_retry_max_seconds", 1800) or 1800))
+        except (TypeError, ValueError):
+            maximum = 1800.0
+        retry = self._record_background_retry_failure(
+            "weather",
+            retry_key,
+            error=error,
+            base_seconds=base,
+            max_seconds=maximum,
+        )
+        logger.warning(
+            "weather retry deferred: session=%s attempts=%s next_retry=%.3f",
+            retry_key,
+            retry["attempts"],
+            retry["next_retry"],
+        )
+        return retry
 
     def _schedule_weather_refresh(self, session_id: str) -> bool:
         """聊天时若天气缓存已过期（>30 分钟），后台异步刷新。
@@ -354,8 +392,18 @@ class SchedulerRuntimeMixin:
         ts = float(cached.get("ts", 0)) if isinstance(cached, dict) else 0.0
         if time.time() - ts < 1800:
             return False
+        retry_key = session_id or "__default__"
+        if not self._background_retry_ready("weather", retry_key):
+            return False
+        if self._find_background_task(scope="weather", session_id=retry_key) is not None:
+            return False
         try:
-            asyncio.create_task(self._fetch_weather(session_id=session_id))
+            self._spawn_background(
+                self._fetch_weather(session_id=session_id),
+                name=f"weather-refresh:{retry_key}",
+                session_id=retry_key,
+                scope="weather",
+            )
         except RuntimeError:
             return False  # 无运行中的事件循环（极少见）
         return True
@@ -501,16 +549,52 @@ class SchedulerRuntimeMixin:
             if force:
                 await task
             return
+        if not self._background_retry_ready("dream", session_id, key):
+            retry = self._background_retry_info("dream", session_id, key)
+            self._ulog(
+                session_id,
+                "DREAM",
+                f"跳过 dream 退避窗口 reason={reason} next_retry={float(retry.get('next_retry') or 0):.3f}",
+            )
+            return
 
         async def runner():
             try:
                 await self._dream_once(session_id, key, local_dt, reason=reason)
+                self._clear_background_retry("dream", session_id, key)
             except Exception as exc:
+                try:
+                    base = max(1.0, float(self.config.get("dream_retry_base_seconds", 60) or 60))
+                except (TypeError, ValueError):
+                    base = 60.0
+                try:
+                    maximum = max(base, float(self.config.get("dream_retry_max_seconds", 3600) or 3600))
+                except (TypeError, ValueError):
+                    maximum = 3600.0
+                retry = self._record_background_retry_failure(
+                    "dream",
+                    session_id,
+                    key,
+                    error=exc,
+                    base_seconds=base,
+                    max_seconds=maximum,
+                )
                 self._ulog(session_id, "ERROR", f"DREAM_FAILED reason={reason}: {exc}")
+                self._ulog(
+                    session_id,
+                    "DREAM",
+                    f"dream 进入退避 attempts={retry['attempts']} next_retry={retry['next_retry']:.3f}",
+                )
                 logger.warning("dream task failed", exc_info=True)
 
-        task = asyncio.create_task(runner())
-        self._dream_tasks[scope] = task
+        task = self._spawn_background(
+            runner(),
+            name=f"dream:{session_id}:{key}:{reason}",
+            session_id=session_id,
+            character_key=key,
+            scope="dream",
+        )
+        self._bind_background_task_slot(self._dream_tasks, scope, task)
         if force:
             await task
 
@@ -1373,7 +1457,14 @@ class SchedulerRuntimeMixin:
                 if cur is asyncio.current_task():
                     getattr(self, "_post_chat_push_tasks", {}).pop(session_id, None)
 
-        tasks[session_id] = asyncio.create_task(runner(), name=f"post-chat-push:{session_id}")
+        task = self._spawn_background(
+            runner(),
+            name=f"post-chat-push:{session_id}",
+            session_id=session_id,
+            character_key=self._context_character_key(session_id),
+            scope="post-chat-push",
+        )
+        self._bind_background_task_slot(tasks, session_id, task)
         self._ulog(session_id, "PUSH", f"已安排对话后续场推送 delay={delay / 60:.1f}min")
         return True
 
@@ -1440,7 +1531,14 @@ class SchedulerRuntimeMixin:
                 self._ulog(session_id, "PUSH", "早安推送本次未完成，窗口内等待重试")
             return ok
 
-        return asyncio.create_task(runner())
+        return self._spawn_background(
+            runner(),
+            name=f"scheduled-push:{session_id}:{mode_override}",
+            session_id=session_id,
+            character_key=self._context_character_key(session_id),
+            scope="scheduled-push",
+            drain=True,
+        )
 
     async def scheduler_loop(self):
         await asyncio.sleep(10)

@@ -1271,7 +1271,15 @@ class LifePlanMixin:
             except Exception as exc:
                 self._ulog(session_id, "ERROR", f"LIFE_PLAN_LAZY_FAILED error={exc}")
 
-        tasks[session_id] = asyncio.create_task(runner(), name=f"life-plan:{session_id}")
+        character_key = self._context_character_key(session_id)
+        task = self._spawn_background(
+            runner(),
+            name=f"life-plan:{session_id}:{character_key}",
+            session_id=session_id,
+            character_key=character_key,
+            scope="life-plan",
+        )
+        self._bind_background_task_slot(tasks, session_id, task)
         return True
 
     def _life_plan_chat_context(self, session_id: str, *, now: datetime | None = None) -> str:

@@ -40,6 +40,7 @@ from .memory_policy import MemoryPolicyMixin
 from .process_restart import ProcessRestartMixin
 from .scheduler_runtime import SchedulerRuntimeMixin
 from .state_runtime import ServiceStateMixin
+from .task_runtime import TaskRuntimeMixin
 from .telegram_io import TelegramIOMixin
 from .telegram_update_runtime import TelegramUpdateRuntimeMixin
 from .time_context import build_time_context, format_light_guard, format_time_context, rough_time_period
@@ -93,6 +94,7 @@ class TelegramComfyUIService(
     ServiceStateMixin,
     AppearanceRuntimeMixin,
     ImageStateRuntimeMixin,
+    TaskRuntimeMixin,
     TelegramUpdateRuntimeMixin,
     TelegramIOMixin,
     CharacterCheckpointMixin,
@@ -132,6 +134,7 @@ class TelegramComfyUIService(
         self._skill_reference_cache: str | None = None
         self._bot_username = ""
         self._offset = 0
+        self._init_task_runtime()
         self._init_telegram_update_runtime()
         self._bot_tasks: list[asyncio.Task] = []
         self._checkpoint_tasks: dict[str, asyncio.Task] = {}
@@ -209,8 +212,16 @@ class TelegramComfyUIService(
         self._bot_username = (me.get("result") or {}).get("username", "")
         await self._start_telegram_update_runtime()
         self._bot_tasks = [
-            asyncio.create_task(self.poll_loop(), name="telegram-poll-loop"),
-            asyncio.create_task(self.scheduler_loop(), name="selfie-scheduler-loop"),
+            self._spawn_background(
+                self.poll_loop(),
+                name="telegram-poll-loop",
+                scope="bot-loop",
+            ),
+            self._spawn_background(
+                self.scheduler_loop(),
+                name="selfie-scheduler-loop",
+                scope="bot-loop",
+            ),
         ]
         logger.info("Telegram bot connected as @%s", self._bot_username or "?")
 
@@ -231,6 +242,7 @@ class TelegramComfyUIService(
             30.0,
         )
         await self._stop_telegram_update_runtime(timeout=drain_timeout)
+        await self._shutdown_background_tasks(drain_timeout, final=False)
         await self._drain_protected_image_tasks(drain_timeout)
         if self.http is not None and not self.http.closed:
             await self.http.close()
@@ -263,6 +275,11 @@ class TelegramComfyUIService(
         return bool(self.http and not self.http.closed and self._bot_tasks and all(not task.done() for task in self._bot_tasks))
 
     async def close(self):
+        drain_timeout = self._telegram_update_float_config(
+            "telegram_update_drain_timeout_seconds",
+            30.0,
+        )
+        await self._shutdown_background_tasks(drain_timeout, final=True)
         self._flush_sessions(force=True)
         self._flush_llm_debug(force=True)
         if self.comfy_session and not self.comfy_session.closed:
@@ -1401,7 +1418,15 @@ class TelegramComfyUIService(
         after_cancel_done=None,
     ):
         """等待一个生图/发图协程；外层消息处理取消时让图片链路继续完成。"""
-        task = asyncio.create_task(coro, name=f"protected-image:{session_id or 'unknown'}")
+        character_key = self._context_character_key(session_id) if session_id else ""
+        task = self._spawn_background(
+            coro,
+            name=f"protected-image:{session_id or 'unknown'}",
+            session_id=session_id,
+            character_key=character_key,
+            scope="protected-image",
+            drain=True,
+        )
         protected = getattr(self, "_protected_image_tasks", None)
         if isinstance(protected, set):
             protected.add(task)

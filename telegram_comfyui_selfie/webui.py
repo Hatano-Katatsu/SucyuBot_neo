@@ -1541,7 +1541,12 @@ async def api_service_restart(request: web.Request):
         restart = service.prepare_process_restart()
     except Exception as exc:
         return json_error(f"无法准备重启: {exc}", status=500)
-    asyncio.create_task(service.shutdown_for_process_restart())
+    service._spawn_background(
+        service.shutdown_for_process_restart(),
+        name="web-service-restart",
+        scope="service-lifecycle",
+        drain=True,
+    )
     return json_ok({"restart": restart})
 
 
@@ -1562,7 +1567,12 @@ async def api_service_reload_config(request: web.Request):
 async def api_service_stop(request: web.Request):
     _require_admin(request)
     service = service_from(request)
-    asyncio.create_task(service.shutdown_service())
+    service._spawn_background(
+        service.shutdown_service(),
+        name="web-service-stop",
+        scope="service-lifecycle",
+        drain=True,
+    )
     return json_ok({"stopping": True})
 
 
@@ -1633,7 +1643,12 @@ async def api_admin_git_update(request: web.Request):
     if result.get("pulled"):
         try:
             restart = service.prepare_process_restart()
-            asyncio.create_task(service.shutdown_for_process_restart(delay=3.0))
+            service._spawn_background(
+                service.shutdown_for_process_restart(delay=3.0),
+                name="web-git-update-restart",
+                scope="service-lifecycle",
+                drain=True,
+            )
         except Exception as exc:
             return json_error(f"Git 拉取成功但准备重启失败: {exc}", status=500)
     return json_ok({"result": result, "report": service._format_git_update_report(result), "restart": restart})
