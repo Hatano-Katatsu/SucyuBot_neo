@@ -1475,18 +1475,32 @@ class SchedulerRuntimeMixin:
         session_schema.set_ntr_stage_reached(state, current)
         self._mark_dirty(session_id)
 
-    async def _sched_fire(self, session_id: str, local_dt: datetime, mode_override=None, skip_active_check=False) -> bool:
+    async def _sched_fire(
+        self,
+        session_id: str,
+        local_dt: datetime,
+        mode_override=None,
+        skip_active_check=False,
+        character_lock_held: bool = False,
+    ) -> bool:
         if not session_id or (not skip_active_check and session_id in self._active_pushes):
             return False
-        if not skip_active_check:
-            # WebUI 角色操作（头像/手动推送/激活）持锁期间不触发自动推送，避免按临时角色发图。
+        op_lock = None
+        lock_acquired = False
+        if not character_lock_held:
+            # 自动推送、Telegram 手动推送与 WebUI 角色操作共用同一把会话锁。先检查再真正
+            # 持锁到推送结束，避免检查通过后 WebUI/Telegram 恰好切换角色的竞态窗口。
             op_lock = self.character_operation_lock(session_id) if hasattr(self, "character_operation_lock") else None
             if op_lock is not None and op_lock.locked():
-                self._ulog(session_id, "PUSH", "跳过推送: 角色操作进行中")
-                return False
-        self._active_pushes.add(session_id)
-        chat_id = self.chat_id_from_session(session_id)
+                if not skip_active_check:
+                    self._ulog(session_id, "PUSH", "跳过推送: 角色操作进行中")
+                    return False
+            if op_lock is not None:
+                await op_lock.acquire()
+                lock_acquired = True
         try:
+            self._active_pushes.add(session_id)
+            chat_id = self.chat_id_from_session(session_id)
             state = self._get_session_state(session_id)
             if self._check_goodnight_inhibition(state):
                 self._ulog(session_id, "PUSH", "跳过推送: goodnight inhibition")
@@ -1594,6 +1608,8 @@ class SchedulerRuntimeMixin:
             return False
         finally:
             self._active_pushes.discard(session_id)
+            if lock_acquired:
+                op_lock.release()
 
     def _check_goodnight_inhibition(self, state: dict[str, Any]) -> bool:
         text = (session_schema.get_last_message_text(state) or "").lower()

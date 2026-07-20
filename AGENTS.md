@@ -91,7 +91,7 @@ telegram_comfyui_selfie/
 - 测试进程设置 `SUCYUBOT_TEST_FAST_SQLITE=1`，仅测试环境关闭 SQLite 同步/使用内存 journal，生产默认不受影响
 - 真实前缀缓存请求测试默认跳过；需要额外设置 `$env:SUCYUBOT_TEST_LIVE_CACHE_PROBE='1'` 后单独运行 `py -3 -m unittest tests.test_core.ServiceTestCase.test_live_chat_context_cache_probe_uses_current_config_when_available -v`
 
-## 当前架构状态（2026-07-12）
+## 当前架构状态（2026-07-20）
 
 ### 配置与存储
 
@@ -256,6 +256,18 @@ telegram_comfyui_selfie/
 10. **filename_prefix 角色名修复**：OC 没有视觉 identity，`_animatool_filename_prefix()` 旧回退读全局 `bot_name`，导致所有 OC 生成图文件名都错成全局默认角色（"蕾伊"）；现按 `slots.character → slots.identity → _session_role_identity(session_id) → 会话 bot_name → 全局 bot_name` 解析。
 11. **AnimaTool 后端同步**：`ComfyUI-AnimaTool/` 已从 `D:\ComfyUI\...\custom_nodes\ComfyUI-AnimaTool` 完整替换（排除 .git / __pycache__ / outputs），含修复后的 turbo_v1/aesthetic_v1 schema（neg 不再含 `no mosaic, uncensored`，tags 不再要求追加无码尾注）、new_models knowledge 与 executor 更新。
 12. **本轮追加验证**：新增测试覆盖性爱构图全身默认、neg 无双重否定、OC 文件名角色名；`py -3 -m unittest tests.test_core -q` 结果 `439 tests, OK (skipped=1)`；`py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js`、`git diff --check` 全部通过。
+
+## 今日变更（2026-07-20）
+
+### Phase 0 完整审查后的修复
+
+1. **角色操作互斥覆盖完整生命周期**：Telegram 输入不再只在入口瞬时等待角色锁，而是在命令/聊天处理、LLM await、落库和发送回复的整轮生命周期内持锁；同会话新消息仍通过原有可中断任务取消旧回复，取消后在 `finally` 释放锁。`_sched_fire()` 也会真实持有同一会话角色锁到推送结束，消除“检查通过后角色恰好被 WebUI 临时切换”的竞态；WebUI 手动推送通过 `character_lock_held=True` 复用外层锁，避免重入死锁。
+2. **后台 prompt 按捕获角色彻底隔离**：长期记忆提取的结构化边界与 scope 过滤新增显式 `character` 维度；非活动角色从其角色卡和冻结衣柜构造边界，不再读取活动角色的人设、外貌、画风和纯良度。checkpoint 摘要的角色历史提要与长期记忆也按捕获的 `character_key` 查询，角色切换期间不会把 B 的 durable context 注入 A 的摘要 prompt。
+3. **系统默认角色前后端语义统一**：WebUI 保存默认卡时显式提交 `is_default`，后端在角色池无实体默认卡时仍正确写回 config；默认态返回真实 `active_id`，默认角色可正常激活和手动推送。`__default__` 保持系统保留占位，旧 `default` 占位在存在同名自定义角色时优先解析为真实角色；默认头像元数据可保留，但角色字段始终与最新 config 合并展示。
+4. **角色切换 purity 与隐式默认态修复**：切到 `purity=None` 的角色会明确清除上一角色的手动纯良度覆盖；仅重复激活同一角色时保留当前手动覆盖。切回系统默认角色会清空会话 `custom_*`、人格/纯良度标志并恢复 `__default__` 冻结上下文，不再把全局默认配置烘焙成会话自定义字段。
+5. **头像缓存无损恢复**：头像临时生图会快照并恢复会话级 `_last_prompt_slots_by_session` / `_last_generated_nltag_by_session` 与 legacy 全局 fallback 缓存；不再重复 `pop`、不再丢失活动角色最近一次提示词和 nltag，也保留其他会话缓存。
+6. **冗余分支清理**：删除 full 角色检查点导入中完全重复的无冻结上下文 `elif`，保留单一清理/穿搭初始化路径。
+7. **回归测试**：新增/扩展测试覆盖 Telegram/定时推送实际持锁、旧角色后台记忆与 checkpoint prompt 隔离、默认角色 key 归一（含真实 `default` 自定义角色）、默认卡保存/高亮/激活/手动推送、Telegram 与 WebUI 两条 purity 清理路径、头像会话级与全局缓存恢复；完整验证结果见文末“最新验证”。
 
 ## 今日变更（2026-07-19）
 
@@ -557,7 +569,7 @@ telegram_comfyui_selfie/
 
 ## 最新验证
 
-- `py -3 -m unittest tests.test_core -q` → `442 tests, OK (skipped=1)`（2026-07-19）
+- `py -3 -m unittest tests.test_core -q` → `448 tests, OK (skipped=1)`（2026-07-20）
 - `py -3 -m compileall -q telegram_comfyui_selfie tests`、`node --check telegram_comfyui_selfie\static\app.js` 通过
 - 默认跳过真实前缀缓存请求测试；设置 `SUCYUBOT_TEST_LIVE_CACHE_PROBE=1` 后才运行
 - `git diff --check` 通过；Windows 下仅可能出现 LF/CRLF 提示

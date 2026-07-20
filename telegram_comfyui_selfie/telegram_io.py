@@ -180,26 +180,6 @@ class TelegramIOMixin:
             logger.info("ignored chat_id not in allowlist: %s", chat_id)
             return
 
-        # WebUI 头像生成/手动推送等角色操作会临时切换会话角色；窗口期内按错误角色
-        # 处理消息会串味并错误落库，这里等待操作结束（超时则提示用户稍后再发）。
-        op_lock = self.character_operation_lock(session_id) if hasattr(self, "character_operation_lock") else None
-        if op_lock is not None and op_lock.locked():
-            try:
-                await asyncio.wait_for(op_lock.acquire(), timeout=60)
-            except asyncio.TimeoutError:
-                await self.send_message(chat_id, "正在切换角色/执行角色操作，请稍后再发一次。")
-                return
-            else:
-                op_lock.release()
-
-        state = self._get_session_state(session_id)
-        if session_schema.get_frozen(state):
-            session_schema.set_frozen(state, False)
-            session_schema.set_frozen_at(state, 0)
-            self._save_session_state(session_id, state)
-            self._ulog(session_id, "UNFREEZE", "用户发消息，自动解冻")
-            logger.info("session %s auto-unfrozen by user message", session_id)
-
         if self._consume_pending_media_group_caption(session_id, msg, text):
             return
 
@@ -230,6 +210,35 @@ class TelegramIOMixin:
             self._unregister_interruptible_task(session_id, current_task)
 
     async def _process_incoming_message(self, chat_id: int | str, session_id: str, msg: dict[str, Any], text: str):
+        """在角色操作锁内处理一次完整输入。
+
+        调用方会先把当前任务注册为可中断任务，因此同会话新消息仍可取消正在生成的旧回复；
+        旧任务取消后会在 finally 释放本锁，新消息随即接管，不会牺牲原有抢占语义。
+        """
+        op_lock = self.character_operation_lock(session_id) if hasattr(self, "character_operation_lock") else None
+        acquired = False
+        if op_lock is not None:
+            try:
+                await asyncio.wait_for(op_lock.acquire(), timeout=60)
+                acquired = True
+            except asyncio.TimeoutError:
+                await self.send_message(chat_id, "正在切换角色/执行角色操作，请稍后再发一次。")
+                return
+        try:
+            await self._process_incoming_message_locked(chat_id, session_id, msg, text)
+        finally:
+            if acquired:
+                op_lock.release()
+
+    async def _process_incoming_message_locked(self, chat_id: int | str, session_id: str, msg: dict[str, Any], text: str):
+        state = self._get_session_state(session_id)
+        if session_schema.get_frozen(state):
+            session_schema.set_frozen(state, False)
+            session_schema.set_frozen_at(state, 0)
+            self._save_session_state(session_id, state)
+            self._ulog(session_id, "UNFREEZE", "用户发消息，自动解冻")
+            logger.info("session %s auto-unfrozen by user message", session_id)
+
         cmd, arg = self.parse_command(text) if text else (None, "")
         try:
             if cmd is not None:

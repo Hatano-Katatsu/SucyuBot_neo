@@ -1787,6 +1787,19 @@ class CommandHandlersMixin:
         session_schema.clear_public_fallback_outfit(state)
         session_schema.clear_nudity(state)
 
+    def _apply_selected_character_payload(self, state: dict[str, Any], payload: dict[str, Any]) -> None:
+        """应用切换目标；系统默认角色保持隐式 config 态，不烘焙为会话覆盖。"""
+        if not payload.get("is_default"):
+            self._apply_character_payload(state, payload)
+            return
+        for key in SESSION_CUSTOM_RESET_KEYS:
+            session_schema.set_character_value(state, key, "")
+        state.pop("custom_daily_selfie_limit", None)
+        session_schema.set_character_value(state, "custom_allow_llm_change_appearance", None)
+        session_schema.set_character_value(state, "persona_user_set", False)
+        session_schema.set_character_value(state, "purity", None)
+        session_schema.set_character_value(state, "purity_user_set", False)
+
     @staticmethod
     def _character_export_payload(state: dict[str, Any]) -> dict[str, Any]:
         key = (
@@ -1990,9 +2003,11 @@ class CommandHandlersMixin:
             if "style" not in data:
                 payload.pop("style", None)
             # 切换角色时应用目标卡自己的 purity；旧角色的手动 purity 只在非切换时保留。
-            if data.get("purity") is None or (not switching and session_schema.get_character_value(state, "purity_user_set", False)):
+            if switching and "purity" not in payload:
+                payload["purity"] = None
+            if not switching and session_schema.get_character_value(state, "purity_user_set", False):
                 payload.pop("purity", None)
-            self._apply_character_payload(state, payload)
+            self._apply_selected_character_payload(state, payload)
             if switching:
                 # 短期态（含 dynamic_appearance/wardrobe）现已随 character_contexts 冻结/解冻：
                 # 切回的角色拿回自己存档的穿搭，新角色则被清空——不再需要在此硬抹（那会覆盖存档）。
@@ -2068,9 +2083,11 @@ class CommandHandlersMixin:
             if "style" not in data:
                 payload.pop("style", None)
             # 切换角色时应用目标卡自己的 purity；旧角色的手动 purity 只在非切换时保留。
-            if data.get("purity") is None or (not switching and session_schema.get_character_value(state, "purity_user_set", False)):
+            if switching and "purity" not in payload:
+                payload["purity"] = None
+            if not switching and session_schema.get_character_value(state, "purity_user_set", False):
                 payload.pop("purity", None)
-            self._apply_character_payload(state, payload)
+            self._apply_selected_character_payload(state, payload)
             if switching:
                 has_clothing_context = self._restore_character_context(session_id, state)
                 self._apply_card_outfit_after_switch(state, payload, has_clothing_context=has_clothing_context)

@@ -58,23 +58,56 @@ class MemoryPolicyMixin:
             return ""
         return format_memory_lines(memories, with_ids=False)
 
-    def _long_memory_structured_boundary_text(self, session_id: str) -> str:
+    def _long_memory_structured_fields(self, session_id: str, character: str | None = None) -> list[tuple[str, Any]]:
+        """返回指定角色的结构化边界，后台任务不得借用另一活动角色的 live state。"""
         state = self._get_session_state(session_id)
-        fields = [
-            ("当前角色", state.get("custom_character") or ""),
-            ("当前作品", state.get("custom_series") or ""),
-            ("当前人设", (state.get("custom_scheduled_persona") or "")[:120]),
-            ("当前身体特征", (state.get("custom_positive_prefix") or "")[:120]),
-            ("当前临时外型", session_schema.get_outfit(state)),
-            ("当前地点", self._get_session_cfg(session_id, "location", "")),
-            ("当前时区", self._get_session_cfg(session_id, "timezone_offset", "")),
-            ("当前画风", self._get_current_style(session_id)),
-            ("当前纯良度", str(self._get_purity(session_id))),
-            ("当前空间关系", self._get_session_cfg(session_id, "spatial_relationship", "")),
+        active_key = self._memory_character(session_id)
+        character_key = active_key if character is None else str(character or "").strip()
+        if character_key == active_key:
+            return [
+                ("当前角色", session_schema.get_character_value(state, "custom_character", "") or ""),
+                ("当前作品", session_schema.get_character_value(state, "custom_series", "") or ""),
+                ("当前人设", (session_schema.get_character_value(state, "custom_scheduled_persona", "") or "")[:120]),
+                ("当前身体特征", (session_schema.get_character_value(state, "custom_positive_prefix", "") or "")[:120]),
+                ("当前临时外型", session_schema.get_outfit(state)),
+                ("当前地点", self._get_session_cfg(session_id, "location", "")),
+                ("当前时区", self._get_session_cfg(session_id, "timezone_offset", "")),
+                ("当前画风", self._get_current_style(session_id)),
+                ("当前纯良度", str(self._get_purity(session_id))),
+                ("当前空间关系", self._get_session_cfg(session_id, "spatial_relationship", "")),
+            ]
+
+        saved = session_schema.get_saved_characters(state)
+        card = dict(saved.get(character_key) or {}) if character_key else dict(self._default_character_payload())
+        context_key = character_key or "__default__"
+        frozen = session_schema.get_character_contexts(state).get(context_key)
+        clothing = frozen.get("clothing") if isinstance(frozen, dict) and isinstance(frozen.get("clothing"), dict) else {}
+        outfit = clothing.get("dynamic_appearance") if isinstance(clothing, dict) else ""
+        if not outfit:
+            outfit = card.get("outfit") or ""
+        return [
+            ("当前角色", card.get("character") or card.get("bot_name") or character_key),
+            ("当前作品", card.get("series") or ""),
+            ("当前人设", str(card.get("persona") or "")[:120]),
+            ("当前身体特征", str(card.get("appearance") or "")[:120]),
+            ("当前临时外型", outfit),
+            ("当前画风", card.get("style") or ""),
+            ("当前纯良度", "" if card.get("purity") is None else str(card.get("purity"))),
+            ("当前空间关系", card.get("relationship") or ""),
         ]
+
+    def _long_memory_structured_boundary_text(self, session_id: str, character: str | None = None) -> str:
+        fields = self._long_memory_structured_fields(session_id, character)
         return "\n".join(f"- {label}: {value}" for label, value in fields if str(value).strip())
 
-    def _is_long_memory_in_scope(self, session_id: str, kind: str, summary: str, tags: Any = None) -> bool:
+    def _is_long_memory_in_scope(
+        self,
+        session_id: str,
+        kind: str,
+        summary: str,
+        tags: Any = None,
+        character: str | None = None,
+    ) -> bool:
         kind = normalize_kind(kind)
         summary = (summary or "").strip()
         if not summary:
@@ -94,16 +127,7 @@ class MemoryPolicyMixin:
         if kind == "visual" and transient and not stable:
             return False
         if kind in ("profile", "setting", "relationship") and not stable:
-            state = self._get_session_state(session_id)
-            current_values = [
-                state.get("custom_character", ""),
-                state.get("custom_series", ""),
-                state.get("custom_scheduled_persona", ""),
-                state.get("custom_positive_prefix", ""),
-                session_schema.get_outfit(state),
-                self._get_session_cfg(session_id, "location", ""),
-                self._get_current_style(session_id),
-            ]
+            current_values = [value for _label, value in self._long_memory_structured_fields(session_id, character)]
             for value in current_values:
                 value = str(value or "").strip()
                 if value and len(value) >= 2 and value in text:
@@ -131,7 +155,7 @@ class MemoryPolicyMixin:
             mems = self.memory.context_memories(session_id, f"{user_text}\n{assistant_text}", character=character_key, limit=10)
             if mems:
                 existing = format_memory_lines(mems, with_ids=False)
-        structured = self._long_memory_structured_boundary_text(session_id)
+        structured = self._long_memory_structured_boundary_text(session_id, character_key)
         system = (
             "你是长期记忆提取器。请从一轮用户与角色的对话中提取值得长期保存的信息。\n"
             "只保存稳定偏好、明确设定、关系状态变化、重要事件、视觉/穿搭偏好、边界或禁忌。\n"
@@ -201,7 +225,13 @@ class MemoryPolicyMixin:
             summary = (item.get("summary") or "").strip()
             if not summary:
                 continue
-            if not self._is_long_memory_in_scope(session_id, item.get("kind", "event"), summary, item.get("tags") or []):
+            if not self._is_long_memory_in_scope(
+                session_id,
+                item.get("kind", "event"),
+                summary,
+                item.get("tags") or [],
+                character_key,
+            ):
                 logger.info("skip out-of-scope long memory: %s", summary)
                 continue
             mid = self.memory.add_memory(

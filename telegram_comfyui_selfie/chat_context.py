@@ -11,6 +11,7 @@ from typing import Any
 
 from . import session_schema
 from .defaults import WEEKDAY_NAMES
+from .memory import format_memory_lines
 
 logger = logging.getLogger(__name__)
 
@@ -1427,14 +1428,31 @@ class ChatContextMixin:
         state = self._get_session_state(session_id)
         return session_schema.get_character_history_summary(state)
 
-    def _checkpoint_summary_durable_context(self, session_id: str) -> str:
+    def _checkpoint_summary_durable_context(self, session_id: str, character_key: str | None = None) -> str:
         """给 checkpoint 摘要器看的长期依据，只用于去重和归属判断。"""
+        key = self._context_character_key(session_id) if character_key is None else str(character_key or "").strip()
+        active_key = self._context_character_key(session_id)
         parts: list[str] = []
-        history_summary = self._character_history_summary_context(session_id)
+        history_summary = ""
+        try:
+            history_summary = (self.app_store.get_context_meta(session_id, key).get("character_history_summary") or "").strip()
+        except Exception:
+            logger.debug("character history summary lookup for checkpoint failed", exc_info=True)
+        if not history_summary and key == active_key:
+            history_summary = session_schema.get_character_history_summary(self._get_session_state(session_id))
         if history_summary:
             parts.append(f"角色历史提要（宏观关系/重大事件/个人轨迹，不要在 checkpoint 中复述）:\n{history_summary}")
         try:
-            memory_context = self._long_term_memory_context(session_id)
+            if key == active_key:
+                memory_context = self._long_term_memory_context(session_id)
+            else:
+                memories = self.memory.context_memories(
+                    session_id,
+                    "",
+                    character=key,
+                    limit=self._long_memory_limit(),
+                )
+                memory_context = format_memory_lines(memories, with_ids=False) if memories else ""
         except Exception:
             memory_context = ""
             logger.debug("long memory context lookup for checkpoint failed", exc_info=True)
@@ -1643,7 +1661,7 @@ class ChatContextMixin:
             if not overflow:
                 return
             previous = checkpoint.get("summary") or ""
-            merged = await self._summarize_checkpoint(session_id, previous, overflow)
+            merged = await self._summarize_checkpoint(session_id, previous, overflow, character_key=character_key)
             hard = self._checkpoint_hard_limit_chars()
             if len(merged) > hard:
                 merged = merged[-hard:]
@@ -1710,7 +1728,7 @@ class ChatContextMixin:
             overflow = pending[:keep_start]
             kept = pending[keep_start:]
             previous = checkpoint.get("summary") or ""
-            merged = await self._summarize_checkpoint(session_id, previous, overflow)
+            merged = await self._summarize_checkpoint(session_id, previous, overflow, character_key=key)
             hard = self._checkpoint_hard_limit_chars()
             if len(merged) > hard:
                 merged = merged[-hard:]
@@ -1749,11 +1767,18 @@ class ChatContextMixin:
         except Exception:
             return 3000
 
-    async def _summarize_checkpoint(self, session_id: str, previous: str, messages: list[dict[str, Any]]) -> str:
+    async def _summarize_checkpoint(
+        self,
+        session_id: str,
+        previous: str,
+        messages: list[dict[str, Any]],
+        *,
+        character_key: str | None = None,
+    ) -> str:
         soft = str(self.config.get("checkpoint_soft_limit_chars", "2000") or "2000")
         dialog = self._format_store_messages(messages, limit_chars=18000)
         role_legend = self._dialog_role_legend()
-        durable_context = self._checkpoint_summary_durable_context(session_id)
+        durable_context = self._checkpoint_summary_durable_context(session_id, character_key)
         durable_rules = (
             "Use durable context only as a de-duplication and ownership reference. "
             "Stable user facts, preferences, boundaries, and corrections belong to long-term memory; "
@@ -1887,7 +1912,7 @@ class ChatContextMixin:
             if not pending:
                 return latest_id
             previous = checkpoint.get("summary") or ""
-            merged = await self._summarize_checkpoint(session_id, previous, pending)
+            merged = await self._summarize_checkpoint(session_id, previous, pending, character_key=key)
             hard = self._checkpoint_hard_limit_chars()
             if len(merged) > hard:
                 merged = merged[-hard:]

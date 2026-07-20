@@ -75,21 +75,29 @@ def required_character_key_from_request(request: web.Request, payload: dict[str,
         return None
     # 默认角色卡的 payload id 是 bot_name 回退值（如"蕾伊"），运行态记忆/日记/checkpoint
     # 都写在空串键下——这里统一归一，前端对 is_default 卡也会直接发 __default__ 占位。
-    if value in ("__default__", "default"):
+    if value == "__default__":
         return ""
     try:
         service = service_from(request)
         sid = request.match_info.get("session_id")
+        if sid:
+            saved = session_schema.get_saved_characters(service._get_session_state(sid))
+            # "default" 是旧前端曾发送的默认角色占位；若用户确实创建了同名自定义角色，
+            # 则优先把它当真实角色键。"__default__" 才是无条件保留的系统占位。
+            if value == "default":
+                entry = saved.get(value)
+                return value if isinstance(entry, dict) and entry.get("is_default") is not True else ""
         if sid and hasattr(service, "_default_character_payload"):
             default_id = str(service._default_character_payload().get("id") or "").strip()
             if default_id and value == default_id:
-                saved = session_schema.get_saved_characters(service._get_session_state(sid))
                 entry = saved.get(value)
                 # 用户创建过同名自定义角色时不映射；否则默认角色 id 一律归一到空串键。
                 if not isinstance(entry, dict) or entry.get("is_default") is True:
                     return ""
     except Exception:
         pass
+    if value == "default":
+        return ""
     return value
 
 
@@ -1489,6 +1497,20 @@ async def api_characters(request: web.Request):
     default_id = default_char.get("id") or default_char.get("bot_name") or "default"
     if default_id and default_id not in characters:
         characters[default_id] = default_char
+    elif default_id and isinstance(characters.get(default_id), dict) and characters[default_id].get("is_default") is True:
+        # 默认角色生成头像后会在会话角色池留一条带头像元数据的记录；展示字段仍以实时
+        # config 为准，只从该记录继承头像，避免后续编辑默认配置后 UI 继续显示旧快照。
+        avatar_meta = {
+            key: characters[default_id].get(key)
+            for key in ("avatar_path", "avatar_updated_at")
+            if characters[default_id].get(key) not in (None, "")
+        }
+        characters[default_id] = {**default_char, **avatar_meta}
+    if (
+        not character_value(state, "custom_character", "")
+        and not character_value(state, "persona_user_set", False)
+    ):
+        active_id = default_id
     checkpoints: dict[str, list[dict[str, Any]]] = {}
     if hasattr(service, "list_character_checkpoints"):
         for cid in characters:
@@ -1539,11 +1561,18 @@ async def _save_character_locked(service, sid: str, payload: dict[str, Any], req
     key = str(payload.get("id") or payload.get("character") or payload.get("bot_name") or "").strip()
     if not key:
         return json_error("角色 JSON 必须包含 id 或 character")
+    if key == "__default__":
+        return json_error("__default__ 是系统保留角色键，请使用其他角色名")
     # 默认角色以 config 为存储：仅当该角色不在 saved_characters（用户没创建过同名自定义角色）、
     # 且其 is_default 标记为真时，才走默认路径写回 config。否则走常规 saved_characters 路径。
     default_id = service._default_character_payload().get("id") or ""
     saved = session_schema.get_saved_characters(state)
-    is_default_card = key == default_id and saved.get(key, {}).get("is_default") is True
+    existing = saved.get(key)
+    is_default_card = (
+        key == default_id
+        and payload.get("is_default") is True
+        and (not isinstance(existing, dict) or existing.get("is_default") is True)
+    )
     if is_default_card:
         service._apply_default_character_payload(payload)
         return json_ok({
@@ -1601,17 +1630,25 @@ def _avatar_public_marker(service, session_id: str, character_id: str) -> str:
 
 def _character_for_avatar(service, state: dict[str, Any], session_id: str, character_id: str) -> dict[str, Any]:
     saved = session_schema.get_saved_characters(state)
-    if character_id in saved:
-        return dict(saved.get(character_id) or {})
+    saved_entry = saved.get(character_id)
+    default_char = service._default_character_payload()
+    default_id = default_char.get("id") or default_char.get("bot_name") or "default"
+    if isinstance(saved_entry, dict) and saved_entry.get("is_default") is not True:
+        return dict(saved_entry)
+    if character_id in ("", "__default__"):
+        return dict(default_char)
     active_id = active_character_id(state)
     if character_id == active_id:
         current = service._character_export_payload(state) if hasattr(service, "_character_export_payload") else {}
         if current:
             return dict(current)
-    default_char = service._default_character_payload()
-    default_id = default_char.get("id") or default_char.get("bot_name") or "default"
     if character_id == default_id:
-        return dict(default_char)
+        avatar_meta = {
+            key: saved_entry.get(key)
+            for key in ("avatar_path", "avatar_updated_at")
+            if isinstance(saved_entry, dict) and saved_entry.get(key) not in (None, "")
+        }
+        return {**default_char, **avatar_meta}
     return {}
 
 
@@ -1636,7 +1673,12 @@ def _selected_character_is_active(service, state: dict[str, Any], session_id: st
         default_id = str(service._default_character_payload().get("id") or "").strip()
     except Exception:
         default_id = ""
-    return bool(default_id and character_id == default_id and not current_character)
+    return bool(
+        payload.get("is_default")
+        and not current_character
+        and not character_value(state, "persona_user_set", False)
+        and character_id in ("", "__default__", default_id)
+    )
 
 
 def _switch_state_to_selected_character(service, session_id: str, state: dict[str, Any], character_id: str, payload: dict[str, Any]) -> None:
@@ -1647,13 +1689,24 @@ def _switch_state_to_selected_character(service, session_id: str, state: dict[st
     next_payload = dict(payload)
     if "style" not in payload:
         next_payload.pop("style", None)
-    # 本函数只在切换角色时调用：应用目标卡自己的 purity，不被旧角色的手动 purity 压制。
-    if payload.get("purity") is None:
-        next_payload.pop("purity", None)
-    if hasattr(service, "_apply_character_payload"):
-        service._apply_character_payload(state, next_payload)
-    if not character_value(state, "custom_character", "") and not payload.get("is_default"):
-        session_schema.set_character_value(state, "custom_character", character_id)
+    if "purity" not in next_payload:
+        next_payload["purity"] = None
+    if payload.get("is_default"):
+        # 系统默认角色由 config 实时提供，不能把默认值写成会话 custom_* 覆盖。
+        for key in SESSION_CUSTOM_RESET_KEYS:
+            session_schema.set_character_value(state, key, "")
+        state.pop("custom_daily_selfie_limit", None)
+        session_schema.set_character_value(state, "custom_allow_llm_change_appearance", None)
+        session_schema.set_character_value(state, "persona_user_set", False)
+        session_schema.set_character_value(state, "purity", None)
+        session_schema.set_character_value(state, "purity_user_set", False)
+    else:
+        # 本函数只在切换角色时调用：包括 None 在内都应用目标卡自己的 purity，
+        # 避免沿用上一个角色的会话覆盖。
+        if hasattr(service, "_apply_character_payload"):
+            service._apply_character_payload(state, next_payload)
+        if not character_value(state, "custom_character", ""):
+            session_schema.set_character_value(state, "custom_character", character_id)
     has_clothing_context = False
     if hasattr(service, "_restore_character_context"):
         has_clothing_context = service._restore_character_context(session_id, state)
@@ -1733,6 +1786,18 @@ async def _generate_character_avatar_locked(service, sid: str, character_id: str
     if hasattr(service, "_apply_character_payload"):
         service._apply_character_payload(avatar_state, payload)
     original_session_state = service.sessions.get(sid)
+    missing = object()
+    session_cache_snapshots: dict[str, tuple[Any, bool, Any]] = {}
+    for cache_name in ("_last_prompt_slots_by_session", "_last_generated_nltag_by_session"):
+        cache = getattr(service, cache_name, missing)
+        if isinstance(cache, dict):
+            session_cache_snapshots[cache_name] = (cache, sid in cache, copy.deepcopy(cache.get(sid)))
+        else:
+            session_cache_snapshots[cache_name] = (cache, False, None)
+    global_cache_snapshots: dict[str, Any] = {}
+    for cache_name in ("_last_prompt_slots", "_last_generated_nltag"):
+        old_value = getattr(service, cache_name, missing)
+        global_cache_snapshots[cache_name] = missing if old_value is missing else copy.deepcopy(old_value)
     service.sessions[sid] = avatar_state
     try:
         ok, images, err = await service._do_generate(
@@ -1743,25 +1808,39 @@ async def _generate_character_avatar_locked(service, sid: str, character_id: str
             orientation="2:3",
         )
     except Exception as exc:
-        if original_session_state is not None:
-            service.sessions[sid] = original_session_state
         service._ulog(sid, "ERROR", f"CHARACTER_AVATAR_FAILED character={character_id} error={exc}")
         return json_error(f"头像生成失败: {exc}", status=502)
     finally:
         if original_session_state is not None:
             service.sessions[sid] = original_session_state
-        # 头像生成会污染按 sid 缓存的展示层数据（最近 prompt slots / nltag），
-        # 结束后清掉，避免下一张正式图把头像的 slots/nltag 当成上一张照片。
-        for cache_name in ("_last_prompt_slots_by_session", "_last_generated_nltag_by_session"):
-            cache = getattr(service, cache_name, None)
-            if isinstance(cache, dict):
-                cache.pop(sid, None)
-        # 头像生成在临时角色态下跑完了整条生图链路，展示缓存属于头像角色，
-        # 直接清掉避免覆盖活动角色最近一次的 /查看提示词 与照片历史 nltag。
-        for cache_attr in ("_last_prompt_slots_by_session", "_last_generated_nltag_by_session"):
-            cache = getattr(service, cache_attr, None)
-            if isinstance(cache, dict):
-                cache.pop(sid, None)
+        else:
+            service.sessions.pop(sid, None)
+        # 头像链路使用临时角色态，会同时覆盖会话级和 legacy 全局展示缓存；恢复生成前快照，
+        # 既保住活动角色最近一次提示词/照片历史，也不误删其他会话的缓存。
+        for cache_name, (original_cache, had_sid, old_value) in session_cache_snapshots.items():
+            current_cache = getattr(service, cache_name, None)
+            if isinstance(original_cache, dict):
+                target_cache = current_cache if isinstance(current_cache, dict) else original_cache
+                if had_sid:
+                    target_cache[sid] = old_value
+                else:
+                    target_cache.pop(sid, None)
+                setattr(service, cache_name, target_cache)
+            elif isinstance(current_cache, dict):
+                current_cache.pop(sid, None)
+                if original_cache is missing and not current_cache:
+                    delattr(service, cache_name)
+            elif original_cache is missing:
+                if hasattr(service, cache_name):
+                    delattr(service, cache_name)
+            else:
+                setattr(service, cache_name, original_cache)
+        for cache_name, old_value in global_cache_snapshots.items():
+            if old_value is missing:
+                if hasattr(service, cache_name):
+                    delattr(service, cache_name)
+            else:
+                setattr(service, cache_name, old_value)
     if not ok or not images:
         service._ulog(sid, "ERROR", f"CHARACTER_AVATAR_FAILED character={character_id} error={err}")
         return json_error(f"头像生成失败: {err or '无图片'}", status=502)
@@ -1868,7 +1947,10 @@ async def api_delete_character(request: web.Request):
     default_id = service._default_character_payload().get("id") or ""
     state = service._get_session_state(sid)
     saved = session_schema.get_saved_characters(state)
-    is_default_card = character_id == default_id and saved.get(character_id, {}).get("is_default") is True
+    existing = saved.get(character_id)
+    is_default_card = character_id == default_id and (
+        not isinstance(existing, dict) or existing.get("is_default") is True
+    )
     if is_default_card:
         return json_error("系统默认角色不能删除", status=403)
     saved.pop(character_id, None)
@@ -1901,34 +1983,28 @@ async def api_activate_character(request: web.Request):
 
 async def _activate_character_locked(service, sid: str, character_id: str):
     state = service._get_session_state(sid)
-    saved = session_schema.get_saved_characters(state)
-    data = saved.get(character_id)
+    data = _character_payload_for_operation(service, state, sid, character_id)
     if not data:
         return json_error("角色不存在", status=404)
-    switching = (data.get("character", "") or "") != (character_value(state, "custom_character", "") or "")
-    if switching and hasattr(service, "_save_current_character_context"):
-        service._save_current_character_context(state)
-    if hasattr(service, "_snapshot_character"):
-        service._snapshot_character(state)
-    payload = dict(data)
-    if not switching:
+    already_active = _selected_character_is_active(service, state, sid, character_id, data)
+    if not already_active:
+        _switch_state_to_selected_character(service, sid, state, character_id, data)
+    elif not data.get("is_default"):
+        payload = dict(data)
         payload["role_name"] = character_value(state, "custom_role_name", "") or data.get("role_name", "")
         payload["bot_self_name"] = character_value(state, "custom_bot_self_name", "") or data.get("bot_self_name", "")
         payload["relationship"] = character_value(state, "custom_spatial_relationship", "") or data.get("relationship", "")
-    if "style" not in data:
-        payload.pop("style", None)
-    # 切换到目标角色时应用目标卡自己的 purity；旧角色的手动 purity 只在非切换（重复激活）时保留。
-    if data.get("purity") is None or (not switching and character_value(state, "purity_user_set", False)):
-        payload.pop("purity", None)
-    if hasattr(service, "_apply_character_payload"):
-        service._apply_character_payload(state, payload)
-    if switching and hasattr(service, "_restore_character_context"):
-        has_clothing_context = service._restore_character_context(sid, state)
-        if hasattr(service, "_apply_card_outfit_after_switch"):
-            service._apply_card_outfit_after_switch(state, payload, has_clothing_context=has_clothing_context)
-    state.pop("life_profile", None)
-    service._save_session_state(sid, state)
-    return json_ok({"active_id": character_value(state, "custom_character", "") or "", "current": service._character_export_payload(state), "characters": session_schema.get_saved_characters(state)})
+        if "style" not in data:
+            payload.pop("style", None)
+        if character_value(state, "purity_user_set", False):
+            payload.pop("purity", None)
+        if hasattr(service, "_apply_character_payload"):
+            service._apply_character_payload(state, payload)
+        state.pop("life_profile", None)
+        service._save_session_state(sid, state)
+    default_id = str(service._default_character_payload().get("id") or "").strip()
+    active_id = character_value(state, "custom_character", "") or (default_id if data.get("is_default") else "")
+    return json_ok({"active_id": active_id, "current": service._character_export_payload(state), "characters": session_schema.get_saved_characters(state)})
 
 
 async def api_diaries(request: web.Request):
@@ -2519,7 +2595,13 @@ async def _test_push_selected_character_locked(service, sid: str, char: str, mod
         if not already_active:
             _switch_state_to_selected_character(service, sid, state, char, character_payload)
         now = service._session_now(sid)
-        ok = await service._sched_fire(sid, now, mode_override=mode, skip_active_check=True)
+        ok = await service._sched_fire(
+            sid,
+            now,
+            mode_override=mode,
+            skip_active_check=True,
+            character_lock_held=True,
+        )
         if not already_active:
             target_state = service._get_session_state(sid)
             if hasattr(service, "_save_current_character_context"):

@@ -1325,6 +1325,7 @@ function renderCharacterForm() {
     try {
       const values = formValues(form);
       values.id = state.selectedCharacter;
+      if (isDefault) values.is_default = true;
       const sid = encodeURIComponent(state.selectedSession);
       await api(`/api/sessions/${sid}/characters`, { method: "POST", body: values });
       await loadCharacters();

@@ -24,7 +24,7 @@ from telegram_comfyui_selfie.commands import (
 )
 from telegram_comfyui_selfie.command_aliases import COMMAND_ALIAS_GROUPS, resolve_command_alias
 from telegram_comfyui_selfie.prompt_intake import heuristic_intake
-from telegram_comfyui_selfie.webui import api_character_avatar_image, api_diaries, api_generate_character_avatar, api_get_history_summary, api_organize_memories, api_save_character, api_save_diary, api_save_history_summary, api_system_error_log, api_test_push_selected_character, api_update_wardrobe, api_world_life_plan_generate, api_world_life_plan_goal_create, api_world_life_plan_goal_delete, api_world_life_plan_goal_update, build_world_route_preview, cast_config_value, masked_config, required_character_key_from_request, serialize_prompt_slots, session_summary
+from telegram_comfyui_selfie.webui import api_activate_character, api_character_avatar_image, api_characters, api_diaries, api_generate_character_avatar, api_get_history_summary, api_organize_memories, api_save_character, api_save_diary, api_save_history_summary, api_system_error_log, api_test_push_selected_character, api_update_wardrobe, api_world_life_plan_generate, api_world_life_plan_goal_create, api_world_life_plan_goal_delete, api_world_life_plan_goal_update, build_world_route_preview, cast_config_value, masked_config, required_character_key_from_request, serialize_prompt_slots, session_summary
 
 
 os.environ.setdefault("SUCYUBOT_TEST_FAST_SQLITE", "1")
@@ -2491,11 +2491,12 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._bot_tasks = [keepalive]
             observed = {}
 
-            async def fake_sched(session_id, local_dt, mode_override=None, skip_active_check=False):
+            async def fake_sched(session_id, local_dt, mode_override=None, skip_active_check=False, character_lock_held=False):
                 active_state = svc._get_session_state(session_id)
                 observed["character"] = session_schema.get_character_value(active_state, "custom_character", "")
                 observed["mode"] = mode_override
                 observed["skip_active_check"] = skip_active_check
+                observed["character_lock_held"] = character_lock_held
                 svc._record_sent_photo(
                     session_id,
                     "B push scene",
@@ -2525,7 +2526,12 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             data = json.loads(resp.text)
             self.assertTrue(data["ok"])
             self.assertTrue(data["triggered"])
-            self.assertEqual(observed, {"character": "角色B", "mode": "morning", "skip_active_check": True})
+            self.assertEqual(observed, {
+                "character": "角色B",
+                "mode": "morning",
+                "skip_active_check": True,
+                "character_lock_held": True,
+            })
 
             after = svc._get_session_state(sid)
             self.assertEqual(session_schema.get_character_value(after, "custom_character", ""), "角色A")
@@ -2599,7 +2605,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 await enter("avatar")
                 return True, [b"a-avatar"], ""
 
-            async def fake_sched(session_id, local_dt, mode_override=None, skip_active_check=False):
+            async def fake_sched(session_id, local_dt, mode_override=None, skip_active_check=False, character_lock_held=False):
                 await enter("push")
                 svc._record_sent_photo(
                     session_id,
@@ -5409,7 +5415,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             session_schema.set_checkpoint_message_id(state, 0)
             captured_checkpoint = {}
 
-            async def fake_summarize(session_id_arg, previous, msgs):
+            async def fake_summarize(session_id_arg, previous, msgs, **kwargs):
                 captured_checkpoint["session_id"] = session_id_arg
                 captured_checkpoint["previous"] = previous
                 captured_checkpoint["messages"] = list(msgs)
@@ -11441,7 +11447,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             # 模拟 LLM 摘要：在 await 期间把活动角色切到 B
             switched = False
 
-            async def fake_summarize(session_id, previous, msgs_list):
+            async def fake_summarize(session_id, previous, msgs_list, **kwargs):
                 nonlocal switched
                 if not switched:
                     state_b = svc._get_session_state(sid)
@@ -11531,6 +11537,325 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         memories = svc.memory.list_memories(sid, character="")
         self.assertTrue(any("默认角色记忆" in (m.get("summary") or "") for m in memories))
 
+        # 6) 用户真实创建名为 default 的自定义角色时，不再被旧占位规则吞掉。
+        session_schema.get_saved_characters(svc._get_session_state(sid))["default"] = {
+            "character": "default",
+            "persona": "真实自定义角色",
+        }
+        self.assertEqual(required_character_key_from_request(_req("default")), "default")
+
+    def test_character_operation_lock_covers_telegram_and_scheduler_runtime(self):
+        """Telegram 整轮处理与定时推送实际持锁，而非只在入口瞬时检查。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:lock-runtime"
+            entered = asyncio.Event()
+            release = asyncio.Event()
+
+            async def fake_locked(chat_id, session_id, msg, text):
+                self.assertTrue(svc.character_operation_lock(session_id).locked())
+                entered.set()
+                await release.wait()
+
+            svc._process_incoming_message_locked = fake_locked
+            task = asyncio.create_task(svc._process_incoming_message(1, sid, {}, "hello"))
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            self.assertTrue(svc.character_operation_lock(sid).locked())
+            release.set()
+            await task
+            self.assertFalse(svc.character_operation_lock(sid).locked())
+
+            observed = {}
+
+            def stop_push(state):
+                observed["locked"] = svc.character_operation_lock(sid).locked()
+                return True
+
+            svc._check_goodnight_inhibition = stop_push
+            ok = await svc._sched_fire(sid, svc._session_now(sid))
+            self.assertFalse(ok)
+            self.assertTrue(observed["locked"])
+            self.assertFalse(svc.character_operation_lock(sid).locked())
+
+        asyncio.run(run())
+
+    def test_background_memory_and_checkpoint_use_explicit_character_context(self):
+        """显式为旧角色运行后台任务时，prompt 不得混入当前活动角色。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:background-role"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "角色B")
+            session_schema.set_character_value(state, "custom_scheduled_persona", "B 的人格")
+            session_schema.set_character_value(state, "custom_positive_prefix", "B 外貌")
+            session_schema.get_saved_characters(state)["角色A"] = {
+                "character": "角色A",
+                "persona": "A 的人格",
+                "appearance": "A 外貌",
+                "relationship": "A 的关系",
+            }
+            svc._save_session_state(sid, state)
+            svc.memory.add_memory(sid, "manual", "A 的长期记忆", character="角色A", importance=5)
+            svc.memory.add_memory(sid, "manual", "B 的长期记忆", character="角色B", importance=5)
+            svc.app_store.upsert_character_history_summary(sid, "角色A", "A 的历史提要")
+            svc.app_store.upsert_character_history_summary(sid, "角色B", "B 的历史提要")
+            captured = []
+
+            async def fake_call_llm(system, user, **kwargs):
+                captured.append(user)
+                if kwargs.get("tag") == "memory-extract":
+                    return '{"memories":[]}'
+                return "checkpoint"
+
+            svc._call_llm = fake_call_llm
+            svc.has_llm_config = lambda purpose, session_id="": True
+
+            await svc._extract_long_term_memories(sid, "User: A 的对话", "", character="角色A")
+            await svc._summarize_checkpoint(
+                sid,
+                "",
+                [{"role": "user", "content": "A 的短期对话"}],
+                character_key="角色A",
+            )
+
+            memory_prompt, checkpoint_prompt = captured
+            self.assertIn("当前角色: 角色A", memory_prompt)
+            self.assertIn("A 的人格", memory_prompt)
+            self.assertNotIn("角色B", memory_prompt)
+            self.assertNotIn("B 的人格", memory_prompt)
+            self.assertIn("A 的历史提要", checkpoint_prompt)
+            self.assertIn("A 的长期记忆", checkpoint_prompt)
+            self.assertNotIn("B 的历史提要", checkpoint_prompt)
+            self.assertNotIn("B 的长期记忆", checkpoint_prompt)
+
+        asyncio.run(run())
+
+    def test_webui_default_character_save_list_and_activation_are_consistent(self):
+        """合成默认卡写回 config、默认态正确高亮，并可从自定义角色切回。"""
+        async def run():
+            from aiohttp import web
+            from aiohttp.test_utils import make_mocked_request
+
+            class JsonRequest(dict):
+                def __init__(self, app, match_info, payload):
+                    super().__init__()
+                    self.app = app
+                    self.match_info = match_info
+                    self.query = {}
+                    self._payload = payload
+                    self["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+
+                async def json(self):
+                    return self._payload
+
+            svc = self.make_service()
+            sid = "telegram:default-card"
+            svc.config["bot_name"] = "蕾伊"
+            app = web.Application()
+            app["service"] = svc
+
+            default_card = svc._default_character_payload()
+            default_card["persona"] = "修改后的默认人格"
+            save_resp = await api_save_character(JsonRequest(app, {"session_id": sid}, default_card))
+            self.assertTrue(json.loads(save_resp.text)["ok"])
+            self.assertEqual(svc.config["scheduled_persona"], "修改后的默认人格")
+            self.assertNotIn("蕾伊", session_schema.get_saved_characters(svc._get_session_state(sid)))
+
+            list_req = make_mocked_request(
+                "GET", f"/api/sessions/{sid}/characters", app=app, match_info={"session_id": sid}
+            )
+            list_req["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+            list_data = json.loads((await api_characters(list_req)).text)
+            self.assertEqual(list_data["active_id"], "蕾伊")
+            self.assertTrue(list_data["characters"]["蕾伊"]["is_default"])
+
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "角色A")
+            session_schema.set_character_value(state, "custom_scheduled_persona", "A 人格")
+            session_schema.set_character_value(state, "purity", 2)
+            session_schema.set_character_value(state, "purity_user_set", True)
+            session_schema.get_saved_characters(state)["角色A"] = {"character": "角色A", "persona": "A 人格"}
+            activate_req = make_mocked_request(
+                "POST",
+                f"/api/sessions/{sid}/characters/蕾伊/activate",
+                app=app,
+                match_info={"session_id": sid, "character_id": "蕾伊"},
+            )
+            activate_req["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+            activate_data = json.loads((await api_activate_character(activate_req)).text)
+            self.assertTrue(activate_data["ok"])
+            self.assertEqual(activate_data["active_id"], "蕾伊")
+            after = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_character_value(after, "custom_character", ""), "")
+            self.assertEqual(session_schema.get_character_value(after, "custom_scheduled_persona", ""), "")
+            self.assertIsNone(session_schema.get_character_value(after, "purity"))
+            self.assertFalse(session_schema.get_character_value(after, "purity_user_set", False))
+
+        asyncio.run(run())
+
+    def test_switch_to_character_with_inherited_purity_clears_previous_override(self):
+        """目标卡 purity=None 表示跟随全局，不能继承上一角色的手动纯良度。"""
+        async def run():
+            from aiohttp import web
+            from aiohttp.test_utils import make_mocked_request
+
+            svc = self.make_service()
+            sid = "telegram:purity-switch"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "角色A")
+            session_schema.set_character_value(state, "purity", 2)
+            session_schema.set_character_value(state, "purity_user_set", True)
+            session_schema.get_saved_characters(state).update({
+                "角色A": {"character": "角色A", "purity": 2},
+                "角色B": {"character": "角色B", "persona": "B 人格", "purity": None},
+            })
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_character(1, sid, "load 角色B")
+
+            after = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_character_value(after, "custom_character", ""), "角色B")
+            self.assertIsNone(session_schema.get_character_value(after, "purity"))
+            self.assertFalse(session_schema.get_character_value(after, "purity_user_set", False))
+
+            # WebUI 激活入口使用独立实现，也必须遵守同一语义。
+            session_schema.set_character_value(after, "custom_character", "角色A")
+            session_schema.set_character_value(after, "purity", 2)
+            session_schema.set_character_value(after, "purity_user_set", True)
+            svc._save_session_state(sid, after)
+            app = web.Application()
+            app["service"] = svc
+            req = make_mocked_request(
+                "POST",
+                f"/api/sessions/{sid}/characters/角色B/activate",
+                app=app,
+                match_info={"session_id": sid, "character_id": "角色B"},
+            )
+            req["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+            data = json.loads((await api_activate_character(req)).text)
+            self.assertTrue(data["ok"])
+            after_web = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_character_value(after_web, "custom_character", ""), "角色B")
+            self.assertIsNone(session_schema.get_character_value(after_web, "purity"))
+            self.assertFalse(session_schema.get_character_value(after_web, "purity_user_set", False))
+
+        asyncio.run(run())
+
+    def test_webui_manual_push_accepts_default_character_sentinel(self):
+        """前端发送 __default__ 时，后台用隐式默认角色推送并恢复原活动角色。"""
+        async def run():
+            from aiohttp import web
+
+            class DummyHttp:
+                closed = False
+
+            class JsonRequest(dict):
+                def __init__(self, app, match_info, payload):
+                    super().__init__()
+                    self.app = app
+                    self.match_info = match_info
+                    self.query = {}
+                    self._payload = payload
+                    self["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+
+                async def json(self):
+                    return self._payload
+
+            svc = self.make_service()
+            sid = "telegram:default-push"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "角色A")
+            session_schema.set_character_value(state, "custom_scheduled_persona", "A 人格")
+            session_schema.get_saved_characters(state)["角色A"] = {"character": "角色A", "persona": "A 人格"}
+            svc._save_session_state(sid, state)
+            observed = {}
+
+            async def fake_sched(
+                session_id,
+                local_dt,
+                mode_override=None,
+                skip_active_check=False,
+                character_lock_held=False,
+            ):
+                active = svc._get_session_state(session_id)
+                observed["character"] = session_schema.get_character_value(active, "custom_character", "")
+                observed["lock_held"] = character_lock_held
+                return True
+
+            keepalive = asyncio.create_task(asyncio.sleep(60))
+            svc.http = DummyHttp()
+            svc._bot_tasks = [keepalive]
+            svc._sched_fire = fake_sched
+            app = web.Application()
+            app["service"] = svc
+            req = JsonRequest(
+                app,
+                {"session_id": sid},
+                {"character_key": "__default__", "mode": "normal"},
+            )
+            try:
+                data = json.loads((await api_test_push_selected_character(req)).text)
+            finally:
+                keepalive.cancel()
+                try:
+                    await keepalive
+                except asyncio.CancelledError:
+                    pass
+            self.assertTrue(data["ok"])
+            self.assertTrue(data["triggered"])
+            self.assertEqual(observed, {"character": "", "lock_held": True})
+            after = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_character_value(after, "custom_character", ""), "角色A")
+            self.assertEqual(session_schema.get_character_value(after, "custom_scheduled_persona", ""), "A 人格")
+
+        asyncio.run(run())
+
+    def test_avatar_generation_restores_session_and_global_prompt_caches(self):
+        """头像临时生图结束后恢复活动角色最近一次提示词与 nltag 缓存。"""
+        async def run():
+            from aiohttp import web
+            from aiohttp.test_utils import make_mocked_request
+
+            svc = self.make_service()
+            sid = "telegram:avatar-cache"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "当前角色")
+            session_schema.get_saved_characters(state)["头像角色"] = {"character": "头像角色"}
+            svc._last_prompt_slots_by_session = {sid: "old-slots", "telegram:other": "other-slots"}
+            svc._last_generated_nltag_by_session = {sid: "old-nltag", "telegram:other": "other-nltag"}
+            svc._last_prompt_slots = "old-global-slots"
+            svc._last_generated_nltag = "old-global-nltag"
+
+            async def fake_generate(*args, **kwargs):
+                svc._last_prompt_slots_by_session[sid] = "avatar-slots"
+                svc._last_generated_nltag_by_session[sid] = "avatar-nltag"
+                svc._last_prompt_slots = "avatar-global-slots"
+                svc._last_generated_nltag = "avatar-global-nltag"
+                return True, [b"avatar"], ""
+
+            svc._do_generate = fake_generate
+            app = web.Application()
+            app["service"] = svc
+            req = make_mocked_request(
+                "POST",
+                f"/api/sessions/{sid}/characters/头像角色/avatar",
+                app=app,
+                match_info={"session_id": sid, "character_id": "头像角色"},
+            )
+            req["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+            data = json.loads((await api_generate_character_avatar(req)).text)
+            self.assertTrue(data["ok"])
+            self.assertEqual(svc._last_prompt_slots_by_session, {
+                sid: "old-slots", "telegram:other": "other-slots",
+            })
+            self.assertEqual(svc._last_generated_nltag_by_session, {
+                sid: "old-nltag", "telegram:other": "other-nltag",
+            })
+            self.assertEqual(svc._last_prompt_slots, "old-global-slots")
+            self.assertEqual(svc._last_generated_nltag, "old-global-nltag")
+
+        asyncio.run(run())
+
 
 class CheckpointTrimTestCase(ServiceFixtureMixin, unittest.TestCase):
     """TODO #9.4: checkpoint 裁剪测试 — 51+ messages 后 checkpoint，窗口 10 messages，不能 assistant 开头。"""
@@ -11588,7 +11913,7 @@ class CheckpointTrimTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(len(ids), 12)
 
             # 手动跑 checkpoint（mock LLM 摘要，避免真实调用）
-            async def fake_summarize(session_id, previous, msgs):
+            async def fake_summarize(session_id, previous, msgs, **kwargs):
                 return "CHECKPOINT SUMMARY"
             svc._summarize_checkpoint = fake_summarize
             svc._extract_long_term_memories_from_messages = AsyncMock()
@@ -11630,7 +11955,7 @@ class CheckpointTrimTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             captured = []
 
-            async def fake_summarize(session_id, previous, msgs):
+            async def fake_summarize(session_id, previous, msgs, **kwargs):
                 captured.extend(msgs)
                 return "CHECKPOINT SUMMARY"
 
