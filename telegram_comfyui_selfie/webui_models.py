@@ -9,6 +9,7 @@ from .webui_common import (
     is_admin,
     json_error,
     json_ok,
+    parse_bool,
     require_admin,
     service_from,
 )
@@ -44,12 +45,6 @@ def masked_config(service) -> dict[str, Any]:
         else:
             values[key] = value
     return {"values": values, "secret_present": secret_present}
-
-
-def parse_bool(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on", "启用", "开启", "开", "允许"}
 
 
 def mask_model_profile(profile: dict[str, Any] | None) -> dict[str, Any]:

@@ -42,6 +42,12 @@ def require_admin(request: web.Request):
         raise web.HTTPForbidden(text="需要管理员权限")
 
 
+def parse_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "启用", "开启", "开", "允许"}
+
+
 def human_ago(seconds: float) -> str:
     if seconds < 60:
         return "刚刚"
