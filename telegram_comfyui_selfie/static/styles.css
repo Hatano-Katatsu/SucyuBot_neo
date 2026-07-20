@@ -669,6 +669,35 @@ select {
   box-shadow: var(--shadow-sm);
 }
 
+.world-session-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 0;
+  overflow: hidden;
+  cursor: default;
+}
+
+.world-session-select {
+  min-width: 0;
+  min-height: 52px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.world-session-select:focus-visible,
+.session-freeze-toggle:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: -3px;
+}
+
 .session-item.active {
   border-color: var(--accent);
   background: var(--accent-light);
@@ -1287,11 +1316,23 @@ select {
 .log-filter-bar label:last-child { flex: 0 0 140px; }
 .session-freeze-toggle {
   display: inline-flex;
-  min-height: 32px;
+  min-width: 48px;
+  min-height: 40px;
+  justify-content: center;
   align-items: center;
-  margin-top: 8px;
+  align-self: center;
+  margin: 6px 8px 6px 0;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-subtle);
   color: var(--accent);
-  text-decoration: underline;
+  cursor: pointer;
+}
+
+.session-freeze-toggle:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-ghost);
 }
 
 .toast[data-kind="error"] {

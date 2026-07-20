@@ -14,24 +14,37 @@ function renderWorldSessionList() {
     return;
   }
   state.sessions.forEach(item => {
-    const btn = document.createElement("button");
-    btn.className = "session-item" + (item.frozen ? " frozen" : "");
-    btn.dataset.sid = item.session_id;
+    const row = document.createElement("div");
+    row.className = "session-item world-session-item" + (item.frozen ? " frozen" : "");
+    row.dataset.sid = item.session_id;
     const frozenBadge = item.frozen ? ' <span class="frozen-badge">已冻结</span>' : "";
-    btn.innerHTML = `<div class="session-title">${escapeHtml(item.character || item.chat_id)}${frozenBadge}</div><div class="session-meta">${escapeHtml(item.location || "未设置城市")} · UTC${escapeHtml(item.timezone || "-")} · 推送 ${escapeHtml(item.daily_push || "-")}</div><span class="session-freeze-toggle" role="button" tabindex="0">${item.frozen ? "解冻" : "冻结"}</span>`;
-    btn.onclick = () => selectWorldSession(item.session_id);
-    const toggle = btn.querySelector(".session-freeze-toggle");
-    const changeFrozen = async event => {
+    const select = document.createElement("button");
+    select.type = "button";
+    select.className = "world-session-select";
+    select.innerHTML = `<span class="session-title">${escapeHtml(item.character || item.chat_id)}${frozenBadge}</span><span class="session-meta">${escapeHtml(item.location || "未设置城市")} · UTC${escapeHtml(item.timezone || "-")} · 推送 ${escapeHtml(item.daily_push || "-")}</span>`;
+    select.onclick = () => selectWorldSession(item.session_id);
+    select.setAttribute("aria-label", `查看 ${item.character || item.chat_id || item.session_id} 的动线`);
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "session-freeze-toggle";
+    toggle.textContent = item.frozen ? "解冻" : "冻结";
+    toggle.setAttribute("aria-label", `${item.frozen ? "解冻" : "冻结"} ${item.character || item.chat_id || item.session_id}`);
+    toggle.onclick = async event => {
       event.stopPropagation();
-      await api(`/api/sessions/${encodeURIComponent(item.session_id)}/${item.frozen ? "unfreeze" : "freeze"}`, { method: "POST" });
-      await loadWorldSessions();
-      toast(item.frozen ? "会话已解冻" : "会话已冻结");
+      setBusy(toggle, true);
+      try {
+        await api(`/api/sessions/${encodeURIComponent(item.session_id)}/${item.frozen ? "unfreeze" : "freeze"}`, { method: "POST" });
+        await loadWorldSessions();
+        toast(item.frozen ? "会话已解冻" : "会话已冻结");
+      } catch (err) {
+        toast(err.message, "error");
+      } finally {
+        setBusy(toggle, false);
+      }
     };
-    toggle.onclick = changeFrozen;
-    toggle.onkeydown = event => {
-      if (event.key === "Enter" || event.key === " ") changeFrozen(event);
-    };
-    list.appendChild(btn);
+    row.append(select, toggle);
+    list.appendChild(row);
   });
   if (state.selectedWorldSession) {
     $all("#world-session-list .session-item").forEach(btn => btn.classList.toggle("active", btn.dataset.sid === state.selectedWorldSession));

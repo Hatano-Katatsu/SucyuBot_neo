@@ -89,6 +89,15 @@ class StaticModuleBoundaryTestCase(unittest.TestCase):
             self.assertIn(declaration, character_ui)
             self.assertNotIn(declaration, app)
 
+    def test_world_session_actions_are_separate_native_buttons(self):
+        world_ui = (STATIC_ROOT / "world_ui.js").read_text(encoding="utf-8")
+
+        self.assertIn('document.createElement("div")', world_ui)
+        self.assertIn('select.className = "world-session-select"', world_ui)
+        self.assertIn('toggle.className = "session-freeze-toggle"', world_ui)
+        self.assertNotIn('role="button"', world_ui)
+        self.assertIn('toast(err.message, "error")', world_ui)
+
 
 if __name__ == "__main__":
     unittest.main()
