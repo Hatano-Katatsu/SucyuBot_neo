@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import copy
+import math
 from typing import Any
 
 from aiohttp import web
@@ -31,6 +34,20 @@ YAML_ONLY_CONFIG_KEYS = {
     "long_memory_db_path", "user_log_enabled", "user_log_dir",
     "web_enabled", "web_host", "web_port",
 }
+NUMERIC_CONFIG_KEYS = {
+    "cfg", "default_purity", "height", "life_plan_max_events", "life_plan_max_long",
+    "life_plan_max_mid", "timezone_offset", "turbo_strength", "width",
+}
+NUMERIC_CONFIG_SUFFIXES = (
+    "_bytes", "_cfg", "_chars", "_count", "_days", "_hour", "_hours", "_limit",
+    "_minutes", "_offset", "_penalty", "_per_type", "_port", "_purity", "_rounds",
+    "_seconds", "_steps", "_strength", "_temperature", "_tokens", "_top_p",
+)
+CONFIG_ORDERED_NUMBER_PAIRS = (
+    ("post_chat_push_delay_min_minutes", "post_chat_push_delay_max_minutes"),
+    ("checkpoint_soft_limit_chars", "checkpoint_hard_limit_chars"),
+    ("world_character_place_strong_hours", "world_character_place_ttl_hours"),
+)
 
 
 def masked_config(service) -> dict[str, Any]:
@@ -102,6 +119,82 @@ def cast_config_value(key: str, value, old_value):
     return "" if value is None else str(value)
 
 
+def _is_numeric_config_key(key: str) -> bool:
+    return (
+        key in NUMERIC_CONFIG_KEYS
+        or "_temperature_" in key
+        or key.endswith(NUMERIC_CONFIG_SUFFIXES)
+    )
+
+
+def _optional_finite_config_number(config: dict[str, Any], key: str) -> float | None:
+    value = config.get(key)
+    if value in ("", None):
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"配置字段 {key} 必须是有限数值")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"配置字段 {key} 必须是有限数值") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"配置字段 {key} 必须是有限数值")
+    return number
+
+
+def validate_config_candidate(config: dict[str, Any]) -> None:
+    for key in config:
+        if _is_numeric_config_key(str(key)):
+            _optional_finite_config_number(config, str(key))
+    for lower_key, upper_key in CONFIG_ORDERED_NUMBER_PAIRS:
+        lower = _optional_finite_config_number(config, lower_key)
+        upper = _optional_finite_config_number(config, upper_key)
+        if lower is not None and upper is not None and lower > upper:
+            raise ValueError(f"配置字段 {lower_key} 不能大于 {upper_key}")
+
+
+def prepare_config_candidate(current: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
+    candidate = copy.deepcopy(current)
+    for key, value in values.items():
+        if key in YAML_ONLY_CONFIG_KEYS:
+            continue
+        if key in SECRET_KEYS and value in ("", None):
+            continue
+        try:
+            candidate[key] = cast_config_value(key, value, candidate.get(key))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"配置字段 {key} 的值无效: {exc}") from exc
+    validate_config_candidate(candidate)
+    return candidate
+
+
+def config_operation_lock(service) -> asyncio.Lock:
+    if hasattr(service, "config_update_lock"):
+        return service.config_update_lock()
+    lock = getattr(service, "_web_config_update_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        service._web_config_update_lock = lock
+    return lock
+
+
+def _replace_config_sync(service, candidate: dict[str, Any]) -> None:
+    if hasattr(service, "replace_config_and_save"):
+        service.replace_config_and_save(candidate)
+        return
+    previous = service.config
+    service.config = copy.deepcopy(candidate)
+    try:
+        service.save_config()
+    except Exception:
+        service.config = previous
+        raise
+
+
+async def _replace_config(service, candidate: dict[str, Any]) -> None:
+    await asyncio.to_thread(_replace_config_sync, service, candidate)
+
+
 async def api_config(request: web.Request):
     require_admin(request)
     return json_ok({"config": masked_config(service_from(request))})
@@ -120,20 +213,16 @@ async def api_save_config(request: web.Request):
         "weekend_wake_time", "weekend_sleep_time",
         "daily_selfie_limit",
     }
-    schedule_changed = False
-    try:
-        for key, value in values.items():
-            if key in YAML_ONLY_CONFIG_KEYS:
-                continue
-            if key in SECRET_KEYS and value in ("", None):
-                continue
-            old = service.config.get(key)
-            service.config[key] = cast_config_value(key, value, old)
-            if key in global_schedule_keys:
-                schedule_changed = True
-        service.save_config()
-    except (TypeError, ValueError) as exc:
-        return json_error(f"配置字段 {key} 的值无效: {exc}")
+    schedule_changed = bool(global_schedule_keys.intersection(values))
+    async with config_operation_lock(service):
+        try:
+            candidate = prepare_config_candidate(service.config, values)
+        except (TypeError, ValueError) as exc:
+            return json_error(str(exc))
+        try:
+            await _replace_config(service, candidate)
+        except Exception as exc:
+            return json_error(f"配置保存失败: {exc}", status=500)
     if schedule_changed:
         for sid in list(service.sessions.keys()):
             try:
@@ -189,11 +278,17 @@ async def api_save_model_profile(request: web.Request):
         user_id = request.query.get("user_id") or user_id
     if scope == "global":
         require_admin(request)
-        profiles = dict(service._global_model_profiles())
-        payload = merge_model_profile_secrets(payload, profiles.get(profile_id) or {})
-        profiles[profile_id] = payload
-        service.config["global_model_profiles"] = profiles
-        service.save_config()
+        async with config_operation_lock(service):
+            profiles = copy.deepcopy(service._global_model_profiles())
+            payload = merge_model_profile_secrets(payload, profiles.get(profile_id) or {})
+            profiles[profile_id] = payload
+            candidate = copy.deepcopy(service.config)
+            candidate["global_model_profiles"] = profiles
+            try:
+                validate_config_candidate(candidate)
+                await _replace_config(service, candidate)
+            except Exception as exc:
+                return json_error(f"模型 profile 保存失败: {exc}", status=500)
         return json_ok({"global_profiles": mask_model_profiles(profiles)})
     current = service.app_store.list_model_profiles(user_id).get(profile_id) or {}
     payload = merge_model_profile_secrets(payload, current)
@@ -210,12 +305,18 @@ async def api_delete_model_profile(request: web.Request):
     scope = str(request.query.get("scope") or "user").lower()
     if scope == "global":
         require_admin(request)
-        profiles = dict(service._global_model_profiles())
-        if profile_id not in profiles:
-            return json_error("模型 profile 不存在", status=404)
-        profiles.pop(profile_id, None)
-        service.config["global_model_profiles"] = profiles
-        service.save_config()
+        async with config_operation_lock(service):
+            profiles = copy.deepcopy(service._global_model_profiles())
+            if profile_id not in profiles:
+                return json_error("模型 profile 不存在", status=404)
+            profiles.pop(profile_id, None)
+            candidate = copy.deepcopy(service.config)
+            candidate["global_model_profiles"] = profiles
+            try:
+                validate_config_candidate(candidate)
+                await _replace_config(service, candidate)
+            except Exception as exc:
+                return json_error(f"模型 profile 删除失败: {exc}", status=500)
         return json_ok({"global_profiles": mask_model_profiles(profiles)})
     if not service.app_store.delete_model_profile(user_id, profile_id):
         return json_error("模型 profile 不存在", status=404)

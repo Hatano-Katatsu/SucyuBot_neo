@@ -1,10 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import json
+import os
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tests.support import ServiceFixtureMixin, make_project_temp_dir
+
+
+class JsonRequest(dict):
+    def __init__(self, service, payload: dict, *, match_info: dict | None = None, query: dict | None = None):
+        super().__init__(web_auth={"role": "admin", "user_id": "admin", "token": "test"})
+        self.app = {"service": service}
+        self.match_info = match_info or {}
+        self.query = query or {}
+        self._payload = payload
+
+    async def json(self):
+        return copy.deepcopy(self._payload)
 
 
 class LlmPromptCompareScriptTestCase(unittest.TestCase):
@@ -158,6 +174,144 @@ class ModelProfileTestCase(ServiceFixtureMixin, unittest.TestCase):
             resolved = svc._resolved_llm_config("chat", "telegram:1")
             self.assertFalse(resolved["thinking"])
             self.assertEqual(resolved["thinking_control"], "param")
+
+        asyncio.run(run())
+
+
+class ConfigTransactionTestCase(ServiceFixtureMixin, unittest.TestCase):
+    """Web 配置候选校验与原子落盘事务测试。"""
+
+    def test_late_cast_failure_does_not_apply_earlier_fields(self):
+        from telegram_comfyui_selfie.webui_models import api_save_config
+
+        async def run():
+            svc = self.make_service()
+            before_config = copy.deepcopy(svc.config)
+            before_file = svc.config_path.read_bytes()
+            request = JsonRequest(svc, {
+                "values": {
+                    "web_admin_username": "changed-before-error",
+                    "push_continuity_hours": "not-an-int",
+                }
+            })
+
+            response = await api_save_config(request)
+            data = json.loads(response.text)
+
+            self.assertEqual(response.status, 400)
+            self.assertFalse(data["ok"])
+            self.assertIn("push_continuity_hours", data["error"])
+            self.assertEqual(svc.config, before_config)
+            self.assertEqual(svc.config_path.read_bytes(), before_file)
+
+        asyncio.run(run())
+
+    def test_non_finite_and_cross_field_values_are_rejected_before_save(self):
+        from telegram_comfyui_selfie.webui_models import api_save_config
+
+        async def run():
+            svc = self.make_service()
+            before_config = copy.deepcopy(svc.config)
+            before_file = svc.config_path.read_bytes()
+            cases = (
+                ({"chat_llm_temperature": "NaN"}, "有限数值"),
+                ({
+                    "post_chat_push_delay_min_minutes": "20",
+                    "post_chat_push_delay_max_minutes": "10",
+                }, "不能大于"),
+            )
+            for values, expected_error in cases:
+                with self.subTest(values=values):
+                    response = await api_save_config(JsonRequest(svc, {"values": values}))
+                    data = json.loads(response.text)
+                    self.assertEqual(response.status, 400)
+                    self.assertIn(expected_error, data["error"])
+                    self.assertEqual(svc.config, before_config)
+                    self.assertEqual(svc.config_path.read_bytes(), before_file)
+
+        asyncio.run(run())
+
+    def test_replace_failure_rolls_back_runtime_and_keeps_original_file(self):
+        svc = self.make_service()
+        before_config = copy.deepcopy(svc.config)
+        before_file = svc.config_path.read_bytes()
+        svc.config["location"] = "不会落盘的城市"
+
+        with patch("telegram_comfyui_selfie.state_runtime.os.replace", side_effect=OSError("replace failed")):
+            with self.assertRaisesRegex(OSError, "replace failed"):
+                svc.save_config()
+
+        self.assertEqual(svc.config, before_config)
+        self.assertEqual(svc.config_path.read_bytes(), before_file)
+        self.assertEqual(list(svc.config_path.parent.glob(f".{svc.config_path.name}.*.tmp")), [])
+
+    def test_web_replace_failure_returns_error_without_runtime_mutation(self):
+        from telegram_comfyui_selfie.webui_models import api_save_config
+
+        async def run():
+            svc = self.make_service()
+            before_config = copy.deepcopy(svc.config)
+            before_file = svc.config_path.read_bytes()
+            request = JsonRequest(svc, {"values": {"web_admin_username": "not-persisted"}})
+
+            with patch("telegram_comfyui_selfie.state_runtime.os.replace", side_effect=OSError("replace failed")):
+                response = await api_save_config(request)
+
+            self.assertEqual(response.status, 500)
+            self.assertIn("配置保存失败", json.loads(response.text)["error"])
+            self.assertEqual(svc.config, before_config)
+            self.assertEqual(svc.config_path.read_bytes(), before_file)
+            self.assertEqual(list(svc.config_path.parent.glob(f".{svc.config_path.name}.*.tmp")), [])
+
+        asyncio.run(run())
+
+    def test_json_and_yaml_saves_use_same_directory_atomic_replace(self):
+        from telegram_comfyui_selfie import TelegramComfyUIService
+        from telegram_comfyui_selfie.config_store import flatten_config, load_simple_yaml
+
+        real_fsync = os.fsync
+        real_replace = os.replace
+        for suffix in (".json", ".yml"):
+            with self.subTest(suffix=suffix):
+                root = make_project_temp_dir(f"atomic_config_{suffix[1:]}")
+                config_path = root / f"config{suffix}"
+                svc = TelegramComfyUIService(config_path, root / "state.json")
+                svc.config["location"] = f"atomic-{suffix[1:]}"
+
+                with (
+                    patch("telegram_comfyui_selfie.state_runtime.os.fsync", wraps=real_fsync) as fsync_mock,
+                    patch("telegram_comfyui_selfie.state_runtime.os.replace", wraps=real_replace) as replace_mock,
+                ):
+                    svc.save_config()
+
+                fsync_mock.assert_called_once()
+                replace_mock.assert_called_once()
+                temp_path, target_path = replace_mock.call_args.args
+                self.assertEqual(Path(temp_path).parent, config_path.parent)
+                self.assertEqual(Path(target_path), config_path)
+                self.assertEqual(list(config_path.parent.glob(f".{config_path.name}.*.tmp")), [])
+                if suffix == ".json":
+                    saved = json.loads(config_path.read_text(encoding="utf-8"))
+                else:
+                    saved = flatten_config(load_simple_yaml(config_path))
+                self.assertEqual(saved["location"], f"atomic-{suffix[1:]}")
+
+    def test_concurrent_web_saves_rebase_under_async_lock(self):
+        from telegram_comfyui_selfie.webui_models import api_save_config
+
+        async def run():
+            svc = self.make_service()
+            first = JsonRequest(svc, {"values": {"web_admin_username": "serial-user"}})
+            second = JsonRequest(svc, {"values": {"web_public_host": "https://example.test"}})
+
+            responses = await asyncio.gather(api_save_config(first), api_save_config(second))
+
+            self.assertTrue(all(response.status == 200 for response in responses))
+            self.assertEqual(svc.config["web_admin_username"], "serial-user")
+            self.assertEqual(svc.config["web_public_host"], "https://example.test")
+            persisted = json.loads(svc.config_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["web_admin_username"], "serial-user")
+            self.assertEqual(persisted["web_public_host"], "https://example.test")
 
         asyncio.run(run())
 

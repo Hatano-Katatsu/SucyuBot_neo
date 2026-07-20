@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
+import math
+import os
 import re
+import tempfile
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +21,7 @@ from .defaults import DEFAULT_CONFIG
 
 
 logger = logging.getLogger(__name__)
+_CONFIG_LOCK_INIT_GUARD = threading.Lock()
 
 
 class ServiceStateMixin:
@@ -24,41 +30,121 @@ class ServiceStateMixin:
     # ---------------------------------------------------------------------
     # Config / state
     # ---------------------------------------------------------------------
-    def _load_config(self) -> dict[str, Any]:
-        cfg = dict(DEFAULT_CONFIG)
-        if self.config_path.exists():
-            try:
-                if self.config_path.suffix.lower() in (".yml", ".yaml"):
-                    loaded = flatten_config(load_simple_yaml(self.config_path))
-                else:
-                    loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    cfg.update(loaded)
-            except Exception as exc:
-                raise RuntimeError(f"配置文件读取失败: {self.config_path}: {exc}") from exc
-        else:
-            self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            if self.config_path.suffix.lower() in (".yml", ".yaml"):
-                self.config_path.write_text(dump_simple_yaml(cfg), encoding="utf-8")
-            else:
-                self.config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-            logger.warning("配置文件不存在，已写入默认配置: %s", self.config_path)
-        return cfg
+    def _config_file_lock(self) -> threading.RLock:
+        lock = getattr(self, "_config_file_thread_lock", None)
+        if lock is not None:
+            return lock
+        with _CONFIG_LOCK_INIT_GUARD:
+            lock = getattr(self, "_config_file_thread_lock", None)
+            if lock is None:
+                lock = threading.RLock()
+                self._config_file_thread_lock = lock
+        return lock
 
-    def save_config(self):
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+    def config_update_lock(self) -> asyncio.Lock:
+        """Web 配置事务锁；等待锁不会阻塞事件循环。"""
+        lock = getattr(self, "_config_update_async_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._config_update_async_lock = lock
+        return lock
+
+    @staticmethod
+    def _validate_serializable_config_numbers(value: Any, path: str = "config") -> None:
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"{path} 包含非有限数值")
+        if isinstance(value, dict):
+            for key, child in value.items():
+                ServiceStateMixin._validate_serializable_config_numbers(child, f"{path}.{key}")
+        elif isinstance(value, (list, tuple)):
+            for index, child in enumerate(value):
+                ServiceStateMixin._validate_serializable_config_numbers(child, f"{path}[{index}]")
+
+    def _serialize_config(self, config: dict[str, Any]) -> str:
+        self._validate_serializable_config_numbers(config)
         if self.config_path.suffix.lower() in (".yml", ".yaml"):
-            self.config_path.write_text(dump_simple_yaml(self.config), encoding="utf-8")
-        else:
-            self.config_path.write_text(json.dumps(self.config, ensure_ascii=False, indent=2), encoding="utf-8")
+            return dump_simple_yaml(config)
+        return json.dumps(config, ensure_ascii=False, indent=2, allow_nan=False)
 
-    def reload_config_from_disk(self) -> dict[str, Any]:
-        """从当前配置文件重新载入运行态配置，不写回磁盘。"""
-        self.config = self._load_config()
+    def _write_config_atomic(self, config: dict[str, Any]) -> None:
+        """在目标文件同目录完成 flush/fsync 后原子替换配置文件。"""
+        content = self._serialize_config(config)
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{self.config_path.name}.",
+            suffix=".tmp",
+            dir=str(self.config_path.parent),
+        )
+        temp_path = Path(temp_name)
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8", newline="\n")
+            fd = -1
+            with handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, self.config_path)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _set_runtime_config(self, config: dict[str, Any]) -> None:
+        self.config = config
         for attr in ("_cached_outfit_kw", "_cached_accessory_kw"):
             if hasattr(self, attr):
                 delattr(self, attr)
-        return self.config
+
+    def _load_config(self) -> dict[str, Any]:
+        with self._config_file_lock():
+            cfg = copy.deepcopy(DEFAULT_CONFIG)
+            if self.config_path.exists():
+                try:
+                    if self.config_path.suffix.lower() in (".yml", ".yaml"):
+                        loaded = flatten_config(load_simple_yaml(self.config_path))
+                    else:
+                        loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        cfg.update(loaded)
+                except Exception as exc:
+                    raise RuntimeError(f"配置文件读取失败: {self.config_path}: {exc}") from exc
+            else:
+                self._write_config_atomic(cfg)
+                logger.warning("配置文件不存在，已写入默认配置: %s", self.config_path)
+            self._persisted_config_snapshot = copy.deepcopy(cfg)
+            return cfg
+
+    def save_config(self):
+        """原子保存当前配置；失败时恢复最近一次成功落盘的运行态快照。"""
+        with self._config_file_lock():
+            previous = copy.deepcopy(getattr(self, "_persisted_config_snapshot", self.config))
+            try:
+                candidate = copy.deepcopy(self.config)
+                persisted = copy.deepcopy(candidate)
+                self._write_config_atomic(candidate)
+            except Exception:
+                self._set_runtime_config(previous)
+                raise
+            self._set_runtime_config(candidate)
+            self._persisted_config_snapshot = persisted
+
+    def replace_config_and_save(self, config: dict[str, Any]) -> None:
+        """候选配置成功原子落盘后，再一次性替换运行态。"""
+        with self._config_file_lock():
+            candidate = copy.deepcopy(config)
+            persisted = copy.deepcopy(candidate)
+            self._write_config_atomic(candidate)
+            self._set_runtime_config(candidate)
+            self._persisted_config_snapshot = persisted
+
+    def reload_config_from_disk(self) -> dict[str, Any]:
+        """从当前配置文件重新载入运行态配置，不写回磁盘。"""
+        with self._config_file_lock():
+            self._set_runtime_config(self._load_config())
+            return self.config
 
     def _memory_db_path(self) -> Path:
         raw = str(self.config.get("long_memory_db_path") or "").strip()
