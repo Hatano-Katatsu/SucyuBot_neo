@@ -6597,7 +6597,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             "web_search_date", "web_search_count",
             "saved_characters", "character_contexts", "init_flow",
             "ntr_stage_reached", "ntr_reconcile_count", "ntr_affection_reset",
-            "frozen", "frozen_at",
+            "frozen", "frozen_at", "web_hidden",
             "session",
         })
         self.assertEqual(set(ss.CHARACTER_CONFIG_EXTRA_KEYS),
