@@ -1043,6 +1043,7 @@ async def plan_roleplay_image(
         role_name = service._get_session_cfg(session_id, "role_name", "魅魔")
     is_push = mode in ("normal", "morning", "ntr", "followup")
     is_followup = mode == "followup"
+    is_ntr = (mode or "").strip().lower() == "ntr"
     forbidden_captions = _recent_photo_captions_for_push(service, state, session_id) if is_push else []
     recent_push_texts = _recent_push_texts_for_push(service, state, session_id) if is_push else []
     push_transition_decision: dict[str, Any] = {}
@@ -1197,7 +1198,8 @@ async def plan_roleplay_image(
         "followup: 用户刚结束对话后的短时间续场推送，优先保持最近地点、关系、情绪和相邻动作；"
         "若节拍推进/转场判定已触发，则按判定让时间自然推进一拍，不要停在上一句话附近。\n"
         f"normal: 根据{spatial_label}和近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror/third。\n"
-        "ntr: 用户长时间未互动的冷落惩罚推送，强烈 NTR 危机感，通常 portrait（他人帮角色拍）、selfie 或分屏。\n"
+        "ntr: 用户长时间未互动的冷落惩罚推送，强烈 NTR 危机感。NTR 模式不适用单人构图规则、不强制 POV；"
+        "允许伴侣（第三人）完整入画；sex 场景允许 portrait（第三人拍摄）、selfie、第三人视角或角色第一人称视角。\n"
         "推送转场通用规则: 最近对话/照片只能作为情绪、约定和避免重复的参考；判定应转场时，不要把上一幕地点、姿势或话题强行续写成此刻仍在发生。\n"
     )
     stable_world_rules = (
@@ -1220,7 +1222,15 @@ async def plan_roleplay_image(
         "注意: is_intimate 只表示亲密/性爱语境，不等于用户身体必须入画；POV 可以只看到角色，用户在画外。"
         + ("系统初步判断本次可能属于亲密场景，请重点确认。" if intimate_hint else "")
     )
-    if free_composition:
+    if is_ntr:
+        interaction_rules = (
+            "\n【NTR 模式的亲密构图】NTR 推送不适用单人构图规则、不强制 POV。"
+            "若 is_intimate=true，伴侣（第三人）可以完整入画（partner_in_frame=true），"
+            "画面焦点仍应是角色，但允许第三人全身、面部和姿态描述。"
+            "sex 场景允许 portrait（第三人拍摄角色）、selfie、第三人视角或角色第一人称视角。"
+            "new_appearance_tags 仍只填临时外观变化。"
+        )
+    elif free_composition:
         interaction_rules = (
             "\n【自由配图模式的亲密构图】若 is_intimate=true，仍要避免把用户误画成抢主体的完整第二人；"
             f"只有用户要求或场景硬约束明确需要用户身体可见时，才把用户写成{user_g_zh}局部、手臂、胸腹、背或腿入画；"
@@ -1253,7 +1263,7 @@ async def plan_roleplay_image(
         "如果草案写成“你坐着/你躺着/你穿着”，必须改写为“角色坐着/她躺着/角色穿着”。"
         "角色名只用于台词称呼；默认或原创角色不要把名字当作画面标签，画面描述应依靠角色类型和外貌特征。既有作品角色可以保留角色名和作品名。"
     )
-    if not free_composition:
+    if not free_composition and not is_ntr:
         subject_rules += (
             "\n单人构图硬规则: 当视角是 selfie 前摄自拍或 mirror 对镜自拍时，画面里【只能有角色一个人】，"
             "scene 绝不能写入第二个人（用户、伴侣、他、她、对方、男人、女人）或对方的完整身体、面部。"
@@ -1273,7 +1283,15 @@ async def plan_roleplay_image(
         "如果角色有连续动作（如转身→走开→回头），只选取其中最具表现力的一帧，不要把多帧塞进同一张图。"
         "不要在 scene 里写叙事推进或时间线（先…然后…最后…），只写此刻定格的画面。"
     )
-    if free_composition:
+    if is_ntr:
+        view_rules = (
+            "\n视角规则: NTR 模式不强制 POV 或单人构图。"
+            "sex 场景允许 portrait（第三人拍摄）、selfie、第三人视角或角色第一人称视角。"
+            "取景物理规则: view=selfie 是前摄自拍；view=portrait 是他人帮角色拍的照片；"
+            "view=mirror 的对镜自拍允许镜子和手机同时可见。"
+            "手部规则: 避免复杂手势，严禁三只手/多余手臂。"
+        )
+    elif free_composition:
         view_rules = (
             "\n视角规则: 优先服从用户本次给出的视角、机位、远近和构图；未指定时才根据上下文选择 pov/third/selfie/mirror/portrait。"
             "允许部位特写、超近景、远景、低机位、俯拍、侧后方、环境或道具承接；不要为了自拍偏好强行改写。"

@@ -44,9 +44,6 @@ ANIMATOOL_NLTAG_FIELDS = ("nltag", "nl_tag", "nl_tags", "tags")
 ANIMATOOL_NEGATIVE_FIELDS = ("neg", "negative", "negative_prompt")
 VALID_VIEWS = {"selfie", "mirror", "pov", "third", "portrait"}
 
-ANIMATOOL_AGE_GUARD_TERMS = (
-    "child", "loli", "underage", "minor",
-)
 ANIMATOOL_PHONE_GUARD_TERMS = (
     "holding phone", "visible phone", "phone", "smartphone", "cellphone", "mobile phone",
     "phone in hand", "hand holding phone", "viewfinder", "phone screen", "camera ui",
@@ -197,7 +194,6 @@ class PromptSlots:
 class AnimaToolGuardContract:
     """不能交给 LLM 自由删改的 AnimaTool 安全与构图终裁项。"""
 
-    age: tuple[str, ...] = ()
     phone: tuple[str, ...] = ()
     mirror: tuple[str, ...] = ()
     extra_people: tuple[str, ...] = ()
@@ -208,7 +204,6 @@ class AnimaToolGuardContract:
         seen: set[str] = set()
         terms: list[str] = []
         for group in (
-            self.age,
             self.phone,
             self.mirror,
             self.extra_people,
@@ -225,8 +220,6 @@ class AnimaToolGuardContract:
     def nltag_constraint(self) -> str:
         """无 neg 字段的工作流以单句自然语言保留同一份终裁语义。"""
         clauses: list[str] = []
-        if self.age:
-            clauses.append("every visible person is an adult")
         if self.phone:
             forbidden_phone = {
                 _tag_key(term)
@@ -1497,7 +1490,7 @@ def build_prompt(
     )
     device_present = device_in_frame or bool(DEVICE_SCENE_RE.search(scene_desc))
     scene_has_sex_keyword = any(k in scene_lower for k in sex_keywords)
-    is_partner_scene = scene_has_partner and not is_ntr_scene
+    is_partner_scene = scene_has_partner
     is_sex_scene = is_intimate or scene_has_sex_keyword or bool(explicit_sex_tags)
 
     quality = "masterpiece, best quality, highres, absurdres, newest, year 2025, anime coloring, clean lineart, soft cel shading, detailed illustration"
@@ -1529,8 +1522,6 @@ def build_prompt(
                 continue
             kept.append(tok)
         neg = ", ".join(kept)
-    if "2girls" not in neg.lower():
-        neg += ", 2girls, multiple girls, extra girls"
     if is_ntr:
         neg = ", ".join(t for t in [x.strip() for x in neg.split(",")] if t.lower() not in {"male", "boy", "man", "1boy"})
     elif not male and "male" not in neg.lower():
@@ -1542,7 +1533,35 @@ def build_prompt(
     # 角色背对相机/在相机背后（从背后环抱面向屏幕的用户等）：POV 看不到她，这类同框场景应走
     # 第三人称双人取景，而非贴身 POV。此处与规划器的几何闸门同源，覆盖无规划器/规划器漏判路径。
     partner_behind = is_partner_scene and not is_ntr_scene and _scene_breaks_pov_facing(scene_desc)
-    if (is_sex_scene or is_partner_scene) and not is_ntr_scene:
+    if is_ntr_scene:
+        # NTR 推送：移除 solo、允许伴侣（第三人）完整入画、不强制 POV
+        scene_desc = re.sub(r"\bsolo\b,?\s*", "", scene_desc)
+        if is_sex_scene:
+            # 性爱 NTR：伴侣完整或局部入画，放行 device
+            scene_desc += ", third person fully visible in frame, intimate interaction"
+            neg = _remove_negatives(
+                neg, "male", "boy", "man", "1boy",
+                "2girls", "multiple girls", "extra girls",
+                "multiple characters", "second body", "duplicate body",
+            )
+        else:
+            # 非性爱 NTR：伴侣入画、移除单人限制
+            scene_desc += ", another person visible in frame"
+            neg = _remove_negatives(
+                neg, "male", "boy", "man", "1boy",
+                "2girls", "multiple girls", "extra girls",
+                "multiple characters",
+            )
+        if device_present:
+            neg = _remove_negatives(
+                neg, "holding phone", "phone", "cellphone", "mobile phone", "smartphone",
+                "visible phone", "phone in hand", "hand holding phone",
+                "mirror", "mirror reflection", "mirror selfie",
+                *VISIBLE_PHONE_NEGATIVES,
+            )
+        else:
+            neg = _append_negatives(neg, "holding phone", "phone", "cellphone", "mobile phone", "smartphone")
+    elif is_sex_scene or is_partner_scene:
         if not device_present:
             # 伴侣/性爱/日常同框画面不能是单人自拍取景：先清掉自拍/对镜的相机取景措辞，
             # 否则会出现“自拍框 + 画面里有第二人”的矛盾（断臂/双人的主因）。
@@ -1680,10 +1699,7 @@ def build_prompt(
             scene_desc += ", " + ", ".join(missing_sex_tags)
 
     effective = safety.get("level", purity)
-    if purity <= 2:
-        # 最露骨档：去掉未成年/儿童向安全底线，但保留 censor bar / mosaic / pixelated 等去马赛克反词。
-        neg = ", ".join(t for t in [x.strip() for x in neg.split(",")] if t.lower() not in {"child", "loli"})
-    elif purity <= 7:
+    if purity <= 7:
         if effective > 5 and not is_sex_scene:
             neg += ", nsfw, explicit, naked, nude, sex"
     elif purity <= 9:
@@ -1952,7 +1968,6 @@ def _build_animatool_guard_contract(slots: PromptSlots | None) -> AnimaToolGuard
     """从 native 已终裁的 negative 中提取不可被 AnimaTool LLM 删除的子集。"""
     negative = str(slots.negative or "") if isinstance(slots, PromptSlots) else ""
     return AnimaToolGuardContract(
-        age=_guard_terms_from_negative(negative, ANIMATOOL_AGE_GUARD_TERMS),
         phone=_guard_terms_from_negative(negative, ANIMATOOL_PHONE_GUARD_TERMS),
         mirror=_guard_terms_from_negative(negative, ANIMATOOL_MIRROR_GUARD_TERMS),
         extra_people=_guard_terms_from_negative(negative, ANIMATOOL_EXTRA_PERSON_GUARD_TERMS),

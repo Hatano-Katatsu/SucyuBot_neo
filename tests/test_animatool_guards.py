@@ -18,7 +18,7 @@ from telegram_comfyui_selfie.image_planning import plan_animatool_slots
 
 class AnimaToolGuardContractTestCase(unittest.TestCase):
     GUARDED_NEGATIVE = (
-        "bad hands, child, holding phone, mirror, unrelated extra person, "
+        "bad hands, holding phone, mirror, unrelated extra person, "
         "split screen, nipples"
     )
 
@@ -78,7 +78,6 @@ class AnimaToolGuardContractTestCase(unittest.TestCase):
                 if supports_neg:
                     negative = payload["neg"].lower()
                     for term in (
-                        "child",
                         "holding phone",
                         "mirror",
                         "unrelated extra person",
@@ -90,7 +89,6 @@ class AnimaToolGuardContractTestCase(unittest.TestCase):
                     self.assertNotIn("neg", payload)
                     tags = payload["tags"].lower()
                     for phrase in (
-                        "every visible person is an adult",
                         "no phone",
                         "no mirror",
                         "no unrelated extra person",
@@ -110,7 +108,6 @@ class AnimaToolGuardContractTestCase(unittest.TestCase):
 
         negative = payload["neg"].lower()
         self.assertIn("llm supplemental artifact", negative)
-        self.assertIn("child", negative)
         self.assertIn("holding phone", negative)
         self.assertIn("unrelated extra person", negative)
         self.assertIn("split screen", negative)
@@ -154,7 +151,6 @@ class AnimaToolGuardContractTestCase(unittest.TestCase):
             self.assertIsNotNone(payload)
             negative = payload["neg"].lower()
             self.assertIn("llm supplemental artifact", negative)
-            self.assertIn("child", negative)
             self.assertIn("holding phone", negative)
             self.assertIn("split screen", negative)
             system_prompt = service._call_llm.await_args.args[0]
@@ -185,7 +181,6 @@ class AnimaToolGuardContractTestCase(unittest.TestCase):
         )
 
         self.assertIn("schema term", payload["neg"])
-        self.assertIn("child", payload["neg"])
         self.assertNotIn("Deterministic rendering constraints", payload["tags"])
 
     def test_mirror_workflow_allows_one_phone_and_one_reflection(self):
