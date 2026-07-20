@@ -16,6 +16,7 @@ const state = {
   selectedLogChunk: "",
   logRawContent: "",
   logTail: 1000,
+  llmDebugCursorStack: [null],
   profiles: {},
 };
 
@@ -814,6 +815,7 @@ async function initEvents() {
   $("#log-tail").onchange = event => {
     state.logTail = Number(event.currentTarget.value) || 1000;
     if (state.selectedLog) selectLog(state.selectedLog);
+    else if (state.selectedLogType) selectSystemLog(state.selectedLogType);
   };
   $("#feedback-refresh").onclick = () => loadFeedbackBoard().then(() => toast("反馈已刷新"));
   $("#feedback-form").onsubmit = async (event) => {

@@ -7977,8 +7977,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             self.assertEqual(captured["body"]["max_tokens"], 8192)
             svc._flush_llm_debug(force=True)
-            data = json.loads(svc._llm_debug_log_path().read_text(encoding="utf-8"))
-            entry = data["entries_by_type"]["chat:dream-memory-summarize"][-1]
+            entries = [
+                json.loads(line)
+                for line in svc._llm_debug_log_path().read_text(encoding="utf-8").splitlines()
+            ]
+            entry = [item for item in entries if item["type"] == "chat:dream-memory-summarize"][-1]
             self.assertEqual(entry["finish_reason"], "length")
             self.assertEqual(entry["completion_tokens"], 8192)
             self.assertEqual(entry["max_tokens"], 8192)

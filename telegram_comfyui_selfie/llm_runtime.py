@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 # 日志脱敏：vision 请求会把图片编码成 base64 data_url 放进 messages，
-# 落盘到 llm_debug.json / 用户 ERROR 日志时会污染日志并放大体积。
+# 落盘到 llm_debug.jsonl / 用户 ERROR 日志时会污染日志并放大体积。
 # _redact_base64 在序列化前递归扫描，把图片相关内容整体丢弃。
 _BASE64_DATA_URL_RE = re.compile(r"data:[^;,]+;base64,[A-Za-z0-9+/=]+")
 _BARE_BASE64_RE = re.compile(r"[A-Za-z0-9+/]{256,}={0,2}")
@@ -231,7 +231,41 @@ class LLMRuntimeMixin:
         return str(choice.get("finish_reason") or "")
 
     def _llm_debug_log_path(self) -> Path:
+        return self._user_log_dir() / "llm_debug.jsonl"
+
+    def _llm_debug_legacy_log_path(self) -> Path:
         return self._user_log_dir() / "llm_debug.json"
+
+    def _migrate_legacy_llm_debug_log(self) -> None:
+        """把旧版分组 JSON 日志一次性迁为按行 JSON，并保留原文件备份。"""
+        path = self._llm_debug_log_path()
+        legacy = self._llm_debug_legacy_log_path()
+        if path.exists() or not legacy.exists():
+            return
+        try:
+            data = json.loads(legacy.read_text(encoding="utf-8"))
+            grouped = data.get("entries_by_type") if isinstance(data, dict) else {}
+            entries = []
+            if isinstance(grouped, dict):
+                for values in grouped.values():
+                    if isinstance(values, list):
+                        entries.extend(item for item in values if isinstance(item, dict))
+            entries.sort(key=lambda item: (float(item.get("ts") or 0), str(item.get("time") or "")))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp = path.with_suffix(path.suffix + ".tmp")
+            with temp.open("w", encoding="utf-8", newline="\n") as handle:
+                for entry in entries:
+                    handle.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
+            temp.replace(path)
+
+            backup = legacy.with_name("llm_debug.legacy.json")
+            index = 1
+            while backup.exists():
+                backup = legacy.with_name(f"llm_debug.legacy.{index}.json")
+                index += 1
+            legacy.replace(backup)
+        except Exception as exc:
+            logger.debug("migrate legacy llm debug log failed: %s", exc)
 
     def _flush_llm_debug(self, *, force: bool = False) -> None:
         pending = getattr(self, "_llm_debug_buffer", [])
@@ -244,37 +278,11 @@ class LLMRuntimeMixin:
         try:
             path = self._llm_debug_log_path()
             path.parent.mkdir(parents=True, exist_ok=True)
+            self._migrate_legacy_llm_debug_log()
             self._rotate_log_file_if_needed(path)
-            if path.exists():
-                try:
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                except Exception:
-                    data = {}
-            else:
-                data = {}
-            if not isinstance(data, dict):
-                data = {}
-            grouped = data.get("entries_by_type")
-            if not isinstance(grouped, dict):
-                grouped = {}
-            for entry in batch:
-                key = str(entry.get("type") or "unknown:untagged")
-                entries = grouped.get(key)
-                if not isinstance(entries, list):
-                    entries = []
-                entries.append(entry)
-                grouped[key] = entries[-10:]
-            updated_at = batch[-1].get("time") or datetime.now().isoformat(timespec="seconds")
-            data = {
-                "schema_version": 1,
-                "updated_at": updated_at,
-                "retention": "last 10 entries per purpose:tag",
-                "flush_policy": f"replace whole file after {threshold} buffered LLM records",
-                "entries_by_type": grouped,
-            }
-            tmp = path.with_suffix(path.suffix + ".tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(path)
+            with path.open("a", encoding="utf-8", newline="\n") as handle:
+                for entry in batch:
+                    handle.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
             del pending[:len(batch)]
         except Exception as exc:
             logger.debug("flush llm debug failed: %s", exc)
@@ -292,7 +300,7 @@ class LLMRuntimeMixin:
         status: int | None = None,
         error: str = "",
     ) -> None:
-        """按 purpose:tag 保存最近 10 次完整 LLM 请求/返回，供上下文缓存命中分析。"""
+        """按 JSONL 追加完整 LLM 请求/返回，读取端按游标分页。"""
         key = f"{purpose or 'unknown'}:{tag or 'untagged'}"
         now = time.time()
         usage_summary = self._llm_usage_debug_summary(response if isinstance(response, dict) else None)

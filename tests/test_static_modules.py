@@ -98,6 +98,15 @@ class StaticModuleBoundaryTestCase(unittest.TestCase):
         self.assertNotIn('role="button"', world_ui)
         self.assertIn('toast(err.message, "error")', world_ui)
 
+    def test_llm_debug_ui_uses_cursor_pagination(self):
+        index = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+        admin_logs = (STATIC_ROOT / "admin_logs.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="log-page-newer"', index)
+        self.assertIn('id="log-page-older"', index)
+        self.assertIn('params.set("before", String(before))', admin_logs)
+        self.assertIn("data.next_before", admin_logs)
+
 
 if __name__ == "__main__":
     unittest.main()

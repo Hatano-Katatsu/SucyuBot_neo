@@ -84,6 +84,58 @@ def read_error_log_tail(paths: list[Path], limit: int) -> dict[str, Any]:
     return {"errors": entries[:limit], "truncated": truncated or len(entries) > limit}
 
 
+def read_llm_debug_page(path: Path, limit: int, before: int | None = None) -> dict[str, Any]:
+    """按字节游标从 JSONL 尾部读取一页，单条坏记录不会阻断其余日志。"""
+    safe_limit = max(1, min(1000, int(limit or 200)))
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        cursor = size if before is None else max(0, min(size, int(before)))
+        position = cursor
+        chunks: list[bytes] = []
+        newline_count = 0
+        while position > 0 and newline_count <= safe_limit:
+            take = min(LOG_TAIL_CHUNK_BYTES, position)
+            position -= take
+            handle.seek(position)
+            chunk = handle.read(take)
+            chunks.append(chunk)
+            newline_count += chunk.count(b"\n")
+
+        starts_on_boundary = position == 0
+        if position > 0:
+            handle.seek(position - 1)
+            starts_on_boundary = handle.read(1) == b"\n"
+
+    raw = b"".join(reversed(chunks))
+    if position > 0 and not starts_on_boundary:
+        boundary = raw.find(b"\n")
+        raw = raw[boundary + 1:] if boundary >= 0 else b""
+    raw_lines = raw.splitlines(keepends=True)
+    selected = raw_lines[-safe_limit:]
+    next_before = max(0, cursor - sum(len(line) for line in selected))
+    entries: list[dict[str, Any]] = []
+    invalid_lines = 0
+    for raw_line in selected:
+        try:
+            item = json.loads(raw_line.decode("utf-8", errors="replace"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            invalid_lines += 1
+            continue
+        if isinstance(item, dict):
+            entries.append(item)
+        else:
+            invalid_lines += 1
+    return {
+        "entries": entries,
+        "size": size,
+        "before": cursor,
+        "next_before": next_before if next_before > 0 else None,
+        "has_more": next_before > 0,
+        "invalid_lines": invalid_lines,
+    }
+
+
 def log_chunk_items(service, base_path: Path, active_path: Path | None = None) -> list[dict[str, Any]]:
     paths = service._log_all_paths(base_path) if hasattr(service, "_log_all_paths") else ([base_path] if base_path.exists() else [])
     active_name = active_path.name if active_path is not None else ""
@@ -243,16 +295,37 @@ async def api_llm_debug_log(request: web.Request):
     require_admin(request)
     service = service_from(request)
     base_path = service._llm_debug_log_path()
+    if not base_path.exists() and hasattr(service, "_migrate_legacy_llm_debug_log"):
+        await asyncio.to_thread(service._migrate_legacy_llm_debug_log)
     path = service._resolve_log_chunk_path(base_path, request.query.get("chunk") or "") if hasattr(service, "_resolve_log_chunk_path") else base_path
     if not path.exists():
-        return json_ok({"content": {}, "updated_at": None, "chunks": []})
+        return json_ok({"content": {}, "updated_at": None, "chunks": [], "has_more": False})
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            limit = max(1, min(1000, int(request.query.get("limit", "200"))))
+        except ValueError:
+            limit = 200
+        before_raw = str(request.query.get("before") or "").strip()
+        try:
+            before = int(before_raw) if before_raw else None
+        except ValueError:
+            return json_error("before 游标无效")
+        page = await asyncio.to_thread(read_llm_debug_page, path, limit, before)
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for entry in page["entries"]:
+            key = str(entry.get("type") or "unknown:untagged")
+            grouped.setdefault(key, []).append(entry)
+        updated_at = page["entries"][-1].get("time") if page["entries"] else None
         return json_ok({
-            "content": data.get("entries_by_type", {}),
-            "updated_at": data.get("updated_at"),
+            "content": grouped,
+            "updated_at": updated_at,
             "chunk": path.name,
             "chunks": log_chunk_items(service, base_path, path),
+            "limit": limit,
+            "before": page["before"],
+            "next_before": page["next_before"],
+            "has_more": page["has_more"],
+            "invalid_lines": page["invalid_lines"],
         })
     except Exception as exc:
         return json_error(str(exc), status=500)

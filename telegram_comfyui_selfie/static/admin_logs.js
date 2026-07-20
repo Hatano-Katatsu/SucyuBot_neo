@@ -211,6 +211,37 @@ function hideLogChunkSelector() {
   state.selectedLogChunk = "";
 }
 
+function hideLogPageControls() {
+  const bar = $("#log-page-bar");
+  if (bar) bar.hidden = true;
+}
+
+function renderLlmDebugPageControls(data, chunk) {
+  const bar = $("#log-page-bar");
+  const newer = $("#log-page-newer");
+  const older = $("#log-page-older");
+  const status = $("#log-page-status");
+  if (!bar || !newer || !older || !status) return;
+  bar.hidden = false;
+  const stack = Array.isArray(state.llmDebugCursorStack) ? state.llmDebugCursorStack : [null];
+  state.llmDebugCursorStack = stack.length ? stack : [null];
+  newer.disabled = state.llmDebugCursorStack.length <= 1;
+  older.disabled = !data.has_more || data.next_before === null || data.next_before === undefined;
+  const page = state.llmDebugCursorStack.length;
+  status.textContent = `第 ${page} 页 · 每页最多 ${data.limit || state.logTail} 条`;
+  newer.onclick = () => {
+    if (state.llmDebugCursorStack.length <= 1) return;
+    state.llmDebugCursorStack.pop();
+    const before = state.llmDebugCursorStack[state.llmDebugCursorStack.length - 1];
+    selectSystemLog("llm-debug", chunk, before, true);
+  };
+  older.onclick = () => {
+    if (older.disabled) return;
+    state.llmDebugCursorStack.push(data.next_before);
+    selectSystemLog("llm-debug", chunk, data.next_before, true);
+  };
+}
+
 function renderFilteredLog(content) {
   state.logRawContent = String(content || "");
   const needle = ($("#log-filter")?.value || "").trim().toLowerCase();
@@ -224,6 +255,7 @@ async function selectLog(chatId, chunk = null) {
   const sameLog = state.selectedLog === chatId && !state.selectedLogType;
   state.selectedLog = chatId;
   state.selectedLogType = null;
+  hideLogPageControls();
   const chosenChunk = chunk === null ? (sameLog ? state.selectedLogChunk : "") : chunk;
   $("#log-title").textContent = `日志 · ${chatId}`;
   $all("#log-list .session-item").forEach(btn => btn.classList.toggle("active", btn.dataset.chat === chatId));
@@ -241,7 +273,7 @@ async function selectLog(chatId, chunk = null) {
   }
 }
 
-async function selectSystemLog(logType, chunk = null) {
+async function selectSystemLog(logType, chunk = null, before = null, keepPage = false) {
   const sameLog = state.selectedLogType === logType && !state.selectedLog;
   state.selectedLog = null;
   state.selectedLogType = logType;
@@ -252,10 +284,14 @@ async function selectSystemLog(logType, chunk = null) {
   box.textContent = "加载中...";
   try {
     if (logType === "llm-debug") {
-      const suffix = chosenChunk ? `?chunk=${encodeURIComponent(chosenChunk)}` : "";
-      const data = await api(`/api/logs/llm-debug${suffix}`);
+      if (!keepPage) state.llmDebugCursorStack = [null];
+      const params = new URLSearchParams({ limit: String(Math.min(1000, state.logTail || 200)) });
+      if (chosenChunk) params.set("chunk", chosenChunk);
+      if (before !== null && before !== undefined) params.set("before", String(before));
+      const data = await api(`/api/logs/llm-debug?${params.toString()}`);
       state.selectedLogChunk = data.chunk || chosenChunk || "";
       renderLogChunkSelector(data.chunks || [], state.selectedLogChunk, nextChunk => selectSystemLog(logType, nextChunk));
+      renderLlmDebugPageControls(data, state.selectedLogChunk);
       const content = data.content || {};
       let text = "";
       Object.keys(content).forEach(key => {
@@ -287,6 +323,7 @@ async function selectSystemLog(logType, chunk = null) {
       renderFilteredLog(text || "暂无 LLM 调试日志");
     } else if (logType === "system-errors") {
       hideLogChunkSelector();
+      hideLogPageControls();
       const data = await api("/api/logs/system-errors?limit=500");
       const errors = data.errors || [];
       if (errors.length === 0) {
@@ -298,6 +335,7 @@ async function selectSystemLog(logType, chunk = null) {
     box.scrollTop = box.scrollHeight;
   } catch (err) {
     hideLogChunkSelector();
+    hideLogPageControls();
     box.textContent = `加载失败: ${err.message}`;
   }
 }

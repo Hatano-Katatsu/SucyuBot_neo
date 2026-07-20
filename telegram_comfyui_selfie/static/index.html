@@ -330,6 +330,11 @@
               <label for="log-chunk-select">日志块</label>
               <select id="log-chunk-select"></select>
             </div>
+            <div id="log-page-bar" class="log-page-bar" hidden>
+              <button id="log-page-newer" type="button">较新一页</button>
+              <span id="log-page-status" aria-live="polite"></span>
+              <button id="log-page-older" type="button">更早一页</button>
+            </div>
             <div class="log-filter-bar">
               <label>筛选<input id="log-filter" type="search" placeholder="输入关键词" autocomplete="off"></label>
               <label>读取行数<select id="log-tail"><option value="500">500</option><option value="1000" selected>1000</option><option value="3000">3000</option><option value="5000">5000</option></select></label>

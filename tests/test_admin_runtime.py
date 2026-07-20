@@ -240,7 +240,7 @@ class LLMUsageTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_llm_debug_records_are_buffered_and_keep_recent_ten(self):
+    def test_llm_debug_records_are_buffered_then_appended_as_jsonl(self):
         svc = self.make_service()
         path = svc._llm_debug_log_path()
         resolved = {
@@ -277,24 +277,29 @@ class LLMUsageTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertFalse(path.exists(), "不足 10 条时不应落盘，避免频繁 IO")
 
         record(9)
-        data = json.loads(path.read_text(encoding="utf-8"))
-        entries = data["entries_by_type"]["chat:reply"]
+        entries = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(len(entries), 10)
         self.assertEqual(entries[0]["request"]["body"]["messages"][0]["content"], "message-0")
         self.assertEqual(entries[-1]["response"]["choices"][0]["message"]["content"], "response-9")
         self.assertEqual(entries[-1]["usage"]["cached_tokens"], 89)
-        self.assertIn("replace whole file after 10", data.get("flush_policy", ""))
+        self.assertEqual(path.suffix, ".jsonl")
 
         for i in range(10, 20):
             record(i)
-        data2 = json.loads(path.read_text(encoding="utf-8"))
-        entries2 = data2["entries_by_type"]["chat:reply"]
+        entries2 = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if json.loads(line).get("type") == "chat:reply"
+        ]
+        self.assertEqual(len(entries2), 20)
+        entries2 = entries2[-10:]
         self.assertEqual(len(entries2), 10)
         self.assertEqual(entries2[0]["request"]["body"]["messages"][0]["content"], "message-10")
         self.assertEqual(entries2[-1]["request"]["body"]["messages"][0]["content"], "message-19")
 
         record(20, tag="scene")
         svc._flush_llm_debug(force=True)
-        data3 = json.loads(path.read_text(encoding="utf-8"))
-        self.assertIn("chat:reply", data3["entries_by_type"])
-        self.assertEqual(data3["entries_by_type"]["chat:scene"][-1]["request"]["body"]["messages"][0]["content"], "message-20")
+        entries3 = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        self.assertIn("chat:reply", {entry["type"] for entry in entries3})
+        scene = [entry for entry in entries3 if entry["type"] == "chat:scene"][-1]
+        self.assertEqual(scene["request"]["body"]["messages"][0]["content"], "message-20")
