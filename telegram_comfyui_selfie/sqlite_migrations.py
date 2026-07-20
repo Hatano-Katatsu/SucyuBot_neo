@@ -237,11 +237,46 @@ def _migration_v4_vision_profile(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_v5_telegram_update_inbox(conn: sqlite3.Connection) -> None:
+    """增加应用元数据与 Telegram 持久更新收件箱。"""
+
+    _execute(
+        conn,
+        (
+            """
+            CREATE TABLE IF NOT EXISTS app_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT '',
+                updated_at REAL NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS telegram_update_inbox (
+                update_id INTEGER PRIMARY KEY,
+                chat_key TEXT NOT NULL DEFAULT '',
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                available_at REAL NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_telegram_update_pending "
+            "ON telegram_update_inbox(status, update_id)",
+            "CREATE INDEX IF NOT EXISTS idx_telegram_update_chat "
+            "ON telegram_update_inbox(chat_key, update_id)",
+        ),
+    )
+
+
 SCHEMA_MIGRATIONS: tuple[Migration, ...] = (
     (1, "base_schema", _migration_v1_base_schema),
     (2, "character_memories", _migration_v2_character_memories),
     (3, "character_history", _migration_v3_character_history),
     (4, "vision_profile", _migration_v4_vision_profile),
+    (5, "telegram_update_inbox", _migration_v5_telegram_update_inbox),
 )
 LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS[-1][0]
 
@@ -298,6 +333,21 @@ def _validate_schema(conn: sqlite3.Connection, version: int) -> None:
         missing.append("context_meta:[character_history_summary]")
     if version >= 4 and "vision_profile_id" not in _table_columns(conn, "user_model_settings"):
         missing.append("user_model_settings:[vision_profile_id]")
+    if version >= 5:
+        expected_v5 = {
+            "app_metadata": {"key", "value", "updated_at"},
+            "telegram_update_inbox": {
+                "update_id", "chat_key", "payload", "status", "attempts",
+                "available_at", "last_error", "created_at", "updated_at",
+            },
+        }
+        for table, expected in expected_v5.items():
+            columns = _table_columns(conn, table)
+            absent = expected - columns
+            if not columns:
+                missing.append(f"table:{table}")
+            elif absent:
+                missing.append(f"{table}:[{','.join(sorted(absent))}]")
     if missing:
         raise SchemaMigrationError("SQLite schema 校验失败：" + "; ".join(missing))
 

@@ -41,6 +41,7 @@ from .process_restart import ProcessRestartMixin
 from .scheduler_runtime import SchedulerRuntimeMixin
 from .state_runtime import ServiceStateMixin
 from .telegram_io import TelegramIOMixin
+from .telegram_update_runtime import TelegramUpdateRuntimeMixin
 from .time_context import build_time_context, format_light_guard, format_time_context, rough_time_period
 from .world_runtime import WorldRuntimeMixin
 
@@ -92,6 +93,7 @@ class TelegramComfyUIService(
     ServiceStateMixin,
     AppearanceRuntimeMixin,
     ImageStateRuntimeMixin,
+    TelegramUpdateRuntimeMixin,
     TelegramIOMixin,
     CharacterCheckpointMixin,
     CommandHandlersMixin,
@@ -130,6 +132,7 @@ class TelegramComfyUIService(
         self._skill_reference_cache: str | None = None
         self._bot_username = ""
         self._offset = 0
+        self._init_telegram_update_runtime()
         self._bot_tasks: list[asyncio.Task] = []
         self._checkpoint_tasks: dict[str, asyncio.Task] = {}
         self._checkpoint_locks: dict[str, asyncio.Lock] = {}
@@ -204,6 +207,7 @@ class TelegramComfyUIService(
         self.http = aiohttp.ClientSession(timeout=timeout, trust_env=(connector is None), connector=connector)
         me = await self.tg_api("getMe")
         self._bot_username = (me.get("result") or {}).get("username", "")
+        await self._start_telegram_update_runtime()
         self._bot_tasks = [
             asyncio.create_task(self.poll_loop(), name="telegram-poll-loop"),
             asyncio.create_task(self.scheduler_loop(), name="selfie-scheduler-loop"),
@@ -222,6 +226,12 @@ class TelegramComfyUIService(
             except Exception as exc:
                 logger.warning("bot task stopped with error: %s", exc)
         self._bot_tasks.clear()
+        drain_timeout = self._telegram_update_float_config(
+            "telegram_update_drain_timeout_seconds",
+            30.0,
+        )
+        await self._stop_telegram_update_runtime(timeout=drain_timeout)
+        await self._drain_protected_image_tasks(drain_timeout)
         if self.http is not None and not self.http.closed:
             await self.http.close()
         self.http = None

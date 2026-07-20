@@ -26,6 +26,11 @@
   "default_fast_model_profile": "deepseek-flash",
   "default_vision_model_profile": "",
   "photo_caption_wait_seconds": "30",
+  "telegram_update_queue_size": "32",
+  "telegram_update_max_concurrency": "4",
+  "telegram_update_drain_timeout_seconds": "30",
+  "telegram_update_max_attempts": "3",
+  "telegram_update_retry_base_seconds": "1",
   "global_model_profiles": {
     "deepseek-pro": {
       "name": "DeepSeek V4 Pro",

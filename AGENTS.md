@@ -131,6 +131,7 @@ telegram_comfyui_selfie/
 ## Telegram 与 WebUI
 
 - Telegram 图片、引用图片先由 vision 模型转换为文本描述；chat 模型只接收文本。未配置 vision profile 时跳过图片理解。
+- Telegram update 必须先与确认 offset 一起写入 SQLite inbox，再进入按会话有序的有界 worker；跨会话受全局并发上限控制，停机先停止拉取并排空，超时待办由下次启动恢复。
 - 同会话新消息可取消旧文字生成，但已进入生图/发图阶段的受保护任务不能被取消。
 - Web API 错误优先返回 JSON；前端也必须兼容非 JSON 错误体、401 跳转与可读错误摘要。
 - 普通用户不可查看系统日志项或其他用户的数据；管理员才能维护全局模型和运维配置。

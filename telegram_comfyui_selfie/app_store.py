@@ -67,6 +67,155 @@ class AppStateStore:
     def _init_schema(self) -> SchemaMigrationResult:
         return migrate_database(self.path, connection_factory=self._connect)
 
+    def get_metadata(self, key: str, default: str = "") -> str:
+        """读取应用级元数据；不存在时返回默认值。"""
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT value FROM app_metadata WHERE key = ?",
+                (str(key or ""),),
+            ).fetchone()
+        return str(row["value"]) if row else default
+
+    def set_metadata(self, key: str, value: str) -> None:
+        """原子写入应用级元数据。"""
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO app_metadata(key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (str(key or ""), str(value or ""), _now()),
+            )
+            conn.commit()
+
+    def telegram_update_offset(self) -> int:
+        """返回已持久化确认的 Telegram update offset。"""
+        try:
+            return max(0, int(self.get_metadata("telegram_update_offset", "0") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def stage_telegram_update(
+        self,
+        update_id: int,
+        chat_key: str,
+        update: dict[str, Any],
+    ) -> tuple[bool, int]:
+        """持久化更新并在同一事务推进确认 offset。"""
+        update_id = int(update_id)
+        next_offset = update_id + 1
+        now = _now()
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT value FROM app_metadata WHERE key = 'telegram_update_offset'"
+            ).fetchone()
+            try:
+                current_offset = max(0, int(row["value"] if row else 0))
+            except (TypeError, ValueError):
+                current_offset = 0
+            existing = conn.execute(
+                "SELECT 1 FROM telegram_update_inbox WHERE update_id = ?",
+                (update_id,),
+            ).fetchone()
+            inserted = False
+            if existing is None and update_id >= current_offset:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO telegram_update_inbox(
+                        update_id, chat_key, payload, status, attempts,
+                        available_at, last_error, created_at, updated_at
+                    ) VALUES (?, ?, ?, 'pending', 0, 0, '', ?, ?)
+                    """,
+                    (update_id, str(chat_key or ""), _json_dumps(update), now, now),
+                )
+                inserted = cursor.rowcount > 0
+            durable_offset = max(current_offset, next_offset)
+            conn.execute(
+                """
+                INSERT INTO app_metadata(key, value, updated_at)
+                VALUES ('telegram_update_offset', ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (str(durable_offset), now),
+            )
+            conn.commit()
+        return inserted, durable_offset
+
+    def list_pending_telegram_updates(self, limit: int = 10000) -> list[dict[str, Any]]:
+        """按 update_id 返回尚未完成的持久 Telegram 更新。"""
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT update_id, chat_key, payload, attempts, available_at
+                FROM telegram_update_inbox
+                WHERE status = 'pending'
+                ORDER BY update_id ASC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [
+            {
+                "update_id": int(row["update_id"]),
+                "chat_key": str(row["chat_key"] or ""),
+                "update": _json_loads(row["payload"], {}),
+                "attempts": int(row["attempts"] or 0),
+                "available_at": float(row["available_at"] or 0),
+            }
+            for row in rows
+        ]
+
+    def complete_telegram_update(self, update_id: int) -> None:
+        """从持久收件箱删除已终态处理的更新。"""
+        with closing(self._connect()) as conn:
+            conn.execute(
+                "DELETE FROM telegram_update_inbox WHERE update_id = ?",
+                (int(update_id),),
+            )
+            conn.commit()
+
+    def fail_telegram_update(
+        self,
+        update_id: int,
+        error: str,
+        *,
+        max_attempts: int,
+        retry_at: float,
+    ) -> tuple[int, str]:
+        """记录一次失败；超过上限后保留为 failed 死信。"""
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT attempts FROM telegram_update_inbox WHERE update_id = ?",
+                (int(update_id),),
+            ).fetchone()
+            attempts = int(row["attempts"] or 0) + 1 if row else 1
+            status = "failed" if attempts >= max(1, int(max_attempts)) else "pending"
+            conn.execute(
+                """
+                UPDATE telegram_update_inbox
+                SET status = ?, attempts = ?, available_at = ?,
+                    last_error = ?, updated_at = ?
+                WHERE update_id = ?
+                """,
+                (
+                    status,
+                    attempts,
+                    float(retry_at),
+                    str(error or "")[:2000],
+                    _now(),
+                    int(update_id),
+                ),
+            )
+            conn.commit()
+        return attempts, status
+
     @staticmethod
     def user_id_from_session(session_id: str) -> str:
         return str(session_id or "").removeprefix("telegram:")

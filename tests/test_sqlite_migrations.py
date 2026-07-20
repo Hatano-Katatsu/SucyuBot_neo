@@ -35,7 +35,10 @@ class SQLiteMigrationTestCase(unittest.TestCase):
         app_store = AppStateStore(path)
 
         self.assertEqual(memory.schema_migration.previous_version, 0)
-        self.assertEqual(memory.schema_migration.applied_versions, (1, 2, 3, 4))
+        self.assertEqual(
+            memory.schema_migration.applied_versions,
+            tuple(range(1, LATEST_SCHEMA_VERSION + 1)),
+        )
         self.assertIsNone(memory.schema_migration.backup_path)
         self.assertEqual(app_store.schema_migration.applied_versions, ())
         self.assertEqual(_user_version(path), LATEST_SCHEMA_VERSION)
@@ -78,6 +81,8 @@ class SQLiteMigrationTestCase(unittest.TestCase):
         self.assertEqual(memory.schema_migration.previous_version, 0)
         self.assertEqual(_user_version(path), LATEST_SCHEMA_VERSION)
         self.assertIn("character", _columns(path, "memories"))
+        self.assertIn("payload", _columns(path, "telegram_update_inbox"))
+        self.assertIn("value", _columns(path, "app_metadata"))
         records = memory.list_memories("telegram:old", character="")
         self.assertEqual([item["summary"] for item in records], ["旧记忆"])
         backup = memory.schema_migration.backup_path
@@ -94,7 +99,7 @@ class SQLiteMigrationTestCase(unittest.TestCase):
         self.assertEqual(before, set(root.glob("*.schema-migration-*-backup-*.sqlite3")))
 
     def test_each_historical_user_version_upgrades_in_order(self):
-        for historical_version in (1, 2, 3):
+        for historical_version in range(1, LATEST_SCHEMA_VERSION):
             with self.subTest(historical_version=historical_version):
                 root = make_project_temp_dir(f"sqlite_migration_v{historical_version}")
                 path = root / "memory.sqlite3"
@@ -152,6 +157,7 @@ class SQLiteMigrationTestCase(unittest.TestCase):
                 self.assertIn("character", _columns(path, "memories"))
                 self.assertIn("character_history_summary", _columns(path, "context_meta"))
                 self.assertIn("vision_profile_id", _columns(path, "user_model_settings"))
+                self.assertIn("payload", _columns(path, "telegram_update_inbox"))
                 settings = app_store.get_user_model_settings(f"v{historical_version}")
                 self.assertEqual(settings["chat_profile_id"], "chat")
                 self.assertEqual(settings["vision_profile_id"], "")
@@ -165,6 +171,8 @@ class SQLiteMigrationTestCase(unittest.TestCase):
                     self.assertNotIn("character_history_summary", _columns(backup, "context_meta"))
                 if historical_version < 4:
                     self.assertNotIn("vision_profile_id", _columns(backup, "user_model_settings"))
+                if historical_version < 5:
+                    self.assertEqual(_columns(backup, "telegram_update_inbox"), set())
 
     def test_invalid_legacy_schema_rolls_back_and_keeps_recoverable_backup(self):
         root = make_project_temp_dir("sqlite_migration_rollback")
@@ -185,7 +193,9 @@ class SQLiteMigrationTestCase(unittest.TestCase):
         with closing(sqlite3.connect(path)) as conn:
             self.assertEqual(conn.execute("SELECT marker FROM memories WHERE id = 1").fetchone()[0], "keep-me")
 
-        backups = list(root.glob("*.schema-migration-v0-to-v4-backup-*.sqlite3"))
+        backups = list(root.glob(
+            f"*.schema-migration-v0-to-v{LATEST_SCHEMA_VERSION}-backup-*.sqlite3"
+        ))
         self.assertEqual(len(backups), 1)
         backup = backups[0]
         with closing(sqlite3.connect(backup)) as conn:

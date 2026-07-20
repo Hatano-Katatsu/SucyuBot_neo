@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import mimetypes
 from typing import Any
@@ -139,24 +138,6 @@ class TelegramIOMixin:
             chunks.append(text[:cut])
             text = text[cut:].lstrip()
         return chunks
-
-    async def poll_loop(self):
-        while True:
-            try:
-                data = {
-                    "timeout": "55",
-                    "offset": str(self._offset),
-                    "allowed_updates": json.dumps(["message"]),
-                }
-                payload = await self.tg_api("getUpdates", data)
-                for update in payload.get("result", []):
-                    self._offset = max(self._offset, update["update_id"] + 1)
-                    asyncio.create_task(self.handle_update(update))
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.error("poll loop error: %s", exc, exc_info=True)
-                await asyncio.sleep(5)
 
     async def handle_update(self, update: dict[str, Any]):
         msg = update.get("message") or {}
