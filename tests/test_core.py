@@ -28,6 +28,10 @@ from telegram_comfyui_selfie.webui import api_activate_character, api_character_
 from tests.support import ServiceFixtureMixin, TRUE_ENV_VALUES, make_mock_request, make_project_temp_dir
 
 
+PRIVATE_CHAT = {"id": 123, "type": "private"}
+PRIVATE_SENDER = {"id": 123, "is_bot": False}
+
+
 class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
     def test_parse_command_with_bot_mention(self):
@@ -75,7 +79,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc.cmd_selfie = AsyncMock()
             svc.handle_chat = AsyncMock()
 
-            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "自拍"}})
+            await svc.handle_update({"message": {"chat": PRIVATE_CHAT, "from": PRIVATE_SENDER, "text": "自拍"}})
 
             svc.cmd_selfie.assert_awaited_once_with(123, "telegram:123", "")
             svc.handle_chat.assert_not_awaited()
@@ -146,15 +150,15 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc.send_message = AsyncMock()
             svc.handle_chat = AsyncMock()
 
-            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "初始化"}})
+            await svc.handle_update({"message": {"chat": PRIVATE_CHAT, "from": PRIVATE_SENDER, "text": "初始化"}})
             self.assertTrue(session_schema.get_init_flow(svc._get_session_state(sid)).get("active"))
             self.assertIn("第 1/9 步", svc.send_message.await_args.args[1])
 
-            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "小雨"}})
+            await svc.handle_update({"message": {"chat": PRIVATE_CHAT, "from": PRIVATE_SENDER, "text": "小雨"}})
             self.assertEqual(session_schema.get_init_flow(svc._get_session_state(sid)).get("step"), 1)
             self.assertIn("第 2/9 步", svc.send_message.await_args.args[1])
 
-            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "原创"}})
+            await svc.handle_update({"message": {"chat": PRIVATE_CHAT, "from": PRIVATE_SENDER, "text": "原创"}})
             state = svc._get_session_state(sid)
             self.assertEqual(session_schema.get_init_flow(state).get("step"), 2)
             self.assertEqual(state["custom_character"], "")
@@ -173,7 +177,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._describe_telegram_photo_sizes_for_chat = fake_describe
             await svc.handle_update({
                 "message": {
-                    "chat": {"id": 123},
+                    "chat": PRIVATE_CHAT,
+                    "from": PRIVATE_SENDER,
                     "caption": "看这个",
                     "photo": [{"file_id": "p1", "width": 100, "height": 100}],
                 }
@@ -203,13 +208,14 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._describe_telegram_photo_sizes_for_chat = fake_describe
             await svc.handle_update({
                 "message": {
-                    "chat": {"id": 123},
+                    "chat": PRIVATE_CHAT,
+                    "from": PRIVATE_SENDER,
                     "photo": [{"file_id": "p1", "width": 100, "height": 100}],
                 }
             })
             svc.handle_chat.assert_not_awaited()
 
-            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "这是什么？"}})
+            await svc.handle_update({"message": {"chat": PRIVATE_CHAT, "from": PRIVATE_SENDER, "text": "这是什么？"}})
             await asyncio.sleep(0.05)
 
             svc.handle_chat.assert_awaited_once()
@@ -238,7 +244,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._describe_telegram_photo_groups_for_chat = fake_describe_group
             await svc.handle_update({
                 "message": {
-                    "chat": {"id": 123},
+                    "chat": PRIVATE_CHAT,
+                    "from": PRIVATE_SENDER,
                     "message_id": 1,
                     "media_group_id": "album-1",
                     "caption": "看这组",
@@ -247,7 +254,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             })
             await svc.handle_update({
                 "message": {
-                    "chat": {"id": 123},
+                    "chat": PRIVATE_CHAT,
+                    "from": PRIVATE_SENDER,
                     "message_id": 2,
                     "media_group_id": "album-1",
                     "photo": [{"file_id": "p2", "width": 100, "height": 100}],
@@ -282,14 +290,17 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             for idx in range(6):
                 await svc.handle_update({
                     "message": {
-                        "chat": {"id": 123},
+                        "chat": PRIVATE_CHAT,
+                        "from": PRIVATE_SENDER,
                         "message_id": idx + 1,
                         "photo": [{"file_id": f"p{idx}", "width": 100, "height": 100}],
                     }
                 })
             svc.handle_chat.assert_not_awaited()
 
-            await svc.handle_update({"message": {"chat": {"id": 123}, "message_id": 20, "text": "一起看"}})
+            await svc.handle_update({
+                "message": {"chat": PRIVATE_CHAT, "from": PRIVATE_SENDER, "message_id": 20, "text": "一起看"}
+            })
             await asyncio.sleep(0.05)
 
             svc.handle_chat.assert_awaited_once()
@@ -343,7 +354,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._describe_telegram_photo_sizes_for_chat = fake_describe
             await svc.handle_update({
                 "message": {
-                    "chat": {"id": 123},
+                    "chat": PRIVATE_CHAT,
+                    "from": PRIVATE_SENDER,
                     "photo": [{"file_id": "p1", "width": 100, "height": 100}],
                 }
             })
@@ -367,7 +379,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             await svc.handle_update({
                 "message": {
-                    "chat": {"id": 123},
+                    "chat": PRIVATE_CHAT,
+                    "from": PRIVATE_SENDER,
                     "photo": [{"file_id": "p1", "width": 100, "height": 100}],
                 }
             })
@@ -385,7 +398,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             await svc.handle_update({
                 "message": {
-                    "chat": {"id": 123},
+                    "chat": PRIVATE_CHAT,
+                    "from": PRIVATE_SENDER,
                     "photo": [{"file_id": "p1", "width": 100, "height": 100}],
                 }
             })
@@ -417,9 +431,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc.send_action = AsyncMock()
             svc.tg_api = AsyncMock(side_effect=lambda method, data=None: sent.append((method, data)) or {"ok": True})
 
-            first = asyncio.create_task(svc.handle_update({"message": {"chat": {"id": 123}, "text": "第一句"}}))
+            first = asyncio.create_task(svc.handle_update({
+                "message": {"chat": PRIVATE_CHAT, "from": PRIVATE_SENDER, "text": "第一句"}
+            }))
             await asyncio.wait_for(first_started.wait(), timeout=1)
-            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "第二句"}})
+            await svc.handle_update({"message": {"chat": PRIVATE_CHAT, "from": PRIVATE_SENDER, "text": "第二句"}})
             try:
                 await first
             except asyncio.CancelledError:
@@ -465,9 +481,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc.send_action = AsyncMock()
             svc.tg_api = AsyncMock(side_effect=fake_tg)
 
-            first = asyncio.create_task(svc.handle_update({"message": {"chat": {"id": 123}, "text": "旧问题"}}))
+            first = asyncio.create_task(svc.handle_update({
+                "message": {"chat": PRIVATE_CHAT, "from": PRIVATE_SENDER, "text": "旧问题"}
+            }))
             await asyncio.wait_for(first_sent.wait(), timeout=1)
-            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "新问题"}})
+            await svc.handle_update({"message": {"chat": PRIVATE_CHAT, "from": PRIVATE_SENDER, "text": "新问题"}})
             try:
                 await first
             except asyncio.CancelledError:
@@ -513,9 +531,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc.send_action = AsyncMock()
             svc.tg_api = AsyncMock(return_value={"ok": True})
 
-            first = asyncio.create_task(svc.handle_update({"message": {"chat": {"id": 123}, "text": "给我看看你"}}))
+            first = asyncio.create_task(svc.handle_update({
+                "message": {"chat": PRIVATE_CHAT, "from": PRIVATE_SENDER, "text": "给我看看你"}
+            }))
             await asyncio.wait_for(image_started.wait(), timeout=1)
-            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "新消息"}})
+            await svc.handle_update({"message": {"chat": PRIVATE_CHAT, "from": PRIVATE_SENDER, "text": "新消息"}})
             image_release.set()
             await asyncio.wait_for(image_finished.wait(), timeout=1)
             try:
@@ -545,9 +565,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc.tool_generate_image = AsyncMock(side_effect=fake_image)
             svc.handle_chat = AsyncMock()
 
-            first = asyncio.create_task(svc.handle_update({"message": {"chat": {"id": 123}, "text": "配图 窗边"}}))
+            first = asyncio.create_task(svc.handle_update({
+                "message": {"chat": PRIVATE_CHAT, "from": PRIVATE_SENDER, "text": "配图 窗边"}
+            }))
             await asyncio.wait_for(image_started.wait(), timeout=1)
-            await svc.handle_update({"message": {"chat": {"id": 123}, "text": "先别说这个"}})
+            await svc.handle_update({"message": {"chat": PRIVATE_CHAT, "from": PRIVATE_SENDER, "text": "先别说这个"}})
             image_release.set()
             await asyncio.wait_for(image_finished.wait(), timeout=1)
             try:
@@ -568,7 +590,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             await svc.handle_update({
                 "message": {
-                    "chat": {"id": 123},
+                    "chat": PRIVATE_CHAT,
+                    "from": PRIVATE_SENDER,
                     "text": "这句是什么意思？",
                     "quote": {"text": "手动选中的片段"},
                     "reply_to_message": {
@@ -610,7 +633,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "3",
                 "0",
             ):
-                await svc.handle_update({"message": {"chat": {"id": 123}, "text": text}})
+                await svc.handle_update({"message": {"chat": PRIVATE_CHAT, "from": PRIVATE_SENDER, "text": text}})
 
             state = svc._get_session_state(sid)
             self.assertEqual(session_schema.get_init_flow(state), {})
@@ -649,7 +672,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "auto",
                 "默认",
             ):
-                await svc.handle_update({"message": {"chat": {"id": 123}, "text": text}})
+                await svc.handle_update({"message": {"chat": PRIVATE_CHAT, "from": PRIVATE_SENDER, "text": text}})
 
             state = svc._get_session_state(sid)
             persona = state["custom_scheduled_persona"]
@@ -696,7 +719,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "auto",
                 "默认",
             ):
-                await svc.handle_update({"message": {"chat": {"id": 123}, "text": text}})
+                await svc.handle_update({"message": {"chat": PRIVATE_CHAT, "from": PRIVATE_SENDER, "text": text}})
 
             state = svc._get_session_state(sid)
             self.assertEqual(state["custom_character"], "爱丽丝卡")

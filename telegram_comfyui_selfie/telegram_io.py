@@ -173,6 +173,26 @@ class TelegramIOMixin:
         if chat_id is None or not has_payload:
             return
 
+        chat_type = str(chat.get("type") or "").strip().lower()
+        if chat_type != "private":
+            logger.info(
+                "ignored non-private Telegram message: chat_id=%s chat_type=%s thread_id=%s",
+                chat_id,
+                chat_type or "unknown",
+                msg.get("message_thread_id"),
+            )
+            return
+
+        sender = msg.get("from") or {}
+        sender_id = sender.get("id")
+        if sender_id is None or str(sender_id) != str(chat_id) or sender.get("is_bot") is True:
+            logger.warning(
+                "ignored private Telegram message with invalid sender identity: chat_id=%s sender_id=%s",
+                chat_id,
+                sender_id,
+            )
+            return
+
         session_id = self.session_id_for_chat(chat_id)
         allowed = self.config.get("allowed_chat_ids") or []
         if allowed and str(chat_id) not in {str(x) for x in allowed}:
@@ -491,7 +511,10 @@ class TelegramIOMixin:
         caption = ""
         try:
             try:
-                caption = str(await asyncio.wait_for(future, timeout=self._caption_wait_seconds()) or "").strip()
+                # 追加单图会取消旧计时任务并复用同一批次 Future；shield 避免取消向批次传播。
+                caption = str(
+                    await asyncio.wait_for(asyncio.shield(future), timeout=self._caption_wait_seconds()) or ""
+                ).strip()
             except asyncio.TimeoutError:
                 caption = ""
             pending = getattr(self, "_pending_photo_inputs", {})
