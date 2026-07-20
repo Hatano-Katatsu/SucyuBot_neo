@@ -6509,7 +6509,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertTrue(full_result["life_plan_replaced"])
         self.assertEqual(session_schema.get_outfit(full_state), "blue dress")
         self.assertEqual(full.app_store.get_checkpoint(sid, "小雨")["summary"], "导出的 checkpoint")
-        self.assertEqual(int(full.app_store.get_checkpoint(sid, "小雨")["source_until_id"]), 12)
+        # 默认不恢复来源聊天时，来源自增 ID 没有跨库语义；映射到目标导入前 latest（此处为 0）。
+        self.assertEqual(int(full.app_store.get_checkpoint(sid, "小雨")["source_until_id"]), 0)
         self.assertEqual(full.app_store.get_context_meta(sid, "小雨")["character_history_summary"], "导出的历史提要")
         self.assertEqual(full.app_store.get_life_plan(sid, "小雨")["payload"]["today"]["texture"], "心里压着一点细碎牵挂。")
 

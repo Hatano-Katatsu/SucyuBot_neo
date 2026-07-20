@@ -6,11 +6,13 @@ import json
 import logging
 import re
 import time
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import session_schema
+from . import character_card, session_schema
+from .memory import clamp_importance, normalize_kind, normalize_tags
 
 logger = logging.getLogger(__name__)
 
@@ -344,20 +346,449 @@ class CharacterCheckpointMixin:
             raise ValueError("导入模式必须是 basic / memory / full")
         return value
 
-    def import_character_checkpoint(self, session_id: str, payload: dict[str, Any], *, mode: str = "basic") -> dict[str, Any]:
+    @staticmethod
+    def _checkpoint_import_int(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _prepare_checkpoint_import_memories(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """先完整归一化 full 导入的记忆，事务内只执行确定性的 SQL。"""
+        source = f"checkpoint-import:{payload.get('checkpoint_date') or ''}"[:800]
+        prepared: dict[tuple[str, str], dict[str, Any]] = {}
+        for item in payload.get("memories") or []:
+            if not isinstance(item, dict):
+                continue
+            summary = str(item.get("summary") or "").strip()[:600]
+            if not summary:
+                continue
+            kind = normalize_kind(str(item.get("kind") or "event"))
+            key = (kind, re.sub(r"\s+", "", summary).lower())
+            tags = normalize_tags(item.get("tags") or [])
+            importance = clamp_importance(item.get("importance", 3))
+            existing = prepared.get(key)
+            if existing is None:
+                prepared[key] = {
+                    "kind": kind,
+                    "summary": summary,
+                    "tags": tags,
+                    "importance": importance,
+                    "source": source,
+                }
+                continue
+            existing["tags"] = normalize_tags([*existing["tags"], *tags])
+            existing["importance"] = max(int(existing["importance"]), importance)
+        return list(prepared.values())
+
+    def _prepare_checkpoint_import_diaries(self, background: dict[str, Any]) -> list[dict[str, Any]]:
+        prepared: list[dict[str, Any]] = []
+        seen_dates: set[str] = set()
+        for item in background.get("diaries") or []:
+            if not isinstance(item, dict):
+                continue
+            diary_date = str(item.get("diary_date") or "").strip()
+            content = str(item.get("content") or "").strip()
+            if not _DATE_RE.match(diary_date) or not content or diary_date in seen_dates:
+                continue
+            seen_dates.add(diary_date)
+            prepared.append({
+                "diary_date": diary_date,
+                "content": content,
+                "from_message_id": self._checkpoint_import_int(item.get("from_message_id")),
+                "to_message_id": self._checkpoint_import_int(item.get("to_message_id")),
+            })
+        return prepared
+
+    def _prepare_checkpoint_import_messages(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        prepared: list[dict[str, Any]] = []
+        for item in payload.get("chat_messages") or []:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip()
+            content = str(item.get("content") or "").strip()
+            if not role or not content:
+                continue
+            try:
+                created_at = float(item.get("created_at") or 0)
+            except (TypeError, ValueError):
+                created_at = 0.0
+            prepared.append({
+                "source_id": self._checkpoint_import_int(item.get("id")),
+                "role": role,
+                "content": content,
+                "created_at": created_at,
+            })
+        return prepared
+
+    @staticmethod
+    def _mapped_checkpoint_message_id(source_id: int, id_map: dict[int, int]) -> int:
+        """来源边界未恰好落在导出行时，映射到不超过它的最后一条已恢复消息。"""
+        source_id = max(0, int(source_id or 0))
+        if source_id <= 0 or not id_map:
+            return 0
+        if source_id in id_map:
+            return int(id_map[source_id])
+        eligible = [old_id for old_id in id_map if 0 < old_id <= source_id]
+        return int(id_map[max(eligible)]) if eligible else 0
+
+    def _stage_full_checkpoint_state(
+        self,
+        session_id: str,
+        character_key: str,
+        card: dict[str, Any],
+        state_part: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None, bool]:
+        """在副本中完成角色卡和短期态切换，数据库提交前不暴露给运行态。"""
+        state = copy.deepcopy(self._get_session_state(session_id))
+        if hasattr(self, "_save_current_character_context"):
+            self._save_current_character_context(state)
+        if hasattr(self, "_snapshot_character"):
+            self._snapshot_character(state)
+
+        blank_card: dict[str, Any] = {key: "" for key in character_card.CARD_KEYS}
+        blank_card["allow_change_appearance"] = None
+        blank_card["purity"] = None
+        card_for_apply = {**blank_card, **copy.deepcopy(card)}
+        card_for_apply["id"] = character_key or "__default__"
+        if character_key:
+            card_for_apply["character"] = character_key
+        self._apply_character_payload(state, card_for_apply)
+        if character_key and not session_schema.get_character_value(state, "custom_character", ""):
+            session_schema.set_character_value(state, "custom_character", character_key)
+
+        if character_key:
+            session_schema.get_saved_characters(state)[character_key] = {
+                key: copy.deepcopy(value) for key, value in card_for_apply.items() if key != "id"
+            }
+
+        restore_context = copy.deepcopy(state_part.get("frozen_context") or {})
+        if not isinstance(restore_context, dict):
+            restore_context = {}
+        boxes = state_part.get("boxes") if isinstance(state_part.get("boxes"), dict) else {}
+        for box_name in ("clothing", "place", "context"):
+            if isinstance(boxes.get(box_name), dict):
+                restore_context[box_name] = copy.deepcopy(boxes[box_name])
+
+        context_key = character_key or "__default__"
+        contexts = session_schema.get_character_contexts(state)
+        if restore_context:
+            contexts[context_key] = restore_context
+        else:
+            # full=replace：来源没有冻结上下文时必须删掉目标角色的旧快照。
+            contexts.pop(context_key, None)
+
+        if hasattr(self, "_clear_transient_state"):
+            self._clear_transient_state(state, keep_appearance=False)
+        if restore_context:
+            for key, value in restore_context.items():
+                state[key] = copy.deepcopy(value)
+            has_clothing_context = any(
+                key in restore_context
+                for key in ("clothing", "dynamic_appearance", "wardrobe", "wardrobe_closet")
+            )
+            if hasattr(self, "_apply_card_outfit_after_switch"):
+                self._apply_card_outfit_after_switch(
+                    state,
+                    card_for_apply,
+                    has_clothing_context=has_clothing_context,
+                )
+        elif hasattr(self, "_apply_card_outfit_after_switch"):
+            self._apply_card_outfit_after_switch(state, card_for_apply, has_clothing_context=False)
+        return state, restore_context or None, bool(restore_context)
+
+    def _replace_full_checkpoint_rows(
+        self,
+        conn,
+        *,
+        session_id: str,
+        character_key: str,
+        state: dict[str, Any],
+        restore_context: dict[str, Any] | None,
+        background: dict[str, Any],
+        checkpoint: dict[str, Any],
+        checkpoint_present: bool,
+        history_summary: str,
+        diaries: list[dict[str, Any]],
+        life_plan: dict[str, Any] | None,
+        memories: list[dict[str, Any]],
+        messages: list[dict[str, Any]],
+        restore_chat_messages: bool,
+    ) -> dict[str, int]:
+        """在调用者开启的单个事务中替换 full 检查点的全部持久域。"""
+        key = character_key or ""
+        now = time.time()
+        latest_row = conn.execute(
+            "SELECT MAX(id) AS id FROM chat_messages WHERE session_id = ? AND character_key = ?",
+            (session_id, key),
+        ).fetchone()
+        latest_target_id = int(latest_row["id"] or 0) if latest_row else 0
+        id_map: dict[int, int] = {}
+        restored_messages = 0
+        if restore_chat_messages:
+            conn.execute(
+                "DELETE FROM chat_messages WHERE session_id = ? AND character_key = ?",
+                (session_id, key),
+            )
+            user_id = self.app_store.user_id_from_session(session_id)
+            for item in messages:
+                cur = conn.execute(
+                    """
+                    INSERT INTO chat_messages(
+                        session_id, user_id, character_key, role, content, created_at, checkpointed
+                    ) VALUES (?, ?, ?, ?, ?, ?, 0)
+                    """,
+                    (
+                        session_id,
+                        user_id,
+                        key,
+                        item["role"],
+                        item["content"],
+                        float(item["created_at"] or now),
+                    ),
+                )
+                target_id = int(cur.lastrowid)
+                source_id = int(item["source_id"] or 0)
+                if source_id > 0:
+                    id_map[source_id] = target_id
+                restored_messages += 1
+
+        for table in ("checkpoints", "diaries", "life_plans", "context_meta", "memories"):
+            column = "character" if table == "memories" else "character_key"
+            conn.execute(
+                f"DELETE FROM {table} WHERE session_id = ? AND {column} = ?",
+                (session_id, key),
+            )
+        conn.execute(
+            "UPDATE chat_messages SET checkpointed = 0 WHERE session_id = ? AND character_key = ?",
+            (session_id, key),
+        )
+
+        source_until_id = self._checkpoint_import_int(checkpoint.get("source_until_id"))
+        mapped_until_id = (
+            self._mapped_checkpoint_message_id(source_until_id, id_map)
+            if restore_chat_messages
+            else latest_target_id
+        ) if checkpoint_present else 0
+        summary = str(checkpoint.get("summary") or "").strip() if checkpoint_present else ""
+        if checkpoint_present:
+            conn.execute(
+                """
+                INSERT INTO checkpoints(
+                    session_id, character_key, summary, source_until_id, updated_at, version
+                ) VALUES (?, ?, ?, ?, ?, 1)
+                """,
+                (session_id, key, summary, mapped_until_id, now),
+            )
+            if mapped_until_id > 0:
+                conn.execute(
+                    """
+                    UPDATE chat_messages SET checkpointed = 1
+                    WHERE session_id = ? AND character_key = ? AND id <= ?
+                    """,
+                    (session_id, key, mapped_until_id),
+                )
+
+        history_present = "character_history_summary" in background
+        if checkpoint_present or history_present:
+            conn.execute(
+                """
+                INSERT INTO context_meta(
+                    session_id, character_key, last_dream_at, last_dream_message_id,
+                    last_checkpoint_at, last_checkpoint_message_id, character_history_summary
+                ) VALUES (?, ?, 0, 0, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    key,
+                    now if checkpoint_present else 0,
+                    mapped_until_id if checkpoint_present else 0,
+                    history_summary,
+                ),
+            )
+
+        for item in diaries:
+            from_id = (
+                self._mapped_checkpoint_message_id(item["from_message_id"], id_map)
+                if restore_chat_messages else 0
+            )
+            to_id = (
+                self._mapped_checkpoint_message_id(item["to_message_id"], id_map)
+                if restore_chat_messages else 0
+            )
+            conn.execute(
+                """
+                INSERT INTO diaries(
+                    session_id, character_key, diary_date, content,
+                    from_message_id, to_message_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (session_id, key, item["diary_date"], item["content"], from_id, to_id, now),
+            )
+
+        if life_plan is not None:
+            conn.execute(
+                "INSERT INTO life_plans(session_id, character_key, payload, updated_at) VALUES (?, ?, ?, ?)",
+                (
+                    session_id,
+                    key,
+                    json.dumps(life_plan, ensure_ascii=False, separators=(",", ":")),
+                    now,
+                ),
+            )
+
+        for item in memories:
+            conn.execute(
+                """
+                INSERT INTO memories(
+                    session_id, character, kind, summary, tags, importance,
+                    source, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                """,
+                (
+                    session_id,
+                    key,
+                    item["kind"],
+                    item["summary"],
+                    json.dumps(item["tags"], ensure_ascii=False),
+                    int(item["importance"]),
+                    item["source"],
+                    now,
+                    now,
+                ),
+            )
+
+        session_schema.set_checkpoint_summary(state, summary)
+        session_schema.set_checkpoint_message_id(state, mapped_until_id)
+        session_schema.set_character_history_summary(state, history_summary)
+        session_schema.set_life_plan_payload(state, life_plan or {})
+        if restore_context is not None:
+            session_schema.set_checkpoint_summary(restore_context, summary)
+            session_schema.set_checkpoint_message_id(restore_context, mapped_until_id)
+            session_schema.set_character_history_summary(restore_context, history_summary)
+            session_schema.set_life_plan_payload(restore_context, life_plan or {})
+
+        conn.execute(
+            """
+            INSERT INTO session_state(session_id, data, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                data = excluded.data,
+                updated_at = excluded.updated_at
+            """,
+            (
+                session_id,
+                json.dumps(state, ensure_ascii=False, separators=(",", ":")),
+                now,
+            ),
+        )
+        return {
+            "mapped_source_until_id": mapped_until_id,
+            "chat_messages_restored": restored_messages,
+        }
+
+    def _import_full_character_checkpoint(
+        self,
+        session_id: str,
+        payload: dict[str, Any],
+        character_key: str,
+        card: dict[str, Any],
+        state_part: dict[str, Any],
+        *,
+        restore_chat_messages: bool,
+    ) -> dict[str, Any]:
+        state, restore_context, context_restored = self._stage_full_checkpoint_state(
+            session_id,
+            character_key,
+            card,
+            state_part,
+        )
+        background = payload.get("background") if isinstance(payload.get("background"), dict) else {}
+        checkpoint_present = isinstance(background.get("sqlite_checkpoint"), dict)
+        checkpoint = copy.deepcopy(background.get("sqlite_checkpoint")) if checkpoint_present else {}
+        history_summary = str(background.get("character_history_summary") or "").strip()
+        diaries = self._prepare_checkpoint_import_diaries(background)
+        memories = self._prepare_checkpoint_import_memories(payload)
+        messages = self._prepare_checkpoint_import_messages(payload)
+
+        life_plan: dict[str, Any] | None = None
+        life_plan_data = payload.get("life_plan") if isinstance(payload.get("life_plan"), dict) else None
+        if life_plan_data:
+            life_payload = life_plan_data.get("payload") if isinstance(life_plan_data.get("payload"), dict) else life_plan_data
+            if isinstance(life_payload, dict):
+                life_plan = self._normalize_life_plan_payload(life_payload, session_id=session_id)
+
+        with closing(self.app_store._connect()) as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                transaction_result = self._replace_full_checkpoint_rows(
+                    conn,
+                    session_id=session_id,
+                    character_key=character_key,
+                    state=state,
+                    restore_context=restore_context,
+                    background=background,
+                    checkpoint=checkpoint,
+                    checkpoint_present=checkpoint_present,
+                    history_summary=history_summary,
+                    diaries=diaries,
+                    life_plan=life_plan,
+                    memories=memories,
+                    messages=messages,
+                    restore_chat_messages=bool(restore_chat_messages),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+        # DB 全部成功后才一次性切换内存对象；失败路径始终保留原 state。
+        self.sessions[session_id] = state
+        dirty_sessions = getattr(self, "_dirty_sessions", None)
+        if isinstance(dirty_sessions, set):
+            dirty_sessions.discard(session_id)
+        return {
+            "mode": "full",
+            "character_key": character_key,
+            "character_id": character_key or card.get("id") or "__default__",
+            "memories": len(memories),
+            "diaries": len(diaries),
+            "context_restored": context_restored,
+            "checkpoint_replaced": checkpoint_present,
+            "life_plan_replaced": life_plan is not None,
+            "chat_messages_archived": len(payload.get("chat_messages") or []),
+            **transaction_result,
+        }
+
+    def import_character_checkpoint(
+        self,
+        session_id: str,
+        payload: dict[str, Any],
+        *,
+        mode: str = "basic",
+        restore_chat_messages: bool = False,
+    ) -> dict[str, Any]:
         if not self.is_character_checkpoint_payload(payload):
             raise ValueError("不是有效的角色检查点 JSON")
         mode = self._normalize_checkpoint_import_mode(mode)
         character_key, card, state_part = self._checkpoint_restore_payload(payload)
+        if mode == "full":
+            return self._import_full_character_checkpoint(
+                session_id,
+                payload,
+                character_key,
+                card,
+                state_part,
+                restore_chat_messages=restore_chat_messages,
+            )
+
         state = self._get_session_state(session_id)
-        if mode == "full" and hasattr(self, "_save_current_character_context"):
-            self._save_current_character_context(state)
         if hasattr(self, "_snapshot_character"):
             self._snapshot_character(state)
 
         card_for_apply = {"id": character_key or "__default__", **card}
         active_key = (session_schema.get_character_value(state, "custom_character", "") or "").strip()
-        should_apply_to_current = mode == "full" or not active_key or active_key == character_key
+        should_apply_to_current = not active_key or active_key == character_key
         if should_apply_to_current:
             self._apply_character_payload(state, card_for_apply)
         if character_key and should_apply_to_current and not session_schema.get_character_value(state, "custom_character", ""):
@@ -368,54 +799,9 @@ class CharacterCheckpointMixin:
                 k: copy.deepcopy(v) for k, v in card_for_apply.items() if k != "id"
             }
 
-        context_restored = False
-        if mode == "full":
-            restore_context = copy.deepcopy(state_part.get("frozen_context") or {})
-            boxes = state_part.get("boxes") if isinstance(state_part.get("boxes"), dict) else {}
-            if isinstance(boxes, dict):
-                for box_name in ("clothing", "place", "context"):
-                    if isinstance(boxes.get(box_name), dict):
-                        restore_context[box_name] = copy.deepcopy(boxes[box_name])
-            if restore_context:
-                context_key = character_key or "__default__"
-                session_schema.get_character_contexts(state)[context_key] = restore_context
-                if hasattr(self, "_restore_character_context"):
-                    self._restore_character_context(session_id, state)
-                context_restored = True
-            elif should_apply_to_current and hasattr(self, "_clear_transient_state"):
-                # full 导入没有冻结上下文时，清掉上一个角色残留的短期态（对话/衣柜/位置），
-                # 避免导入从未激活过的角色后仍带着旧角色的完整上下文；穿搭按新卡 outfit 初始化。
-                self._clear_transient_state(state, keep_appearance=False)
-                if hasattr(self, "_apply_card_outfit_after_switch"):
-                    self._apply_card_outfit_after_switch(state, card_for_apply, has_clothing_context=False)
-
         background = payload.get("background") if isinstance(payload.get("background"), dict) else {}
-        checkpoint = background.get("sqlite_checkpoint") if isinstance(background.get("sqlite_checkpoint"), dict) else {}
-        summary = str(checkpoint.get("summary") or "").strip()
-        checkpoint_replaced = False
-        if mode == "full" and summary:
-            try:
-                source_until_id = int(checkpoint.get("source_until_id") or 0)
-            except (TypeError, ValueError):
-                source_until_id = 0
-            self.app_store.upsert_checkpoint(
-                session_id,
-                character_key,
-                summary,
-                source_until_id,
-                allow_regression=True,
-            )
-            session_schema.set_checkpoint_summary(state, summary)
-            session_schema.set_checkpoint_message_id(state, source_until_id)
-            checkpoint_replaced = True
-
-        history_summary = str(background.get("character_history_summary") or "").strip()
-        if mode == "full" and history_summary:
-            self.app_store.upsert_character_history_summary(session_id, character_key, history_summary)
-            session_schema.set_character_history_summary(state, history_summary)
-
         imported_diaries = 0
-        if mode in {"memory", "full"}:
+        if mode == "memory":
             for diary in background.get("diaries") or []:
                 if not isinstance(diary, dict):
                     continue
@@ -425,16 +811,8 @@ class CharacterCheckpointMixin:
                     self.app_store.upsert_diary(session_id, character_key, diary_date, content, from_message_id=0, to_message_id=0)
                     imported_diaries += 1
 
-        life_plan_replaced = False
-        life_plan_data = payload.get("life_plan") if isinstance(payload.get("life_plan"), dict) else None
-        if mode == "full" and life_plan_data and hasattr(self, "_save_life_plan_payload"):
-            life_payload = life_plan_data.get("payload") if isinstance(life_plan_data.get("payload"), dict) else life_plan_data
-            if isinstance(life_payload, dict):
-                self._save_life_plan_payload(session_id, character_key, life_payload)
-                life_plan_replaced = True
-
         imported_memories = 0
-        if mode in {"memory", "full"}:
+        if mode == "memory":
             for memory in payload.get("memories") or []:
                 if not isinstance(memory, dict):
                     continue
@@ -460,8 +838,8 @@ class CharacterCheckpointMixin:
             "character_id": character_key or card_for_apply.get("id") or "__default__",
             "memories": imported_memories,
             "diaries": imported_diaries,
-            "context_restored": context_restored,
-            "checkpoint_replaced": checkpoint_replaced,
-            "life_plan_replaced": life_plan_replaced,
+            "context_restored": False,
+            "checkpoint_replaced": False,
+            "life_plan_replaced": False,
             "chat_messages_archived": len(payload.get("chat_messages") or []),
         }
