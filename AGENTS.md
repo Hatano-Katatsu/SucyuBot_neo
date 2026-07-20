@@ -32,6 +32,7 @@ telegram_comfyui_selfie/
 ├── service.py               # 服务初始化与 mixin 组合
 ├── llm_runtime.py           # 模型 profile、LLM HTTP 调用、用量与调试日志
 ├── state_runtime.py         # 配置、状态迁移、会话访问与活动日志
+├── appearance_runtime.py    # 画风、稳定外观、衣柜状态与换装工具
 ├── defaults.py              # 默认配置
 ├── commands.py              # Telegram 命令处理
 ├── command_aliases.py       # 命令及别名的单一来源
