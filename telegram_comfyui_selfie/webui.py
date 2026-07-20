@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
-import json
 import secrets
 import os
 import re
@@ -17,6 +16,27 @@ from . import session_schema
 from . import appearance as appearance_rules
 from .commands import SESSION_CUSTOM_RESET_KEYS
 from .command_aliases import COMMAND_ALIAS_GROUPS
+from .webui_common import (
+    character_value,
+    human_ago,
+    is_admin as _is_admin,
+    json_error,
+    json_ok,
+    require_admin as _require_admin,
+    service_from,
+    session_allowed as _session_allowed,
+)
+from .webui_logs import (
+    USER_LOG_LINE_RE,
+    api_llm_debug_log,
+    api_log_clear,
+    api_log_detail,
+    api_logs,
+    api_system_error_log,
+    error_log_paths as _error_log_paths,
+    log_chunk_items,
+    parse_error_log_line as _parse_error_log_line,
+)
 from .world_runtime import PLACE_TYPES
 
 
@@ -38,10 +58,6 @@ YAML_ONLY_CONFIG_KEYS = {
     "web_enabled", "web_host", "web_port",
 }
 WORLD_TIMELINE_HOURS = (0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22)
-
-
-def character_value(state: dict[str, Any], key: str, default: Any = "") -> Any:
-    return session_schema.get_character_value(state, key, default)
 
 
 def active_character_id(state: dict[str, Any]) -> str:
@@ -144,22 +160,6 @@ def _auth_from_request(request: web.Request) -> dict[str, Any] | None:
         if token in sessions:
             return {"role": "admin", "user_id": "admin", "token": token}
     return None
-
-
-def _is_admin(request: web.Request) -> bool:
-    return (request.get("web_auth") or {}).get("role") == "admin"
-
-
-def _session_allowed(request: web.Request, session_id: str) -> bool:
-    if _is_admin(request):
-        return True
-    auth = request.get("web_auth") or {}
-    return auth.get("user_id") == service_from(request)._user_id_for_session(session_id)
-
-
-def _require_admin(request: web.Request):
-    if not _is_admin(request):
-        raise web.HTTPForbidden(text="需要管理员权限")
 
 
 @web.middleware
@@ -418,21 +418,6 @@ async def api_auth_me(request: web.Request):
     return json_ok({"auth": request.get("web_auth") or {}})
 
 
-def service_from(request: web.Request):
-    return request.app["service"]
-
-
-def json_ok(data: dict[str, Any] | None = None):
-    payload = {"ok": True}
-    if data:
-        payload.update(data)
-    return web.json_response(payload)
-
-
-def json_error(message: str, status: int = 400):
-    return web.json_response({"ok": False, "error": message}, status=status)
-
-
 def feedback_file_path(service) -> Path:
     configured = getattr(service, "feedback_file_path", None)
     if configured:
@@ -633,16 +618,6 @@ def session_summary(service, session_id: str, state: dict[str, Any]) -> dict[str
         "saved_characters": len(session_schema.get_saved_characters(state)),
         "frozen": session_schema.get_frozen(state),
     }
-
-
-def human_ago(seconds: float) -> str:
-    if seconds < 60:
-        return "刚刚"
-    if seconds < 3600:
-        return f"{int(seconds // 60)} 分钟前"
-    if seconds < 86400:
-        return f"{int(seconds // 3600)} 小时前"
-    return f"{int(seconds // 86400)} 天前"
 
 
 def serialize_place(place: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -2455,84 +2430,6 @@ async def api_admin_git_update(request: web.Request):
 FREEZE_INACTIVE_DAYS = 7
 
 
-def log_chunk_items(service, base_path: Path, active_path: Path | None = None) -> list[dict[str, Any]]:
-    paths = service._log_all_paths(base_path) if hasattr(service, "_log_all_paths") else ([base_path] if base_path.exists() else [])
-    active_name = active_path.name if active_path is not None else ""
-    items = []
-    for path in paths:
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        is_current = path == base_path
-        items.append({
-            "name": path.name,
-            "label": ("当前块 " if is_current else "历史块 ") + path.name,
-            "current": is_current,
-            "active": path.name == active_name,
-            "size": stat.st_size,
-            "mtime": stat.st_mtime,
-            "mtime_ago": human_ago(time.time() - stat.st_mtime),
-        })
-    return items
-
-
-USER_LOG_LINE_RE = re.compile(
-    r"^(?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+(?P<tag>\S+)(?:\s+(?P<message>.*))?$"
-)
-
-
-def _error_log_paths(service) -> list[Path]:
-    """只读取专用错误日志 errors.log 及其历史分块。"""
-    if hasattr(service, "_error_log_all_paths"):
-        return service._error_log_all_paths()
-    path = service._user_log_dir() / "errors.log"
-    return [path] if path.exists() else []
-
-
-def _parse_error_log_line(path: Path, line: str, line_no: int, mtime: float) -> dict[str, Any] | None:
-    match = USER_LOG_LINE_RE.match(line)
-    timestamp = match.group("time") if match else ""
-    tag = match.group("tag") if match else ""
-    message = (match.group("message") if match else line) or ""
-    if tag != "ERROR" and "ERROR" not in line and "error" not in line.lower():
-        return None
-    session_id = ""
-    session_match = re.match(r"session=([^\s]+)\s*(.*)$", message)
-    if session_match:
-        session_id = session_match.group(1)
-        message = session_match.group(2).strip()
-    payload = None
-    marker = ""
-    for candidate in ("LLM_FULL_LOG", "MEMORY_OP_FAILED"):
-        if candidate in message:
-            marker = candidate
-            raw_json = message.split(candidate, 1)[1].strip()
-            try:
-                payload = json.loads(raw_json)
-            except Exception:
-                payload = None
-            break
-    item: dict[str, Any] = {
-        "file": path.name,
-        "line_no": line_no,
-        "line": line,
-        "time": timestamp,
-        "tag": tag or "",
-        "message": message,
-        "session_id": session_id,
-        "kind": marker,
-        "mtime": mtime,
-    }
-    if payload is not None:
-        item["payload"] = payload
-        if isinstance(payload, dict):
-            item["error"] = payload.get("error") or ""
-            item["request"] = payload.get("request")
-            item["response"] = payload.get("response")
-    return item
-
-
 async def api_freeze_inactive(request: web.Request):
     _require_admin(request)
     service = service_from(request)
@@ -2712,122 +2609,6 @@ async def api_save_history_summary(request: web.Request):
         session_schema.set_character_history_summary(state, summary)
         service._save_session_state(sid, state)
     return json_ok({"character_key": char, "summary": summary})
-
-
-async def api_logs(request: web.Request):
-    service = service_from(request)
-    log_dir = service._user_log_dir()
-    items = []
-    if log_dir.exists():
-        for path in log_dir.glob("telegram_*.log"):
-            # 历史分块形如 telegram_123.20260630_153000.log；列表只展示当前块。
-            if "." in path.stem[len("telegram_"):]:
-                continue
-            chat_id = path.stem[len("telegram_"):]
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            sid = service.session_id_for_chat(chat_id)
-            if not _session_allowed(request, sid):
-                continue
-            state = service.sessions.get(sid, {})
-            items.append({
-                "chat_id": chat_id,
-                "session_id": sid,
-                "character": character_value(state, "custom_character", "") or "",
-                "size": stat.st_size,
-                "mtime": stat.st_mtime,
-                "mtime_ago": human_ago(time.time() - stat.st_mtime),
-            })
-    items.sort(key=lambda item: item["mtime"], reverse=True)
-    return json_ok({"logs": items, "enabled": service._user_log_enabled(), "dir": str(log_dir)})
-
-
-async def api_log_detail(request: web.Request):
-    service = service_from(request)
-    chat_id = request.match_info["chat_id"]
-    sid = service.session_id_for_chat(chat_id)
-    if not _session_allowed(request, sid):
-        return json_error("无权访问此日志", status=403)
-    base_path = service._user_log_path(sid)
-    if hasattr(service, "_resolve_log_chunk_path"):
-        path = service._resolve_log_chunk_path(base_path, request.query.get("chunk") or "")
-    else:
-        path = service._user_log_latest_path(sid) if hasattr(service, "_user_log_latest_path") else base_path
-    if not path.exists():
-        return json_error("日志不存在", status=404)
-    try:
-        tail = max(1, min(5000, int(request.query.get("tail", "500"))))
-    except ValueError:
-        tail = 500
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return json_ok({
-        "chat_id": chat_id,
-        "chunk": path.name,
-        "chunk_size": path.stat().st_size,
-        "chunks": log_chunk_items(service, base_path, path),
-        "total_lines": len(lines),
-        "shown_lines": min(tail, len(lines)),
-        "content": "\n".join(lines[-tail:]),
-    })
-
-
-async def api_log_clear(request: web.Request):
-    service = service_from(request)
-    chat_id = request.match_info["chat_id"]
-    sid = service.session_id_for_chat(chat_id)
-    if not _session_allowed(request, sid):
-        return json_error("无权清除此日志", status=403)
-    try:
-        paths = service._user_log_all_paths(sid) if hasattr(service, "_user_log_all_paths") else [service._user_log_path(sid)]
-        for path in paths:
-            if path.exists():
-                path.unlink()
-    except OSError as exc:
-        return json_error(str(exc), status=500)
-    return json_ok()
-
-
-async def api_llm_debug_log(request: web.Request):
-    _require_admin(request)
-    service = service_from(request)
-    base_path = service._llm_debug_log_path()
-    path = service._resolve_log_chunk_path(base_path, request.query.get("chunk") or "") if hasattr(service, "_resolve_log_chunk_path") else base_path
-    if not path.exists():
-        return json_ok({"content": {}, "updated_at": None, "chunks": []})
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return json_ok({
-            "content": data.get("entries_by_type", {}),
-            "updated_at": data.get("updated_at"),
-            "chunk": path.name,
-            "chunks": log_chunk_items(service, base_path, path),
-        })
-    except Exception as exc:
-        return json_error(str(exc), status=500)
-
-
-async def api_system_error_log(request: web.Request):
-    _require_admin(request)
-    service = service_from(request)
-    try:
-        limit = max(1, min(1000, int(request.query.get("limit", "300"))))
-    except ValueError:
-        limit = 300
-    error_lines: list[dict[str, Any]] = []
-    for path in _error_log_paths(service):
-        try:
-            stat = path.stat()
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-            for index, line in enumerate(lines, start=1):
-                item = _parse_error_log_line(path, line, index, stat.st_mtime)
-                if item:
-                    error_lines.append(item)
-        except Exception:
-            continue
-    error_lines.sort(key=lambda x: (x.get("time") or "", x.get("mtime") or 0, x.get("line_no") or 0), reverse=True)
-    return json_ok({"errors": error_lines[:limit], "total": len(error_lines)})
 
 
 async def api_test_comfyui(request: web.Request):
