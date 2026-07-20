@@ -2270,7 +2270,7 @@ class CommandHandlersMixin:
                 session_schema.set_character_value(state, "custom_spatial_relationship", relationship)
             if result.get("purity") is not None and not session_schema.get_character_value(state, "purity_user_set", False):
                 try:
-                    session_schema.set_character_value(state, "purity", max(-1, min(10, int(result["purity"]))))
+                    session_schema.set_character_value(state, "purity", max(1, min(10, int(result["purity"]))))
                 except (TypeError, ValueError):
                     pass
             self._snapshot_character(state)
