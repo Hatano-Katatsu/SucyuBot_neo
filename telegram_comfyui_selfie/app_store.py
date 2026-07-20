@@ -10,6 +10,8 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
+from .sqlite_migrations import SchemaMigrationResult, migrate_database
+
 
 def _now() -> float:
     return time.time()
@@ -51,7 +53,7 @@ class AppStateStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
+        self.schema_migration: SchemaMigrationResult = self._init_schema()
 
     def _connect(self):
         conn = sqlite3.connect(self.path, timeout=10)
@@ -62,160 +64,8 @@ class AppStateStore:
             conn.execute("PRAGMA temp_store=MEMORY")
         return conn
 
-    def _init_schema(self):
-        with closing(self._connect()) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS chat_messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    character_key TEXT NOT NULL DEFAULT '',
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    checkpointed INTEGER NOT NULL DEFAULT 0
-                )
-                """
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_chat_messages_scope "
-                "ON chat_messages(session_id, character_key, id)"
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS checkpoints (
-                    session_id TEXT NOT NULL,
-                    character_key TEXT NOT NULL DEFAULT '',
-                    summary TEXT NOT NULL DEFAULT '',
-                    source_until_id INTEGER NOT NULL DEFAULT 0,
-                    updated_at REAL NOT NULL,
-                    version INTEGER NOT NULL DEFAULT 1,
-                    PRIMARY KEY(session_id, character_key)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS diaries (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    character_key TEXT NOT NULL DEFAULT '',
-                    diary_date TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    from_message_id INTEGER NOT NULL DEFAULT 0,
-                    to_message_id INTEGER NOT NULL DEFAULT 0,
-                    updated_at REAL NOT NULL,
-                    UNIQUE(session_id, character_key, diary_date)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS life_plans (
-                    session_id TEXT NOT NULL,
-                    character_key TEXT NOT NULL DEFAULT '',
-                    payload TEXT NOT NULL,
-                    updated_at REAL NOT NULL,
-                    PRIMARY KEY(session_id, character_key)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS context_meta (
-                    session_id TEXT NOT NULL,
-                    character_key TEXT NOT NULL DEFAULT '',
-                    last_dream_at REAL NOT NULL DEFAULT 0,
-                    last_dream_message_id INTEGER NOT NULL DEFAULT 0,
-                    last_checkpoint_at REAL NOT NULL DEFAULT 0,
-                    last_checkpoint_message_id INTEGER NOT NULL DEFAULT 0,
-                    character_history_summary TEXT NOT NULL DEFAULT '',
-                    PRIMARY KEY(session_id, character_key)
-                )
-                """
-            )
-            # 迁移：旧库没有 character_history_summary 列时补上。
-            meta_cols = {row["name"] for row in conn.execute("PRAGMA table_info(context_meta)")}
-            if "character_history_summary" not in meta_cols:
-                conn.execute("ALTER TABLE context_meta ADD COLUMN character_history_summary TEXT NOT NULL DEFAULT ''")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS web_credentials (
-                    user_id TEXT PRIMARY KEY,
-                    password_hash TEXT NOT NULL DEFAULT '',
-                    access_token TEXT NOT NULL DEFAULT '',
-                    updated_at REAL NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS model_profiles (
-                    user_id TEXT NOT NULL,
-                    profile_id TEXT NOT NULL,
-                    data TEXT NOT NULL,
-                    updated_at REAL NOT NULL,
-                    PRIMARY KEY(user_id, profile_id)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS user_model_settings (
-                    user_id TEXT PRIMARY KEY,
-                    chat_profile_id TEXT NOT NULL DEFAULT '',
-                    fast_profile_id TEXT NOT NULL DEFAULT '',
-                    vision_profile_id TEXT NOT NULL DEFAULT '',
-                    chat_thinking INTEGER,
-                    fast_thinking INTEGER,
-                    updated_at REAL NOT NULL
-                )
-                """
-            )
-            settings_cols = {row["name"] for row in conn.execute("PRAGMA table_info(user_model_settings)")}
-            if "vision_profile_id" not in settings_cols:
-                conn.execute("ALTER TABLE user_model_settings ADD COLUMN vision_profile_id TEXT NOT NULL DEFAULT ''")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS llm_usage (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created_at REAL NOT NULL,
-                    profile_id TEXT NOT NULL DEFAULT '',
-                    model TEXT NOT NULL DEFAULT '',
-                    purpose TEXT NOT NULL DEFAULT '',
-                    tag TEXT NOT NULL DEFAULT '',
-                    session_id TEXT NOT NULL DEFAULT '',
-                    prompt_tokens INTEGER NOT NULL DEFAULT 0,
-                    completion_tokens INTEGER NOT NULL DEFAULT 0,
-                    cached_tokens INTEGER NOT NULL DEFAULT 0,
-                    total_tokens INTEGER NOT NULL DEFAULT 0
-                )
-                """
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_llm_usage_scope "
-                "ON llm_usage(created_at, profile_id, model, purpose, tag)"
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS session_state (
-                    session_id TEXT PRIMARY KEY,
-                    data TEXT NOT NULL DEFAULT '{}',
-                    updated_at REAL NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS city_catalogs (
-                    catalog_key TEXT PRIMARY KEY,
-                    data TEXT NOT NULL DEFAULT '{}',
-                    updated_at REAL NOT NULL
-                )
-                """
-            )
-            conn.commit()
+    def _init_schema(self) -> SchemaMigrationResult:
+        return migrate_database(self.path, connection_factory=self._connect)
 
     @staticmethod
     def user_id_from_session(session_id: str) -> str:

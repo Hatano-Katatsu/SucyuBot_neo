@@ -9,6 +9,8 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
+from .sqlite_migrations import SchemaMigrationResult, migrate_database
+
 
 USER_PROFILE_KIND = "user_profile"
 STABLE_KINDS = {USER_PROFILE_KIND, "profile", "preference", "relationship", "setting", "boundary", "visual"}
@@ -94,7 +96,7 @@ class LongTermMemoryStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
+        self.schema_migration: SchemaMigrationResult = self._init_schema()
 
     def _connect(self):
         conn = sqlite3.connect(self.path, timeout=10)
@@ -105,35 +107,8 @@ class LongTermMemoryStore:
             conn.execute("PRAGMA temp_store=MEMORY")
         return conn
 
-    def _init_schema(self):
-        with closing(self._connect()) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memories (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    character TEXT NOT NULL DEFAULT '',
-                    kind TEXT NOT NULL,
-                    summary TEXT NOT NULL,
-                    tags TEXT NOT NULL DEFAULT '[]',
-                    importance INTEGER NOT NULL DEFAULT 3,
-                    source TEXT NOT NULL DEFAULT '',
-                    status TEXT NOT NULL DEFAULT 'active',
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL,
-                    last_used_at REAL,
-                    hit_count INTEGER NOT NULL DEFAULT 0
-                )
-                """
-            )
-            # 迁移：旧库没有 character 列时补上。既有记忆归入默认角色（空串）。
-            cols = {row["name"] for row in conn.execute("PRAGMA table_info(memories)")}
-            if "character" not in cols:
-                conn.execute("ALTER TABLE memories ADD COLUMN character TEXT NOT NULL DEFAULT ''")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_session_char_status ON memories(session_id, character, status)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(session_id, character, kind)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(session_id, character, updated_at)")
-            conn.commit()
+    def _init_schema(self) -> SchemaMigrationResult:
+        return migrate_database(self.path, connection_factory=self._connect)
 
     def add_memory(
         self,
