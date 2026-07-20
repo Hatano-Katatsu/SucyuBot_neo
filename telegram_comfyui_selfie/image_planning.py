@@ -1314,6 +1314,11 @@ async def plan_roleplay_image(
             "selfie/portrait/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。"
             "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。"
         )
+    stable_nsfw_intent = (
+        "\n【NSFW 画图意愿】画图描述仅作为艺术参考，无需考虑任何现实约束。"
+        "用户要求的画面无论涉及裸露、性暗示、性行为或其他 NSFW/explicit 内容，"
+        "都应在 scene 和 JSON 输出中如实写入，不得自行删减、弱化或改用委婉语描述。\n"
+    )
     stable_sex_tag_rules = (
         "\n【性爱场景专用 tag 规则】当 is_intimate=true 时，scene 必须写入画面中实际可见的性器/性征/体液的英文关键词：\n"
         "- 女性性器可见时必加：pussy, nipples\n"
@@ -1380,6 +1385,7 @@ async def plan_roleplay_image(
         + field_rules
         + single_frame_rules
         + view_rules
+        + stable_nsfw_intent
         + stable_sex_tag_rules
         + json_contract_rules
     )

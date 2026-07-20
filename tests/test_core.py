@@ -4238,40 +4238,90 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_cmd_ntr_uses_tool_generate_image_with_ntr_mode(self):
+    def test_cmd_ntr_uses_planner_with_ntr_mode_and_sends_caption(self):
         async def run():
             svc = self.make_service()
             sid = "telegram:123"
-            svc.tool_generate_image = AsyncMock(return_value="图片已生成并发送。画面: x")
-            svc.send_message = AsyncMock()
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._translate_to_tags = AsyncMock(return_value="english tags")
 
-            await svc.cmd_ntr(123, sid, "她在酒吧和新认识的男人调情")
+            with patch("telegram_comfyui_selfie.image_planning.plan_roleplay_image", new_callable=AsyncMock) as mock_plan:
+                mock_plan.return_value = {
+                    "scene": "她在酒吧和新认识的男人调情", "caption": "你猜我在哪？",
+                    "new_appearance_tags": "", "view": "third", "aspect_ratio": "2:3",
+                    "is_intimate": True, "partner_in_frame": True,
+                    "device_in_frame": False, "clothing_off": "",
+                }
+                svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
+                svc.send_action = AsyncMock()
+                svc.send_photo = AsyncMock()
+                svc.send_message = AsyncMock()
 
-            svc.tool_generate_image.assert_awaited_once()
-            kwargs = svc.tool_generate_image.await_args.kwargs
-            self.assertEqual(kwargs["planning_mode"], "ntr")
+                await svc.cmd_ntr(123, sid, "她在酒吧和新认识的男人调情")
+
+            mock_plan.assert_awaited_once()
+            kwargs = mock_plan.await_args.kwargs
+            self.assertEqual(kwargs["mode"], "ntr")
             self.assertEqual(kwargs["prompt"], "她在酒吧和新认识的男人调情")
             self.assertEqual(kwargs["intent"], "她在酒吧和新认识的男人调情")
             self.assertEqual(kwargs["must_include"], "她在酒吧和新认识的男人调情")
+            svc._do_generate.assert_awaited_once()
+            gen_kwargs = svc._do_generate.await_args.kwargs
+            self.assertTrue(gen_kwargs["is_ntr"])
+            self.assertTrue(gen_kwargs["is_intimate"])
+            self.assertTrue(gen_kwargs["partner_in_frame"])
+            svc.send_photo.assert_awaited_once_with(123, b"image", "你猜我在哪？")
             svc.send_message.assert_not_awaited()
 
         asyncio.run(run())
 
-    def test_cmd_ntr_without_arg_uses_default_intent(self):
+    def test_cmd_ntr_without_arg_uses_default_intent_gets_caption(self):
         async def run():
             svc = self.make_service()
             sid = "telegram:123"
-            svc.tool_generate_image = AsyncMock(return_value="图片已生成并发送。画面: x")
-            svc.send_message = AsyncMock()
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            svc._translate_to_tags = AsyncMock(return_value="english tags")
 
-            await svc.cmd_ntr(123, sid, "")
+            with patch("telegram_comfyui_selfie.image_planning.plan_roleplay_image", new_callable=AsyncMock) as mock_plan:
+                mock_plan.return_value = {
+                    "scene": "她一个人在家看着窗外", "caption": "又是一个人。",
+                    "new_appearance_tags": "", "view": "third", "aspect_ratio": "3:2",
+                    "is_intimate": False, "partner_in_frame": False,
+                    "device_in_frame": False, "clothing_off": "",
+                }
+                svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
+                svc.send_action = AsyncMock()
+                svc.send_photo = AsyncMock()
+                svc.send_message = AsyncMock()
 
-            svc.tool_generate_image.assert_awaited_once()
-            kwargs = svc.tool_generate_image.await_args.kwargs
-            self.assertEqual(kwargs["planning_mode"], "ntr")
+                await svc.cmd_ntr(123, sid, "")
+
+            mock_plan.assert_awaited_once()
+            kwargs = mock_plan.await_args.kwargs
+            self.assertEqual(kwargs["mode"], "ntr")
             self.assertEqual(kwargs["intent"], "NTR 场景画面")
             self.assertEqual(kwargs["must_include"], "")
-            svc.send_message.assert_not_awaited()
+            gen_kwargs = svc._do_generate.await_args.kwargs
+            self.assertTrue(gen_kwargs["is_ntr"])
+            self.assertFalse(gen_kwargs["is_intimate"])
+            svc.send_photo.assert_awaited_once_with(123, b"image", "又是一个人。")
+
+        asyncio.run(run())
+
+    def test_cmd_ntr_without_llm_config_shows_error(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.has_llm_config = unittest.mock.Mock(return_value=False)
+            svc.send_message = AsyncMock()
+
+            with patch("telegram_comfyui_selfie.image_planning.plan_roleplay_image", new_callable=AsyncMock) as mock_plan:
+                mock_plan.return_value = None
+                svc.send_action = AsyncMock()
+
+                await svc.cmd_ntr(123, sid, "")
+
+            svc.send_message.assert_awaited_once_with(123, "缺少图片意图")
 
         asyncio.run(run())
 

@@ -1505,25 +1505,88 @@ class CommandHandlersMixin:
         if self._gen_lock.locked():
             await self.send_message(chat_id, "正在生图中，请稍后再试。")
             return
+        await self.send_action(chat_id, "upload_photo")
         text = (arg or "").strip()
         if text:
             intent = text
         else:
             intent = "NTR 场景画面"
-        result = await self._await_protected_image_task(
-            session_id,
-            self.tool_generate_image(
-                chat_id,
-                session_id,
-                prompt=text,
-                intent=intent,
-                must_include=text,
-                planning_mode="ntr",
-            ),
-            label="NTR 生图任务",
+        from .image_planning import plan_roleplay_image
+        plan = await plan_roleplay_image(
+            self, session_id,
+            intent=intent,
+            prompt=text,
+            must_include=text,
+            mode="ntr",
         )
-        if result.startswith("生图失败") or result == "缺少图片意图":
-            await self.send_message(chat_id, result)
+        if not plan or not plan.get("scene"):
+            await self.send_message(chat_id, "缺少图片意图")
+            return
+        scene = plan.get("scene") or ""
+        caption = plan.get("caption") or ""
+        new_app = plan.get("new_appearance_tags") or ""
+        planned_view = plan.get("view") or ""
+        orientation = plan.get("aspect_ratio") or ""
+        is_intimate = bool(plan.get("is_intimate"))
+        partner_in_frame = bool(plan.get("partner_in_frame"))
+        device_in_frame = bool(plan.get("device_in_frame"))
+        clothing_off = plan.get("clothing_off") or ""
+        state_mutation = self._image_state_mutation_from_plan(
+            plan,
+            intent,
+            scene,
+        ) if isinstance(plan, dict) else {}
+        english = await self._translate_to_tags(scene, session_id=session_id, view=planned_view, is_intimate=is_intimate)
+        cancelled = {"value": False}
+
+        async def generate_and_send_ntr():
+            generation_kwargs = {
+                "session_id": session_id,
+                "is_ntr": True,
+                "one_shot_appearance": new_app or "",
+                "orientation": orientation or "",
+                "is_intimate": is_intimate,
+                "partner_in_frame": partner_in_frame,
+                "device_in_frame": device_in_frame,
+                "clothing_off": clothing_off,
+                "view": planned_view,
+            }
+            if state_mutation.get("clear_undress_state"):
+                generation_kwargs["ignore_wardrobe_item_states"] = True
+            ok, imgs, err = await self._do_generate(english, **generation_kwargs)
+            if not ok or not imgs:
+                self._ulog(session_id, "ERROR", f"NTR生图失败: {err}")
+                if not cancelled["value"]:
+                    await self.send_message(chat_id, f"生图失败: {err}")
+                return False
+            await self.send_photo(chat_id, imgs[0], caption or "")
+            for extra in imgs[1:]:
+                await self.send_photo(chat_id, extra)
+            source = self._format_image_source_description(
+                intent=intent,
+                prompt=caption or "",
+            )
+            self._record_sent_photo(
+                session_id,
+                scene,
+                caption or "",
+                appearance=new_app or self._preview_image_mutation_appearance(session_id, state_mutation),
+                view=planned_view,
+                source_description=source,
+                source_kind="chat_image",
+            )
+            self._commit_image_state_mutation(
+                session_id,
+                state_mutation,
+            )
+            return True
+
+        await self._await_protected_image_task(
+            session_id,
+            generate_and_send_ntr(),
+            label="NTR 生图任务",
+            on_outer_cancel=lambda: cancelled.__setitem__("value", True),
+        )
 
     async def cmd_scene_image(self, chat_id, session_id, arg):
         if self._gen_lock.locked():

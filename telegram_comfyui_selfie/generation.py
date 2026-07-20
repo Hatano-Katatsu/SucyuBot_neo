@@ -1496,7 +1496,9 @@ def build_prompt(
     quality = "masterpiece, best quality, highres, absurdres, newest, year 2025, anime coloring, clean lineart, soft cel shading, detailed illustration"
     safety_tag = str(safety.get("tag") or "").strip()
     count = "1boy, solo" if male else "1girl, solo"
-    if is_ntr or is_partner_scene:
+    if is_ntr_scene:
+        count = ""
+    elif is_partner_scene:
         count = re.sub(r"\bsolo\b,?\s*", "", count).strip(", ")
     character, series = _visual_character_identity(state)
     artist = current_style if current_style.startswith("@") else ""
