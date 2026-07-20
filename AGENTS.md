@@ -129,6 +129,9 @@ telegram_comfyui_selfie/
 - 同一会话的推送使用 `asyncio.Lock` 串行化，避免 morning/daily/continuity 并发重复发图。
 - 多阶段 NTR/连续推送按阶段顺序 await；单阶段失败要隔离并记录，不阻塞后续调度循环。
 - 场景结束和晚安判断只读取近期用户消息，不让 assistant 台词或照片 system 误触发。
+- 主动推送的话题方向（dialogue/life/external_topic）由前置轻量 LLM 调用 `_decide_push_topic_direction` 判断，不使用随机数。followup 模式默认 dialogue，不调 LLM。external_topic 每天最多搜索 1 次（`push_topic_search_daily_limit`，与聊天侧 `web_search_count` 独立计数），话题来源可以是角色爱好/作品/职业或当前生活主线延展出的方向；配额用完或搜索失败时降级为 life。决策 LLM 参考最近几天的话题历史（带相对日期）和已用搜索关键词决定今天的方向，尽量不重复。
+- 推送话题日志 `recent_push_topics` 跨 `/新场景` 保留（`reset_preserved=True`），切角色才清；专门堵 `/新场景` 后 `sent_photos_history` 被 `since=reset_time` 过滤导致避重失效的缺口。每条记录 ts/caption/scene/topic 签名/direction，保留最近 8 条；`_pushes_since_last_user_message` 据此统计用户上次发言后的推送间隔，间隔超过 1-2 次后 dialogue 方向应大幅减少。
+- 推送 caption 优先展现角色自己的生活片段、看到想到的事或感兴趣的话题，避免写成对用户的询问式开场或催促回复；冷启动（用户长时间无互动）时非 dialogue 方向强制不带问句主旨。
 - 短英文关键词使用单词边界匹配，避免 `bed` 命中 `bedroom` 等子串。
 - 天气缓存必须绑定城市；城市变化不能复用旧城市数据。外部天气请求复用统一代理配置。
 - 地点匹配优先识别路线、街道等动线提示，再匹配普通地点标签。

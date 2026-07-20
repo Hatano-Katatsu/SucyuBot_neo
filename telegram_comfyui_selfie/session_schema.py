@@ -76,6 +76,9 @@ STATE_SCHEMA: dict[str, Field] = {
     "last_post_chat_push_time": Field(G, default=0.0),
     "web_search_date": Field(G, default=""),
     "web_search_count": Field(G, default=0),
+    # 推送侧外部话题搜索配额（与聊天侧 web_search_count 独立，每天最多 1 次）。
+    "push_topic_search_date": Field(G, default=""),
+    "push_topic_search_count": Field(G, default=0),
     # —— 会话全局：角色池容器 / 初始化流程 ——
     "saved_characters": Field(G, default={}),
     "character_contexts": Field(G, default={}),
@@ -99,6 +102,8 @@ STATE_SCHEMA: dict[str, Field] = {
         "last_post_chat_push_time": 0.0,
         "web_search_date": "",
         "web_search_count": 0,
+        "push_topic_search_date": "",
+        "push_topic_search_count": 0,
         "saved_characters": {},
         "character_contexts": {},
         "init_flow": {},
@@ -156,6 +161,9 @@ STATE_SCHEMA: dict[str, Field] = {
     "last_dream_message_id": Field(T, default=0),
     # —— 角色短期态：照片历史 / 回图标志 ——
     "sent_photos_history": Field(T, default=[]),
+    # 推送话题日志：跨 /新场景 保留（reset_preserved），切角色才清。
+    # 用于话题级避重，避免短期上下文重置后推送复述上一次话题。
+    "recent_push_topics": Field(T, default=[], reset_preserved=True),
     "replying_to_selfie": Field(T, default=False),
     "last_sent_selfie_time": Field(T, default=0),
     "last_sent_selfie_caption": Field(T, default=""),
@@ -206,6 +214,7 @@ STATE_SCHEMA: dict[str, Field] = {
         "last_dream_at": 0,
         "last_dream_message_id": 0,
         "sent_photos_history": [],
+        "recent_push_topics": [],
         "replying_to_selfie": False,
         "last_sent_selfie_time": 0,
         "last_sent_selfie_caption": "",
@@ -788,6 +797,7 @@ _CONTEXT_DEFAULT: dict[str, Any] = {
     "last_dream_at": 0,
     "last_dream_message_id": 0,
     "sent_photos_history": [],
+    "recent_push_topics": [],
     "replying_to_selfie": False,
     "last_sent_selfie_time": 0,
     "last_sent_selfie_caption": "",
@@ -807,7 +817,8 @@ _CONTEXT_DEFAULT: dict[str, Any] = {
 _LEGACY_CONTEXT_FLAT_KEYS = (
     "recent_message_history", "chat_history", "checkpoint_summary",
     "checkpoint_message_id", "last_checkpoint_at", "last_dream_at",
-    "last_dream_message_id", "sent_photos_history", "replying_to_selfie",
+    "last_dream_message_id", "sent_photos_history", "recent_push_topics",
+    "replying_to_selfie",
     "last_sent_selfie_time", "last_sent_selfie_caption",
     "last_sent_selfie_source_description", "last_sent_selfie_replied",
     "rounds_since_image", "short_context_start", "short_context_reset_time",
@@ -1006,6 +1017,16 @@ def get_sent_photos_history(state):
 def set_sent_photos_history(state, value):
     _context_set(state, "sent_photos_history", list(value or []))
 
+# ── 推送话题日志（话题级避重，跨 /新场景 保留）──
+# 每条结构：{"ts": float, "caption": str, "scene": str, "topic": str}
+# topic 是从 caption/scene 提炼的简短话题签名，供 planner 做话题级避重。
+def get_recent_push_topics(state) -> list[dict[str, Any]]:
+    value = _context_get(state, "recent_push_topics", is_list=True)
+    return value if isinstance(value, list) else []
+
+def set_recent_push_topics(state, value):
+    _context_set(state, "recent_push_topics", list(value or []))
+
 def get_replying_to_selfie(state):
     return bool(_context_get(state, "replying_to_selfie"))
 
@@ -1136,6 +1157,8 @@ _SESSION_DEFAULT: dict[str, Any] = {
     "last_post_chat_push_time": 0.0,
     "web_search_date": "",
     "web_search_count": 0,
+    "push_topic_search_date": "",
+    "push_topic_search_count": 0,
     "saved_characters": {},
     "character_contexts": {},
     "init_flow": {},
@@ -1150,6 +1173,7 @@ _LEGACY_SESSION_FLAT_KEYS = (
     "daily_trigger_times", "daily_trigger_date", "daily_triggered_times",
     "post_chat_push_date", "post_chat_push_count", "last_post_chat_push_time",
     "web_search_date", "web_search_count",
+    "push_topic_search_date", "push_topic_search_count",
     "saved_characters", "character_contexts", "init_flow",
     "ntr_stage_reached", "ntr_reconcile_count", "ntr_affection_reset",
     "frozen", "frozen_at",
@@ -1298,6 +1322,22 @@ def get_web_search_count(state):
 
 def set_web_search_count(state, value):
     _session_set(state, "web_search_count", int(value or 0))
+
+# 推送侧外部话题搜索配额（每天最多 1 次，与聊天侧独立）
+def get_push_topic_search_date(state):
+    return (_session_get(state, "push_topic_search_date") or "").strip()
+
+def set_push_topic_search_date(state, value):
+    _session_set(state, "push_topic_search_date", str(value or ""))
+
+def get_push_topic_search_count(state):
+    try:
+        return int(_session_get(state, "push_topic_search_count", coerce=int) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+def set_push_topic_search_count(state, value):
+    _session_set(state, "push_topic_search_count", int(value or 0))
 
 
 # ── NTR ──

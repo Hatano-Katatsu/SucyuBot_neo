@@ -16,7 +16,7 @@ from telegram_comfyui_selfie import character_card
 from telegram_comfyui_selfie import session_schema
 from telegram_comfyui_selfie.config_store import flatten_config, load_simple_yaml
 from telegram_comfyui_selfie.generation import PromptSlots, _build_animatool_turbo_payload, _do_generate_animatool
-from telegram_comfyui_selfie.image_planning import _detect_intimate_context, _detect_nudity_context, _infer_clothing_off_fallback, format_dialog_context, format_planning_spatial_context, format_recent_photo_dedup_context, format_sent_photo_context, normalize_scene_visual_subject, plan_animatool_slots, plan_roleplay_image
+from telegram_comfyui_selfie.image_planning import _detect_intimate_context, _detect_nudity_context, _infer_clothing_off_fallback, _push_topic_signature, _format_recent_push_topic_dedup_context, format_dialog_context, format_planning_spatial_context, format_recent_photo_dedup_context, format_sent_photo_context, normalize_scene_visual_subject, plan_animatool_slots, plan_roleplay_image
 from telegram_comfyui_selfie.commands import (
     SESSION_GLOBAL_STATE_KEYS,
     _is_character_config_key,
@@ -3031,6 +3031,190 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("recent_push_1", joined)
             self.assertNotIn("推送内容重复修正", joined)
 
+        asyncio.run(run())
+
+    def test_push_topic_signature_extracts_keywords(self):
+        # caption + scene 提炼话题签名：同主题不同措辞应得到相似签名
+        sig1 = _push_topic_signature("今天去看了新出的番剧，画面太美了", "watching anime on couch")
+        sig2 = _push_topic_signature("番剧看完了，真的很惊艳", "anime screen glowing in dark room")
+        self.assertIn("番剧", sig1)
+        # 两条同主题推送的签名应有交集（都含"番剧"）
+        self.assertTrue(set(sig1.split()) & set(sig2.split()))
+
+    def test_format_recent_push_topic_dedup_context(self):
+        topics = [
+            {"caption": "今天做了咖喱饭", "scene": "cooking curry", "topic": "咖喱 做饭"},
+            {"caption": "下午去了图书馆", "scene": "library", "topic": "图书馆 看书"},
+        ]
+        ctx = _format_recent_push_topic_dedup_context(topics)
+        self.assertIn("话题级", ctx)
+        self.assertIn("last_push_topic_1", ctx)
+        self.assertIn("last_push_topic_2", ctx)
+        self.assertIn("咖喱", ctx)
+        self.assertIn("图书馆", ctx)
+        # 空列表不输出
+        self.assertEqual(_format_recent_push_topic_dedup_context([]), "")
+
+    def test_recent_push_topics_accessor_and_reset_preserved(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        # 默认空
+        self.assertEqual(session_schema.get_recent_push_topics(state), [])
+        # 写入
+        session_schema.set_recent_push_topics(state, [
+            {"ts": 1.0, "caption": "a", "topic": "ta"},
+            {"ts": 2.0, "caption": "b", "topic": "tb"},
+        ])
+        self.assertEqual(len(session_schema.get_recent_push_topics(state)), 2)
+        # reset_preserved: /reset（清对话）应保留 recent_push_topics
+        svc._clear_conversation_context(state)
+        topics = session_schema.get_recent_push_topics(state)
+        self.assertEqual(len(topics), 2, "recent_push_topics 应跨场景重置保留")
+
+    def test_pushes_since_last_user_message_counts_after_user_ts(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        session_schema.set_last_message_time(state, 1000.0)
+        session_schema.set_recent_push_topics(state, [
+            {"ts": 500.0, "caption": "old"},   # 用户发言前，不计
+            {"ts": 1100.0, "caption": "p1"},   # 用户发言后，计
+            {"ts": 1200.0, "caption": "p2"},   # 用户发言后，计
+        ])
+        self.assertEqual(svc._pushes_since_last_user_message(state), 2)
+        # 无用户发言时返回 0
+        session_schema.set_last_message_time(state, 0)
+        self.assertEqual(svc._pushes_since_last_user_message(state), 0)
+
+    def test_push_topic_search_quota_daily_limit(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        svc.config["push_topic_search_daily_limit"] = "1"
+        today = "2026-07-20"
+        # 当日未用：配额可用
+        self.assertTrue(svc._push_topic_search_quota_ok(state, today))
+        # 扣减一次
+        svc._consume_push_topic_search_quota(sid, state, today)
+        self.assertEqual(session_schema.get_push_topic_search_count(state), 1)
+        self.assertEqual(session_schema.get_push_topic_search_date(state), today)
+        # 当日已满：配额不可用
+        self.assertFalse(svc._push_topic_search_quota_ok(state, today))
+        # 跨日重置
+        self.assertTrue(svc._push_topic_search_quota_ok(state, "2026-07-21"))
+
+    def test_decide_push_topic_direction_followup_defaults_dialogue(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({"image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "u"})
+            state = svc._get_session_state(sid)
+            now = datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc)
+            # followup 模式不调 LLM，直接回退 dialogue
+            svc._call_llm = AsyncMock()
+            decision = await svc._decide_push_topic_direction(sid, "followup", state, now)
+            self.assertEqual(decision["topic_direction"], "dialogue")
+            self.assertEqual(svc._call_llm.await_count, 0)
+        asyncio.run(run())
+
+    def test_decide_push_topic_direction_external_downgrades_when_quota_used(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({"image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "u"})
+            state = svc._get_session_state(sid)
+            now = datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc)
+            today = now.strftime("%Y-%m-%d")
+            # 用完配额
+            svc._consume_push_topic_search_quota(sid, state, today)
+            # LLM 返回 external_topic，但配额已满应降级 life
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "topic_direction": "external_topic",
+                "search_query": "原神 活动",
+                "reason": "test",
+            }))
+            decision = await svc._decide_push_topic_direction(sid, "normal", state, now)
+            self.assertEqual(decision["topic_direction"], "life")
+            self.assertEqual(decision["search_query"], "")
+        asyncio.run(run())
+
+    def test_append_push_topic_bounded_to_eight(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        # 填 10 条，应只保留最后 8 条
+        for i in range(10):
+            svc._append_push_topic(sid, f"caption{i}", f"scene{i}", "life")
+        topics = session_schema.get_recent_push_topics(svc._get_session_state(sid))
+        self.assertEqual(len(topics), 8)
+        self.assertEqual(topics[-1]["caption"], "caption9")
+        self.assertEqual(topics[0]["caption"], "caption2")
+        # 每条都带 direction 和 topic 签名
+        self.assertEqual(topics[-1]["direction"], "life")
+        self.assertTrue(topics[-1]["topic"])
+        # search_query 默认空串
+        self.assertEqual(topics[-1].get("search_query"), "")
+
+    def test_append_push_topic_records_search_query_for_external(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        svc._append_push_topic(sid, "今天搜到个有意思的事", "scene", "external_topic", "原神 4.5 活动")
+        topics = session_schema.get_recent_push_topics(svc._get_session_state(sid))
+        self.assertEqual(len(topics), 1)
+        self.assertEqual(topics[0]["direction"], "external_topic")
+        self.assertEqual(topics[0]["search_query"], "原神 4.5 活动")
+
+    def test_push_topic_direction_context_includes_life_plan_and_history(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        now = datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc)
+        # 写入昨天和今天的话题历史
+        yesterday_ts = now.timestamp() - 26 * 3600
+        session_schema.set_recent_push_topics(state, [
+            {"ts": yesterday_ts, "caption": "昨天在追番", "topic": "追番", "direction": "life", "search_query": ""},
+            {"ts": now.timestamp() - 3600, "caption": "今天做了咖喱", "topic": "咖喱 做饭", "direction": "life", "search_query": ""},
+        ])
+        ctx = svc._push_topic_direction_context(sid, state, now)
+        # 话题历史带相对日期
+        self.assertIn("昨天", ctx)
+        self.assertIn("追番", ctx)
+        self.assertIn("咖喱", ctx)
+        # external_topic 配额状态
+        self.assertIn("外部话题搜索今日配额", ctx)
+
+    def test_plan_roleplay_image_injects_topic_direction_hint(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            plan_output = {
+                "scene": "A woman reads on a couch",
+                "view": "selfie",
+                "caption": "在看一本很有意思的书。",
+                "character_location": "home",
+                "user_location": "unknown",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            }
+            svc._call_llm_messages = AsyncMock(return_value={
+                "choices": [{"message": {"content": json.dumps(plan_output, ensure_ascii=False)}}],
+                "usage": {},
+            })
+            svc._call_llm = AsyncMock()
+            await plan_roleplay_image(
+                svc, sid, mode="normal",
+                weather_data={"desc": "晴", "temp": "22"},
+                push_topic_direction="life",
+            )
+            joined = "\n".join(m.get("content", "") for m in svc._call_llm_messages.await_args.args[0])
+            self.assertIn("本次推送方向", joined)
+            self.assertIn("life", joined)
         asyncio.run(run())
 
     def test_scheduled_push_planner_injects_today_life_candidates(self):
@@ -6687,6 +6871,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             "daily_trigger_times", "daily_trigger_date", "daily_triggered_times",
             "post_chat_push_date", "post_chat_push_count", "last_post_chat_push_time",
             "web_search_date", "web_search_count",
+            "push_topic_search_date", "push_topic_search_count",
             "saved_characters", "character_contexts", "init_flow",
             "ntr_stage_reached", "ntr_reconcile_count", "ntr_affection_reset",
             "frozen", "frozen_at", "web_hidden",
@@ -6694,9 +6879,10 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         })
         self.assertEqual(set(ss.CHARACTER_CONFIG_EXTRA_KEYS),
                          {"character", "purity", "purity_user_set", "persona_user_set"})
-        # clothing 三字段已收进 clothing 盒；reset 保留的短期态单元现为 clothing + life_profile + life_plan。
+        # clothing 三字段已收进 clothing 盒；reset 保留的短期态单元现为
+        # clothing + life_profile + life_plan + recent_push_topics（推送话题日志跨场景重置保留）。
         self.assertEqual(set(ss.RESET_PRESERVED_TRANSIENT_KEYS),
-                         {"clothing", "life_profile", "life_plan"})
+                         {"clothing", "life_profile", "life_plan", "recent_push_topics"})
         # 默认值表：代表性字段 + 无默认字段不进表
         defaults = ss.state_defaults()
         self.assertIn("last_interaction", defaults)          # 动态时间戳

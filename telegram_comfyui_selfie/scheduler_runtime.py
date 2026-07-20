@@ -268,15 +268,276 @@ class SchedulerRuntimeMixin:
             + transition
         )
 
-    async def _llm_write_scene(self, mode, weather, weekday, time_period, recent_chat=None, session_id="", now=None, weather_data=None):
+    async def _llm_write_scene(self, mode, weather, weekday, time_period, recent_chat=None, session_id="", now=None, weather_data=None, push_topic_seed="", push_topic_direction=""):
         from .image_planning import plan_roleplay_image
         if not self.has_llm_config("image", session_id):
             return None
         plan = await plan_roleplay_image(
             self, session_id, mode=mode or "normal",
             weather_data=weather_data, now=now,
+            push_topic_seed=push_topic_seed or "",
+            push_topic_direction=push_topic_direction or "",
         )
         return plan
+
+    # ---------------------------------------------------------------------
+    # 推送话题方向决策（对话用户 / 生活线 / 外部话题）
+    # 三选一交给大模型判断，不使用随机数。外部话题每天最多搜索 1 次，
+    # 且搜索关键词必须和角色爱好/作品/职业相关。
+    # ---------------------------------------------------------------------
+    _PUSH_TOPIC_DIRECTIONS = ("dialogue", "life", "external_topic")
+
+    def _pushes_since_last_user_message(self, state: dict[str, Any]) -> int:
+        """统计用户上次发言之后已经发生了几次推送（含续场推送）。"""
+        last_user_ts = float(session_schema.get_last_message_time(state) or 0)
+        if not last_user_ts:
+            return 0
+        topics = session_schema.get_recent_push_topics(state)
+        return sum(1 for t in topics if isinstance(t, dict) and float(t.get("ts") or 0) > last_user_ts)
+
+    def _push_topic_search_quota_ok(self, state: dict[str, Any], today: str) -> bool:
+        if session_schema.get_push_topic_search_date(state) != today:
+            return True
+        try:
+            limit = max(0, int(str(self.config.get("push_topic_search_daily_limit", "1")).strip() or "1"))
+        except ValueError:
+            limit = 1
+        return session_schema.get_push_topic_search_count(state) < limit
+
+    def _consume_push_topic_search_quota(self, session_id: str, state: dict[str, Any], today: str) -> None:
+        if session_schema.get_push_topic_search_date(state) != today:
+            session_schema.set_push_topic_search_date(state, today)
+            session_schema.set_push_topic_search_count(state, 0)
+        session_schema.set_push_topic_search_count(state, session_schema.get_push_topic_search_count(state) + 1)
+        self._save_session_state(session_id, state)
+
+    def _push_topic_direction_context(self, session_id: str, state: dict[str, Any], now: datetime) -> str:
+        """构造给话题决策 LLM 的上下文摘要。"""
+        parts: list[str] = []
+        bot_name = self._get_session_cfg(session_id, "bot_name", "蕾伊")
+        role_name = self._get_session_cfg(session_id, "role_name", "")
+        series = self._get_session_cfg(session_id, "custom_series", "") or self.config.get("series", "")
+        character = self._get_session_cfg(session_id, "custom_character", "") or self.config.get("character", "")
+        occupation = self._get_session_cfg(session_id, "custom_character_occupation", "") or self.config.get("character_occupation", "")
+        scene_pref = self._get_session_cfg(session_id, "custom_scene_preference", "") or self.config.get("scene_preference", "")
+        persona = self._get_effective_persona(session_id, include_appearance=False) if hasattr(self, "_get_effective_persona") else ""
+        parts.append(f"角色名: {bot_name}" + (f"（{role_name}）" if role_name else ""))
+        if character or series:
+            parts.append(f"作品/系列: {series or character}")
+        if occupation:
+            parts.append(f"职业/身份: {occupation}")
+        if scene_pref:
+            parts.append(f"场景偏好: {scene_pref}")
+        if persona:
+            parts.append(f"人设摘要: {persona[:400]}")
+        # 最近推送话题（全部，带相对日期），让 LLM 看到昨天/前天聊了什么
+        all_topics = session_schema.get_recent_push_topics(state)
+        if all_topics:
+            now_date = now.date()
+            topic_lines = []
+            for t in all_topics:
+                ts = float(t.get("ts") or 0)
+                day_label = "未知"
+                if ts > 0:
+                    try:
+                        topic_dt = datetime.fromtimestamp(ts, tz=now.tzinfo)
+                        delta_days = (now_date - topic_dt.date()).days
+                        if delta_days <= 0:
+                            day_label = "今天"
+                        elif delta_days == 1:
+                            day_label = "昨天"
+                        elif delta_days == 2:
+                            day_label = "前天"
+                        else:
+                            day_label = f"{delta_days}天前"
+                    except Exception:
+                        day_label = "未知"
+                sig = str(t.get("topic") or "").strip()
+                cap = str(t.get("caption") or "").strip()[:60]
+                direction = str(t.get("direction") or "").strip()
+                sq = str(t.get("search_query") or "").strip()
+                tail = f"（搜索: {sq}）" if sq and direction == "external_topic" else ""
+                topic_lines.append(f"- [{day_label}|{direction or '?'}] {sig or cap}{tail}")
+            parts.append("最近推送话题历史（按时间正序；决定今天的搜索方向时尽量不重复这些主题）:\n" + "\n".join(topic_lines))
+        # 用户互动间隔
+        pushes_since = self._pushes_since_last_user_message(state)
+        last_user_ts = float(session_schema.get_last_message_time(state) or 0)
+        if last_user_ts:
+            gap_hours = (now.timestamp() - last_user_ts) / 3600.0
+            parts.append(
+                f"用户上次发言距今约 {gap_hours:.1f} 小时，期间已推送 {pushes_since} 次（含续场）。"
+            )
+        else:
+            parts.append("用户近期没有发言。")
+        # 生活线今日片段摘要（external_topic 可基于生活主线延展）
+        if hasattr(self, "_life_plan_enabled") and self._life_plan_enabled(session_id):
+            try:
+                row = self._load_life_plan_row(session_id) if hasattr(self, "_load_life_plan_row") else None
+                if row:
+                    today_plan = (row.get("payload") or {}).get("today") or {}
+                    texture = str(today_plan.get("texture") or "").strip()
+                    events = today_plan.get("events") or []
+                    life_bits: list[str] = []
+                    if texture:
+                        life_bits.append(f"今日底色: {texture}")
+                    for ev in events[:5]:
+                        if not isinstance(ev, dict):
+                            continue
+                        ev_text = str(ev.get("text") or "").strip()
+                        if ev_text:
+                            life_bits.append(ev_text[:80])
+                    if life_bits:
+                        parts.append(
+                            "今日生活线片段（life 方向的连续剧情素材；external_topic 也可基于其中方向延展成角色会感兴趣的新鲜话题）:\n"
+                            + "\n".join(f"- {b}" for b in life_bits)
+                        )
+            except Exception:
+                pass
+        # 外部话题搜索配额
+        today = now.strftime("%Y-%m-%d")
+        quota_ok = self._push_topic_search_quota_ok(state, today)
+        parts.append(f"外部话题搜索今日配额: {'可用' if quota_ok else '已用完'}。")
+        return "\n".join(parts)
+
+    async def _decide_push_topic_direction(
+        self,
+        session_id: str,
+        mode: str,
+        state: dict[str, Any],
+        now: datetime,
+    ) -> dict[str, Any]:
+        """让大模型判断本次推送的话题方向（dialogue/life/external_topic）。
+
+        不使用随机数。返回 {"topic_direction": str, "search_query": str, "reason": str}。
+        失败时回退到 life（最安全、不依赖外部资源）。
+        """
+        # followup（续场）紧接用户对话，默认 dialogue 方向，不走外部搜索。
+        if mode == "followup":
+            return {"topic_direction": "dialogue", "search_query": "", "reason": "followup 默认对话承接"}
+        purpose = "fast" if self.has_llm_config("fast", session_id) else "image"
+        if not self.has_llm_config(purpose, session_id):
+            return {"topic_direction": "life", "search_query": "", "reason": "无 LLM 配置，回退 life"}
+        today = now.strftime("%Y-%m-%d")
+        quota_ok = self._push_topic_search_quota_ok(state, today)
+        context = self._push_topic_direction_context(session_id, state, now)
+        system = (
+            "你是推送话题方向分类器。根据角色设定、最近几天的话题历史、用户互动间隔和生活线，"
+            "判断本次主动推送应该走哪个方向。只输出一个 JSON 对象，不要输出任何其他文本。\n"
+            "三个可选方向：\n"
+            "- dialogue：承接和用户的对话，回应或延续最近的话题，适合用户刚说话或 1-2 次推送内。\n"
+            "- life：展现角色自己此刻的生活片段（做某件事、看到某样东西、想起某件事），可以有连续剧情。"
+            "当用户已经多次推送没说话时优先选这个。\n"
+            "- external_topic：分享一个角色会感兴趣的外部新鲜话题。话题来源可以是角色的爱好/作品/职业，"
+            "也可以是当前生活主线（今日生活线片段）延展出的方向——例如生活线里提到角色在追某部剧、"
+            "准备某项活动、研究某样东西，就可以围绕那个方向搜一个相关的、角色能自然提起的新鲜切入点。"
+            "search_query 要具体、贴近角色此刻的生活或长期兴趣，不要搜离角色太远的时事或宽泛新闻。"
+            "只有在外部话题搜索配额可用、且用户长时间没说话、life 方向最近已用过时才选这个。\n"
+            "关键规则：\n"
+            "1) 用户上次发言后 1-2 次推送内，dialogue 是合理的；超过 2 次推送用户没回话，"
+            "dialogue 概率应大幅降低，优先 life 或 external_topic。\n"
+            "2) 参考最近几天的话题历史（尤其是昨天和前天），决定今天的方向和搜索关键词，"
+            "尽量不重复近期已聊过的主题或已搜过的关键词；同一天内不要重复同一方向。\n"
+            "3) external_topic 的 search_query 必须和角色的作品/系列/职业/爱好或当前生活主线直接相关，"
+            "不要写宽泛的时事关键词。如果配额已用完，不要选 external_topic。\n"
+            "输出格式: {\"topic_direction\": \"dialogue|life|external_topic\", \"search_query\": \"关键词或空\", \"reason\": \"简短理由\"}"
+        )
+        user = (
+            f"当前推送模式: {mode}\n"
+            f"当前时间: {now.strftime('%Y-%m-%d %H:%M %A')}\n\n"
+            f"{context}\n\n"
+            "请输出 JSON（以 { 开头）。"
+        )
+        try:
+            raw = await self._call_llm(
+                system, user, temp=0.4, tag="push_topic_direction",
+                purpose=purpose, session_id=session_id, max_tokens=300,
+            )
+        except Exception as exc:
+            self._ulog(session_id, "PUSH", f"话题方向决策失败，回退 life: {exc}")
+            return {"topic_direction": "life", "search_query": "", "reason": f"llm error: {exc}"}
+        try:
+            if hasattr(self, "_parse_llm_json"):
+                parsed = self._parse_llm_json(raw)
+            else:
+                parsed = json.loads(raw)
+            if not isinstance(parsed, dict):
+                parsed = {}
+        except Exception:
+            # 宽松提取
+            text = str(raw or "").strip()
+            start = text.find("{")
+            end = text.rfind("}")
+            if 0 <= start < end:
+                try:
+                    parsed = json.loads(text[start:end + 1])
+                except Exception:
+                    parsed = {}
+            else:
+                parsed = {}
+        direction = str(parsed.get("topic_direction") or "").strip().lower()
+        if direction not in self._PUSH_TOPIC_DIRECTIONS:
+            direction = "life"
+        search_query = str(parsed.get("search_query") or "").strip()
+        # 配额已满或 search_query 为空时，external_topic 降级为 life
+        if direction == "external_topic" and (not quota_ok or not search_query):
+            direction = "life"
+            search_query = ""
+        reason = str(parsed.get("reason") or "").strip()[:200]
+        self._ulog(session_id, "PUSH", f"话题方向={direction} query=\"{search_query[:60]}\" reason={reason}")
+        return {"topic_direction": direction, "search_query": search_query, "reason": reason}
+
+    async def _fetch_push_topic_seed(self, session_id: str, state: dict[str, Any], query: str, now: datetime) -> str:
+        """按搜索关键词获取外部话题素材，扣减每日配额。失败返回空串。"""
+        from . import web_search
+        query = (query or "").strip()
+        if not query or not self._web_search_enabled():
+            return ""
+        today = now.strftime("%Y-%m-%d")
+        if not self._push_topic_search_quota_ok(state, today):
+            self._ulog(session_id, "PUSH", "外部话题搜索配额已用完")
+            return ""
+        # 复用缓存（与聊天侧共享），缓存命中不扣配额
+        cached = web_search.cache_get(query)
+        if cached is not None:
+            self._ulog(session_id, "PUSH", f"外部话题搜索命中缓存 query=\"{query[:60]}\"")
+            return web_search.format_results_for_roleplay(query, cached)
+        try:
+            results = await web_search.tavily_search(
+                str(self.config.get("tavily_api_key", "") or "").strip(),
+                query,
+                max_results=4,
+                max_response_bytes=response_limit(self.config, "search_json"),
+                max_error_bytes=response_limit(self.config, "error_text"),
+            )
+        except Exception as exc:
+            self._ulog(session_id, "PUSH", f"外部话题搜索失败: {exc}")
+            return ""
+        self._consume_push_topic_search_quota(session_id, state, today)
+        if not results:
+            self._ulog(session_id, "PUSH", "外部话题搜索无结果")
+            return ""
+        web_search.cache_put(query, results)
+        self._ulog(session_id, "PUSH", f"外部话题搜索返回 {len(results)} 条")
+        return web_search.format_results_for_roleplay(query, results)
+
+    def _append_push_topic(self, session_id: str, caption: str, scene: str, direction: str, search_query: str = "") -> None:
+        """推送成功后追加话题日志（跨 /新场景 保留）。"""
+        from .image_planning import _push_topic_signature
+        state = self._get_session_state(session_id)
+        topics = session_schema.get_recent_push_topics(state)
+        topic_sig = _push_topic_signature(caption, scene)
+        topics.append({
+            "ts": time.time(),
+            "caption": (caption or "").strip()[:200],
+            "scene": (scene or "").strip()[:160],
+            "topic": topic_sig,
+            "direction": (direction or "").strip().lower(),
+            "search_query": (search_query or "").strip()[:120],
+        })
+        # 保留最近 8 条
+        session_schema.set_recent_push_topics(state, topics[-8:])
+        self._save_session_state(session_id, state)
+
     # ---------------------------------------------------------------------
     # Weather / scheduler
     # ---------------------------------------------------------------------
@@ -1748,6 +2009,18 @@ class SchedulerRuntimeMixin:
                         )
                 except Exception:
                     logger.debug("world route log failed for scheduler push", exc_info=True)
+            # 话题方向决策（dialogue / life / external_topic），交给大模型判断，不随机。
+            # external_topic 时按需联网搜索，每天最多 1 次；搜索结果作为可选素材注入主 planner。
+            topic_decision = await self._decide_push_topic_direction(session_id, mode, state, local_dt)
+            topic_direction = str(topic_decision.get("topic_direction") or "life").strip().lower()
+            push_topic_seed = ""
+            if topic_direction == "external_topic" and topic_decision.get("search_query"):
+                push_topic_seed = await self._fetch_push_topic_seed(
+                    session_id, state, topic_decision.get("search_query") or "", local_dt,
+                )
+                if not push_topic_seed:
+                    # 搜索失败或无结果，降级为 life 方向，主 planner 不再带外部素材。
+                    topic_direction = "life"
             plan = await self._llm_write_scene(
                 mode,
                 weather,
@@ -1757,6 +2030,8 @@ class SchedulerRuntimeMixin:
                 session_id,
                 now=local_dt,
                 weather_data=w,
+                push_topic_seed=push_topic_seed,
+                push_topic_direction=topic_direction,
             )
             if not plan or not plan.get("scene"):
                 self._ulog(session_id, "PUSH", f"推送规划为空 mode={mode}")
@@ -1809,6 +2084,10 @@ class SchedulerRuntimeMixin:
                     source_kind=source_kind,
                 )
                 self._commit_image_state_mutation(session_id, state_mutation)
+                # 记录推送话题日志（用于话题级避重与方向间隔统计；跨 /新场景 保留）。
+                # external_topic 时一并记录搜索关键词，供后续不重复参考。
+                used_query = topic_decision.get("search_query") or "" if topic_direction == "external_topic" else ""
+                self._append_push_topic(session_id, caption or "", scene, topic_direction, used_query)
                 if mode == "morning":
                     # 早安图保留了隔夜的衣服状态（刚睡醒的样子）；发出后进入新的一天，
                     # 下一次推送/图片要恢复穿好衣服，清掉临时裸体与半脱状态。

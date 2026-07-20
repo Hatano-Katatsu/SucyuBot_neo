@@ -59,6 +59,7 @@ CONFIG_GROUPS: dict[str, list[str]] = {
     ],
     "search": [
         "tavily_api_key", "web_search_enabled", "web_search_daily_limit",
+        "push_topic_search_daily_limit",
     ],
 }
 
