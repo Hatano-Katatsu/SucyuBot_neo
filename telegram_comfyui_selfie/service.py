@@ -388,7 +388,7 @@ class TelegramComfyUIService(
         if now.weekday() >= 5:
             effective -= 1
             context = (context + "；周末放松模式") if context else "周末放松模式"
-        effective = max(0, min(10, effective))
+        effective = max(1, min(10, effective))
         tag = "nsfw" if effective <= 2 else "safe" if effective >= 8 else None
         return {"level": effective, "tag": tag, "context": context}
 
