@@ -837,6 +837,154 @@ class AppStateStore:
             conn.execute("DELETE FROM session_state WHERE session_id = ?", (session_id,))
             conn.commit()
 
+    def delete_character_bundle(
+        self,
+        session_id: str,
+        character_key: str,
+        next_state: dict[str, Any],
+    ) -> dict[str, int]:
+        """在单事务中删除角色全部持久域，并切换到调用方准备好的会话状态。"""
+        key = str(character_key or "")
+        now = _now()
+        deleted: dict[str, int] = {}
+        with closing(self._connect()) as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                cursor = conn.execute(
+                    "DELETE FROM memories WHERE session_id = ? AND character = ?",
+                    (session_id, key),
+                )
+                deleted["memories"] = int(cursor.rowcount or 0)
+                for table in (
+                    "chat_messages",
+                    "checkpoints",
+                    "diaries",
+                    "life_plans",
+                    "context_meta",
+                ):
+                    cursor = conn.execute(
+                        f"DELETE FROM {table} WHERE session_id = ? AND character_key = ?",
+                        (session_id, key),
+                    )
+                    deleted[table] = int(cursor.rowcount or 0)
+                conn.execute(
+                    """
+                    INSERT INTO session_state(session_id, data, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        data = excluded.data,
+                        updated_at = excluded.updated_at
+                    """,
+                    (session_id, _json_dumps(next_state), now),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return deleted
+
+    def delete_session_bundle(
+        self,
+        session_id: str,
+        *,
+        purge_identity: bool = False,
+    ) -> dict[str, int]:
+        """在单事务中级联删除会话；默认保留用户凭据和模型配置。"""
+        user_id = self.user_id_from_session(session_id)
+        deleted: dict[str, int] = {}
+        with closing(self._connect()) as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                for table in (
+                    "memories",
+                    "chat_messages",
+                    "checkpoints",
+                    "diaries",
+                    "life_plans",
+                    "context_meta",
+                    "llm_usage",
+                    "session_state",
+                ):
+                    cursor = conn.execute(
+                        f"DELETE FROM {table} WHERE session_id = ?",
+                        (session_id,),
+                    )
+                    deleted[table] = int(cursor.rowcount or 0)
+                cursor = conn.execute(
+                    "DELETE FROM telegram_update_inbox WHERE chat_key IN (?, ?)",
+                    (user_id, session_id),
+                )
+                deleted["telegram_update_inbox"] = int(cursor.rowcount or 0)
+                if purge_identity:
+                    for table in (
+                        "web_credentials",
+                        "model_profiles",
+                        "user_model_settings",
+                    ):
+                        cursor = conn.execute(
+                            f"DELETE FROM {table} WHERE user_id = ?",
+                            (user_id,),
+                        )
+                        deleted[table] = int(cursor.rowcount or 0)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return deleted
+
+    def import_legacy_state_bundle(
+        self,
+        sessions: dict[str, Any],
+        catalogs: dict[str, Any],
+        *,
+        marker_key: str,
+    ) -> None:
+        """一次事务导入旧 state.json，并持久化只执行一次的迁移标记。"""
+        now = _now()
+        with closing(self._connect()) as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                for session_id, state in sessions.items():
+                    if not isinstance(state, dict):
+                        continue
+                    conn.execute(
+                        """
+                        INSERT INTO session_state(session_id, data, updated_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(session_id) DO UPDATE SET
+                            data = excluded.data,
+                            updated_at = excluded.updated_at
+                        """,
+                        (str(session_id), _json_dumps(state), now),
+                    )
+                for catalog_key, catalog in catalogs.items():
+                    if not isinstance(catalog, dict):
+                        continue
+                    conn.execute(
+                        """
+                        INSERT INTO city_catalogs(catalog_key, data, updated_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(catalog_key) DO UPDATE SET
+                            data = excluded.data,
+                            updated_at = excluded.updated_at
+                        """,
+                        (str(catalog_key), _json_dumps(catalog), now),
+                    )
+                conn.execute(
+                    """
+                    INSERT INTO app_metadata(key, value, updated_at)
+                    VALUES (?, '1', ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (str(marker_key), now),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
     def delete_character_runtime_data(self, session_id: str, character_key: str) -> int:
         """删除角色关联的聊天、检查点、日记、生活线与上下文元数据。"""
         deleted = 0

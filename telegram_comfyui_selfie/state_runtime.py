@@ -21,6 +21,8 @@ from .defaults import DEFAULT_CONFIG
 
 
 logger = logging.getLogger(__name__)
+
+LEGACY_STATE_IMPORT_MARKER = "legacy_state_json_import_completed"
 _CONFIG_LOCK_INIT_GUARD = threading.Lock()
 
 
@@ -163,11 +165,21 @@ class ServiceStateMixin:
         self.sessions = {}
         self.city_place_catalogs = {}
         try:
+            legacy_import_done = self.app_store.get_metadata(
+                LEGACY_STATE_IMPORT_MARKER,
+                "",
+            ) == "1"
             if self.app_store.has_session_states():
                 self.sessions = self.app_store.load_all_session_states()
                 logger.info("Loaded %d sessions from SQLite", len(self.sessions))
-            elif self.state_path.exists():
-                self._migrate_from_state_json()
+                if not legacy_import_done:
+                    self.app_store.set_metadata(LEGACY_STATE_IMPORT_MARKER, "1")
+            elif not legacy_import_done:
+                if self.state_path.exists():
+                    self._migrate_from_state_json()
+                else:
+                    # 首次启动时没有旧文件；之后即使生成同名文件也不能被当作待迁移源复活。
+                    self.app_store.set_metadata(LEGACY_STATE_IMPORT_MARKER, "1")
             # 城市目录独立加载（可能先于会话写入）
             self.city_place_catalogs = self.app_store.load_all_city_catalogs()
             self._migrate_session_boxes_on_startup()
@@ -192,30 +204,40 @@ class ServiceStateMixin:
         logger.info("已备份旧状态文件: %s -> %s", source, backup)
         return path
 
-    def _migrate_from_state_json(self):
+    def _migrate_from_state_json(self) -> bool:
         """从旧版 state.json 迁移数据到 SQLite。"""
         try:
             raw = self.state_path.read_text(encoding="utf-8")
             if not raw.strip():
-                return
+                self.app_store.set_metadata(LEGACY_STATE_IMPORT_MARKER, "1")
+                return True
             data = json.loads(raw)
             sessions = data.get("sessions", {})
             catalogs = data.get("city_place_catalogs", {})
+            sessions = sessions if isinstance(sessions, dict) else {}
+            catalogs = catalogs if isinstance(catalogs, dict) else {}
             if (isinstance(sessions, dict) and sessions) or (isinstance(catalogs, dict) and catalogs):
                 self._backup_file(self.state_path, "state-json-migration")
-            if isinstance(sessions, dict):
-                self.sessions = sessions
-                for sid, state in sessions.items():
-                    if isinstance(state, dict):
-                        self.app_store.save_session_state(sid, state)
-                logger.info("Migrated %d sessions from %s to SQLite", len(sessions), self.state_path)
-            if isinstance(catalogs, dict):
-                self.city_place_catalogs = catalogs
-                for key, catalog in catalogs.items():
-                    if isinstance(catalog, dict):
-                        self.app_store.save_city_catalog(key, catalog)
+            self.app_store.import_legacy_state_bundle(
+                sessions,
+                catalogs,
+                marker_key=LEGACY_STATE_IMPORT_MARKER,
+            )
+            self.sessions = {
+                str(sid): state
+                for sid, state in sessions.items()
+                if isinstance(state, dict)
+            }
+            self.city_place_catalogs = {
+                str(key): catalog
+                for key, catalog in catalogs.items()
+                if isinstance(catalog, dict)
+            }
+            logger.info("Migrated %d sessions from %s to SQLite", len(self.sessions), self.state_path)
+            return True
         except Exception as exc:
             logger.warning("state.json 迁移失败: %s", exc)
+            return False
 
     def _ensure_session_boxes(self, state: dict[str, Any]) -> None:
         """补齐所有 state 分盒；老扁平数据在各 ensure_* 内幂等迁移。"""
