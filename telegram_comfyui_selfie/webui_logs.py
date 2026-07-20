@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -17,6 +18,70 @@ from .webui_common import (
     service_from,
     session_allowed,
 )
+
+
+LOG_TAIL_CHUNK_BYTES = 64 * 1024
+
+
+def tail_text_file(path: Path, limit: int, *, chunk_size: int = LOG_TAIL_CHUNK_BYTES) -> dict[str, Any]:
+    """从文件尾部反向分块读取完整行，避免 tail 接口把整个日志载入内存。"""
+    safe_limit = max(1, int(limit or 1))
+    safe_chunk_size = max(1024, int(chunk_size or LOG_TAIL_CHUNK_BYTES))
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        position = size
+        chunks: list[bytes] = []
+        newline_count = 0
+        while position > 0 and newline_count <= safe_limit:
+            take = min(safe_chunk_size, position)
+            position -= take
+            handle.seek(position)
+            chunk = handle.read(take)
+            chunks.append(chunk)
+            newline_count += chunk.count(b"\n")
+
+        starts_on_boundary = position == 0
+        if position > 0:
+            handle.seek(position - 1)
+            starts_on_boundary = handle.read(1) == b"\n"
+
+    raw = b"".join(reversed(chunks))
+    truncated = position > 0
+    if truncated and not starts_on_boundary:
+        boundary = raw.find(b"\n")
+        raw = raw[boundary + 1:] if boundary >= 0 else b""
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    shown = lines[-safe_limit:]
+    return {
+        "lines": shown,
+        "size": size,
+        "truncated": truncated or len(lines) > len(shown),
+        "total_lines": len(lines) if position == 0 else None,
+    }
+
+
+def read_error_log_tail(paths: list[Path], limit: int) -> dict[str, Any]:
+    """按新到旧读取错误日志分块；只保留响应所需的最后若干条。"""
+    entries: list[dict[str, Any]] = []
+    truncated = False
+    for path in paths:
+        try:
+            stat = path.stat()
+            tail = tail_text_file(path, limit)
+        except OSError:
+            continue
+        lines = tail["lines"]
+        for index, line in enumerate(lines, start=1):
+            item = parse_error_log_line(path, line, index, stat.st_mtime)
+            if item:
+                entries.append(item)
+        truncated = truncated or bool(tail["truncated"])
+        if len(entries) >= limit:
+            truncated = truncated or len(entries) > limit or path != paths[-1]
+            break
+    entries.sort(key=lambda item: (item.get("time") or "", item.get("mtime") or 0, item.get("line_no") or 0), reverse=True)
+    return {"errors": entries[:limit], "truncated": truncated or len(entries) > limit}
 
 
 def log_chunk_items(service, base_path: Path, active_path: Path | None = None) -> list[dict[str, Any]]:
@@ -144,15 +209,17 @@ async def api_log_detail(request: web.Request):
         tail = max(1, min(5000, int(request.query.get("tail", "500"))))
     except ValueError:
         tail = 500
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    tail_result = await asyncio.to_thread(tail_text_file, path, tail)
+    lines = tail_result["lines"]
     return json_ok({
         "chat_id": chat_id,
         "chunk": path.name,
-        "chunk_size": path.stat().st_size,
+        "chunk_size": tail_result["size"],
         "chunks": log_chunk_items(service, base_path, path),
-        "total_lines": len(lines),
-        "shown_lines": min(tail, len(lines)),
-        "content": "\n".join(lines[-tail:]),
+        "total_lines": tail_result["total_lines"],
+        "shown_lines": len(lines),
+        "truncated": tail_result["truncated"],
+        "content": "\n".join(lines),
     })
 
 
@@ -198,16 +265,9 @@ async def api_system_error_log(request: web.Request):
         limit = max(1, min(1000, int(request.query.get("limit", "300"))))
     except ValueError:
         limit = 300
-    error_lines: list[dict[str, Any]] = []
-    for path in error_log_paths(service):
-        try:
-            stat = path.stat()
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-            for index, line in enumerate(lines, start=1):
-                item = parse_error_log_line(path, line, index, stat.st_mtime)
-                if item:
-                    error_lines.append(item)
-        except Exception:
-            continue
-    error_lines.sort(key=lambda x: (x.get("time") or "", x.get("mtime") or 0, x.get("line_no") or 0), reverse=True)
-    return json_ok({"errors": error_lines[:limit], "total": len(error_lines)})
+    result = await asyncio.to_thread(read_error_log_tail, error_log_paths(service), limit)
+    return json_ok({
+        "errors": result["errors"],
+        "total": len(result["errors"]),
+        "truncated": result["truncated"],
+    })
