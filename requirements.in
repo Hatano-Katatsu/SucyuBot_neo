@@ -1,0 +1,5 @@
+# 运行时直接依赖。更新后执行：
+# 用最低支持版本解析，确保锁文件包含 Python 3.11 的条件依赖：
+# uvx --python 3.11 --from pip-tools==7.5.3 pip-compile --upgrade --generate-hashes --strip-extras --no-emit-index-url requirements.in
+aiohttp>=3.9,<4
+aiohttp-socks>=0.10,<1
