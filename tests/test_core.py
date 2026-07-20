@@ -61,6 +61,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(svc.parse_command("配图 车窗外远景"), ("配图", "车窗外远景"))
         self.assertEqual(svc.parse_command("推送测试 normal"), ("测试推送", "normal"))
         self.assertEqual(svc.parse_command("手动推送 normal"), ("测试推送", "normal"))
+        self.assertEqual(svc.parse_command("/ntr 她在酒吧"), ("NTR", "她在酒吧"))
+        self.assertEqual(svc.parse_command("/NTR 她在酒吧"), ("NTR", "她在酒吧"))
         self.assertEqual(svc.parse_command("我想看自拍"), (None, "我想看自拍"))
 
     def test_command_aliases_are_grouped_lists_and_cover_reversed_forms(self):
@@ -128,18 +130,21 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc.cmd_selfie = AsyncMock()
             svc.cmd_scene_image = AsyncMock()
             svc.cmd_test_push = AsyncMock()
+            svc.cmd_ntr = AsyncMock()
 
             await svc.dispatch_command(1, "telegram:1", "创建角色", "")
             await svc.dispatch_command(1, "telegram:1", "menu", "动线")
             await svc.dispatch_command(1, "telegram:1", "拍照", "窗边")
             await svc.dispatch_command(1, "telegram:1", "画图", "远景")
             await svc.dispatch_command(1, "telegram:1", "推送测试", "normal")
+            await svc.dispatch_command(1, "telegram:1", "ntr", "她在酒吧")
 
             svc.cmd_init_guide.assert_awaited_once_with(1, "telegram:1", "")
             svc.cmd_menu.assert_awaited_once_with(1, "telegram:1", "动线")
             svc.cmd_selfie.assert_awaited_once_with(1, "telegram:1", "窗边")
             svc.cmd_scene_image.assert_awaited_once_with(1, "telegram:1", "远景")
             svc.cmd_test_push.assert_awaited_once_with(1, "telegram:1", "normal")
+            svc.cmd_ntr.assert_awaited_once_with(1, "telegram:1", "她在酒吧")
 
         asyncio.run(run())
 
@@ -4229,6 +4234,43 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(kwargs["planning_mode"], "illustration")
             self.assertIn("低机位", kwargs["prompt"])
             self.assertIn("手部特写", kwargs["must_include"])
+            svc.send_message.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_cmd_ntr_uses_tool_generate_image_with_ntr_mode(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.tool_generate_image = AsyncMock(return_value="图片已生成并发送。画面: x")
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_ntr(123, sid, "她在酒吧和新认识的男人调情")
+
+            svc.tool_generate_image.assert_awaited_once()
+            kwargs = svc.tool_generate_image.await_args.kwargs
+            self.assertEqual(kwargs["planning_mode"], "ntr")
+            self.assertEqual(kwargs["prompt"], "她在酒吧和新认识的男人调情")
+            self.assertEqual(kwargs["intent"], "她在酒吧和新认识的男人调情")
+            self.assertEqual(kwargs["must_include"], "她在酒吧和新认识的男人调情")
+            svc.send_message.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_cmd_ntr_without_arg_uses_default_intent(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.tool_generate_image = AsyncMock(return_value="图片已生成并发送。画面: x")
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_ntr(123, sid, "")
+
+            svc.tool_generate_image.assert_awaited_once()
+            kwargs = svc.tool_generate_image.await_args.kwargs
+            self.assertEqual(kwargs["planning_mode"], "ntr")
+            self.assertEqual(kwargs["intent"], "NTR 场景画面")
+            self.assertEqual(kwargs["must_include"], "")
             svc.send_message.assert_not_awaited()
 
         asyncio.run(run())

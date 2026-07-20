@@ -249,6 +249,7 @@ class CommandHandlersMixin:
             "创建OC": self.cmd_create_oc,
             "自拍": self.cmd_selfie,
             "配图": self.cmd_scene_image,
+            "NTR": self.cmd_ntr,
             "天气": self.cmd_weather,
             "天气设置": self.cmd_set_location,
             "测试推送": self.cmd_test_push,
@@ -1499,6 +1500,30 @@ class CommandHandlersMixin:
             label="自拍生图任务",
             on_outer_cancel=lambda: cancelled.__setitem__("value", True),
         )
+
+    async def cmd_ntr(self, chat_id, session_id, arg):
+        if self._gen_lock.locked():
+            await self.send_message(chat_id, "正在生图中，请稍后再试。")
+            return
+        text = (arg or "").strip()
+        if text:
+            intent = text
+        else:
+            intent = "NTR 场景画面"
+        result = await self._await_protected_image_task(
+            session_id,
+            self.tool_generate_image(
+                chat_id,
+                session_id,
+                prompt=text,
+                intent=intent,
+                must_include=text,
+                planning_mode="ntr",
+            ),
+            label="NTR 生图任务",
+        )
+        if result.startswith("生图失败") or result == "缺少图片意图":
+            await self.send_message(chat_id, result)
 
     async def cmd_scene_image(self, chat_id, session_id, arg):
         if self._gen_lock.locked():

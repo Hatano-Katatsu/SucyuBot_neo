@@ -21,6 +21,9 @@ COMMAND_ALIAS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "selfie", "photo", "pic", "picture", "image",
         "拍照", "照片", "发图", "生成照片", "照片生成", "生成图片", "图片生成",
     )),
+    ("NTR", (
+        "ntr", "NTR",
+    )),
     ("配图", (
         "illustration", "illustrate", "scene-image", "sceneimage",
         "画图", "绘图", "生图", "出图", "生成图",

@@ -1228,6 +1228,8 @@ async def plan_roleplay_image(
             "若 is_intimate=true，伴侣（第三人）可以完整入画（partner_in_frame=true），"
             "画面焦点仍应是角色，但允许第三人全身、面部和姿态描述。"
             "sex 场景允许 portrait（第三人拍摄角色）、selfie、第三人视角或角色第一人称视角。"
+            "判定 is_intimate=true 时，scene 必须如实写出可见性行为、性器或性征的明确英文词（penis/pussy/nipples/cum/sex 等），"
+            "禁止委婉化为 embrace/intimacy/body；下游 tag 检测依赖这些词。"
             "new_appearance_tags 仍只填临时外观变化。"
         )
     elif free_composition:
@@ -1236,12 +1238,14 @@ async def plan_roleplay_image(
             f"只有用户要求或场景硬约束明确需要用户身体可见时，才把用户写成{user_g_zh}局部、手臂、胸腹、背或腿入画；"
             "没有可见身体线索时，保持角色单人画面，用户只作为画外视角或互动对象。"
             "但用户本次明确指定的视角、机位、远近、局部特写、手机/相机/镜子入画优先，不要硬改成 POV。"
+            "判定 is_intimate=true 时，scene 必须如实写出可见性行为、性器或性征的明确英文词（penis/pussy/nipples/cum/sex 等），"
+            "禁止委婉化为 embrace/intimacy/body；下游 tag 检测依赖这些词。"
             "new_appearance_tags 仍只填临时外观变化，不要把情绪或动作写进去。"
         )
     else:
         interaction_rules = (
             "\n【以下亲密交互规则仅当你判定 is_intimate=true 时适用；若判定为日常/非性场景，请完全忽略本段，按通用规则写】:\n"
-            "- 判定 is_intimate=true 时，scene 必须如实写出可见性行为、性器或体液的明确英文词（penis/pussy/cum/sex 等），禁止委婉化为 embrace/intimacy；下游 tag 检测依赖这些词。\n"
+            "- 判定 is_intimate=true 时，scene 必须如实写出可见性行为、性器或性征的明确英文词（penis/pussy/nipples/cum/sex 等），禁止委婉化为 embrace/intimacy/body；下游 tag 检测依赖这些词。\n"
             "- 视角固定为 pov（用户第一人称视角），严禁 selfie 或 mirror，不需要第三人称全景。\n"
             "- 用户身体入画闸门: is_intimate 不等于 partner_in_frame。没有明确可见的用户身体部位时，scene 可以只写 POV 看向角色，用户在画外；"
             "只有原文、短期连续性或空间硬约束明确出现用户的手/手臂/胸腹/背/腿/脚/怀里/腿上/躺在身边/骑乘/搂抱等可见身体线索时，才写用户局部并把 partner_in_frame 置 true。\n"
@@ -1310,6 +1314,14 @@ async def plan_roleplay_image(
             "selfie/portrait/pov 的 scene 不要写手机屏幕、消息界面、聊天窗口、倒计时界面；如需表达等回复，只写表情、姿态和氛围。"
             "手部规则: 避免复杂手势，除非对镜自拍需要一只手拿手机，否则尽量让手自然或在画面外，严禁三只手/多余手臂。"
         )
+    stable_sex_tag_rules = (
+        "\n【性爱场景专用 tag 规则】当 is_intimate=true 时，scene 必须写入画面中实际可见的性器/性征/体液的英文关键词：\n"
+        "- 女性性器可见时必加：pussy, nipples\n"
+        "- 男性性器可见时必加：penis\n"
+        "- 精液/体液可见时必加：cum\n"
+        "- 性器接触/交合时必加：sex\n"
+        "- 禁止用 embrace、intimacy、body、union 等委婉词替代——这些词无法被下游 tag 检测识别，会导致对应部位画不出来。\n"
+    )
     json_contract_rules = (
         "必须输出严格 JSON: {\"scene\":\"...\",\"view\":\"selfie|mirror|pov|third|portrait\",\"aspect_ratio\":\"2:3|3:2\",\"caption\":\"...\",\"new_appearance_tags\":\"...\",\"clothing_off\":\"...\",\"character_location\":\"...\",\"user_location\":\"...\",\"is_intimate\":false,\"partner_in_frame\":false,\"device_in_frame\":false}。"
         "aspect_ratio 选画幅（重要）：只允许 2:3（竖版，832x1216）或 3:2（横版，1216x832）。"
@@ -1368,6 +1380,7 @@ async def plan_roleplay_image(
         + field_rules
         + single_frame_rules
         + view_rules
+        + stable_sex_tag_rules
         + json_contract_rules
     )
     if needs_caption:
