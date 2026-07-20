@@ -146,7 +146,7 @@ class LongTermMemoryStore:
         tags: Any = None,
         source: str = "",
     ) -> int | None:
-        summary = (summary or "").strip()
+        summary = (summary or "").strip()[:600]
         if not session_id or not summary:
             return None
         character = (character or "").strip()
@@ -155,14 +155,18 @@ class LongTermMemoryStore:
         tag_list = normalize_tags(tags)
         now = time.time()
         with closing(self._connect()) as conn:
-            existing = conn.execute(
+            candidates = conn.execute(
                 """
-                SELECT id, tags, importance FROM memories
-                WHERE session_id = ? AND character = ? AND kind = ? AND status = 'active' AND lower(summary) = lower(?)
-                LIMIT 1
+                SELECT id, summary, tags, importance FROM memories
+                WHERE session_id = ? AND character = ? AND kind = ? AND status = 'active'
                 """,
-                (session_id, character, kind, summary),
-            ).fetchone()
+                (session_id, character, kind),
+            ).fetchall()
+            normalized_key = re.sub(r"\s+", "", summary).lower()
+            existing = next(
+                (row for row in candidates if re.sub(r"\s+", "", str(row["summary"] or "")).lower() == normalized_key),
+                None,
+            )
             if existing:
                 merged_tags = normalize_tags(json.loads(existing["tags"] or "[]") + tag_list)
                 conn.execute(
@@ -190,7 +194,7 @@ class LongTermMemoryStore:
                     session_id,
                     character,
                     kind,
-                    summary[:600],
+                    summary,
                     json.dumps(tag_list, ensure_ascii=False),
                     importance,
                     (source or "")[:800],
@@ -323,9 +327,15 @@ class LongTermMemoryStore:
     def context_memories(self, session_id: str, query: str, *, character: str | None = None, limit: int = 8, stable_limit: int = 4) -> list[dict[str, Any]]:
         return self.list_memories(session_id, character=character, limit=limit)
 
-    def mark_used(self, ids: list[int]):
-        return
-
+    def delete_character_memories(self, session_id: str, character: str) -> int:
+        """硬删除指定角色的全部长期记忆，用于删除角色时避免孤儿数据复活。"""
+        with closing(self._connect()) as conn:
+            cur = conn.execute(
+                "DELETE FROM memories WHERE session_id = ? AND character = ?",
+                (session_id, (character or "").strip()),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
 
     def update_memory(self, session_id: str, memory_id: int, *, character: str | None = None, summary: str | None = None, kind: str | None = None, importance: Any = None, tags: Any = None, source: str | None = None) -> bool:
         scope, params = self._scope_clause(session_id, character)

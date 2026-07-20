@@ -14,6 +14,8 @@ const state = {
   selectedLog: null,
   selectedLogType: null,
   selectedLogChunk: "",
+  logRawContent: "",
+  logTail: 1000,
   profiles: {},
 };
 
@@ -147,7 +149,7 @@ const characterFieldSections = [
   ]],
 ];
 
-const commands = ["创建角色", "初始化", "菜单", "帮助", "创建OC", "新建角色", "自拍", "拍照", "天气", "天气设置", "画风", "角色", "外型", "人格", "纯良度", "新场景", "记忆", "记住", "忘记", "推送频率", "调度", "手动推送", "测试生图", "提示词", "生图状态", "管理", "turbo"];
+let commands = ["创建角色", "菜单", "自拍", "天气", "角色", "新场景", "记忆", "手动推送"];
 
 const memoryKindMap = {
   manual: "手动",
@@ -220,14 +222,24 @@ async function api(path, options = {}) {
     init.body = JSON.stringify(init.body);
   }
   const res = await fetch(path, init);
-  const data = await res.json();
-  if (!res.ok || data.ok === false) throw new Error(data.error || res.statusText);
+  const raw = await res.text();
+  let data = {};
+  try { data = raw ? JSON.parse(raw) : {}; } catch (_err) { data = {}; }
+  if (res.status === 401) {
+    window.location.href = "/";
+    throw new Error("登录已过期，请重新登录");
+  }
+  if (!res.ok || data.ok === false) {
+    throw new Error(data.error || raw.slice(0, 200) || (res.status + " " + res.statusText));
+  }
   return data;
 }
 
 function toast(message, kind = "info") {
   const el = $("#toast");
   el.hidden = false;
+  el.dataset.kind = kind;
+  el.setAttribute("role", kind === "error" ? "alert" : "status");
   el.textContent = message;
   el.style.borderColor = kind === "error" ? "#d9a197" : "#d9e0dc";
   window.clearTimeout(toast._timer);
@@ -237,6 +249,19 @@ function toast(message, kind = "info") {
 function setBusy(button, busy) {
   if (!button) return;
   button.disabled = busy;
+  if (busy) {
+    if (!button.dataset.busyLabel) button.dataset.busyLabel = button.textContent.trim();
+    if (!button.querySelector(".spinner")) {
+      const spinner = document.createElement("span");
+      spinner.className = "spinner";
+      spinner.setAttribute("aria-hidden", "true");
+      button.prepend(spinner);
+    }
+    button.setAttribute("aria-busy", "true");
+  } else {
+    button.querySelector(".spinner")?.remove();
+    button.removeAttribute("aria-busy");
+  }
 }
 
 function escapeHtml(value) {
@@ -545,11 +570,14 @@ function renderRuntimeClothingPanel(char, isActive) {
   const clothing = state.characterData?.current_clothing || {};
   const current = clothing.dynamic_appearance || char.outfit || "";
   const currentSummary = wardrobeSummaryText(clothing.wardrobe || {}, clothing.wardrobe_display || {}, current);
+  const nudityBadge = clothing.nudity
+    ? `<span class="badge danger" title="持久裸体状态会影响后续生图">裸体状态：${escapeHtml(clothing.nudity)}</span>`
+    : "";
   return `
     <section class="form-section character-section runtime-clothing-section">
       <div class="runtime-clothing-head">
         <div>
-          <h3>当前衣柜</h3>
+          <h3>当前衣柜 ${nudityBadge}</h3>
           <p>这里改的是当前角色现在穿在身上的衣服；会直接影响聊天后的生图。</p>
         </div>
         <div class="runtime-clothing-head-actions">
@@ -829,6 +857,7 @@ async function loadAll() {
       state.sessions.unshift({ session_id: fixedSid, chat_id: userId, character: "", last_interaction: 0, last_interaction_ago: "无记录" });
     }
   }
+  renderChatIdOptions();
   renderSessionSelector();
   loadFeedbackBoard();
   // 获取模型 profile 列表供配置页下拉框使用
@@ -1019,6 +1048,7 @@ function inputFor([key, label, type, layout], values) {
   } else {
     input = document.createElement("input");
     input.type = type === "secret" ? "password" : type;
+    if (type === "number") input.inputMode = "decimal";
     input.value = type === "secret" ? "" : (value ?? "");
     if (type === "secret" && state.secretPresent[key]) input.placeholder = "已保存；留空不修改";
   }
@@ -1053,6 +1083,15 @@ function formValues(form) {
   const values = {};
   new FormData(form).forEach((value, key) => { values[key] = value; });
   return values;
+}
+
+function renderChatIdOptions() {
+  const list = $("#chat-id-options");
+  if (!list) return;
+  list.innerHTML = state.sessions.map(item => {
+    const value = item.chat_id || String(item.session_id || "").replace(/^telegram:/, "");
+    return `<option value="${escapeHtml(value)}">${escapeHtml(item.character || "")}</option>`;
+  }).join("");
 }
 
 function selectedModelUserId() {
@@ -1773,6 +1812,7 @@ async function loadModels() {
       <label>最大 tokens<input name="max_tokens" type="number" min="1" step="1" placeholder="可选"></label>
       <label>超时秒数<input name="timeout" type="number" min="1" step="1" placeholder="可选"></label>
       <button type="submit">保存模型 profile</button>
+      <button id="delete-model-profile" class="danger" type="button">删除指定 profile</button>
       <p class="muted">仅填写常用模型字段；api_key 返回时会显示为 ********，保存空值或 ******** 会保留原密钥。Thinking 使用默认策略。</p>
     </form>
   `;
@@ -1803,6 +1843,18 @@ async function loadModels() {
     await loadModels();
     toast("模型 profile 已保存");
   };
+  $("#delete-model-profile").onclick = async event => {
+    const form = event.currentTarget.closest("form");
+    const profileId = (form.elements.profile_id.value || "").trim();
+    if (!profileId) return toast("请先填写要删除的 profile id", "error");
+    const scope = form.elements._scope?.value || "user";
+    if (!window.confirm(`确认删除 ${scope === "global" ? "全局" : "私有"} profile「${profileId}」？`)) return;
+    const base = modelApiUrl(`/api/models/${encodeURIComponent(profileId)}`);
+    const sep = base.includes("?") ? "&" : "?";
+    await api(`${base}${sep}scope=${encodeURIComponent(scope)}`, { method: "DELETE" });
+    await loadModels();
+    toast("模型 profile 已删除");
+  };
 }
 
 function worldSessionTitle(item) {
@@ -1822,8 +1874,19 @@ function renderWorldSessionList() {
     btn.className = "session-item" + (item.frozen ? " frozen" : "");
     btn.dataset.sid = item.session_id;
     const frozenBadge = item.frozen ? ' <span class="frozen-badge">已冻结</span>' : "";
-    btn.innerHTML = `<div class="session-title">${escapeHtml(item.character || item.chat_id)}${frozenBadge}</div><div class="session-meta">${escapeHtml(item.location || "未设置城市")} · UTC${escapeHtml(item.timezone || "-")} · 推送 ${escapeHtml(item.daily_push || "-")}</div>`;
+    btn.innerHTML = `<div class="session-title">${escapeHtml(item.character || item.chat_id)}${frozenBadge}</div><div class="session-meta">${escapeHtml(item.location || "未设置城市")} · UTC${escapeHtml(item.timezone || "-")} · 推送 ${escapeHtml(item.daily_push || "-")}</div><span class="session-freeze-toggle" role="button" tabindex="0">${item.frozen ? "解冻" : "冻结"}</span>`;
     btn.onclick = () => selectWorldSession(item.session_id);
+    const toggle = btn.querySelector(".session-freeze-toggle");
+    const changeFrozen = async event => {
+      event.stopPropagation();
+      await api(`/api/sessions/${encodeURIComponent(item.session_id)}/${item.frozen ? "unfreeze" : "freeze"}`, { method: "POST" });
+      await loadWorldSessions();
+      toast(item.frozen ? "会话已解冻" : "会话已冻结");
+    };
+    toggle.onclick = changeFrozen;
+    toggle.onkeydown = event => {
+      if (event.key === "Enter" || event.key === " ") changeFrozen(event);
+    };
     list.appendChild(btn);
   });
   if (state.selectedWorldSession) {
@@ -2366,7 +2429,7 @@ function renderLogList(meta) {
     { id: "llm-debug", name: "LLM 调试日志", desc: "查看 LLM 请求/响应详情" },
     { id: "system-errors", name: "错误日志", desc: "查看系统错误信息" },
   ];
-  systemLogs.forEach(item => {
+  (state.auth?.role === "admin" ? systemLogs : []).forEach(item => {
     const btn = document.createElement("button");
     btn.className = "session-item";
     btn.dataset.logType = item.id;
@@ -2428,6 +2491,15 @@ function hideLogChunkSelector() {
   state.selectedLogChunk = "";
 }
 
+function renderFilteredLog(content) {
+  state.logRawContent = String(content || "");
+  const needle = ($("#log-filter")?.value || "").trim().toLowerCase();
+  const shown = needle
+    ? state.logRawContent.split(/\r?\n/).filter(line => line.toLowerCase().includes(needle)).join("\n")
+    : state.logRawContent;
+  $("#log-content").textContent = shown || (needle ? "没有匹配内容" : "（空）");
+}
+
 async function selectLog(chatId, chunk = null) {
   const sameLog = state.selectedLog === chatId && !state.selectedLogType;
   state.selectedLog = chatId;
@@ -2437,11 +2509,11 @@ async function selectLog(chatId, chunk = null) {
   $all("#log-list .session-item").forEach(btn => btn.classList.toggle("active", btn.dataset.chat === chatId));
   try {
     const suffix = chosenChunk ? `&chunk=${encodeURIComponent(chosenChunk)}` : "";
-    const data = await api(`/api/logs/${encodeURIComponent(chatId)}?tail=1000${suffix}`);
+    const data = await api(`/api/logs/${encodeURIComponent(chatId)}?tail=${state.logTail}${suffix}`);
     const box = $("#log-content");
     state.selectedLogChunk = data.chunk || chosenChunk || "";
     renderLogChunkSelector(data.chunks || [], state.selectedLogChunk, nextChunk => selectLog(chatId, nextChunk));
-    box.textContent = data.content || "（空）";
+    renderFilteredLog(data.content || "");
     box.scrollTop = box.scrollHeight;
   } catch (err) {
     hideLogChunkSelector();
@@ -2492,15 +2564,15 @@ async function selectSystemLog(logType, chunk = null) {
           text += "\n";
         });
       });
-      box.textContent = text || "暂无 LLM 调试日志";
+      renderFilteredLog(text || "暂无 LLM 调试日志");
     } else if (logType === "system-errors") {
       hideLogChunkSelector();
       const data = await api("/api/logs/system-errors?limit=500");
       const errors = data.errors || [];
       if (errors.length === 0) {
-        box.textContent = "暂无错误日志";
+        renderFilteredLog("暂无错误日志");
       } else {
-        box.textContent = errors.map(formatSystemErrorEntry).join("\n\n---\n\n");
+        renderFilteredLog(errors.map(formatSystemErrorEntry).join("\n\n---\n\n"));
       }
     }
     box.scrollTop = box.scrollHeight;
@@ -2555,6 +2627,16 @@ function fillCommandSelect() {
   sel.innerHTML = commands.map(cmd => `<option value="${cmd}">/${cmd}</option>`).join("");
   sel.onchange = updateCommandHelp;
   updateCommandHelp();
+}
+
+async function loadCommandSelect() {
+  try {
+    const data = await api("/api/commands");
+    if (Array.isArray(data.commands) && data.commands.length) commands = data.commands;
+  } catch (err) {
+    console.warn("加载命令列表失败，使用内置兜底", err);
+  }
+  fillCommandSelect();
 }
 
 function updateCommandHelp() {
@@ -2662,6 +2744,11 @@ async function initEvents() {
     }
   };
   $("#reload-logs").onclick = () => loadLogs().then(() => toast("日志列表已刷新"));
+  $("#log-filter").oninput = () => renderFilteredLog(state.logRawContent);
+  $("#log-tail").onchange = event => {
+    state.logTail = Number(event.currentTarget.value) || 1000;
+    if (state.selectedLog) selectLog(state.selectedLog);
+  };
   $("#feedback-refresh").onclick = () => loadFeedbackBoard().then(() => toast("反馈已刷新"));
   $("#feedback-form").onsubmit = async (event) => {
     event.preventDefault();
@@ -2719,6 +2806,13 @@ async function initEvents() {
     const btn = event.submitter;
     setBusy(btn, true);
     try {
+      const invalid = [...event.currentTarget.querySelectorAll('input[type="number"]')].find(input => {
+        return input.value.trim() !== "" && !Number.isFinite(Number(input.value));
+      });
+      if (invalid) {
+        invalid.focus();
+        throw new Error("字段「" + (invalid.closest("label")?.textContent?.trim() || invalid.name) + "」必须是有效数字");
+      }
       await api("/api/config", { method: "POST", body: { values: formValues(event.currentTarget) } });
       await loadAll();
       toast("设置已保存");
@@ -2975,6 +3069,6 @@ async function runTest(path, body = undefined) {
   }
 }
 
-fillCommandSelect();
+loadCommandSelect();
 initEvents();
 loadAll().catch(err => toast(err.message, "error"));

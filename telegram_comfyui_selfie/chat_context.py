@@ -666,13 +666,14 @@ class ChatContextMixin:
 
         # ── 静态前缀（变化极低频：角色切换/配置变更才动）──
         # 放在 messages[0]，最大化 DeepSeek 服务端 prefix cache 命中率。
-        system_static = (
+        system_persona = (
             f"{persona}\n\n"
             f"你当前扮演的角色是「{bot_name}」（{role_name}）。除非用户明确要求换角色，否则你就是「{bot_name}」，"
             f"不要声称自己是其他角色或默认角色。对话中按角色习惯使用「{bot_self_name}」或自然第一人称作为自称，"
             "不要不自然地反复报全名。\n"
-            f"{rel_line}"
-            f"{address_line}"
+            f"{rel_line}{address_line}"
+        )
+        system_static = (
             "当用户明示或暗示想看你的样子、照片、穿着或当前场景时，应调用 generate_roleplay_image。"
             "工具调用只需要描述这张图要回应的对话意图、情绪和必要元素；"
             "若场景涉及性爱，intent 与 must_include 必须如实描述性行为，露骨度由评级系统控制，不需要你自行淡化或省略。"
@@ -757,7 +758,14 @@ class ChatContextMixin:
             stale_minutes = 30
         previous_interaction = session_schema.get_last_interaction(state)
         scene_stale = bool(stale_minutes > 0 and previous_interaction and time.time() - previous_interaction > stale_minutes * 60)
+        weather = None
+        cached_weather = getattr(self, "_weather_caches", {}).get(session_id or "__default__")
+        if isinstance(cached_weather, dict):
+            weather = cached_weather.get("data")
+        exact_temp = str((weather or {}).get("temp") or "").strip() if isinstance(weather, dict) else ""
         system_dynamic = f"当前时间: {now.strftime('%H:%M')} ({weekday}) {time_period}。\n"
+        if exact_temp:
+            system_dynamic += f"当前精确气温: {exact_temp}°C。\n"
         if image_nudge_due:
             system_dynamic += "发图提醒: 已有多轮未配图，本轮请优先调用 generate_roleplay_image。\n"
         if scene_stale:
@@ -813,7 +821,14 @@ class ChatContextMixin:
         # 拼接顺序：
         #   [静态 system] + [天级/低频稳定层] + [半稳定状态/世界模板] + [checkpoint 会话连续性] + [历史(checkpoint 锚定，含照片 system 记录)] + [动态 system] + [本轮 user]
         # 静态 + 低频稳定 + 半稳定 + checkpoint + 未折叠历史构成只追加不左移的前缀；checkpoint 落地时才整体归位。
-        messages: list[dict[str, Any]] = [{"role": "system", "content": system_static}]
+        persona_first = str(self.config.get("chat_persona_first", False)).strip().lower() in {"1", "true", "yes", "on"}
+        if persona_first:
+            messages: list[dict[str, Any]] = [{"role": "system", "content": f"{system_persona}\n\n{system_static}"}]
+        else:
+            messages = [
+                {"role": "system", "content": system_static},
+                {"role": "system", "content": system_persona},
+            ]
         durable_context = "\n\n".join(durable_parts) if durable_parts else ""
         if durable_context:
             messages.append({"role": "system", "content": durable_context})
@@ -831,7 +846,7 @@ class ChatContextMixin:
         messages.append({"role": "user", "content": user_text})
         self._log_prefix_slot_signatures(
             session_id,
-            static=system_static,
+            static=f"{system_static}\n\n{system_persona}",
             durable=durable_context,
             semistable=semistable_context,
             conditions=world_conditions_context,
@@ -1184,7 +1199,19 @@ class ChatContextMixin:
             weather = cached.get("data")
         city = self._get_session_cfg(session_id, "location", self.config.get("location", "上海"))
         day = self._day_type(now).get("label", "工作日") if hasattr(self, "_day_type") else ""
-        weather_text = self._weather_text(weather) if hasattr(self, "_weather_text") else str(weather or "未知")
+        weather_desc = str((weather or {}).get("desc") or "未知").strip() if isinstance(weather, dict) else str(weather or "未知")
+        try:
+            temp = float((weather or {}).get("temp")) if isinstance(weather, dict) else None
+        except (TypeError, ValueError):
+            temp = None
+        temp_band = (
+            "寒冷" if temp is not None and temp < 5 else
+            "凉" if temp is not None and temp < 15 else
+            "温和" if temp is not None and temp < 27 else
+            "热" if temp is not None and temp < 35 else
+            "酷热" if temp is not None else "未知"
+        )
+        weather_text = f"{weather_desc}，体感{temp_band}"
         time_ctx = self._get_time_context(session_id, now=now, weather=weather)
         light_guard = self._format_light_guard(session_id, now=now, weather=weather)
         sunrise = time_ctx.get("sunrise")
@@ -1346,7 +1373,7 @@ class ChatContextMixin:
         老实判断，而不是像主 RP 调用那样沉浸在文字里不肯配图。最小间隔做硬约束，
         “很久没配图”只做软倾向，避免固定轮次的机械感。
         """
-        if not self.has_llm_config("chat"):
+        if not self.has_llm_config("image", session_id):
             return None
         freq = self.config.get("selfie_frequency", "频繁")
         if freq == "关闭":
@@ -1374,20 +1401,19 @@ class ChatContextMixin:
             "若决定发图，intent 必须严格贴合“角色刚回复”的地点、动作、情绪和用户刚说的话；不要另起一个新场景，不要改写成角色刚才没提到的地点。\n"
             "view 字段只有在用户或角色刚刚明确提出了硬视角/拍摄方式时才填写：例如自拍、对镜、拿手机拍、帮忙拍一张照片。\n"
             "像“凑近镜头”“看向镜头”“分享一下现在的样子”这类普通画面感，不等于自拍要求；同空间陪伴、一起看东西、递咖啡、坐在沙发上说话等日常场景，view 留空交给后续规划器判断。\n"
-            f"{light_guard}\n"
-            f"发图门槛: {tendency}\n"
-            + ("已经较久没有配图了，如有合适时机可适当倾向于发。\n" if overdue else "")
-            + "只输出严格 JSON: {\"send\": true/false, \"intent\": \"这张图要回应的对话意图(中文,具体)\", "
+            "只输出严格 JSON: {\"send\": true/false, \"intent\": \"这张图要回应的对话意图(中文,具体)\", "
             "\"mood\": \"情绪或关系推进\", \"view\": \"selfie|mirror|pov|third 或留空\"}。"
             "send 为 false 时其余可留空。不要输出 JSON 以外的任何内容。"
         )
         user = (
             f"最近对话:\n{recent or '(无)'}\n\n"
             f"用户刚说: {user_text}\n"
-            f"角色刚回复: {(draft_reply or '(无文字回复)')[:500]}"
+            f"角色刚回复: {(draft_reply or '(无文字回复)')[:500]}\n\n"
+            f"自然光约束: {light_guard}\n发图门槛: {tendency}\n"
+            + ("已经较久没有配图了，如有合适时机可适当倾向于发。" if overdue else "")
         )
         try:
-            text = await self._call_llm(system, user, temp=0.2, tag="image-judge", purpose="chat", disable_thinking=True, session_id=session_id)
+            text = await self._call_llm(system, user, temp=0.2, tag="image-judge", purpose="image", disable_thinking=True, session_id=session_id)
             parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
         except Exception as exc:
             logger.warning("image moment judge failed: %s", exc)
@@ -1460,87 +1486,6 @@ class ChatContextMixin:
             logger.debug("long memory context lookup for checkpoint failed", exc_info=True)
         if memory_context:
             parts.append(f"长期记忆（稳定事实/偏好/边界/纠正，不要在 checkpoint 中复述）:\n{memory_context}")
-        return "\n\n".join(parts)
-
-    def _build_scene_system_prompt(self, session_id: str, *, weather: Any = None, mode: str = "image", now: Any = None) -> str:
-        """构建场景生成用的完整 system prompt，复用聊天侧的静态 + 稳定 + 动态上下文。
-
-        返回拼好的单个 system 字符串，供 _llm_write_scene / plan_roleplay_image 使用。
-        调用方只需追加场景特定的模式指令和 JSON 输出要求。
-        """
-        state = self._get_session_state(session_id)
-        if now is None:
-            now = self._session_now(session_id)
-        weekday = WEEKDAY_NAMES[now.weekday()]
-        time_ctx = self._get_time_context(session_id, now=now, weather=weather)
-        time_period = time_ctx.get("period") or self._get_time_period(now.hour)
-
-        # ── 静态前缀 ──（不含穿搭：见下方动态层「当前附加外貌」，避免双注入+毒化前缀缓存）
-        persona = self._get_effective_persona(session_id, include_appearance=False)
-        role_name, bot_name, bot_self_name = self._session_role_identity(session_id)
-        relationship = self._get_session_cfg(session_id, "spatial_relationship", "")
-        rel_line = f"你和用户的关系: {str(relationship).strip()}。\n" if str(relationship).strip() else ""
-        system_static = (
-            f"{persona}\n\n"
-            f"你当前扮演的角色是「{bot_name}」（{role_name}）。对话中按角色习惯使用「{bot_self_name}」或自然第一人称作为自称。\n"
-            f"{rel_line}"
-        )
-
-        # ── 天级/低频稳定上下文 + 半稳定快照 + checkpoint ──
-        durable_parts: list[str] = []
-        scene_control = self._scene_low_frequency_context(session_id)
-        if scene_control:
-            durable_parts.append(scene_control)
-        history_summary = self._character_history_summary_context(session_id)
-        if history_summary:
-            durable_parts.append(f"角色历史提要（宏观关系与剧情发展脉络）:\n{history_summary}")
-        memory_context = self._long_term_memory_context(session_id)
-        if memory_context:
-            durable_parts.append(f"长期记忆（高重要度稳定事实/偏好/边界）:\n{memory_context}")
-
-        semistable_parts: list[str] = []
-        dynamic = self._effective_dynamic_appearance(session_id)
-        if dynamic:
-            semistable_parts.append(f"当前附加外貌: {dynamic}")
-
-        checkpoint_context = self._checkpoint_context(session_id)
-        checkpoint_part = f"Checkpoint（近期已折叠对话连续性，仅承接当前/最近场景）:\n{checkpoint_context}" if checkpoint_context else ""
-
-        # ── 动态上下文 ──
-        time_light = self._format_time_context(session_id, now=now, weather=weather)
-        light_guard = self._format_light_guard(session_id, now=now, weather=weather)
-        safety = self._get_effective_safety(session_id)
-        system_dynamic = (
-            f"当前时间: {now.strftime('%H:%M')} ({weekday}) {time_period}。\n"
-            f"季节与自然光: {time_light}。\n"
-            f"{light_guard}\n"
-            f"当前场合: {time_period}, {weekday}, {safety.get('context', '')}。\n"
-        )
-
-        # 对话场景连续性（近 3h 内的对话 + 照片）
-        continuity = self._format_scene_continuity_context(state, session_id, now=now) if hasattr(self, "_format_scene_continuity_context") else ""
-
-        # 世界状态
-        world_context = ""
-        if hasattr(self, "_format_world_context"):
-            try:
-                world_context = self._format_world_context(session_id, "", weather=weather, mode=mode, now=now)
-            except Exception:
-                logger.debug("world context build failed for scene prompt", exc_info=True)
-
-        # ── 拼接 ──
-        parts = [system_static]
-        if durable_parts:
-            parts.append("\n\n".join(durable_parts))
-        if semistable_parts:
-            parts.append("\n\n".join(semistable_parts))
-        if checkpoint_part:
-            parts.append(checkpoint_part)
-        parts.append(system_dynamic)
-        if world_context:
-            parts.append(world_context)
-        if continuity:
-            parts.append(continuity)
         return "\n\n".join(parts)
 
     def _context_character_key(self, session_id: str) -> str:
@@ -1669,7 +1614,7 @@ class ChatContextMixin:
                 merged = merged[-hard:]
             until_id = int(overflow[-1]["id"])
             # Extract stable long-term memories from the overflow before committing checkpoint.
-            if extract_memory:
+            if extract_memory and self._long_memory_extract_enabled():
                 try:
                     await self._extract_long_term_memories_from_messages(session_id, overflow, source_type="checkpoint", character=character_key)
                 except Exception:
@@ -1891,9 +1836,9 @@ class ChatContextMixin:
         return "\n".join(selected)
 
     async def _extract_long_term_memories_from_messages(self, session_id: str, messages: list[dict[str, Any]], source_type: str = "checkpoint", character: str | None = None):
-        if not messages or not hasattr(self, "_extract_long_term_memories"):
+        if not messages or not hasattr(self, "_extract_long_term_memories") or not self._long_memory_extract_enabled():
             return
-        dialog = self._format_store_messages(messages, limit_chars=20000)
+        dialog = self._format_store_messages(messages, limit_chars=20000, roles={"user", "assistant"})
         await self._extract_long_term_memories(session_id, f"[{source_type}]\n{dialog}", "", character=character)
 
     async def _checkpoint_current_context_before_reset(self, session_id: str) -> int:
@@ -1919,10 +1864,11 @@ class ChatContextMixin:
             if len(merged) > hard:
                 merged = merged[-hard:]
             until_id = int(pending[-1]["id"])
-            try:
-                await self._extract_long_term_memories_from_messages(session_id, pending, source_type="checkpoint", character=key)
-            except Exception:
-                logger.warning("pre-reset checkpoint memory extraction failed", exc_info=True)
+            if self._long_memory_extract_enabled():
+                try:
+                    await self._extract_long_term_memories_from_messages(session_id, pending, source_type="checkpoint", character=key)
+                except Exception:
+                    logger.warning("pre-reset checkpoint memory extraction failed", exc_info=True)
             self.app_store.upsert_checkpoint(session_id, key, merged, until_id)
             state = self._get_session_state(session_id)
             session_schema.set_checkpoint_summary(state, merged)
@@ -1979,6 +1925,7 @@ class ChatContextMixin:
         session_schema.clear_wardrobe_observed_snapshot(state)
         self._demote_character_place(state)
         session_schema.clear_nudity(state)  # 新场景：不再续上上一幕的裸体态
+        session_schema.clear_wardrobe_item_states(state)  # 半脱/破损同样属于上一幕短期状态
 
     @staticmethod
     def _active_chat_history(state: dict[str, Any], limit: int = 16) -> list[dict[str, Any]]:

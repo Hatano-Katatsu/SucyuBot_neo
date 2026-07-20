@@ -69,6 +69,10 @@ _SIMPLE_LLM_CACHE_ANCHORS: dict[str, str] = {
         "subject ownership, action direction, camera/view constraints, visible weather/light, and safety "
         "guards. Return prompt text only, not explanations."
     ),
+    "image-judge": (
+        "Stable prefix for image-judge v1. Decide whether the current roleplay moment benefits from one image. "
+        "Return strict JSON only with send, intent, mood, and view. Do not invent a new scene."
+    ),
 }
 
 _CJK_RE = re.compile(r"[一-鿿]")
@@ -176,6 +180,7 @@ class TelegramComfyUIService(
         self._gen_lock = asyncio.Lock()
         self._generating = False
         self._active_pushes: set[str] = set()
+        self._push_locks: dict[str, asyncio.Lock] = {}
         self._dirty_sessions: set[str] = set()
         self._last_state_write = 0.0
         self._state_write_interval = 30.0
@@ -2490,8 +2495,6 @@ class TelegramComfyUIService(
                 "For default or original characters, do not turn role names into English names or visual tags; describe appearance and action instead. "
                 "Only keep a character name when it is paired with its published series. "
                 "Stable appearance is injected later; do not invent or restate stable hair, eye, body, species, clothing, or accessory traits unless the source explicitly asks for a one-shot change. "
-                f"{weather_guard}"
-                f"{light_guard}"
                 "你是专业的 Anima3 提示词工程师。把中文场景重构为英文自然语言画面描述，后接少量 danbooru 补强标签。"
                 "直接输出英文提示词，不要 JSON、不要解释，不要压缩成纯标签列表。"
                 "保留用户指定的视角、机位、远近、焦段、构图和局部特写；不要自动改写成自拍、POV 或看镜头。"
@@ -2520,8 +2523,6 @@ class TelegramComfyUIService(
                 "For default or original characters, do not turn role names into English names or visual tags; describe appearance and action instead. "
                 "Only keep a character name when it is paired with its published series. "
                 "Stable appearance is injected later; do not invent or restate stable hair, eye, body, species, clothing, or accessory traits unless the source explicitly asks for a one-shot change. "
-                f"{weather_guard}"
-                f"{light_guard}"
                 "自然语言句子尽量不要使用逗号；重点保留动作、表情、姿态、环境光线、空间关系和氛围。"
                 "避免复杂手势和多手互动；除非原文强制要求，尽量不强调手部。"
                 "输出格式: English visual sentence. key tag, key tag, key tag"
@@ -2532,8 +2533,6 @@ class TelegramComfyUIService(
                 "For default or original characters, do not turn role names into English names or visual tags; describe appearance and action instead. "
                 "Only keep a character name when it is paired with its published series. "
                 "Stable appearance is injected later; do not invent or restate stable hair, eye, body, species, clothing, or accessory traits unless the source explicitly asks for a one-shot change. "
-                f"{weather_guard}"
-                f"{light_guard}"
                 "你是专业的 Anima3 提示词工程师。Anima3 支持英文自然语言与 danbooru 标签混编。"
                 "将中文场景描述重构为一句英文自然语言画面描述，后接少量 danbooru 补强标签。"
                 "直接输出英文提示词，不要 JSON、不要解释，不要压缩成纯标签列表。"
@@ -2558,7 +2557,7 @@ class TelegramComfyUIService(
             )
         text = await self._call_llm(
             system,
-            f"请翻译: {natural}",
+            f"动态天气与自然光约束: {weather_guard} {light_guard}\n请翻译: {natural}",
             temp=float(self._get_llm_value("image", "temperature_translate", "0.3")),
             tag="translate",
             purpose="image",
@@ -2920,6 +2919,7 @@ class TelegramComfyUIService(
             session_schema.set_outfit(state, "")
             session_schema.clear_wardrobe_item_states(state)
             session_schema.clear_public_fallback_outfit(state)
+            session_schema.clear_nudity(state)
             if session_id:
                 self._ulog(session_id, "WARDROBE", f'desc="{desc[:80]}" → reset 清空全部穿搭')
             return ""
@@ -2947,6 +2947,9 @@ class TelegramComfyUIService(
             change = await self._classify_wardrobe_change(
                 desc, appearance_rules.wardrobe_summary(wardrobe), appearance_rules.closet_brief_for_llm(closet)
             )
+            # 分类期间 WebUI/另一轮可能已修改衣柜；只把本轮增量应用到最新状态，避免 await 后整体覆盖。
+            wardrobe = {} if replace else self._get_wardrobe(state)
+            closet = session_schema.get_closet(state)
             wardrobe = appearance_rules.apply_wardrobe_change(wardrobe, change)
             # 守卫：非裸体语义下 reset_all 但没穿任何新衣服，多半是分类器误判，不清空衣柜。
             if change.get("reset_all") and not any(
@@ -2962,9 +2965,29 @@ class TelegramComfyUIService(
                 tags = desc
             else:
                 tags = await self._translate_appearance_tags(desc)
+            wardrobe = {} if replace else self._get_wardrobe(state)
+            closet = session_schema.get_closet(state)
             seed = appearance_rules.seed_wardrobe_from_text(tags, self._outfit_kw, self._accessory_kw)
-            change = {slot: val for slot, val in seed.items()}
-            wardrobe = appearance_rules.apply_wardrobe_seed(wardrobe, seed)
+            remove_intent = bool(self._TAKE_OFF_RE.search(desc)) and not self._PUT_ON_RE.search(desc)
+            if remove_intent:
+                matched_slots = [
+                    slot for slot, worn in wardrobe.items()
+                    if slot in appearance_rules.WARDROBE_CLOTHING_SLOTS
+                    and any(
+                        token and token in f"{desc.lower()} {tags.lower()}"
+                        for token in re.split(r"[,\s]+", str(worn or "").lower())
+                        if len(token) >= 3
+                    )
+                ]
+                if not matched_slots and len(wardrobe) == 1:
+                    matched_slots = list(wardrobe)
+                change = {"remove": matched_slots, "states": {slot: "removed" for slot in matched_slots}}
+                wardrobe = appearance_rules.apply_wardrobe_change(wardrobe, change)
+            else:
+                change = {slot: val for slot, val in seed.items()}
+                wardrobe = appearance_rules.apply_wardrobe_seed(wardrobe, seed)
+        if replace:
+            session_schema.clear_public_fallback_outfit(state)
         # 自动收藏：仅把【本次新穿上】的服装存进衣橱（用应用后的标签，含点名复穿时解析出的标签）。
         names = change.get("names") if isinstance(change.get("names"), dict) else {}
         changed_slots = [
@@ -3019,6 +3042,9 @@ class TelegramComfyUIService(
     _PUT_ON_RE = re.compile(
         r"\b(?:换[上穿]|穿[上回]|put\s+on|wear|change\s+(?:into|to)|换上)", re.IGNORECASE
     )
+    _TAKE_OFF_RE = re.compile(
+        r"(?:脱掉|脱下|褪下|摘掉|取下|不穿|take\s+off|remove|without)", re.IGNORECASE
+    )
 
     @staticmethod
     def _coerce_wardrobe_tool_items(value: Any) -> list[dict[str, Any]]:
@@ -3046,12 +3072,14 @@ class TelegramComfyUIService(
             if slot in appearance_rules.WARDROBE_CLOTHING_SLOTS and slot in wardrobe
         }
         nudity = session_schema.get_nudity(state)
+        nudity_at = session_schema.get_nudity_at(state)
         visual_context = self._chat_visible_appearance_context(session_id)
         closet_context = self._wardrobe_closet_context(session_id)
         signature_payload = {
             "wardrobe": wardrobe,
             "item_states": states,
             "nudity": nudity,
+            "nudity_at": nudity_at,
             "visual_context": visual_context,
             "closet_context": closet_context,
         }
@@ -3064,6 +3092,7 @@ class TelegramComfyUIService(
             "item_states": states,
             "outfit": appearance_rules.render_wardrobe(wardrobe),
             "nudity": nudity,
+            "nudity_at": nudity_at,
             "state_signature": signature,
             "visual_context": visual_context,
             "closet_context": closet_context,
@@ -3166,7 +3195,7 @@ class TelegramComfyUIService(
         session_schema.prune_wardrobe_item_states(state, wardrobe)
         nudity = str(snapshot.get("nudity") or "").strip()
         if nudity:
-            session_schema.set_nudity(state, nudity, at=time.time())
+            session_schema.set_nudity(state, nudity, at=float(snapshot.get("nudity_at") or 0) or time.time())
         else:
             session_schema.clear_nudity(state)
         return True
@@ -3308,7 +3337,7 @@ class TelegramComfyUIService(
                     change["remove"].append(slot)
                 valid_count += 1
             elif action in {"set_state", "state", "restore"}:
-                if slot not in appearance_rules.WARDROBE_CLOTHING_SLOTS or slot not in wardrobe:
+                if slot not in appearance_rules.WARDROBE_CLOTHING_SLOTS:
                     continue
                 change["states"][slot] = "normal" if action == "restore" else (state_value or "normal")
                 valid_count += 1

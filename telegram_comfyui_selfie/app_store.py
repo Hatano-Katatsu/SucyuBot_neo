@@ -630,6 +630,15 @@ class AppStateStore:
             ).fetchall()
         return {row["profile_id"]: _json_loads(row["data"], {}) for row in rows}
 
+    def delete_model_profile(self, user_id: str, profile_id: str) -> bool:
+        with closing(self._connect()) as conn:
+            cur = conn.execute(
+                "DELETE FROM model_profiles WHERE user_id = ? AND profile_id = ?",
+                (str(user_id), str(profile_id)),
+            )
+            conn.commit()
+        return cur.rowcount > 0
+
     def get_user_model_settings(self, user_id: str) -> dict[str, Any]:
         with closing(self._connect()) as conn:
             row = conn.execute(
@@ -800,6 +809,19 @@ class AppStateStore:
         with closing(self._connect()) as conn:
             conn.execute("DELETE FROM session_state WHERE session_id = ?", (session_id,))
             conn.commit()
+
+    def delete_character_runtime_data(self, session_id: str, character_key: str) -> int:
+        """删除角色关联的聊天、检查点、日记、生活线与上下文元数据。"""
+        deleted = 0
+        with closing(self._connect()) as conn:
+            for table in ("chat_messages", "checkpoints", "diaries", "life_plans", "context_meta"):
+                cur = conn.execute(
+                    f"DELETE FROM {table} WHERE session_id = ? AND character_key = ?",
+                    (session_id, character_key or ""),
+                )
+                deleted += int(cur.rowcount or 0)
+            conn.commit()
+        return deleted
 
     def has_session_states(self) -> bool:
         """判断 session_state 表是否有数据（用于迁移判断）。"""

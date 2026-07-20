@@ -447,6 +447,7 @@ PUBLIC_SWIMWEAR_TERMS = ("bikini", "swimsuit", "school swimsuit")
 PUBLIC_EXPOSURE_NEGATIVE_GUARDS = (
     "lingerie", "underwear", "nightgown", "nightdress", "negligee", "sleepwear",
     "revealing clothes", "cleavage", "underboob", "sideboob", "see-through clothing",
+    "nipples", "pussy", "nude", "naked", "topless", "bottomless",
 )
 PUBLIC_SCENE_ANCHOR_RE = re.compile(
     r"\b("
@@ -510,13 +511,15 @@ def _is_public_private_outfit_tag(
     low = _tag_key(tag)
     if not low:
         return False
+    if low in {"nipples", "nipple", "pussy", "vagina", "nude", "naked", "topless", "bottomless"}:
+        return True
     if allow_swimwear and any(term in low for term in PUBLIC_SWIMWEAR_TERMS):
         return False
     if allow_sport_underwear and "sports bra" in low:
         return False
     if "bikini" in low and any(term in low for term in ("armor", "armour", "costume")):
         return False
-    if low == "bra":
+    if re.search(r"\bbra\b", low):
         return True
     if any(term in low for term in PUBLIC_PRIVATE_OUTFIT_TERMS):
         return True
@@ -842,9 +845,7 @@ def _wardrobe_state_exposure_tags(wardrobe: dict[str, Any], states: dict[str, st
         tags.append("pussy")
 
     all_removed = all(states.get(slot) == "removed" for slot in worn_slots)
-    no_upper_cover = not has_normal_cover(_WARDROBE_UPPER_COVER_SLOTS)
-    no_lower_cover = not has_normal_cover(_WARDROBE_LOWER_COVER_SLOTS)
-    if all_removed or (upper_touched and lower_touched and no_upper_cover and no_lower_cover):
+    if all_removed:
         tags.append("nude")
 
     out: list[str] = []
@@ -1618,25 +1619,39 @@ def build_prompt(
         service._effective_dynamic_appearance(session_id) if session_id else session_schema.get_outfit(state)
     )
     current_outfit_tags = _removable_appearance_tags(service, worn_src)
-    effective_appearance, one_shot_effective, neg, _public_outfit_removed = _guard_public_outfit(
-        service,
-        state,
-        session_id,
-        scene_desc,
-        effective_appearance,
-        one_shot_effective,
-        neg,
-        current_outfit_tags=current_outfit_tags,
-        is_intimate=is_sex_scene,
-        clothing_off=clothing_off,
+    public_ctx = (
+        purity > 2
+        and
+        _public_render_context(service, state, session_id, scene_desc)
+        and not _allows_public_private_outfit(scene_desc, is_intimate=is_sex_scene, clothing_off=clothing_off)
     )
+    guarded_outfit_tags = list(current_outfit_tags)
+    if public_ctx:
+        guarded_outfit_tags.extend(wardrobe_state_exposure_tags)
+    if purity > 2:
+        effective_appearance, one_shot_effective, neg, _public_outfit_removed = _guard_public_outfit(
+            service,
+            state,
+            session_id,
+            scene_desc,
+            effective_appearance,
+            one_shot_effective,
+            neg,
+            current_outfit_tags=guarded_outfit_tags,
+            is_intimate=is_sex_scene,
+            clothing_off=clothing_off,
+        )
     # 一次性脱衣/裸露：让规划器的逐图判断剥离本次着装（不落盘），覆盖陈旧持久态。
     # "当前所穿"标签取自生效的 dynamic_appearance + 本次一次性外观，按标签匹配剥离。
     worn_tags = list(current_outfit_tags)
     if one_shot_effective:
         worn_tags += _removable_appearance_tags(service, one_shot_effective)
     effective_appearance, neg = _apply_clothing_off(service, clothing_off, effective_appearance, neg, worn_tags)
-    neg = _free_wardrobe_state_exposure_negatives(neg, wardrobe_state_exposure_tags, wardrobe_state_removed_tags)
+    if public_ctx:
+        # 公开场景不能因为半脱状态放开裸体负向；被门控剥离的暴露词继续由安全护栏压制。
+        neg = _append_negatives(neg, *wardrobe_state_removed_tags, *PUBLIC_EXPOSURE_NEGATIVE_GUARDS)
+    else:
+        neg = _free_wardrobe_state_exposure_negatives(neg, wardrobe_state_exposure_tags, wardrobe_state_removed_tags)
     slots = PromptSlots(
         raw_scene=raw_scene_desc,
         scene=scene_desc,

@@ -16,6 +16,7 @@ from aiohttp import web
 from . import session_schema
 from . import appearance as appearance_rules
 from .commands import SESSION_CUSTOM_RESET_KEYS
+from .command_aliases import COMMAND_ALIAS_GROUPS
 from .world_runtime import PLACE_TYPES
 
 
@@ -185,6 +186,7 @@ def create_web_app(service) -> web.Application:
     app.router.add_get("/api/auth/me", api_auth_me)
     app.router.add_static("/static/", static_dir)
     app.router.add_get("/api/status", api_status)
+    app.router.add_get("/api/commands", api_commands)
     app.router.add_get("/api/feedback", api_feedback)
     app.router.add_post("/api/feedback", api_submit_feedback)
     app.router.add_get("/api/config", api_config)
@@ -221,6 +223,7 @@ def create_web_app(service) -> web.Application:
     app.router.add_delete("/api/sessions/{session_id:[^/]+}", api_delete_session)
     app.router.add_get("/api/models", api_model_profiles)
     app.router.add_post("/api/models/{profile_id}", api_save_model_profile)
+    app.router.add_delete("/api/models/{profile_id}", api_delete_model_profile)
     app.router.add_patch("/api/models/settings", api_update_model_settings)
     app.router.add_get("/api/prompt-slots/{session_id:.+}", api_prompt_slots)
     app.router.add_post("/api/world/{session_id:.+}/places/refresh", api_world_refresh_places)
@@ -974,13 +977,16 @@ def _wardrobe_display_names(wardrobe: dict[str, Any], closet: dict[str, Any]) ->
 
 def serialize_current_clothing(service, state: dict[str, Any]) -> dict[str, Any]:
     wardrobe = service._get_wardrobe(state)
-    session_schema.prune_wardrobe_item_states(state, wardrobe)
+    item_states = {
+        slot: value for slot, value in session_schema.get_wardrobe_item_states(state).items()
+        if slot in wardrobe
+    }
     closet, public_fallback = _split_public_fallback_closet(state)
     return {
         "dynamic_appearance": session_schema.get_outfit(state),
         "wardrobe": wardrobe,
         "wardrobe_display": _wardrobe_display_names(wardrobe, closet),
-        "wardrobe_item_states": session_schema.get_wardrobe_item_states(state),
+        "wardrobe_item_states": item_states,
         "public_fallback_outfit": public_fallback,
         "public_fallback_in_current": _public_fallback_in_current(wardrobe, public_fallback),
         "closet": closet,
@@ -1098,8 +1104,7 @@ async def api_update_wardrobe(request: web.Request):
         result = session_schema.get_outfit(state)
     elif action == "clear_item_states":
         session_schema.clear_wardrobe_item_states(state)
-        if session_schema.get_outfit(state).strip():
-            session_schema.clear_nudity(state)
+        session_schema.clear_nudity(state)
         service._save_session_state(sid, state)
         result = session_schema.get_outfit(state)
     elif action == "wear_closet":
@@ -1223,16 +1228,19 @@ async def api_save_config(request: web.Request):
         "daily_selfie_limit",
     }
     schedule_changed = False
-    for key, value in values.items():
-        if key in YAML_ONLY_CONFIG_KEYS:
-            continue
-        if key in SECRET_KEYS and value in ("", None):
-            continue
-        old = service.config.get(key)
-        service.config[key] = cast_config_value(key, value, old)
-        if key in global_schedule_keys:
-            schedule_changed = True
-    service.save_config()
+    try:
+        for key, value in values.items():
+            if key in YAML_ONLY_CONFIG_KEYS:
+                continue
+            if key in SECRET_KEYS and value in ("", None):
+                continue
+            old = service.config.get(key)
+            service.config[key] = cast_config_value(key, value, old)
+            if key in global_schedule_keys:
+                schedule_changed = True
+        service.save_config()
+    except (TypeError, ValueError) as exc:
+        return json_error(f"配置字段 {key} 的值无效: {exc}")
     if schedule_changed:
         for sid in list(service.sessions.keys()):
             try:
@@ -1242,6 +1250,11 @@ async def api_save_config(request: web.Request):
             except Exception:
                 pass
     return json_ok({"config": masked_config(service)})
+
+
+async def api_commands(request: web.Request):
+    commands = [canonical for canonical, _aliases in COMMAND_ALIAS_GROUPS]
+    return json_ok({"commands": commands})
 
 
 async def api_sessions(request: web.Request):
@@ -1954,6 +1967,11 @@ async def api_delete_character(request: web.Request):
     if is_default_card:
         return json_error("系统默认角色不能删除", status=403)
     saved.pop(character_id, None)
+    character_key = service._web_character_checkpoint_key(sid, character_id) if hasattr(service, "_web_character_checkpoint_key") else character_id
+    if hasattr(service, "memory") and hasattr(service.memory, "delete_character_memories"):
+        service.memory.delete_character_memories(sid, character_key)
+    if hasattr(service, "app_store") and hasattr(service.app_store, "delete_character_runtime_data"):
+        service.app_store.delete_character_runtime_data(sid, character_key)
     if character_value(state, "custom_character", "") == character_id:
         for key in SESSION_CUSTOM_RESET_KEYS:
             session_schema.set_character_value(state, key, "")
@@ -2130,6 +2148,27 @@ async def api_save_model_profile(request: web.Request):
     current = service.app_store.list_model_profiles(user_id).get(profile_id) or {}
     payload = merge_model_profile_secrets(payload, current)
     service.app_store.upsert_model_profile(user_id, profile_id, payload)
+    return json_ok({"user_profiles": mask_model_profiles(service.app_store.list_model_profiles(user_id))})
+
+
+async def api_delete_model_profile(request: web.Request):
+    service = service_from(request)
+    user_id = (request.get("web_auth") or {}).get("user_id", "")
+    if _is_admin(request) and request.query.get("user_id"):
+        user_id = request.query.get("user_id") or user_id
+    profile_id = request.match_info["profile_id"].strip()
+    scope = str(request.query.get("scope") or "user").lower()
+    if scope == "global":
+        _require_admin(request)
+        profiles = dict(service._global_model_profiles())
+        if profile_id not in profiles:
+            return json_error("模型 profile 不存在", status=404)
+        profiles.pop(profile_id, None)
+        service.config["global_model_profiles"] = profiles
+        service.save_config()
+        return json_ok({"global_profiles": mask_model_profiles(profiles)})
+    if not service.app_store.delete_model_profile(user_id, profile_id):
+        return json_error("模型 profile 不存在", status=404)
     return json_ok({"user_profiles": mask_model_profiles(service.app_store.list_model_profiles(user_id))})
 
 

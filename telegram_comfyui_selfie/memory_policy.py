@@ -152,7 +152,21 @@ class MemoryPolicyMixin:
         character_key = self._memory_character(session_id) if character is None else str(character or "").strip()
         existing = ""
         if self._long_memory_enabled():
-            mems = self.memory.context_memories(session_id, f"{user_text}\n{assistant_text}", character=character_key, limit=10)
+            contextual = self.memory.context_memories(
+                session_id, f"{user_text}\n{assistant_text}", character=character_key, limit=10
+            )
+            stable = [
+                memory
+                for memory in self.memory.list_memories(session_id, character=character_key, limit=200)
+                if memory.get("kind") in {"user_profile", "boundary", "correction", "manual"}
+            ]
+            seen_ids: set[int] = set()
+            mems = []
+            for memory in [*stable, *contextual]:
+                mid = int(memory.get("id") or 0)
+                if mid and mid not in seen_ids:
+                    seen_ids.add(mid)
+                    mems.append(memory)
             if mems:
                 existing = format_memory_lines(mems, with_ids=False)
         structured = self._long_memory_structured_boundary_text(session_id, character_key)
@@ -189,8 +203,17 @@ class MemoryPolicyMixin:
             f"{source_block}"
         )
         try:
-            text = await self._call_llm(system, user, temp=0.1, tag="memory-extract", purpose="chat", session_id=session_id)
-            parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
+            if hasattr(self, "_call_memory_json_llm") and (
+                self.has_llm_config("chat", session_id) or self.has_llm_config("image", session_id)
+            ):
+                text, parsed, _purpose, _attempts = await self._call_memory_json_llm(
+                    session_id, system, user, tag="memory-extract", temp=0.1
+                )
+            else:
+                text = await self._call_llm(system, user, temp=0.1, tag="memory-extract", purpose="chat", session_id=session_id)
+                parsed = self._parse_llm_json(text) if hasattr(self, "_parse_llm_json") else json.loads(
+                    re.sub(r"```json\s*|```\s*$", "", text).strip()
+                )
         except Exception as exc:
             logger.warning("long memory extraction failed: %s", exc)
             try:

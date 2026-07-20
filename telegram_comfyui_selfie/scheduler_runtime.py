@@ -61,12 +61,21 @@ class SchedulerRuntimeMixin:
         "休息了", "去休息", "先休息",
     )
 
+    @staticmethod
+    def _keyword_in_text(text: str, keyword: str) -> bool:
+        keyword = str(keyword or "").strip().lower()
+        if not keyword:
+            return False
+        if re.fullmatch(r"[a-z0-9]+", keyword) and len(keyword) <= 8:
+            return bool(re.search(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])", text, re.IGNORECASE))
+        return keyword in text
+
     def _last_message_indicates_conversation_end(self, state: dict[str, Any]) -> bool:
         """用户最后一条消息是否表示主动结束当前聊天会话（拜拜/晚安/走了等）。"""
         text = (session_schema.get_last_message_text(state) or "").lower()
         if not text:
             return False
-        return any(word in text for word in self._POST_CHAT_PUSH_END_KEYWORDS)
+        return any(self._keyword_in_text(text, word) for word in self._POST_CHAT_PUSH_END_KEYWORDS)
 
     def _detect_push_scene_phase(self, text: str) -> str:
         """从最近场景中识别需要在软推进时消费掉的短阶段。"""
@@ -85,6 +94,7 @@ class SchedulerRuntimeMixin:
         latest = float(session_schema.get_last_interaction(state) or 0)
         latest = max(latest, session_schema.get_last_message_time(state))
         texts: list[str] = []
+        recent_user_texts: list[str] = []
         latest_photo_text = ""
 
         for msg in session_schema.get_recent_message_history(state):
@@ -95,6 +105,9 @@ class SchedulerRuntimeMixin:
             text = (msg.get("text") or "").strip()
             if text:
                 texts.append(text)
+                recent_user_texts.append(text)
+                if msg.get("role") == "user":
+                    recent_user_texts.append(text)
         for msg in self._active_chat_history(state, 8):
             if msg.get("role") not in ("user", "assistant"):
                 continue
@@ -129,7 +142,7 @@ class SchedulerRuntimeMixin:
         except Exception:
             continuity_hours = 2.0
         gap_minutes = (now_ts - latest) / 60.0 if latest else 0.0
-        has_end_signal = bool(self._PUSH_SCENE_END_RE.search(joined))
+        has_end_signal = bool(self._PUSH_SCENE_END_RE.search("\n".join(recent_user_texts[-3:])))
         has_hold_signal = bool(self._PUSH_SCENE_HOLD_RE.search(joined))
         recent_scene_phase = self._detect_push_scene_phase(recent_phase_text)
         has_wake_hold_signal = bool(self._PUSH_SCENE_WAKE_HOLD_RE.search(joined))
@@ -272,7 +285,7 @@ class SchedulerRuntimeMixin:
             loc = self._get_session_cfg(session_id, "location", self.config.get("location", "上海"))
             key = session_id or "__default__"
             cached = self._weather_caches.get(key)
-            if cached and now - cached["ts"] < 1800:
+            if cached and cached.get("city") == loc and now - cached["ts"] < 1800:
                 return cached["data"]
             location = loc
             cache_key = key
@@ -280,8 +293,13 @@ class SchedulerRuntimeMixin:
             cache_key = None
         try:
             encoded = urllib.parse.quote(location.strip())
-            async with aiohttp.ClientSession(trust_env=True, timeout=aiohttp.ClientTimeout(total=10)) as s:
-                async with s.get(f"https://wttr.in/{encoded}?format=j1&lang=zh-cn", headers={"User-Agent": "curl/7.81.0"}) as resp:
+            proxy, connector = self._external_http_proxy() if hasattr(self, "_external_http_proxy") else (None, None)
+            async with aiohttp.ClientSession(trust_env=True, connector=connector, timeout=aiohttp.ClientTimeout(total=10)) as s:
+                async with s.get(
+                    f"https://wttr.in/{encoded}?format=j1&lang=zh-cn",
+                    headers={"User-Agent": "curl/7.81.0"},
+                    proxy=proxy,
+                ) as resp:
                     if resp.status != 200:
                         return None
                     data = await resp.json(content_type=None)
@@ -319,7 +337,7 @@ class SchedulerRuntimeMixin:
                 "sunset": astronomy.get("sunset", ""),
             }
             if cache_key:
-                self._weather_caches[cache_key] = {"data": weather, "ts": time.time()}
+                self._weather_caches[cache_key] = {"data": weather, "ts": time.time(), "city": location}
             return weather
         except Exception as exc:
             logger.warning("weather fetch failed: %s", exc)
@@ -472,17 +490,6 @@ class SchedulerRuntimeMixin:
             return WEEKDAY_NAMES[day.weekday()]
         except Exception:
             return ""
-
-    def _should_run_dream_before_push(self, session_id: str, state: dict[str, Any]) -> bool:
-        last = float(session_schema.get_last_interaction(state) or 0)
-        if not last or time.time() - last < self._dream_idle_seconds():
-            return False
-        key = self._context_character_key(session_id) if hasattr(self, "_context_character_key") else self._memory_character(session_id)
-        try:
-            meta = self.app_store.get_context_meta(session_id, key)
-        except Exception:
-            return False
-        return int(meta.get("last_checkpoint_message_id") or 0) > int(meta.get("last_dream_message_id") or 0)
 
     async def _run_dream(self, session_id: str, local_dt: datetime, *, reason: str, force: bool = False):
         if not session_id:
@@ -662,7 +669,12 @@ class SchedulerRuntimeMixin:
             f"日记更新 reason={reason} date={diary_date} messages={len(messages)} "
             f"source_chars={len(source_text)} diary_chars={len(diary or '')} output={self._log_excerpt(diary)}",
         )
-        if messages and self.has_llm_config("chat", session_id) and hasattr(self, "_extract_long_term_memories_from_messages"):
+        if (
+            messages
+            and self._long_memory_extract_enabled()
+            and self.has_llm_config("chat", session_id)
+            and hasattr(self, "_extract_long_term_memories_from_messages")
+        ):
             try:
                 await self._extract_long_term_memories_from_messages(session_id, messages, source_type="dream", character=character_key)
             except Exception:
@@ -854,9 +866,8 @@ class SchedulerRuntimeMixin:
             self._ulog(session_id, "MEMORY", f"整理跳过 {json.dumps(result, ensure_ascii=False)}")
             return result
         limit = self._long_memory_limit()
-        threshold = max(1, limit // 2)
-        if len(editable) > limit:
-            result = await self._summarize_all_memories(session_id, character_key, editable, target_n=threshold, diaries=diaries)
+        if len(editable) > 2 * limit:
+            result = await self._summarize_all_memories(session_id, character_key, editable, target_n=limit, diaries=diaries)
         else:
             result = await self._incremental_organize_memories(session_id, character_key, editable, diaries=diaries)
         try:
@@ -911,7 +922,10 @@ class SchedulerRuntimeMixin:
             "Return strict JSON: {\"ops\":[{\"op\":\"add|update|delete\",\"id\":123,\"kind\":\"user_profile|profile|preference|relationship|setting|boundary|visual|event|correction\",\"summary\":\"...\",\"importance\":1-5,\"tags\":[\"...\"]}]}"
         )
         diary_text = "\n\n".join(f"[{d.get('diary_date')}]\n{d.get('content','')}" for d in (diaries or []))
-        mem_text = "\n".join(f"{m['id']}. [{m.get('kind')}] {m.get('summary')}" for m in editable)
+        mem_text = "\n".join(
+            f"{m['id']}. [{m.get('kind')}/importance={m.get('importance', 3)}/tags={','.join(m.get('tags') or [])}] {m.get('summary')}"
+            for m in editable
+        )
         user = f"Recent diaries:\n{diary_text}\n\nCheckpoint:\n{checkpoint or 'none'}\n\nCurrent dialogue role legend:\n{role_legend}\n\nCurrent window:\n{current or 'none'}\n\nEditable memories:\n{mem_text or 'none'}"
         try:
             raw, parsed, llm_purpose, attempts = await self._call_memory_json_llm(
@@ -957,8 +971,17 @@ class SchedulerRuntimeMixin:
                 mid = self.memory.add_memory(session_id, op.get("kind", "event"), op.get("summary", ""), character=character_key, importance=op.get("importance", 3), tags=op.get("tags") or [], source="dream")
                 ok = mid is not None
                 result_detail.update({"id": mid, "ok": ok, "summary": self._log_excerpt(op.get("summary"), 160)})
-            elif action == "update" and op.get("id") and op.get("summary"):
-                ok = self.memory.update_memory(session_id, int(op.get("id")), character=character_key, summary=op.get("summary"), kind=op.get("kind"), importance=op.get("importance"), tags=op.get("tags") or [], source="dream")
+            elif action == "update" and op.get("id") and any(key in op for key in ("summary", "kind", "importance", "tags")):
+                ok = self.memory.update_memory(
+                    session_id,
+                    int(op.get("id")),
+                    character=character_key,
+                    summary=op.get("summary") if "summary" in op else None,
+                    kind=op.get("kind") if "kind" in op else None,
+                    importance=op.get("importance") if "importance" in op else None,
+                    tags=op.get("tags") if "tags" in op else None,
+                    source="dream",
+                )
                 result_detail.update({"ok": ok, "summary": self._log_excerpt(op.get("summary"), 160)})
             elif action == "delete" and op.get("id"):
                 ok = self.memory.deactivate_non_manual_memory(session_id, int(op.get("id")), character=character_key)
@@ -1050,28 +1073,9 @@ class SchedulerRuntimeMixin:
                 result,
             )
             return result
-        deactivated = 0
         failed = 0
-        for m in editable:
-            try:
-                mid = int(m["id"])
-            except Exception:
-                failed += 1
-                continue
-            if included_ids and mid not in included_ids:
-                continue
-            ok = self.memory.deactivate_non_manual_memory(session_id, mid, character=character_key)
-            if ok:
-                deactivated += 1
-            else:
-                failed += 1
-                self._record_memory_operation_failure(
-                    session_id,
-                    "dream-memory-summarize-deactivate",
-                    {"id": m.get("id"), "summary": m.get("summary")},
-                    {"ok": False},
-                )
         added = 0
+        kept_ids: set[int] = set()
         for item in new_memories[:target_n]:
             if not isinstance(item, dict) or not item.get("summary"):
                 failed += 1
@@ -1096,7 +1100,30 @@ class SchedulerRuntimeMixin:
                     {"ok": False, "error": "add_memory returned None"},
                 )
             else:
+                kept_ids.add(int(mid))
                 added += 1
+        # 新摘要至少成功落库后再停用旧条目；若落库失败，不破坏原有记忆集合。
+        deactivated = 0
+        if added:
+            for m in editable:
+                try:
+                    mid = int(m["id"])
+                except Exception:
+                    failed += 1
+                    continue
+                if (included_ids and mid not in included_ids) or mid in kept_ids:
+                    continue
+                ok = self.memory.deactivate_non_manual_memory(session_id, mid, character=character_key)
+                if ok:
+                    deactivated += 1
+                else:
+                    failed += 1
+                    self._record_memory_operation_failure(
+                        session_id,
+                        "dream-memory-summarize-deactivate",
+                        {"id": m.get("id"), "summary": m.get("summary")},
+                        {"ok": False},
+                    )
         status = "ok" if failed == 0 else ("partial_failed" if added else "failed")
         result = {
             "status": status,
@@ -1117,7 +1144,10 @@ class SchedulerRuntimeMixin:
     async def _generate_character_history_summary(self, session_id: str, character_key: str, diaries: list[dict[str, Any]]):
         if not diaries or not self.has_llm_config("chat", session_id):
             return
-        limit = self._checkpoint_hard_limit_chars()
+        try:
+            limit = max(400, int(self.config.get("character_history_summary_max_chars", "1200") or 1200))
+        except (TypeError, ValueError):
+            limit = 1200
         # meta/检查点/记忆的读写一律使用传入的 character_key，不在生成途中现取活动角色，
         # 避免 LLM 等待期间用户切换角色导致旧角色提要写进新角色。
         key = str(character_key or "").strip()
@@ -1199,9 +1229,8 @@ class SchedulerRuntimeMixin:
             summary = (summary or "").strip()
             if not summary:
                 return
-            hard = self._checkpoint_hard_limit_chars()
-            if len(summary) > hard:
-                summary = summary[-hard:]
+            if len(summary) > limit:
+                summary = summary[-limit:]
             self.app_store.upsert_character_history_summary(session_id, key, summary)
             live_key = self._context_character_key(session_id) if hasattr(self, "_context_character_key") else key
             if live_key == key:
@@ -1396,6 +1425,18 @@ class SchedulerRuntimeMixin:
                     now = self._session_now(session_id)
                     today = now.strftime("%Y-%m-%d")
                     time_str = now.strftime("%H:%M")
+                    schedule = self._character_schedule_minutes(session_id, now)
+                    now_minute = now.hour * 60 + now.minute
+                    key = self._context_character_key(session_id)
+                    meta = self.app_store.get_context_meta(session_id, key)
+                    last_dream_at = float(meta.get("last_dream_at") or 0)
+                    last_dream_date = (
+                        datetime.fromtimestamp(last_dream_at, tz=now.tzinfo).strftime("%Y-%m-%d")
+                        if last_dream_at else ""
+                    )
+                    # dream 是日常整理任务，不依赖推送开关；起床时间后每天尝试一次。
+                    if now_minute >= int(schedule["wake"]) and last_dream_date != today:
+                        await self._run_dream(session_id, now, reason="daily-wake", force=False)
                     try:
                         daily_limit = int(str(self._get_session_cfg(session_id, "daily_selfie_limit", "3")).strip())
                     except ValueError:
@@ -1410,7 +1451,7 @@ class SchedulerRuntimeMixin:
                     # 推送关闭(每日次数=0)时，早安推送也不发——否则“关闭推送”每天早上又冒出来（用户报的“只持续一天”）。
                     if daily_limit > 0 and self._is_morning_push_time(session_id, now) and session_schema.get_last_morning_greet_date(state) != today:
                         if self._check_goodnight_inhibition(state):
-                            self._mark_morning_greet_sent(session_id, now, reason="inhibited-goodnight")
+                            self._ulog(session_id, "PUSH", "早安推送本轮受晚安抑制，窗口内保留重试")
                         elif session_id not in self._active_pushes:
                             self._create_scheduled_push_task(
                                 session_id,
@@ -1429,7 +1470,7 @@ class SchedulerRuntimeMixin:
                             self._mark_daily_triggered_time(session_id, t, reason="missed-window")
                             continue
                         if self._check_goodnight_inhibition(state):
-                            self._mark_daily_triggered_time(session_id, t, reason="inhibited-goodnight")
+                            self._ulog(session_id, "PUSH", f"定时推送 {t} 本轮受晚安抑制，窗口内保留重试")
                             continue
                         if session_id not in self._active_pushes:
                             self._create_scheduled_push_task(
@@ -1460,7 +1501,10 @@ class SchedulerRuntimeMixin:
             return
         for stage in range(reached + 1, current + 1):
             if stage <= 3:
-                asyncio.create_task(self._fire_ntr_stage_message(session_id, stage, int(days)))
+                try:
+                    await self._fire_ntr_stage_message(session_id, stage, int(days))
+                except Exception:
+                    logger.warning("NTR stage message failed stage=%s", stage, exc_info=True)
             elif stage == 4:
                 session_schema.set_ntr_affection_reset(state, True)
                 session_schema.set_ntr_reconcile_count(state, 0)
@@ -1470,6 +1514,26 @@ class SchedulerRuntimeMixin:
         self._mark_dirty(session_id)
 
     async def _sched_fire(
+        self,
+        session_id: str,
+        local_dt: datetime,
+        mode_override=None,
+        skip_active_check=False,
+        character_lock_held: bool = False,
+    ) -> bool:
+        if not session_id:
+            return False
+        lock = self._push_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            return await self._sched_fire_unlocked(
+                session_id,
+                local_dt,
+                mode_override=mode_override,
+                skip_active_check=skip_active_check,
+                character_lock_held=character_lock_held,
+            )
+
+    async def _sched_fire_unlocked(
         self,
         session_id: str,
         local_dt: datetime,
@@ -1611,6 +1675,7 @@ class SchedulerRuntimeMixin:
                     # 下一次推送/图片要恢复穿好衣服，清掉临时裸体与半脱状态。
                     session_schema.clear_nudity(state)
                     session_schema.clear_wardrobe_item_states(state)
+                    self._save_session_state(session_id, state)
                 return True
             else:
                 self._ulog(session_id, "PUSH", f"生图失败 mode={mode}: {err}")
@@ -1628,7 +1693,10 @@ class SchedulerRuntimeMixin:
     def _check_goodnight_inhibition(self, state: dict[str, Any]) -> bool:
         text = (session_schema.get_last_message_text(state) or "").lower()
         ts = session_schema.get_last_message_time(state)
-        return time.time() - ts < 3600 and any(word in text for word in ("晚安", "睡觉", "睡了", "去睡", "good night", "sleep"))
+        return time.time() - ts < 3600 and any(
+            self._keyword_in_text(text, word)
+            for word in ("晚安", "睡觉", "睡了", "去睡", "good night", "sleep", "gn")
+        )
 
     @staticmethod
     def _is_recently_active(state: dict[str, Any]) -> bool:

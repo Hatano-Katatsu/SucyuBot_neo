@@ -84,6 +84,10 @@ models:
   chat_llm_top_p: "0.92"
   chat_llm_frequency_penalty: "0.4"
   chat_llm_presence_penalty: ""
+  # false 时把跨角色通用规则放在 persona 前，提升不同会话的前缀缓存共享；true 可回退旧顺序。
+  chat_persona_first: false
+  character_history_summary_max_chars: 1200
+  push_continuity_hours: 2
   image_llm_temperature_scene: ""
   image_llm_temperature_translate: ""
   image_llm_temperature_classify: ""

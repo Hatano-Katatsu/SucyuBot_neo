@@ -2378,7 +2378,7 @@ class CommandHandlersMixin:
             if dynamic_src:
                 # 服装/配饰走衣柜分槽（同槽替换、连衣裙互斥），不再扁平合并。
                 await self._wardrobe_apply_to_state(state, dynamic_src, session_id=session_id)
-                applied.append(f"穿搭/配饰: {(state.get('dynamic_appearance') or '')[:180]}")
+                applied.append(f"穿搭/配饰: {session_schema.get_outfit(state)[:180]}")
             style = self._apply_intake_style(state, intake)
             if style:
                 applied.append(f"画风: {style[:120]}")

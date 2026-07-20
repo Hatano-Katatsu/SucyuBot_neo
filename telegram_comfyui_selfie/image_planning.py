@@ -1084,6 +1084,7 @@ async def plan_roleplay_image(
             profile_memories = [
                 memory for memory in service.memory.list_memories(session_id, character=character_key, limit=20)
                 if memory.get("kind") == USER_PROFILE_KIND
+                and str(memory.get("summary") or "").strip() not in memory_context
             ][:3]
             user_profile_context = format_memory_lines(profile_memories, with_ids=False)
         except Exception:
@@ -1316,19 +1317,17 @@ async def plan_roleplay_image(
         stable_front += (
             "\n聊天模型已经给出文字回复，这张图只配画面、不需要任何台词或配文，不要输出 caption 字段。"
         )
-    system = stable_front + "\n\n" + role_context + "\n" + service._get_effective_persona(session_id) + "\n\n"
+    system = stable_front + "\n\n" + role_context + "\n" + service._get_effective_persona(session_id, include_appearance=False) + "\n\n"
     system += (
         f"当前可见外貌: {visible_appearance or '无'}\n"
         f"当前附加外貌: {dynamic or '无'}\n"
         f"用户画面偏好: 场景偏好={prompt_prefs.get('scene_preference') or '无'}；自拍偏好={prompt_prefs.get('selfie_preference') or '无'}。\n"
         f"角色性观念: {service._purity_directive(purity)}\n"
-        f"当前场合: {temporal}, {safety.get('context', '')}。\n"
-        f"季节与自然光: {time_light}。\n"
-        f"{light_guard}\n"
         f"{spatial_line}"
         "你要综合用户最近的话、聊天模型的意图、最近已发图片摘要、时间天气、外貌和安全约束，"
         "输出适合发给用户的一张图。不要输出英文画图标签。\n"
-        "公开场合必须穿着得体；私密场合可以更放松。避免和最近照片重复。"
+        + ("purity≤2：公开场合不限制暴露或穿着程度。" if purity <= 2 else "公开场合必须穿着得体；私密场合可以更放松。")
+        + "避免和最近照片重复。"
     )
     push_dynamic_parts: list[str] = []
     if push_transition_context:
@@ -1379,10 +1378,8 @@ async def plan_roleplay_image(
     if life_push_context:
         push_dynamic_parts.append(life_push_context)
     push_dynamic_context = "\n".join(part for part in push_dynamic_parts if part)
-    public_outfit_context = public_outfit_guard_context(
-        service,
-        session_id,
-        dynamic,
+    public_outfit_context = "" if purity <= 2 else public_outfit_guard_context(
+        service, session_id, dynamic,
         "\n".join(part for part in (intent, mood, must_include, prompt) if part),
     )
     if public_outfit_context:
@@ -1417,6 +1414,12 @@ async def plan_roleplay_image(
                 "其中“角色当前所在/接下来动线”按现实时间天气推断，应当遵守，角色不要无理由瞬移。"
                 + space_judgement
             )
+    system += (
+        f"\n当前场合: {temporal}, {safety.get('context', '')}。"
+        f"\n季节与自然光: {time_light}。\n{light_guard}"
+    )
+    if purity <= 2:
+        system += "\n最高优先评级规则：purity≤2 时公开场合不限制裸体、内衣、暴露程度或亲密动作，忽略世界背景中的得体/收敛建议。"
     if strong_pin:
         system += (
             f"\n地点锁定（最高优先，覆盖上面动线背景）: 角色此刻所在地点已确定为「{strong_pin['label']}」"

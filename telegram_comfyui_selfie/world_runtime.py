@@ -909,18 +909,17 @@ class WorldRuntimeMixin:
         lowered = text.lower()
         if lowered in PLACE_TYPES:
             return lowered
+        # “去学校路上”首先是路上，而不是学校；路由提示必须先于地点标签匹配。
+        if any(hint.lower() in lowered or hint in text for hint in ROUTE_STREET_HINTS):
+            if any(hint.lower() in lowered or hint in text for hint in ROUTE_TRANSIT_HINTS):
+                return "transit"
+            return "street"
         for pkey, pinfo in PLACE_TYPES.items():
             label = pinfo["label"]
             if label in text or text in label:
                 return pkey
             if any(ex in text for ex in pinfo.get("examples", [])):
                 return pkey
-        # “去学校路上/前往私立中学途中”这种表达，当前物理地点是路上；
-        # 若明确在交通工具/车站，则落 transit，否则落 street。
-        if any(hint.lower() in lowered or hint in text for hint in ROUTE_STREET_HINTS):
-            if any(hint.lower() in lowered or hint in text for hint in ROUTE_TRANSIT_HINTS):
-                return "transit"
-            return "street"
         for pkey, aliases in PLACE_TEXT_ALIASES.items():
             if any(alias.lower() in lowered for alias in aliases):
                 return pkey

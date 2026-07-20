@@ -1000,7 +1000,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(state["custom_user_address"], "主人")
             self.assertEqual(state["custom_bot_self_name"], "")
             self.assertEqual(state["saved_characters"]["小雨"]["user_address"], "主人")
-            system = svc._build_chat_messages(sid, "你好")[0]["content"]
+            system = "\n".join(m["content"] for m in svc._build_chat_messages(sid, "你好") if m.get("role") == "system")
             self.assertIn("你通常称呼用户为「主人」", system)
 
         asyncio.run(run())
@@ -3278,7 +3278,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(int(before[0]["id"]), int(new_id))
 
         for _ in range(10):
-            svc.memory.mark_used([int(old_id)])
+            svc.memory.context_memories(sid, "共同关键词", limit=2, stable_limit=0)
 
         after = svc.memory.context_memories(sid, "共同关键词", limit=2, stable_limit=0)
         self.assertEqual(int(after[0]["id"]), int(new_id))
@@ -4047,6 +4047,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "image_llm_api_base": "https://image.example",
             })
             state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "purity", 8)
             state["life_profile"] = {
                 "age_stage": "adult",
                 "day_anchor": "school",
@@ -5661,9 +5662,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             await svc._translate_to_tags("在窗边等你", session_id=sid, view="selfie")
 
             system_prompt = svc._call_llm.await_args.args[0]
-            self.assertIn("Current weather: 小雨 18 C", system_prompt)
-            self.assertIn("Preserve visible weather", system_prompt)
-            self.assertIn("wet surfaces", system_prompt)
+            user_prompt = svc._call_llm.await_args.args[1]
+            self.assertNotIn("Current weather: 小雨 18 C", system_prompt)
+            self.assertIn("Current weather: 小雨 18 C", user_prompt)
+            self.assertIn("Preserve visible weather", user_prompt)
+            self.assertIn("wet surfaces", user_prompt)
 
         asyncio.run(run())
 
@@ -5897,7 +5900,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(state["custom_spatial_relationship"], "青梅竹马")
             self.assertEqual(state["saved_characters"]["天童爱丽丝"]["occupation"], "学生")
             # 关系注入聊天系统提示
-            system = svc._build_chat_messages(sid, "你好")[0]["content"]
+            system = "\n".join(m["content"] for m in svc._build_chat_messages(sid, "你好") if m.get("role") == "system")
             self.assertIn("你和用户的关系: 青梅竹马", system)
             # 没填城市时提醒补槽位
             text = svc.send_message.await_args.args[1]
@@ -5935,7 +5938,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(state["custom_bot_name"], "东云绘名")
             self.assertIn("性格内向", state["custom_scheduled_persona"])
             self.assertNotIn("你是东云", state["custom_scheduled_persona"])
-            system = svc._build_chat_messages(sid, "你好")[0]["content"]
+            system = "\n".join(m["content"] for m in svc._build_chat_messages(sid, "你好") if m.get("role") == "system")
             self.assertIn("你当前扮演的角色是「东云绘名」（Project Sekai）", system)
             self.assertIn("你是东云绘名（Project Sekai）。", system)
             self.assertNotIn("进行蕾伊角色扮演", system)
@@ -8598,7 +8601,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             packed = "\n".join(m.get("content", "") for m in messages)
             self.assertNotIn("爱丽丝正在打游戏", packed)
             self.assertNotIn("爱丽丝拿着游戏机", packed)
-            self.assertIn(svc.config["scheduled_persona"], messages[0]["content"])
+            self.assertIn(svc.config["scheduled_persona"], packed)
 
         asyncio.run(run())
 
@@ -9642,6 +9645,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         svc = self.make_service()
         sid = "telegram:1"
         state = svc._get_session_state(sid)
+        session_schema.set_character_value(state, "purity", 8)
         session_schema.set_outfit(state, "black lace camisole nightgown")
 
         pos, neg = svc._build_prompt(
@@ -9669,6 +9673,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         svc = self.make_service()
         sid = "telegram:1"
         state = svc._get_session_state(sid)
+        session_schema.set_character_value(state, "purity", 8)
         session_schema.set_outfit(
             state,
             "upper back length black hair, voluminous curls, middle part bangs, "
@@ -10009,7 +10014,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         state["custom_bot_name"] = ""
         state["custom_scheduled_persona"] = "性格内向、缺乏自信，但内心渴望被认可。"
 
-        system = svc._build_chat_messages(sid, "你好")[0]["content"]
+        system = "\n".join(m["content"] for m in svc._build_chat_messages(sid, "你好") if m.get("role") == "system")
 
         self.assertIn("你是东云绘名（Project Sekai）。", system)
         self.assertIn("你当前扮演的角色是「东云绘名」（Project Sekai）", system)
@@ -10487,7 +10492,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
     def test_judge_triggers_image_when_content_fits(self):
         async def run():
             svc = self.make_service()
-            svc.config.update({"chat_llm_api_key": "k", "chat_llm_model": "m", "chat_llm_api_base": "http://x", "selfie_frequency": "适度"})
+            svc.config.update({"image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "http://x", "selfie_frequency": "适度"})
             sid = "telegram:1"
             svc._get_session_state(sid)["rounds_since_image"] = 3  # >= 最小间隔 2
             svc._call_llm_messages = AsyncMock(return_value={"choices": [{"message": {"content": "在家窝着呢~"}}]})
@@ -10790,7 +10795,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
     def test_judge_skips_plain_dialog_without_visual_trigger(self):
         async def run():
             svc = self.make_service()
-            svc.config.update({"chat_llm_api_key": "k", "chat_llm_model": "m", "chat_llm_api_base": "http://x", "selfie_frequency": "适度"})
+            svc.config.update({"image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "http://x", "selfie_frequency": "适度"})
             sid = "telegram:1"
             svc._get_session_state(sid)["rounds_since_image"] = 9
             svc._call_llm = AsyncMock(return_value=json.dumps({"send": True, "intent": "x"}))
@@ -10803,7 +10808,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
     def test_judge_clears_non_explicit_selfie_view_hint(self):
         async def run():
             svc = self.make_service()
-            svc.config.update({"chat_llm_api_key": "k", "chat_llm_model": "m", "chat_llm_api_base": "http://x", "selfie_frequency": "适度"})
+            svc.config.update({"image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "http://x", "selfie_frequency": "适度"})
             sid = "telegram:1"
             svc._get_session_state(sid)["rounds_since_image"] = 3
             svc._call_llm = AsyncMock(return_value=json.dumps({
@@ -10828,7 +10833,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
     def test_judge_keeps_explicit_selfie_view_hint(self):
         async def run():
             svc = self.make_service()
-            svc.config.update({"chat_llm_api_key": "k", "chat_llm_model": "m", "chat_llm_api_base": "http://x", "selfie_frequency": "适度"})
+            svc.config.update({"image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "http://x", "selfie_frequency": "适度"})
             sid = "telegram:1"
             svc._get_session_state(sid)["rounds_since_image"] = 3
             svc._call_llm = AsyncMock(return_value=json.dumps({
@@ -10923,10 +10928,10 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 prompt="她靠近看着你，但不需要把你画出来",
             )
 
-            self.assertIn("用户画像（仅当用户/伴侣身体明确入画时参考", captured["user"])
+            self.assertNotIn("用户画像（仅当用户/伴侣身体明确入画时参考", captured["user"])
             self.assertIn("短发女性", captured["user"])
-            self.assertIn("不得因为有画像就让用户入画", captured["user"])
-            self.assertIn("不要写进角色 new_appearance_tags", captured["user"])
+            self.assertEqual(captured["user"].count("短发女性"), 1)
+            self.assertIn("长期记忆", captured["user"])
 
         asyncio.run(run())
 
@@ -11147,6 +11152,153 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(session_schema.get_outfit(state), "")
             self.assertEqual(session_schema.get_wardrobe_item_states(state), {})
             self.assertEqual(session_schema.get_nudity(state), "completely nude")
+
+        asyncio.run(run())
+
+    def test_phase2_public_scene_blocks_half_off_exposure(self):
+        svc = self.make_service()
+        sid = "telegram:phase2-public"
+        state = svc._get_session_state(sid)
+        session_schema.set_character_value(state, "purity", 8)
+        session_schema.set_wardrobe(state, {"bra": "black lace bra", "top": "white school blouse", "bottom": "pleated skirt"})
+        session_schema.set_outfit(state, appearance_rules.render_wardrobe(session_schema.get_wardrobe(state)))
+        session_schema.set_wardrobe_item_state(state, "bra", "half_off")
+
+        positive, negative = svc._build_prompt("standing in a school classroom", session_id=sid)
+
+        self.assertNotIn("nipples", positive.lower())
+        self.assertNotIn("half-removed black lace bra", positive.lower())
+        self.assertIn("nipples", negative.lower())
+        self.assertIn("revealing clothes", negative.lower())
+
+    def test_phase2_purity_two_disables_public_exposure_guard(self):
+        svc = self.make_service()
+        sid = "telegram:phase2-public-explicit"
+        state = svc._get_session_state(sid)
+        session_schema.set_character_value(state, "purity", 2)
+        session_schema.set_wardrobe(state, {"bra": "black lace bra"})
+        session_schema.set_outfit(state, "black lace bra")
+        session_schema.set_wardrobe_item_state(state, "bra", "half_off")
+
+        positive, _negative = svc._build_prompt("standing in a school classroom", session_id=sid)
+
+        self.assertIn("half-removed black lace bra", positive.lower())
+        self.assertIn("nipples", positive.lower())
+
+    def test_phase2_new_scene_clears_nudity_and_item_states(self):
+        svc = self.make_service()
+        sid = "telegram:phase2-scene"
+        state = svc._get_session_state(sid)
+        session_schema.set_wardrobe(state, {"bra": "black bra"})
+        session_schema.set_wardrobe_item_state(state, "bra", "half_off")
+        session_schema.set_nudity(state, "completely nude", at=123.0)
+
+        svc._reset_short_context(state, "new-scene", session_id=sid)
+
+        self.assertEqual(session_schema.get_wardrobe_item_states(state), {})
+        self.assertEqual(session_schema.get_nudity(state), "")
+
+    def test_phase2_wardrobe_failure_remove_does_not_reverse_to_wear(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:phase2-remove"
+            state = svc._get_session_state(sid)
+            session_schema.set_wardrobe(state, {"outerwear": "black coat"})
+            session_schema.set_outfit(state, "black coat")
+            svc._classify_wardrobe_change = AsyncMock(side_effect=RuntimeError("offline"))
+            svc._translate_appearance_tags = AsyncMock(return_value="black coat")
+
+            await svc._apply_wardrobe(sid, "脱掉外套")
+
+            self.assertNotIn("outerwear", session_schema.get_wardrobe(state))
+
+        asyncio.run(run())
+
+    def test_phase2_wardrobe_classification_applies_to_latest_state(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:phase2-race"
+            state = svc._get_session_state(sid)
+            session_schema.set_wardrobe(state, {"top": "white blouse"})
+
+            async def classify(*_args):
+                session_schema.set_wardrobe(state, {"top": "white blouse", "bottom": "blue jeans"})
+                session_schema.set_outfit(state, "white blouse, blue jeans")
+                return {"outerwear": "black coat"}
+
+            svc._classify_wardrobe_change = AsyncMock(side_effect=classify)
+            await svc._apply_wardrobe(sid, "穿上黑色外套")
+
+            self.assertEqual(session_schema.get_wardrobe(state), {
+                "top": "white blouse", "bottom": "blue jeans", "outerwear": "black coat",
+            })
+
+        asyncio.run(run())
+
+    def test_phase2_structured_wear_then_set_state_same_call(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:phase2-wear-state"
+            await svc.tool_change_appearance(sid, items=[
+                {"slot": "bra", "action": "wear", "tags": "black lace bra"},
+                {"slot": "bra", "action": "set_state", "state": "half_off"},
+            ])
+            state = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_wardrobe(state).get("bra"), "black lace bra")
+            self.assertEqual(session_schema.get_wardrobe_item_states(state), {"bra": "half_off"})
+
+        asyncio.run(run())
+
+    def test_phase3_long_memory_dedupes_truncated_normalized_summary(self):
+        svc = self.make_service()
+        sid = "telegram:phase3-dedupe"
+        base = "用户喜欢安静的咖啡店。" * 80
+        first = svc.memory.add_memory(sid, "preference", base + "第一版尾部", importance=3)
+        second = svc.memory.add_memory(sid, "preference", base + "第二版尾部", importance=5)
+
+        self.assertEqual(first, second)
+        rows = svc.memory.list_memories(sid, character="", limit=20)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["importance"], 5)
+        self.assertLessEqual(len(rows[0]["summary"]), 600)
+
+    def test_phase3_incremental_memory_allows_importance_only_update(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:phase3-importance"
+            mid = svc.memory.add_memory(sid, "event", "一条仍然重要的事件", importance=2)
+            svc._call_memory_json_llm = AsyncMock(return_value=(
+                '{"ops":[{"op":"update","id":%d,"importance":5}]}' % mid,
+                {"ops": [{"op": "update", "id": mid, "importance": 5}]},
+                "chat",
+                [],
+            ))
+            editable = svc.memory.list_memories(sid, character="", limit=20)
+
+            result = await svc._incremental_organize_memories(sid, "", editable, diaries=[])
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(svc.memory.list_memories(sid, character="", limit=20)[0]["importance"], 5)
+
+        asyncio.run(run())
+
+    def test_phase3_memory_extraction_filters_photo_history_system(self):
+        async def run():
+            svc = self.make_service()
+            captured = {}
+
+            async def extract(_sid, user_text, _assistant_text, **_kwargs):
+                captured["text"] = user_text
+
+            svc._extract_long_term_memories = extract
+            await svc._extract_long_term_memories_from_messages("telegram:phase3-filter", [
+                {"role": "user", "content": "我喜欢爵士乐"},
+                {"role": "system", "content": "照片历史: black dress, bedroom"},
+                {"role": "assistant", "content": "记住了"},
+            ])
+
+            self.assertIn("我喜欢爵士乐", captured["text"])
+            self.assertNotIn("照片历史", captured["text"])
 
         asyncio.run(run())
 
