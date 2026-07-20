@@ -37,6 +37,31 @@ class StaticModuleBoundaryTestCase(unittest.TestCase):
             self.assertIn(declaration, admin_logs)
             self.assertNotIn(declaration, app)
 
+    def test_world_ui_module_loads_before_app_entrypoint(self):
+        index = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+
+        world_pos = index.index('<script src="/static/world_ui.js"></script>')
+        app_pos = index.index('<script src="/static/app.js"></script>')
+
+        self.assertLess(world_pos, app_pos)
+
+    def test_world_domain_is_kept_out_of_app_entrypoint(self):
+        world_ui = (STATIC_ROOT / "world_ui.js").read_text(encoding="utf-8")
+        app = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+        domain_functions = (
+            "loadWorldSessions",
+            "loadWorldRoute",
+            "renderWorldSessionList",
+            "renderWorldRoute",
+            "renderLifePlan",
+            "handleLifePlanAction",
+        )
+
+        for name in domain_functions:
+            declaration = f"function {name}("
+            self.assertIn(declaration, world_ui)
+            self.assertNotIn(declaration, app)
+
 
 if __name__ == "__main__":
     unittest.main()
