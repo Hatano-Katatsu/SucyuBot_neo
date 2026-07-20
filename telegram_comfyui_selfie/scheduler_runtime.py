@@ -620,6 +620,12 @@ class SchedulerRuntimeMixin:
         raise RuntimeError(json.dumps({"attempts": attempts, "error": str(last_exc or '')}, ensure_ascii=False))
 
     async def _dream_once(self, session_id: str, character_key: str, local_dt: datetime, *, reason: str):
+        life_plan_character_snapshot = None
+        if hasattr(self, "_life_plan_character_snapshot"):
+            try:
+                life_plan_character_snapshot = self._life_plan_character_snapshot(session_id, character_key)
+            except Exception:
+                logger.warning("life plan character snapshot failed", exc_info=True)
         meta = self.app_store.get_context_meta(session_id, character_key)
         from_id = int(meta.get("last_dream_message_id") or 0)
         latest_id = self.app_store.latest_message_id(session_id, character_key)
@@ -720,6 +726,7 @@ class SchedulerRuntimeMixin:
                 diary_date=diary_date,
                 diary=diary,
                 reason=reason,
+                character_snapshot=life_plan_character_snapshot,
             )
             if isinstance(life_result, dict):
                 self._ulog(session_id, "LIFE", f"dream生活线结果 {json.dumps(life_result, ensure_ascii=False, default=str)}")

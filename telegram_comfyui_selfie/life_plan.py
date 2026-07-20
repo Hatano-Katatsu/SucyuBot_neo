@@ -67,6 +67,110 @@ class LifePlanMixin:
                 pass
         return ""
 
+    def _life_plan_character_snapshot(self, session_id: str, character_key: str) -> dict[str, Any]:
+        """构造指定角色的不可变材料快照，后台生成期间不再读取 live 角色态。"""
+        key = str(character_key or "").strip()
+        state = self._get_session_state(session_id)
+        active_key = self._life_plan_character_key(session_id)
+        if hasattr(self, "_character_card_snapshot_for_key"):
+            card, exists = self._character_card_snapshot_for_key(session_id, key)
+        else:
+            raw = session_schema.get_saved_characters(state).get(key) if key else {}
+            card, exists = (copy.deepcopy(raw), isinstance(raw, dict))
+        if key == active_key and hasattr(self, "_conversation_context_payload"):
+            context = copy.deepcopy(self._conversation_context_payload(state))
+        else:
+            context = copy.deepcopy(
+                session_schema.get_character_contexts(state).get(key or "__default__") or {}
+            )
+        version = (
+            self._character_snapshot_version(session_id, key)
+            if hasattr(self, "_character_snapshot_version") else ""
+        )
+
+        persona = str(card.get("persona") or "").strip()
+        character_name = str(card.get("character") or card.get("bot_name") or key).strip()
+        if character_name and hasattr(self, "_persona_with_character_identity"):
+            persona = self._persona_with_character_identity(
+                character_name,
+                str(card.get("series") or "").strip(),
+                persona,
+            )
+        elif character_name and not persona:
+            persona = f"你是{character_name}。"
+
+        if hasattr(self, "_character_life_profile_snapshot"):
+            life_profile = self._character_life_profile_snapshot(
+                session_id,
+                key,
+                card=card,
+                context=context,
+            )
+        else:
+            life_profile = copy.deepcopy(context.get("life_profile") or {})
+
+        history_summary = ""
+        try:
+            meta = self.app_store.get_context_meta(session_id, key)
+            history_summary = str(meta.get("character_history_summary") or "").strip()
+        except Exception:
+            pass
+        if not history_summary:
+            history_summary = session_schema.get_character_history_summary(context)
+
+        recent_context: list[dict[str, str]] = []
+        try:
+            for msg in session_schema.get_chat_history(context)[-12:]:
+                if msg.get("role") in {"user", "assistant"} and str(msg.get("content") or "").strip():
+                    recent_context.append({
+                        "role": str(msg.get("role") or ""),
+                        "content": _compact_text(msg.get("content"), 300),
+                    })
+        except Exception:
+            recent_context = []
+
+        try:
+            diaries = copy.deepcopy(self.app_store.recent_diaries(session_id, key, limit=5))
+        except Exception:
+            diaries = []
+        try:
+            memories = copy.deepcopy(
+                self.memory.list_memories(session_id, character=key, limit=10, include_inactive=False)
+            )
+        except Exception:
+            memories = []
+        materials = {
+            "persona": persona,
+            "life_profile": copy.deepcopy(life_profile),
+            "character_card": copy.deepcopy(card),
+            "history_summary": history_summary,
+            "recent_context": recent_context,
+            "diaries": diaries,
+            "memories": memories,
+        }
+        return {
+            "character_key": key,
+            "character_version": version,
+            "character_exists": bool(exists),
+            "materials": materials,
+        }
+
+    def _life_plan_snapshot_is_current(
+        self,
+        session_id: str,
+        character_key: str,
+        snapshot: dict[str, Any] | None,
+    ) -> bool:
+        if not isinstance(snapshot, dict):
+            return False
+        key = str(character_key or "").strip()
+        if str(snapshot.get("character_key") or "").strip() != key or not snapshot.get("character_exists", True):
+            return False
+        expected = str(snapshot.get("character_version") or "")
+        if not expected or not hasattr(self, "_character_snapshot_version"):
+            return True
+        return self._character_snapshot_version(session_id, key) == expected
+
     def _life_today_date(self, session_id: str, now: datetime | None = None) -> str:
         current = now or self._session_now(session_id)
         return current.date().isoformat()
@@ -516,15 +620,34 @@ class LifePlanMixin:
         plan.setdefault("last_long_review_date", today_date)
         return self._normalize_life_plan_payload(plan, today_date=today_date, session_id=session_id), op_result
 
-    def _heuristic_life_plan(self, session_id: str, *, today_date: str) -> dict[str, Any]:
-        profile = self._life_profile(session_id) if hasattr(self, "_life_profile") else {}
+    def _heuristic_life_plan(
+        self,
+        session_id: str,
+        *,
+        today_date: str,
+        materials: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        has_snapshot_materials = isinstance(materials, dict)
+        materials = materials if isinstance(materials, dict) else {}
+        profile = (
+            materials.get("life_profile") or {}
+            if has_snapshot_materials
+            else (self._life_profile(session_id) if hasattr(self, "_life_profile") else {})
+        )
         anchor = (profile or {}).get("day_anchor") or "unknown"
+        card = materials.get("character_card") if isinstance(materials.get("character_card"), dict) else {}
         state = self._get_session_state(session_id)
-        role = session_schema.get_character_value(state, "custom_role_name", "")
-        if not role and hasattr(self, "_get_session_cfg"):
+        role = str(card.get("role_name") or "").strip()
+        if not role and not has_snapshot_materials:
+            role = session_schema.get_character_value(state, "custom_role_name", "")
+        if not role and not has_snapshot_materials and hasattr(self, "_get_session_cfg"):
             role = self._get_session_cfg(session_id, "role_name", "")
-        occupation = session_schema.get_character_value(state, "custom_character_occupation", "")
-        persona = session_schema.get_character_value(state, "custom_scheduled_persona", "")
+        occupation = str(card.get("occupation") or "").strip()
+        if not occupation and not has_snapshot_materials:
+            occupation = session_schema.get_character_value(state, "custom_character_occupation", "")
+        persona = str(card.get("persona") or materials.get("persona") or "").strip()
+        if not persona and not has_snapshot_materials:
+            persona = session_schema.get_character_value(state, "custom_scheduled_persona", "")
         drive_seed = "、".join(part for part in (role, occupation, persona[:60]) if part) or "自己的身份和生活压力"
         long_text = {
             "company": f"在{occupation or '白天的工作'}里证明自己的能力，同时不被职责耗空",
@@ -647,45 +770,25 @@ class LifePlanMixin:
                 normalized.append(event)
         return normalized
 
-    def _life_plan_materials(self, session_id: str, character_key: str, *, diary_date: str = "", diary: str = "") -> dict[str, Any]:
-        state = self._get_session_state(session_id)
-        history_summary = ""
-        try:
-            meta = self.app_store.get_context_meta(session_id, character_key)
-            history_summary = str(meta.get("character_history_summary") or "").strip()
-        except Exception:
-            pass
-        if not history_summary:
-            history_summary = session_schema.get_character_history_summary(state)
-        diaries = []
-        try:
-            diaries = self.app_store.recent_diaries(session_id, character_key, limit=5)
-        except Exception:
-            diaries = []
-        memories = []
-        try:
-            memories = self.memory.list_memories(session_id, character=character_key, limit=10, include_inactive=False)
-        except Exception:
-            memories = []
-        recent_context = []
-        try:
-            for msg in session_schema.get_chat_history(state)[-12:]:
-                if msg.get("role") in {"user", "assistant"} and str(msg.get("content") or "").strip():
-                    recent_context.append({
-                        "role": msg.get("role"),
-                        "content": _compact_text(msg.get("content"), 300),
-                    })
-        except Exception:
-            recent_context = []
-        return {
-            "persona": self._get_effective_persona(session_id, include_appearance=False) if hasattr(self, "_get_effective_persona") else "",
-            "life_profile": self._life_profile(session_id) if hasattr(self, "_life_profile") else {},
-            "history_summary": history_summary,
-            "recent_context": recent_context,
-            "diaries": diaries,
-            "fresh_diary": {"date": diary_date, "content": diary},
-            "memories": memories,
-        }
+    def _life_plan_materials(
+        self,
+        session_id: str,
+        character_key: str,
+        *,
+        diary_date: str = "",
+        diary: str = "",
+        character_snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        snapshot = character_snapshot or self._life_plan_character_snapshot(session_id, character_key)
+        materials = copy.deepcopy(snapshot.get("materials") or {}) if isinstance(snapshot, dict) else {}
+        materials["fresh_diary"] = {"date": diary_date, "content": diary}
+        materials.setdefault("persona", "")
+        materials.setdefault("life_profile", {})
+        materials.setdefault("history_summary", "")
+        materials.setdefault("recent_context", [])
+        materials.setdefault("diaries", [])
+        materials.setdefault("memories", [])
+        return materials
 
     def _format_life_plan_materials(self, materials: dict[str, Any]) -> str:
         diary_lines = []
@@ -751,11 +854,18 @@ class LifePlanMixin:
         reason: str = "",
         goal_instruction: str = "",
         rewrite_goals: bool = False,
+        character_snapshot: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        materials = self._life_plan_materials(
+            session_id,
+            character_key,
+            diary_date=diary_date,
+            diary=diary,
+            character_snapshot=character_snapshot,
+        )
         if not self.has_llm_config("chat", session_id) and not self.has_llm_config("image", session_id):
-            plan = self._heuristic_life_plan(session_id, today_date=today_date)
+            plan = self._heuristic_life_plan(session_id, today_date=today_date, materials=materials)
             return plan, {"status": "heuristic", "reason": "no_llm"}
-        materials = self._life_plan_materials(session_id, character_key, diary_date=diary_date, diary=diary)
         place_keys = ", ".join(sorted(PLACE_TYPES))
         review_days = self._life_plan_limit(session_id, "life_plan_long_review_days", 10)
         long_review_due = True if rewrite_goals else self._life_long_review_due(session_id, previous or {}, today_date)
@@ -916,9 +1026,13 @@ class LifePlanMixin:
         force: bool = False,
         goal_instruction: str = "",
         rewrite_goals: bool = False,
+        character_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self._life_plan_enabled(session_id):
             return {"status": "skipped", "reason": "disabled"}
+        character_snapshot = character_snapshot or self._life_plan_character_snapshot(session_id, character_key)
+        if not self._life_plan_snapshot_is_current(session_id, character_key, character_snapshot):
+            return {"status": "stale", "reason": "character_changed", "character": character_key}
         today_date = self._life_today_date(session_id, local_dt)
         row = self._load_life_plan_row(session_id, character_key)
         previous = row.get("payload") if row else {}
@@ -936,8 +1050,12 @@ class LifePlanMixin:
                 reason=reason,
                 goal_instruction=goal_instruction,
                 rewrite_goals=rewrite_goals,
+                character_snapshot=character_snapshot,
             )
             plan = await self._render_life_plan_texture(session_id, character_key, plan, today_date=today_date)
+            if not self._life_plan_snapshot_is_current(session_id, character_key, character_snapshot):
+                self._ulog(session_id, "LIFE", f"生活线丢弃陈旧结果 character={character_key}")
+                return {"status": "stale", "reason": "character_changed", "character": character_key}
             saved = self._save_life_plan_payload(session_id, character_key, plan)
             result = {
                 "status": "updated",

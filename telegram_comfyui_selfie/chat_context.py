@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import html
 import json
@@ -599,9 +600,29 @@ class ChatContextMixin:
         if hasattr(self, "_should_run_location_extract"):
             should_extract_location = self._should_run_location_extract(user_text, content)
         if content and should_extract_location:
-            async def _bg_extract():
+            location_character_key = self._context_character_key(session_id)
+            location_character_version = (
+                self._character_snapshot_version(session_id, location_character_key)
+                if hasattr(self, "_character_snapshot_version") else ""
+            )
+            location_life_profile = (
+                copy.deepcopy(self._life_profile(session_id))
+                if hasattr(self, "_life_profile") else None
+            )
+
+            async def _bg_extract(
+                captured_key: str = location_character_key,
+                captured_version: str = location_character_version,
+                captured_profile: dict[str, str] | None = location_life_profile,
+            ):
                 try:
-                    await self._update_character_place_from_text(session_id, content)
+                    await self._update_character_place_from_text(
+                        session_id,
+                        content,
+                        character_key=captured_key,
+                        expected_character_version=captured_version,
+                        life_profile=captured_profile,
+                    )
                 except Exception:
                     logger.warning("background location extract failed", exc_info=True)
             asyncio.create_task(_bg_extract())
