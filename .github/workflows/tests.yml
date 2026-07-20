@@ -31,7 +31,9 @@ jobs:
         run: python -m unittest discover -s tests -q
       - name: Check Python syntax
         run: python -m compileall -q telegram_comfyui_selfie tests
+      - name: Run frontend tests
+        run: npm run test:frontend
       - name: Check frontend syntax
-        run: node --check telegram_comfyui_selfie/static/app.js
+        run: npm run check:frontend
       - name: Validate example config
         run: python -m json.tool config.example.json > /dev/null

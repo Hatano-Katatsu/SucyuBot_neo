@@ -19,6 +19,22 @@ class StaticModuleBoundaryTestCase(unittest.TestCase):
 
         self.assertLess(admin_pos, app_pos)
 
+    def test_frontend_core_loads_before_and_is_used_by_app_entrypoint(self):
+        index = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+        app = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+
+        core_pos = index.index('<script src="/static/frontend_core.js"></script>')
+        app_pos = index.index('<script src="/static/app.js"></script>')
+        self.assertLess(core_pos, app_pos)
+        for helper in (
+            "buildRequestOptions",
+            "parseApiResponse",
+            "firstInvalidNumberField",
+            "resolveCommands",
+            "resolveSelectedSession",
+        ):
+            self.assertIn(f"frontendCore.{helper}", app)
+
     def test_admin_logs_domain_is_kept_out_of_app_entrypoint(self):
         admin_logs = (STATIC_ROOT / "admin_logs.js").read_text(encoding="utf-8")
         app = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")

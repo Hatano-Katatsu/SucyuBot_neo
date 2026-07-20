@@ -21,6 +21,9 @@ const state = {
   profiles: {},
 };
 
+const frontendCore = window.SucyuFrontendCore;
+if (!frontendCore) throw new Error("frontend_core.js 未在 app.js 前加载");
+
 const viewMeta = {
   overview: ["总览", "服务状态、连接测试和快捷入口"],
   settings: ["设置", "连接、模型、生图和推送参数"],
@@ -218,23 +221,14 @@ function $(selector) { return document.querySelector(selector); }
 function $all(selector) { return [...document.querySelectorAll(selector)]; }
 
 async function api(path, options = {}) {
-  const init = { ...options };
-  if (init.body && typeof init.body !== "string") {
-    init.headers = { "Content-Type": "application/json", ...(init.headers || {}) };
-    init.body = JSON.stringify(init.body);
-  }
-  const res = await fetch(path, init);
+  const res = await fetch(path, frontendCore.buildRequestOptions(options));
   const raw = await res.text();
-  let data = {};
-  try { data = raw ? JSON.parse(raw) : {}; } catch (_err) { data = {}; }
-  if (res.status === 401) {
-    window.location.href = "/";
-    throw new Error("登录已过期，请重新登录");
+  try {
+    return frontendCore.parseApiResponse(res, raw);
+  } catch (err) {
+    if (err?.authExpired) window.location.href = "/";
+    throw err;
   }
-  if (!res.ok || data.ok === false) {
-    throw new Error(data.error || raw.slice(0, 200) || (res.status + " " + res.statusText));
-  }
-  return data;
 }
 
 function toast(message, kind = "info") {
@@ -360,27 +354,22 @@ function renderSessionSelector() {
   const select = $("#session-select");
   const fixed = $("#session-select-fixed");
   const isAdmin = state.auth.role === "admin";
+  state.selectedSession = frontendCore.resolveSelectedSession(
+    state.sessions,
+    state.selectedSession,
+    state.auth,
+  ) || null;
   if (!isAdmin) {
     select.hidden = true;
     fixed.hidden = false;
     const userId = state.auth.user_id || "";
     const fixedSid = userId ? `telegram:${userId}` : "";
     fixed.textContent = fixedSid ? `当前会话: ${fixedSid}` : "未登录";
-    if (state.selectedSession !== fixedSid) {
-      state.selectedSession = fixedSid;
-    }
     updateSessionActionButtons();
     return;
   }
   select.hidden = false;
   fixed.hidden = true;
-  if (state.selectedSession && !state.sessions.some(item => item.session_id === state.selectedSession)) {
-    state.selectedSession = null;
-  }
-  // 管理员默认选中第一个会话，避免角色页空白
-  if (!state.selectedSession && state.sessions.length) {
-    state.selectedSession = state.sessions[0].session_id;
-  }
   const opts = ['<option value="">选择会话...</option>'];
   state.sessions.forEach(item => {
     const selected = item.session_id === state.selectedSession ? " selected" : "";
@@ -727,11 +716,13 @@ function fillCommandSelect() {
 }
 
 async function loadCommandSelect() {
+  const fallbackCommands = commands;
   try {
     const data = await api("/api/commands");
-    if (Array.isArray(data.commands) && data.commands.length) commands = data.commands;
+    commands = frontendCore.resolveCommands(data.commands, fallbackCommands);
   } catch (err) {
     console.warn("加载命令列表失败，使用内置兜底", err);
+    commands = frontendCore.resolveCommands([], fallbackCommands);
   }
   fillCommandSelect();
 }
@@ -967,9 +958,9 @@ async function initEvents() {
     const btn = event.submitter;
     setBusy(btn, true);
     try {
-      const invalid = [...event.currentTarget.querySelectorAll('input[type="number"]')].find(input => {
-        return input.value.trim() !== "" && !Number.isFinite(Number(input.value));
-      });
+      const invalid = frontendCore.firstInvalidNumberField(
+        event.currentTarget.querySelectorAll('input[type="number"]'),
+      );
       if (invalid) {
         invalid.focus();
         throw new Error("字段「" + (invalid.closest("label")?.textContent?.trim() || invalid.name) + "」必须是有效数字");
