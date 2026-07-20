@@ -407,6 +407,11 @@ async def api_delete_character(request: web.Request):
     if not session_allowed(request, sid):
         return json_error("无权访问此会话", status=403)
     character_id = request.match_info["character_id"]
+    async with character_operation_lock(service, sid):
+        return _delete_character_locked(service, sid, character_id)
+
+
+def _delete_character_locked(service, sid: str, character_id: str):
     default_id = service._default_character_payload().get("id") or ""
     state = service._get_session_state(sid)
     saved = session_schema.get_saved_characters(state)

@@ -790,6 +790,56 @@ def _apply_wardrobe_direct(service, sid: str, state: dict[str, Any], wardrobe: d
     return rendered
 
 
+def _commit_staged_clothing_state(target: dict[str, Any], staged: dict[str, Any]) -> None:
+    """仅提交衣柜分类会修改的 clothing 字段，保留 await 期间产生的其他会话状态。"""
+    wardrobe = copy.deepcopy(session_schema.get_wardrobe(staged))
+    session_schema.set_wardrobe(target, wardrobe)
+    session_schema.set_outfit(target, session_schema.get_outfit(staged))
+    session_schema.clear_wardrobe_item_states(target)
+    for slot, value in session_schema.get_wardrobe_item_states(staged).items():
+        session_schema.set_wardrobe_item_state(target, slot, value)
+    session_schema.set_closet(target, copy.deepcopy(session_schema.get_closet(staged)))
+    session_schema.set_public_fallback_outfit(
+        target,
+        copy.deepcopy(session_schema.get_public_fallback_outfit(staged)),
+    )
+    nudity = session_schema.get_nudity(staged)
+    if nudity:
+        session_schema.set_nudity(target, nudity, at=session_schema.get_nudity_at(staged))
+    else:
+        session_schema.clear_nudity(target)
+
+
+def _wardrobe_character_matches(service, sid: str, expected_key: str) -> bool:
+    return active_context_character_key(service, sid) == expected_key
+
+
+async def _apply_web_wardrobe_staged(
+    service,
+    sid: str,
+    state: dict[str, Any],
+    description: str,
+    *,
+    replace: bool = False,
+) -> tuple[bool, str, dict[str, Any]]:
+    """在副本上完成可能跨 LLM 的换装，角色未变化时才提交到 live state。"""
+    expected_key = active_context_character_key(service, sid)
+    staged = copy.deepcopy(state)
+    rendered = await service._wardrobe_apply_to_state(
+        staged,
+        description,
+        replace=replace,
+        session_id=sid,
+    )
+    current = service._get_session_state(sid)
+    if not _wardrobe_character_matches(service, sid, expected_key):
+        service._ulog(sid, "WARDROBE", f"丢弃 Web 衣柜更新: 活动角色已从 {expected_key!r} 改变")
+        return False, "", current
+    _commit_staged_clothing_state(current, staged)
+    service._save_session_state(sid, current)
+    return True, rendered or "（已清空）", current
+
+
 async def api_update_wardrobe(request: web.Request):
     service = service_from(request)
     sid = request.match_info["session_id"]
@@ -802,6 +852,11 @@ async def api_update_wardrobe(request: web.Request):
     if not isinstance(payload, dict):
         return json_error("衣柜操作必须是 JSON 对象")
 
+    async with character_operation_lock(service, sid):
+        return await _update_wardrobe_locked(service, sid, payload)
+
+
+async def _update_wardrobe_locked(service, sid: str, payload: dict[str, Any]):
     # 前端 data-* 属性用连字符命名，统一成下划线再分发。
     action = str(payload.get("action") or "apply").strip().replace("-", "_")
     state = service._get_session_state(sid)
@@ -811,13 +866,25 @@ async def api_update_wardrobe(request: web.Request):
         description = str(payload.get("description") or "").strip()
         if not description:
             return json_error("请输入要修改的穿搭")
-        result = await service._apply_wardrobe(sid, description, replace=(action == "replace"))
-        state = service._get_session_state(sid)
+        committed, result, state = await _apply_web_wardrobe_staged(
+            service,
+            sid,
+            state,
+            description,
+            replace=(action == "replace"),
+        )
+        if not committed:
+            return json_error("活动角色已改变，衣柜更新未保存，请重试", status=409)
     elif action == "save_closet":
         description = str(payload.get("description") or "").strip()
         if not description:
             return json_error("请输入要收藏的衣物")
-        change = await service._classify_wardrobe_items(state, description)
+        expected_key = active_context_character_key(service, sid)
+        change = await service._classify_wardrobe_items(copy.deepcopy(state), description)
+        state = service._get_session_state(sid)
+        if not _wardrobe_character_matches(service, sid, expected_key):
+            service._ulog(sid, "WARDROBE", f"丢弃 Web 衣橱收藏: 活动角色已从 {expected_key!r} 改变")
+            return json_error("活动角色已改变，衣橱收藏未保存，请重试", status=409)
         names = change.get("names") if isinstance(change.get("names"), dict) else {}
         closet = session_schema.get_closet(state)
         now = time.time()
@@ -871,8 +938,9 @@ async def api_update_wardrobe(request: web.Request):
         service._save_session_state(sid, state)
         result = session_schema.get_outfit(state)
     elif action == "clear":
-        result = await service._apply_wardrobe(sid, "reset")
-        state = service._get_session_state(sid)
+        committed, result, state = await _apply_web_wardrobe_staged(service, sid, state, "reset")
+        if not committed:
+            return json_error("活动角色已改变，衣柜更新未保存，请重试", status=409)
     elif action == "set_item_state":
         slot = str(payload.get("slot") or "").strip()
         item_state = str(payload.get("state") or "").strip()
@@ -1078,6 +1146,11 @@ async def api_update_session(request: web.Request):
     if not _session_allowed(request, sid):
         return json_error("无权访问此会话", status=403)
     payload = await request.json()
+    async with character_operation_lock(service, sid):
+        return _update_session_locked(service, sid, payload)
+
+
+def _update_session_locked(service, sid: str, payload: dict[str, Any]):
     state = service._get_session_state(sid)
     allowed = {
         "custom_scheduled_persona", "custom_role_name", "custom_bot_name", "custom_bot_self_name",
@@ -1821,7 +1894,8 @@ async def api_run_command(request: web.Request):
     if not _session_allowed(request, sid):
         return json_error("无权在此 Chat ID 运行命令", status=403)
     try:
-        await asyncio.wait_for(service.dispatch_command(chat_id, sid, command, arg), timeout=900)
+        async with character_operation_lock(service, sid):
+            await asyncio.wait_for(service.dispatch_command(chat_id, sid, command, arg), timeout=900)
     except Exception as exc:
         return json_error(str(exc), status=502)
     return json_ok()
