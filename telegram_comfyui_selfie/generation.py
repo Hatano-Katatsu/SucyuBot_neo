@@ -1536,10 +1536,8 @@ def build_prompt(
     # 第三人称双人取景，而非贴身 POV。此处与规划器的几何闸门同源，覆盖无规划器/规划器漏判路径。
     partner_behind = is_partner_scene and not is_ntr_scene and _scene_breaks_pov_facing(scene_desc)
     if is_ntr_scene:
-        # NTR 推送：移除 solo、允许伴侣（第三人）完整入画、不强制 POV
-        scene_desc = re.sub(r"\bsolo\b,?\s*", "", scene_desc)
-        if scene_has_partner:
-            scene_desc = re.sub(r"\b(?:1girl|1boy)\b,?\s*", "", scene_desc)
+        # NTR 推送：移除人数/单人标签、允许伴侣（第三人）完整入画、不强制 POV
+        scene_desc = re.sub(r"\b(?:1girl|1boy|solo)\b,?\s*", "", scene_desc)
         if is_sex_scene:
             # 性爱 NTR：伴侣完整或局部入画，放行 device
             if scene_has_partner:
