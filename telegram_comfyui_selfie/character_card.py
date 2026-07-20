@@ -117,7 +117,7 @@ def apply_card_to_state(state: dict[str, Any], data: dict[str, Any]) -> None:
         s = str(raw).strip() if raw is not None else ""
         if s:
             try:
-                session_schema.set_character_value(state, "purity", max(0, min(10, int(s))))
+                session_schema.set_character_value(state, "purity", max(-1, min(10, int(s))))
                 session_schema.set_character_value(state, "purity_user_set", True)
             except (TypeError, ValueError):
                 session_schema.set_character_value(state, "purity", None)

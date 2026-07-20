@@ -1225,7 +1225,7 @@ def _update_session_locked(service, sid: str, payload: dict[str, Any]):
     if "purity" in payload:
         raw = str(payload["purity"]).strip()
         if raw:
-            session_schema.set_character_value(state, "purity", max(0, min(10, int(raw))))
+            session_schema.set_character_value(state, "purity", max(-1, min(10, int(raw))))
             session_schema.set_character_value(state, "purity_user_set", True)
         else:
             session_schema.set_character_value(state, "purity", None)

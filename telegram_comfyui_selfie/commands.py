@@ -445,7 +445,7 @@ class CommandHandlersMixin:
                 session_schema.set_character_value(state, "purity", None)
                 session_schema.set_character_value(state, "purity_user_set", False)
             else:
-                session_schema.set_character_value(state, "purity", max(0, min(10, int(purity))))
+                session_schema.set_character_value(state, "purity", max(-1, min(10, int(purity))))
                 session_schema.set_character_value(state, "purity_user_set", True)
                 self._snapshot_character(state)
         push_frequency = str(answers.get("push_frequency") or "").strip().lower()
@@ -1976,7 +1976,7 @@ class CommandHandlersMixin:
         if not text:
             p = self._get_purity(session_id)
             src = "手动设定" if session_schema.get_character_value(state, "purity_user_set", False) else "自动/默认"
-            await self.send_message(chat_id, f"当前纯良度: {p}/10（{src}）\nNTR 触发周期: {self._compute_ntr_threshold(p)}天\n用法: /纯良度 0~10 或 /纯良度 auto")
+            await self.send_message(chat_id, f"当前纯良度: {p}/10（{src}）\nNTR 触发周期: {self._compute_ntr_threshold(p)}天\n用法: /纯良度 -1~10 或 /纯良度 auto")
             return
         if text in ("auto", "默认", "reset", "自动"):
             session_schema.set_character_value(state, "purity", None)
@@ -1985,9 +1985,9 @@ class CommandHandlersMixin:
             await self.send_message(chat_id, f"已恢复自动/默认纯良度: {self._get_purity(session_id)}/10")
             return
         try:
-            val = max(0, min(10, int(text)))
+            val = max(-1, min(10, int(text)))
         except ValueError:
-            await self.send_message(chat_id, "请输入 0~10 的整数，或 auto。")
+            await self.send_message(chat_id, "请输入 -1~10 的整数，或 auto。")
             return
         session_schema.set_character_value(state, "purity", val)
         session_schema.set_character_value(state, "purity_user_set", True)
@@ -2270,7 +2270,7 @@ class CommandHandlersMixin:
                 session_schema.set_character_value(state, "custom_spatial_relationship", relationship)
             if result.get("purity") is not None and not session_schema.get_character_value(state, "purity_user_set", False):
                 try:
-                    session_schema.set_character_value(state, "purity", max(0, min(10, int(result["purity"]))))
+                    session_schema.set_character_value(state, "purity", max(-1, min(10, int(result["purity"]))))
                 except (TypeError, ValueError):
                     pass
             self._snapshot_character(state)

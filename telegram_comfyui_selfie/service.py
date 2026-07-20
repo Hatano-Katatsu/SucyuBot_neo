@@ -332,19 +332,21 @@ class TelegramComfyUIService(
         raw = session_schema.get_character_value(state, "purity") if state else None
         if raw is not None:
             try:
-                return max(0, min(10, int(raw)))
+                return max(-1, min(10, int(raw)))
             except (TypeError, ValueError):
                 return 5
         default = self.config.get("default_purity", "")
         if default not in ("", None):
             try:
-                return max(0, min(10, int(default)))
+                return max(-1, min(10, int(default)))
             except (TypeError, ValueError):
                 pass
         return 1
 
     @staticmethod
     def _compute_ntr_threshold(purity: int) -> int:
+        if purity < 0:
+            return 99999
         if purity <= 0:
             return 1
         if purity >= 10:

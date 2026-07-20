@@ -1538,10 +1538,16 @@ async def plan_roleplay_image(
                 '除非最近对话明确表明用户已来到角色身边（如「我到了」「开门」「我来找你」），否则 user_location 应填对应地点枚举。'
             )
     if is_push:
-        user = (
-            f"当前时段: {time_period}，星期: {weekday}，天气: {weather}，推送模式: {mode}。\n"
-            "请直接输出 JSON（以 { 开头），不要输出角色台词、叙述文本或括号包裹的场景描写。"
-        )
+        parts = [
+            f"当前时段: {time_period}，星期: {weekday}，天气: {weather}，推送模式: {mode}。",
+        ]
+        if has_explicit_scene_request:
+            parts.append(f"图片意图: {intent or '未提供'}")
+            parts.append(f"必须包含: {must_include or '无'}")
+            parts.append(f"聊天模型画面草案: {prompt or '无'}")
+        if requested_view:
+            parts.append(f"用户指定视角: {requested_view}")
+        user = "\n".join(parts) + "\n请直接输出 JSON（以 { 开头），不要输出角色台词、叙述文本或括号包裹的场景描写。"
     else:
         user = (
             f"当前天气: {weather}\n"

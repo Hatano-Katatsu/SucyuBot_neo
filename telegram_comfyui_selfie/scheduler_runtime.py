@@ -1704,7 +1704,7 @@ class SchedulerRuntimeMixin:
             mode = mode_override or "normal"
             if last and time.time() - last > self._compute_ntr_threshold(purity) * 86400:
                 mode = "ntr"
-            if mode == "normal" and purity <= 0 and random.random() < 0.4:
+            if mode == "normal" and purity == 0 and random.random() < 0.4:
                 mode = "ntr"
             if mode == "morning":
                 await self._run_dream(session_id, local_dt, reason="morning", force=True)
