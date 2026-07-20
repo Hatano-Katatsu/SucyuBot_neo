@@ -914,14 +914,17 @@ class SchedulerRuntimeMixin:
             result = await self._summarize_all_memories(session_id, character_key, editable, target_n=limit, diaries=diaries)
         else:
             result = await self._incremental_organize_memories(session_id, character_key, editable, diaries=diaries)
-        try:
-            merge_result = self.memory.merge_user_profile_memories(session_id, character=character_key, source="dream-user-profile-merge")
-            if merge_result.get("changed"):
-                result = dict(result)
-                result["user_profile_merge"] = merge_result
-                self._ulog(session_id, "MEMORY", f"用户画像合并 {json.dumps(merge_result, ensure_ascii=False)}")
-        except Exception:
-            logger.debug("merge user profile memories failed", exc_info=True)
+        # 全量替换必须以存储层的单事务作为唯一写入；额外合并会破坏失败回滚，
+        # 也会改动因 prompt 预算而明确要求保持不变的 omitted 记忆。
+        if result.get("mode") != "summarize":
+            try:
+                merge_result = self.memory.merge_user_profile_memories(session_id, character=character_key, source="dream-user-profile-merge")
+                if merge_result.get("changed"):
+                    result = dict(result)
+                    result["user_profile_merge"] = merge_result
+                    self._ulog(session_id, "MEMORY", f"用户画像合并 {json.dumps(merge_result, ensure_ascii=False)}")
+            except Exception:
+                logger.debug("merge user profile memories failed", exc_info=True)
         return result
 
     async def _incremental_organize_memories(
@@ -1117,60 +1120,43 @@ class SchedulerRuntimeMixin:
                 result,
             )
             return result
-        failed = 0
-        added = 0
-        kept_ids: set[int] = set()
-        for item in new_memories[:target_n]:
-            if not isinstance(item, dict) or not item.get("summary"):
-                failed += 1
-                self._record_memory_operation_failure(
-                    session_id,
-                    "dream-memory-summarize-add",
-                    item,
-                    {"ok": False, "error": "invalid memory item"},
-                )
-                continue
-            mid = self.memory.add_memory(
-                session_id, item.get("kind", "event"), item["summary"],
-                character=character_key, importance=item.get("importance", 3),
-                tags=item.get("tags") or [], source="dream-summarize",
+        try:
+            replacement = self.memory.replace_non_manual_memories(
+                session_id,
+                character_key,
+                included_ids,
+                new_memories,
+                source="dream-summarize",
+                max_candidates=target_n,
             )
-            if mid is None:
-                failed += 1
-                self._record_memory_operation_failure(
-                    session_id,
-                    "dream-memory-summarize-add",
-                    item,
-                    {"ok": False, "error": "add_memory returned None"},
-                )
-            else:
-                kept_ids.add(int(mid))
-                added += 1
-        # 新摘要至少成功落库后再停用旧条目；若落库失败，不破坏原有记忆集合。
-        deactivated = 0
-        if added:
-            for m in editable:
-                try:
-                    mid = int(m["id"])
-                except Exception:
-                    failed += 1
-                    continue
-                if (included_ids and mid not in included_ids) or mid in kept_ids:
-                    continue
-                ok = self.memory.deactivate_non_manual_memory(session_id, mid, character=character_key)
-                if ok:
-                    deactivated += 1
-                else:
-                    failed += 1
-                    self._record_memory_operation_failure(
-                        session_id,
-                        "dream-memory-summarize-deactivate",
-                        {"id": m.get("id"), "summary": m.get("summary")},
-                        {"ok": False},
-                    )
-        status = "ok" if failed == 0 else ("partial_failed" if added else "failed")
+        except Exception as exc:
+            logger.warning("dream memory atomic replacement failed", exc_info=True)
+            result = {
+                "status": "failed",
+                "mode": "summarize",
+                "llm_purpose": llm_purpose,
+                "llm_attempts": attempts,
+                "editable": len(editable),
+                "target": target_n,
+                "deactivated": 0,
+                "added": 0,
+                "failed": 1,
+                "included": len(included_ids),
+                "omitted": omitted,
+                "error": str(exc),
+            }
+            self._record_memory_operation_failure(
+                session_id,
+                "dream-memory-summarize-replace",
+                {"included_ids": sorted(included_ids), "memories": new_memories},
+                result,
+            )
+            return result
+
+        added = int(replacement.get("added") or 0)
+        deactivated = int(replacement.get("deactivated") or 0)
         result = {
-            "status": status,
+            "status": "ok",
             "mode": "summarize",
             "llm_purpose": llm_purpose,
             "llm_attempts": attempts,
@@ -1178,7 +1164,7 @@ class SchedulerRuntimeMixin:
             "target": target_n,
             "deactivated": deactivated,
             "added": added,
-            "failed": failed,
+            "failed": 0,
             "included": len(included_ids),
             "omitted": omitted,
         }

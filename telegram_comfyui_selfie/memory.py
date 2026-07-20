@@ -181,6 +181,172 @@ class LongTermMemoryStore:
             return int(cur.lastrowid)
 
     @staticmethod
+    def _prepare_replacement_memories(
+        candidates: Any,
+        *,
+        max_candidates: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """严格校验全量重写候选，并转换成可直接写库的规范结构。"""
+        if not isinstance(candidates, list) or not candidates:
+            raise ValueError("全量重写候选必须是非空数组")
+        if max_candidates is not None and len(candidates) > max(0, int(max_candidates)):
+            raise ValueError(f"全量重写候选超过上限：{len(candidates)} > {max_candidates}")
+
+        prepared: list[dict[str, Any]] = []
+        user_profile_count = 0
+        for index, candidate in enumerate(candidates):
+            if not isinstance(candidate, dict):
+                raise ValueError(f"第 {index + 1} 条全量重写候选不是对象")
+
+            summary = candidate.get("summary")
+            if not isinstance(summary, str) or not summary.strip():
+                raise ValueError(f"第 {index + 1} 条全量重写候选缺少有效 summary")
+
+            raw_kind = candidate.get("kind", "event")
+            if not isinstance(raw_kind, str):
+                raise ValueError(f"第 {index + 1} 条全量重写候选 kind 无效")
+            kind_key = raw_kind.strip().lower()
+            kind = KIND_ALIASES.get(kind_key, kind_key)
+            if kind not in VALID_KINDS or kind == "manual":
+                raise ValueError(f"第 {index + 1} 条全量重写候选 kind 无效：{raw_kind!r}")
+
+            raw_importance = candidate.get("importance", 3)
+            if isinstance(raw_importance, bool) or not isinstance(raw_importance, int) or not 1 <= raw_importance <= 5:
+                raise ValueError(f"第 {index + 1} 条全量重写候选 importance 必须是 1-5 的整数")
+
+            raw_tags = candidate.get("tags", [])
+            if not isinstance(raw_tags, list) or any(not isinstance(tag, str) for tag in raw_tags):
+                raise ValueError(f"第 {index + 1} 条全量重写候选 tags 必须是字符串数组")
+
+            if kind == USER_PROFILE_KIND:
+                user_profile_count += 1
+                if user_profile_count > 1:
+                    raise ValueError("全量重写候选最多包含一条 user_profile")
+
+            prepared.append({
+                "kind": kind,
+                "summary": summary.strip()[:600],
+                "importance": raw_importance,
+                "tags": normalize_tags(raw_tags),
+            })
+        return prepared
+
+    def replace_non_manual_memories(
+        self,
+        session_id: str,
+        character: str,
+        included_ids: Any,
+        candidates: Any,
+        *,
+        source: str = "dream-summarize",
+        max_candidates: int | None = None,
+    ) -> dict[str, Any]:
+        """原子插入重写集合并停用本次实际提交给模型的旧记忆。"""
+        if not str(session_id or "").strip():
+            raise ValueError("session_id 不能为空")
+        prepared = self._prepare_replacement_memories(candidates, max_candidates=max_candidates)
+
+        if isinstance(included_ids, (str, bytes)):
+            raise ValueError("included_ids 必须是记忆 ID 集合")
+        try:
+            raw_ids = list(included_ids)
+        except TypeError as exc:
+            raise ValueError("included_ids 必须是记忆 ID 集合") from exc
+        normalized_ids: list[int] = []
+        for value in raw_ids:
+            if isinstance(value, bool):
+                raise ValueError("included_ids 包含无效记忆 ID")
+            try:
+                memory_id = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("included_ids 包含无效记忆 ID") from exc
+            if memory_id <= 0:
+                raise ValueError("included_ids 包含无效记忆 ID")
+            if memory_id not in normalized_ids:
+                normalized_ids.append(memory_id)
+        if not normalized_ids:
+            raise ValueError("全量重写没有可替换的旧记忆")
+
+        character = (character or "").strip()
+        now = time.time()
+        with closing(self._connect()) as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                rows: list[sqlite3.Row] = []
+                # 为兼容 SQLite 较低的绑定变量上限，在同一事务内分块查询和更新。
+                for offset in range(0, len(normalized_ids), 500):
+                    id_chunk = normalized_ids[offset:offset + 500]
+                    placeholders = ",".join("?" for _ in id_chunk)
+                    rows.extend(conn.execute(
+                        f"""
+                        SELECT id, kind, status FROM memories
+                        WHERE session_id = ? AND character = ? AND id IN ({placeholders})
+                        """,
+                        (session_id, character, *id_chunk),
+                    ).fetchall())
+                rows_by_id = {int(row["id"]): row for row in rows}
+                missing = [memory_id for memory_id in normalized_ids if memory_id not in rows_by_id]
+                if missing:
+                    raise ValueError(f"待替换旧记忆不存在或不属于当前角色：{missing}")
+                invalid_old = [
+                    memory_id
+                    for memory_id, row in rows_by_id.items()
+                    if row["status"] != "active" or row["kind"] == "manual"
+                ]
+                if invalid_old:
+                    raise ValueError(f"待替换旧记忆已失效或属于手动记忆：{invalid_old}")
+
+                inserted_ids: list[int] = []
+                for candidate in prepared:
+                    cur = conn.execute(
+                        """
+                        INSERT INTO memories(
+                            session_id, character, kind, summary, tags, importance,
+                            source, status, created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                        """,
+                        (
+                            session_id,
+                            character,
+                            candidate["kind"],
+                            candidate["summary"],
+                            json.dumps(candidate["tags"], ensure_ascii=False),
+                            candidate["importance"],
+                            str(source or "")[:800],
+                            now,
+                            now,
+                        ),
+                    )
+                    inserted_ids.append(int(cur.lastrowid))
+
+                deactivated = 0
+                for offset in range(0, len(normalized_ids), 500):
+                    id_chunk = normalized_ids[offset:offset + 500]
+                    placeholders = ",".join("?" for _ in id_chunk)
+                    cur = conn.execute(
+                        f"""
+                        UPDATE memories SET status = 'deleted', updated_at = ?
+                        WHERE session_id = ? AND character = ? AND id IN ({placeholders})
+                          AND status = 'active' AND kind <> 'manual'
+                        """,
+                        (now, session_id, character, *id_chunk),
+                    )
+                    deactivated += int(cur.rowcount or 0)
+                if deactivated != len(normalized_ids):
+                    raise RuntimeError("旧记忆集合在全量重写事务中发生变化")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+        return {
+            "added": len(inserted_ids),
+            "deactivated": len(normalized_ids),
+            "inserted_ids": inserted_ids,
+        }
+
+    @staticmethod
     def _scope_clause(session_id: str, character: str | None) -> tuple[str, list[Any]]:
         clause = "session_id = ?"
         params: list[Any] = [session_id]
