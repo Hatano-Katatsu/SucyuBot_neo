@@ -419,4 +419,16 @@ DEFAULT_CONFIG = {
     "tavily_api_key": "",
     "web_search_enabled": False,
     "web_search_daily_limit": "5",
+    # 外部 HTTP 响应体按用途设限；可在配置文件中覆盖单项字节数。
+    "http_response_limits": {
+        "llm_json": 16777216,
+        "telegram_json": 4194304,
+        "telegram_file": 20971520,
+        "comfy_json": 16777216,
+        "generated_image": 67108864,
+        "weather_json": 2097152,
+        "places_json": 4194304,
+        "search_json": 4194304,
+        "error_text": 65536,
+    },
 }

@@ -153,5 +153,16 @@
   "amap_poi_per_type": "5",
   "google_places_api_key": "",
   "google_places_enabled": true,
-  "google_places_language": ""
+  "google_places_language": "",
+  "http_response_limits": {
+    "llm_json": 16777216,
+    "telegram_json": 4194304,
+    "telegram_file": 20971520,
+    "comfy_json": 16777216,
+    "generated_image": 67108864,
+    "weather_json": 2097152,
+    "places_json": 4194304,
+    "search_json": 4194304,
+    "error_text": 65536
+  }
 }

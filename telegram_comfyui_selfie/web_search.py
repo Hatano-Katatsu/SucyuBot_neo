@@ -6,6 +6,8 @@ from typing import Any
 
 import aiohttp
 
+from .http_limits import DEFAULT_RESPONSE_LIMITS, read_limited_json, read_limited_text
+
 logger = logging.getLogger(__name__)
 
 TAVILY_API_URL = "https://api.tavily.com/search"
@@ -52,6 +54,8 @@ async def tavily_search(
     topic: str = "general",
     days: int = 0,
     timeout: float = 15.0,
+    max_response_bytes: int | None = None,
+    max_error_bytes: int | None = None,
 ) -> list[dict[str, str]]:
     """调 Tavily 搜索，返回 [{title, content, url}]；答案摘要若有放第一条。失败抛异常由调用方兜底。"""
     payload: dict[str, Any] = {
@@ -63,6 +67,8 @@ async def tavily_search(
     }
     if days > 0:
         payload["days"] = int(days)
+    response_bytes = max_response_bytes or DEFAULT_RESPONSE_LIMITS["search_json"]
+    error_bytes = max_error_bytes or DEFAULT_RESPONSE_LIMITS["error_text"]
     async with aiohttp.ClientSession(trust_env=True, timeout=aiohttp.ClientTimeout(total=timeout)) as session:
         async with session.post(
             TAVILY_API_URL,
@@ -70,9 +76,17 @@ async def tavily_search(
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         ) as resp:
             if resp.status != 200:
-                detail = (await resp.text())[:200]
+                detail = (await read_limited_text(
+                    resp,
+                    error_bytes,
+                    label="Tavily 错误响应",
+                ))[:200]
                 raise RuntimeError(f"tavily http {resp.status}: {detail}")
-            data = await resp.json(content_type=None)
+            data = await read_limited_json(
+                resp,
+                response_bytes,
+                label="Tavily JSON 响应",
+            )
     if not isinstance(data, dict):
         raise RuntimeError("tavily returned non-object payload")
     results: list[dict[str, str]] = []

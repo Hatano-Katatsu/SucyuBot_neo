@@ -8,6 +8,7 @@ from typing import Any
 import aiohttp
 
 from .command_aliases import BARE_COMMAND_ALIASES, resolve_command_alias
+from .http_limits import read_limited_bytes, read_limited_json, read_limited_text, response_limit
 from . import session_schema
 
 logger = logging.getLogger(__name__)
@@ -85,7 +86,11 @@ class TelegramIOMixin:
         if proxy:
             kwargs["proxy"] = proxy
         async with self.http.post(url, **kwargs) as resp:
-            payload = await resp.json(content_type=None)
+            payload = await read_limited_json(
+                resp,
+                response_limit(self.config, "telegram_json"),
+                label=f"Telegram {method} JSON 响应",
+            )
             if not payload.get("ok"):
                 raise RuntimeError(f"Telegram {method} failed: {payload}")
             return payload
@@ -116,7 +121,11 @@ class TelegramIOMixin:
         if proxy:
             kwargs["proxy"] = proxy
         async with self.http.post(url, **kwargs) as resp:
-            payload = await resp.json(content_type=None)
+            payload = await read_limited_json(
+                resp,
+                response_limit(self.config, "telegram_json"),
+                label="Telegram sendPhoto JSON 响应",
+            )
             if not payload.get("ok"):
                 raise RuntimeError(f"Telegram sendPhoto failed: {payload}")
 
@@ -613,9 +622,17 @@ class TelegramIOMixin:
             kwargs["proxy"] = proxy
         async with self.http.get(url, **kwargs) as resp:
             if resp.status != 200:
-                text = await resp.text()
+                text = await read_limited_text(
+                    resp,
+                    response_limit(self.config, "error_text"),
+                    label="Telegram 文件下载错误响应",
+                )
                 raise RuntimeError(f"Telegram file download failed: {resp.status} {text}")
-            data = await resp.read()
+            data = await read_limited_bytes(
+                resp,
+                response_limit(self.config, "telegram_file"),
+                label="Telegram 文件下载响应",
+            )
             mime_type = resp.headers.get("Content-Type") or mimetypes.guess_type(file_path)[0] or "image/jpeg"
         return data, mime_type
 
@@ -624,7 +641,7 @@ class TelegramIOMixin:
         file_id = str(photo.get("file_id") or "")
         if not file_id:
             return None
-        if int(photo.get("file_size") or 0) > 20 * 1024 * 1024:
+        if int(photo.get("file_size") or 0) > response_limit(self.config, "telegram_file"):
             return None
         return await self._download_telegram_file(file_id)
 

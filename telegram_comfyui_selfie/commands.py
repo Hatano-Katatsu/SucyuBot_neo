@@ -20,6 +20,7 @@ from .deletion_runtime import (
     DeletionForbiddenError,
     DeletionNotFoundError,
 )
+from .http_limits import read_limited_json, response_limit
 from .memory import format_memory_lines
 from .model_security import validate_public_model_base_url
 
@@ -1676,7 +1677,11 @@ class CommandHandlersMixin:
         try:
             self._ensure_comfy_session()
             async with self.comfy_session.get(f"{self.comfyui_url}/system_stats") as resp:
-                stats = await resp.json()
+                stats = await read_limited_json(
+                    resp,
+                    response_limit(self.config, "comfy_json"),
+                    label="ComfyUI system_stats 响应",
+                )
             sys = stats.get("system", {})
             backend = self.config.get("image_backend", "native")
             workflow = self.config.get("animatool_workflow", "turbo_v1")

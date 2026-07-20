@@ -31,6 +31,7 @@ from .defaults import DEFAULT_CONFIG
 from .deletion_runtime import DeletionRuntimeMixin
 from .image_planning import VALID_VIEWS, plan_roleplay_image
 from .image_state_runtime import ImageStateRuntimeMixin
+from .http_limits import response_limit
 from .memory import LongTermMemoryStore
 from .chat_context import ChatContextMixin
 from .commands import CommandHandlersMixin
@@ -1605,7 +1606,10 @@ class TelegramComfyUIService(
             return "今天的联网搜索次数已用完，查不了资料。用角色口吻自然带过这个话题，不要编造事实。"
         try:
             results = await web_search.tavily_search(
-                str(self.config.get("tavily_api_key", "") or "").strip(), query
+                str(self.config.get("tavily_api_key", "") or "").strip(),
+                query,
+                max_response_bytes=response_limit(self.config, "search_json"),
+                max_error_bytes=response_limit(self.config, "error_text"),
             )
         except Exception as exc:
             self._ulog(session_id, "SEARCH", f"搜索失败: {exc}")

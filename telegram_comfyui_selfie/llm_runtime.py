@@ -11,6 +11,7 @@ from typing import Any
 
 import aiohttp
 
+from .http_limits import read_limited_json, read_limited_text, response_limit
 from .model_security import PublicOnlyResolver, validate_public_model_base_url
 
 
@@ -492,7 +493,11 @@ class LLMRuntimeMixin:
                     allow_redirects=False,
                 ) as resp:
                     if resp.status != 200:
-                        text = await resp.text()
+                        text = await read_limited_text(
+                            resp,
+                            response_limit(self.config, "error_text"),
+                            label="LLM 错误响应",
+                        )
                         self._record_llm_debug(
                             purpose=purpose,
                             tag=tag,
@@ -520,7 +525,11 @@ class LLMRuntimeMixin:
                             await asyncio.sleep(1)
                             continue
                         raise last_error
-                    data = await resp.json()
+                    data = await read_limited_json(
+                        resp,
+                        response_limit(self.config, "llm_json"),
+                        label="LLM JSON 响应",
+                    )
                     break
         else:
             raise last_error

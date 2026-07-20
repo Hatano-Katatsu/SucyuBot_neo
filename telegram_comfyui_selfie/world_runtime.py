@@ -14,6 +14,8 @@ from . import character_card, session_schema
 
 import aiohttp
 
+from .http_limits import read_limited_json, response_limit
+
 logger = logging.getLogger(__name__)
 
 # 时间段顺序与各时间段的“代表时刻”——用代表时刻（而非边界）推断接下来会去的地点，更贴近该时段的典型活动。
@@ -1577,7 +1579,11 @@ class WorldRuntimeMixin:
                     async with session.get(base, params=params, **kwargs) as resp:
                         if resp.status != 200:
                             return
-                        data = await resp.json(content_type=None)
+                        data = await read_limited_json(
+                            resp,
+                            response_limit(self.config, "places_json"),
+                            label="高德地点 JSON 响应",
+                        )
             except Exception as exc:
                 logger.debug("amap poi fetch failed %s/%s: %s", city, place_key, exc)
                 return
@@ -1671,7 +1677,11 @@ class WorldRuntimeMixin:
                         if resp.status != 200:
                             logger.debug("google places http %s %s/%s", resp.status, city, place_key)
                             return
-                        data = await resp.json(content_type=None)
+                        data = await read_limited_json(
+                            resp,
+                            response_limit(self.config, "places_json"),
+                            label="Google Places JSON 响应",
+                        )
             except Exception as exc:
                 logger.debug("google places fetch failed %s/%s: %s", city, place_key, exc)
                 return

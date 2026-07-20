@@ -25,6 +25,7 @@ from .appearance import (
     seed_wardrobe_from_text,
 )
 from .defaults import DEFAULT_CONFIG
+from .http_limits import read_limited_bytes, read_limited_json, response_limit
 
 logger = logging.getLogger(__name__)
 
@@ -2040,7 +2041,11 @@ async def _fetch_animatool_turbo_schema(service: Any, ttl: float = _ANIMATOOL_SC
         ensure_comfy_session(service)
         async with service.comfy_session.get(f"{url}{schema_path}", timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status == 200:
-                schema = await resp.json(content_type=None) or {}
+                schema = await read_limited_json(
+                    resp,
+                    response_limit(service.config, "comfy_json"),
+                    label="AnimaTool schema 响应",
+                ) or {}
     except Exception as exc:
         logger.debug("fetch animatool schema (%s) failed: %s", wf, exc)
     _animatool_turbo_schema_cache[cache_key] = (schema, now)
@@ -2413,7 +2418,11 @@ async def _post_animatool(
                 f"seed={seed} workflow={wf} payload={json.dumps(payload, ensure_ascii=False)}",
             )
         async with service.comfy_session.post(f"{service.comfyui_url}{generate_path}", json=payload) as resp:
-            data = await resp.json(content_type=None)
+            data = await read_limited_json(
+                resp,
+                response_limit(service.config, "comfy_json"),
+                label=f"AnimaTool {wf} 生成响应",
+            )
             if resp.status >= 400:
                 return False, [], f"AnimaTool {wf} failed: {resp.status} {data}"
         images = data.get("images", []) if isinstance(data, dict) else []
@@ -2427,7 +2436,11 @@ async def _post_animatool(
                 params["subfolder"] = img.get("subfolder")
             async with service.comfy_session.get(f"{service.comfyui_url}/view", params=params) as view_resp:
                 if view_resp.status == 200:
-                    result.append(await view_resp.read())
+                    result.append(await read_limited_bytes(
+                        view_resp,
+                        response_limit(service.config, "generated_image"),
+                        label="AnimaTool 图片响应",
+                    ))
         if not result:
             return False, [], f"AnimaTool {wf} returned no images: {data}"
         return True, result, ""
@@ -2492,7 +2505,11 @@ async def submit_animatool_turbo(service: Any, positive: str, negative: str, see
                 f"seed={seed} workflow={wf} payload={json.dumps(cleaned, ensure_ascii=False)}",
             )
         async with service.comfy_session.post(f"{service.comfyui_url}{generate_path}", json=cleaned) as resp:
-            data = await resp.json(content_type=None)
+            data = await read_limited_json(
+                resp,
+                response_limit(service.config, "comfy_json"),
+                label=f"AnimaTool {wf} 生成响应",
+            )
             if resp.status >= 400:
                 return False, [], f"AnimaTool {wf} failed: {resp.status} {data}"
         images = data.get("images", []) if isinstance(data, dict) else []
@@ -2506,7 +2523,11 @@ async def submit_animatool_turbo(service: Any, positive: str, negative: str, see
                 params["subfolder"] = img.get("subfolder")
             async with service.comfy_session.get(f"{service.comfyui_url}/view", params=params) as view_resp:
                 if view_resp.status == 200:
-                    result.append(await view_resp.read())
+                    result.append(await read_limited_bytes(
+                        view_resp,
+                        response_limit(service.config, "generated_image"),
+                        label="AnimaTool 图片响应",
+                    ))
         if not result:
             return False, [], f"AnimaTool {wf} returned no images: {data}"
         return True, result, ""
@@ -2601,7 +2622,11 @@ async def do_generate_locked(
     workflow = build_workflow(service, positive, negative, seed)
     try:
         async with service.comfy_session.post(f"{service.comfyui_url}/prompt", json={"prompt": workflow}) as resp:
-            data = await resp.json()
+            data = await read_limited_json(
+                resp,
+                response_limit(service.config, "comfy_json"),
+                label="ComfyUI prompt 响应",
+            )
         if "prompt_id" not in data:
             err = data.get("error", {})
             msg = err.get("message", str(data)) if isinstance(err, dict) else str(data)
@@ -2610,7 +2635,11 @@ async def do_generate_locked(
         for _ in range(int(600 / 1.5)):
             await asyncio.sleep(1.5)
             async with service.comfy_session.get(f"{service.comfyui_url}/history/{prompt_id}") as resp:
-                history = await resp.json()
+                history = await read_limited_json(
+                    resp,
+                    response_limit(service.config, "comfy_json"),
+                    label="ComfyUI history 响应",
+                )
             if prompt_id not in history:
                 continue
             outputs = history[prompt_id].get("outputs", {})
@@ -2624,7 +2653,11 @@ async def do_generate_locked(
                     params["subfolder"] = img.get("subfolder")
                 async with service.comfy_session.get(f"{service.comfyui_url}/view", params=params) as resp:
                     if resp.status == 200:
-                        result.append(await resp.read())
+                        result.append(await read_limited_bytes(
+                            resp,
+                            response_limit(service.config, "generated_image"),
+                            label="ComfyUI 图片响应",
+                        ))
             return True, result, ""
         return False, [], "timeout"
     except Exception as exc:

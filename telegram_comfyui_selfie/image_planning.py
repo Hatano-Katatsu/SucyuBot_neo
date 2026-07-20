@@ -19,6 +19,7 @@ from .generation import (
     _strip_non_mirror_camera_artifacts,
     public_outfit_guard_context,
 )
+from .http_limits import read_limited_json, response_limit
 from .memory import USER_PROFILE_KIND, format_memory_lines
 from .world_runtime import PLACE_TYPES
 
@@ -228,7 +229,11 @@ async def _fetch_animatool_turbo_knowledge(service: Any, ttl: float = _ANIMATOOL
             f"{url}{knowledge_path}", timeout=aiohttp.ClientTimeout(total=10)
         ) as resp:
             if resp.status == 200:
-                knowledge = await resp.json(content_type=None) or {}
+                knowledge = await read_limited_json(
+                    resp,
+                    response_limit(service.config, "comfy_json"),
+                    label="AnimaTool knowledge 响应",
+                ) or {}
     except Exception as exc:
         logger.debug("fetch animatool knowledge (%s) failed: %s", wf, exc)
     _animatool_turbo_knowledge_cache[cache_key] = (knowledge, now)
@@ -256,7 +261,11 @@ async def _fetch_animatool_turbo_schema(service: Any, ttl: float = _ANIMATOOL_KN
             f"{url}{schema_path}", timeout=aiohttp.ClientTimeout(total=10)
         ) as resp:
             if resp.status == 200:
-                schema = await resp.json(content_type=None) or {}
+                schema = await read_limited_json(
+                    resp,
+                    response_limit(service.config, "comfy_json"),
+                    label="AnimaTool schema 响应",
+                ) or {}
     except Exception as exc:
         logger.debug("fetch animatool schema (%s) failed: %s", wf, exc)
     _animatool_turbo_schema_cache[cache_key] = (schema, now)

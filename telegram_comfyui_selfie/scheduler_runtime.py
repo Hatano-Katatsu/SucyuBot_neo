@@ -22,6 +22,7 @@ from .image_planning import (
     normalize_scene_visual_subject,
     scene_implies_mirror_selfie,
 )
+from .http_limits import read_limited_json, response_limit
 
 logger = logging.getLogger(__name__)
 
@@ -314,7 +315,11 @@ class SchedulerRuntimeMixin:
                             f"HTTP {resp.status}",
                         )
                         return None
-                    data = await resp.json(content_type=None)
+                    data = await read_limited_json(
+                        resp,
+                        response_limit(self.config, "weather_json"),
+                        label="天气服务 JSON 响应",
+                    )
             cur = data.get("current_condition", [{}])[0]
             desc = ""
             for key in ("lang_zh-cn", "lang_zh", "lang_zh_cn"):

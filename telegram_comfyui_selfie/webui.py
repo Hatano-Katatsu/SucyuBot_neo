@@ -18,6 +18,7 @@ from .deletion_runtime import (
     DeletionBusyError,
     DeletionNotFoundError,
 )
+from .http_limits import read_limited_json, response_limit
 from .webui_characters import (
     PUBLIC_FALLBACK_CLOSET_PREFIX,
     SESSION_CUSTOM_RESET_KEYS,
@@ -1903,7 +1904,11 @@ async def api_test_comfyui(request: web.Request):
         async with service.comfy_session.get(f"{service.comfyui_url}/system_stats") as resp:
             if resp.status != 200:
                 return json_error(f"ComfyUI HTTP {resp.status}", status=502)
-            stats = await resp.json()
+            stats = await read_limited_json(
+                resp,
+                response_limit(service.config, "comfy_json"),
+                label="ComfyUI system_stats 响应",
+            )
         return json_ok({"stats": stats})
     except Exception as exc:
         return json_error(str(exc), status=502)
