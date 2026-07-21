@@ -77,6 +77,7 @@ telegram_comfyui_selfie/
 - 模型配置统一走全局/用户 profile；chat、fast、vision 分别选择 profile。视觉 profile 留空时跳过图片理解。
 - thinking 状态由 profile 决定。API 密钥对前端始终掩码，保存空值或 `********` 时保留旧值。
 - 聊天采样参数只用于真实聊天回复，不传给 checkpoint、dream、memory 等结构化任务。
+- 结构化 LLM JSON 只可对明确位于相邻 token 之间的漏逗号做保守修复；其他损坏必须保持失败并走既有重试/回退。
 
 ## 聊天上下文
 
@@ -130,6 +131,7 @@ telegram_comfyui_selfie/
 - 多阶段 NTR/连续推送按阶段顺序 await；单阶段失败要隔离并记录，不阻塞后续调度循环。
 - 场景结束和晚安判断只读取近期用户消息，不让 assistant 台词或照片 system 误触发。
 - normal 推送先判断是否承接用户；不承接时从生活线与已有网络话题池中混选 1-3 条具体引导。当天第一次选择不承接后，必须先完成本次推送，再按角色兴趣搜索并补充角色维度的当日网络话题池；跨日整理可保留至多少量仍有时效性的旧话题。followup 默认承接用户，不调方向 LLM。
+- 网络话题扩展的兴趣点、query 和整理结果都必须避开上一轮搜索、旧话题池与最近实际推送；同义改写按重复处理，最近已用条目不得作为历史话题保留。
 - 聊天与推送侧 Tavily 搜索统一使用 `search_depth=basic`、`max_results=10`、`include_answer=advanced`；模型必须按用途显式选择 `general/news/finance` topic。
 - 推送话题日志 `recent_push_topics` 跨 `/新场景` 保留（`reset_preserved=True`），切角色才清；专门堵 `/新场景` 后 `sent_photos_history` 被 `since=reset_time` 过滤导致避重失效的缺口。每条记录 ts/caption/scene/topic 签名/direction，保留最近 8 条；`_pushes_since_last_user_message` 据此统计用户上次发言后的推送间隔，间隔超过 1-2 次后 dialogue 方向应大幅减少。
 - 推送 caption 优先展现角色自己的生活片段、看到想到的事或感兴趣的话题，避免写成对用户的询问式开场或催促回复；冷启动（用户长时间无互动）时非 dialogue 方向强制不带问句主旨。

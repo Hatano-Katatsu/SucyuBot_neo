@@ -3140,6 +3140,39 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         # 跨日重置
         self.assertTrue(svc._push_topic_search_quota_ok(state, "2026-07-21"))
 
+    def test_llm_json_parser_safely_repairs_missing_commas(self):
+        svc = self.make_service()
+        raw = (
+            '{"ops":[{"op":"progress","id":"m1"}\n'
+            '{"op":"progress","id":"m2"}]\n'
+            '"today_events":[]}'
+        )
+
+        parsed = svc._parse_llm_json(raw)
+
+        self.assertEqual(len(parsed["ops"]), 2)
+        self.assertEqual(parsed["today_events"], [])
+        with self.assertRaises(json.JSONDecodeError):
+            svc._parse_llm_json('{"ops":["unterminated]}')
+
+    def test_life_plan_missing_comma_is_repaired_without_retry_warning(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "chat"
+            svc._call_llm = AsyncMock(return_value=(
+                '{"ops":[{"op":"progress","id":"m1"}\n'
+                '{"op":"progress","id":"m2"}],"today_events":[]}'
+            ))
+            logs = []
+            svc._ulog = lambda session_id, kind, text: logs.append((kind, text))
+
+            parsed = await svc._call_life_plan_json(sid, "system", "user", tag="life-plan")
+
+            self.assertEqual(len(parsed["ops"]), 2)
+            self.assertFalse(any("LIFE_PLAN_JSON_RETRY" in text for _, text in logs))
+        asyncio.run(run())
+
     def test_push_topic_search_uses_unified_tavily_parameters(self):
         async def run():
             from telegram_comfyui_selfie import web_search
@@ -3293,6 +3326,40 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(decision["post_push_search_query"], "")
         asyncio.run(run())
 
+    def test_independent_decision_rejects_duplicate_expansion_query(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({
+                "image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "u",
+                "web_search_enabled": True, "tavily_api_key": "tavily-key",
+            })
+            state = svc._get_session_state(sid)
+            session_schema.set_push_web_topic_pool(state, {
+                "date": "2026-07-19",
+                "refresh_attempt_date": "2026-07-19",
+                "search_query": "原神 夏日活动 最新消息",
+                "search_topic": "news",
+                "topics": [{"guide": "围绕原神夏日活动的新地图聊探索路线。", "source": "search"}],
+            })
+            now = datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc)
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "topic_mode": "independent",
+                "topic_guides": [{"source": "life", "guide": "沿着晚饭生活线尝试一道新菜。"}],
+                "search_interest": "原神夏日活动",
+                "search_query": "原神 夏日活动 最新消息",
+                "search_topic": "news",
+                "reason": "模型错误地重复旧搜索",
+            }, ensure_ascii=False))
+
+            decision = await svc._decide_push_topic_direction(sid, "normal", state, now)
+
+            self.assertEqual(decision["topic_direction"], "independent")
+            self.assertEqual(decision["post_push_search_query"], "")
+            prompt = svc._call_llm.await_args.args[0]
+            self.assertIn("禁止只换同义词再次搜索现有主题", prompt)
+        asyncio.run(run())
+
     def test_first_independent_push_defers_search_then_builds_reusable_pool(self):
         async def run():
             svc = self.make_service()
@@ -3355,6 +3422,46 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(pool["search_topic"], "news")
             self.assertEqual(len(pool["topics"]), 5)
             self.assertEqual(sum(1 for item in pool["topics"] if item.get("source") == "history"), 1)
+        asyncio.run(run())
+
+    def test_web_topic_curation_filters_existing_and_recent_topics(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({"image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "u"})
+            state = svc._get_session_state(sid)
+            session_schema.set_push_web_topic_pool(state, {
+                "date": "2026-07-19",
+                "refresh_attempt_date": "2026-07-19",
+                "search_query": "旧作 海边城市舞台",
+                "search_topic": "general",
+                "topics": [{"guide": "从旧作的海边城市舞台切入，聊角色最想去的街区。", "source": "search"}],
+            })
+            now_ts = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc).timestamp()
+            session_schema.set_recent_push_topics(state, [{
+                "ts": now_ts,
+                "topic_guides": ["结合水彩背景制作访谈，聊傍晚光影。"],
+            }])
+            now = datetime.fromtimestamp(now_ts + 3600, tz=timezone.utc)
+            svc._call_llm = AsyncMock(return_value=json.dumps({"topics": [
+                {"guide": "从旧作的海边城市舞台切入，聊角色最想去的街区。", "source": "search"},
+                {"guide": "结合水彩背景制作访谈，聊傍晚光影。", "source": "search"},
+                {"guide": "从新公开的主题曲编曲切入，聊最抓耳的乐器层次。", "source": "search"},
+                {"guide": "围绕声优访谈里的录音趣事，聊角色会不会笑场。", "source": "search"},
+                {"guide": "从限定周边的材质设计切入，聊日常真正会使用哪一件。", "source": "search"},
+                {"guide": "围绕线下展览的互动装置，聊最适合拍照的玩法。", "source": "search"},
+            ]}, ensure_ascii=False))
+
+            guides = await svc._curate_push_web_topic_pool(
+                sid, state, "角色作品 音乐与线下展览", "general", "- 新内容摘要", now, "image",
+            )
+
+            self.assertEqual(len(guides), 4)
+            self.assertFalse(any("海边城市舞台" in guide for guide in guides))
+            self.assertFalse(any("水彩背景" in guide for guide in guides))
+            self.assertTrue(any("主题曲" in guide for guide in guides))
+            user_prompt = svc._call_llm.await_args.args[1]
+            self.assertIn("最近已经用于推送的话题", user_prompt)
         asyncio.run(run())
 
     def test_independent_decision_can_mix_life_and_web_after_search_quota(self):
