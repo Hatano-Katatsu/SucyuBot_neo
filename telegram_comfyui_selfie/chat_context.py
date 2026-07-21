@@ -1426,6 +1426,8 @@ class ChatContextMixin:
         """聊天触发的配图（模型主动调工具或泄漏图片描述）是否应被冷却拦截。
 
         关闭档位一律拦截；其余档位在冷却期内拦截，但用户明确要图时放行。
+        已有配图任务进行中（JUDGE 后台配图或上一轮模型主动配图未完成）时也拦截，
+        避免一轮对话连续发送两张图；用户明确要图时仍放行。
         """
         freq = self.config.get("selfie_frequency", "频繁")
         if freq == "关闭":
@@ -1434,8 +1436,30 @@ class ChatContextMixin:
             explicit = self._user_requested_image(user_text)
         if explicit:
             return False
+        if self._has_inflight_chat_image_task(session_id):
+            self._ulog(session_id, "IMG", "拦截配图: 已有配图任务进行中")
+            return True
         rounds = session_schema.get_rounds_since_image(self._get_session_state(session_id))
         return rounds < self._image_min_gap(freq)
+
+    def _has_inflight_chat_image_task(self, session_id: str) -> bool:
+        """是否有正在进行的聊天配图任务。
+
+        覆盖两条并发路径：
+        - protected-image scope：模型主动调用 generate_roleplay_image（_await_protected_image_task）；
+        - auto-image scope：JUDGE 触发的后台配图（_run_background_roleplay_image）。
+        任意一条未完成即视为进行中，新的配图请求应被拦截，避免连续发两张图。
+        """
+        protected = getattr(self, "_protected_image_tasks", None)
+        if isinstance(protected, set):
+            for task in protected:
+                if not task.done():
+                    return True
+        if session_id and hasattr(self, "_find_background_task"):
+            character_key = self._context_character_key(session_id) if hasattr(self, "_context_character_key") else ""
+            if self._find_background_task(scope="auto-image", session_id=session_id, character_key=character_key):
+                return True
+        return False
 
     def _recent_dialog_for_judge(self, state: dict[str, Any], limit: int = 6) -> str:
         lines = []

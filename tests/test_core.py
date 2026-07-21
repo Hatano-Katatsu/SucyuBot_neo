@@ -7084,15 +7084,21 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             {"role": "assistant", "content": "今天的角色回复"},
             {"role": "user", "content": "昨天的消息"},
         ])
+        from datetime import timedelta
         tz = svc._session_tz(sid)
-        today_ts = datetime(2026, 6, 24, 9, tzinfo=tz).timestamp()
-        yesterday_ts = datetime(2026, 6, 23, 23, tzinfo=tz).timestamp()
+        now = svc._session_now(sid)
+        today_date = now.date()
+        yesterday_date = today_date - timedelta(days=1)
+        today_str = today_date.isoformat()
+        yesterday_str = yesterday_date.isoformat()
+        today_ts = datetime(today_date.year, today_date.month, today_date.day, 9, tzinfo=tz).timestamp()
+        yesterday_ts = datetime(yesterday_date.year, yesterday_date.month, yesterday_date.day, 23, tzinfo=tz).timestamp()
         with closing(svc.app_store._connect()) as conn:
             conn.execute("UPDATE chat_messages SET created_at = ? WHERE id IN (?, ?)", (today_ts, ids[0], ids[1]))
             conn.execute("UPDATE chat_messages SET created_at = ? WHERE id = ?", (yesterday_ts, ids[2]))
             conn.commit()
 
-        path = svc.write_character_checkpoint(sid, key, "2026-06-24", reason="dream:test", to_message_id=max(ids))
+        path = svc.write_character_checkpoint(sid, key, today_str, reason="dream:test", to_message_id=max(ids))
         payload = json.loads(path.read_text(encoding="utf-8"))
 
         self.assertEqual(payload["schema"], "sucyubot.character_checkpoint.v1")
@@ -7100,14 +7106,14 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(payload["character_card"]["outfit"], "blue dress")
         self.assertEqual([m["content"] for m in payload["chat_messages"]], ["今天的用户消息", "今天的角色回复"])
 
-        for day in range(23, 31):
-            svc.write_character_checkpoint(sid, key, f"2026-06-{day:02d}", reason="retention", to_message_id=max(ids))
+        # 写昨天到今天+6天（共8天），验证保留最近7天、删除最旧的昨天
+        for offset in range(-1, 7):
+            d = (today_date + timedelta(days=offset)).isoformat()
+            svc.write_character_checkpoint(sid, key, d, reason="retention", to_message_id=max(ids))
+        expected = [(today_date + timedelta(days=offset)).isoformat() for offset in range(6, -1, -1)]
         dates = [item["date"] for item in svc.list_character_checkpoints(sid, key)]
-        self.assertEqual(dates, [
-            "2026-06-30", "2026-06-29", "2026-06-28", "2026-06-27",
-            "2026-06-26", "2026-06-25", "2026-06-24",
-        ])
-        self.assertFalse(svc._character_checkpoint_path(sid, key, "2026-06-23").exists())
+        self.assertEqual(dates, expected)
+        self.assertFalse(svc._character_checkpoint_path(sid, key, yesterday_str).exists())
 
     def test_character_checkpoint_import_modes_control_memory_context_and_checkpoint(self):
         src = self.make_service()
@@ -9128,6 +9134,86 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIsNone(await svc._judge_image_moment(sid, "你好", "回复"))
             svc._call_llm.assert_not_awaited()
 
+        asyncio.run(run())
+
+    def test_should_block_chat_image_with_inflight_protected_task(self):
+        # 有未完成的 protected-image 任务时拦截新配图；用户明确要图仍放行
+        svc = self.make_service()
+        sid = "telegram:1"
+        svc.config["selfie_frequency"] = "频繁"
+        svc._get_session_state(sid)["rounds_since_image"] = 99  # 远超冷却
+        svc._find_background_task = lambda **kw: None  # auto-image 无任务
+        from unittest.mock import Mock
+        # 无 inflight 任务 → 不拦截
+        svc._protected_image_tasks = set()
+        self.assertFalse(svc._should_block_chat_image(sid, "继续聊"))
+        # 有未完成的 protected-image 任务 → 拦截
+        svc._protected_image_tasks = {Mock(done=lambda: False)}
+        self.assertTrue(svc._should_block_chat_image(sid, "继续聊"))
+        # 用户明确要图 → 放行（不被 inflight 拦截）
+        self.assertFalse(svc._should_block_chat_image(sid, "给我看看", explicit=True))
+        # 已完成的任务不算 inflight
+        svc._protected_image_tasks = {Mock(done=lambda: True)}
+        self.assertFalse(svc._should_block_chat_image(sid, "继续聊"))
+
+    def test_should_block_chat_image_with_inflight_auto_image_task(self):
+        # auto-image scope 有未完成任务时拦截新配图
+        svc = self.make_service()
+        sid = "telegram:1"
+        svc.config["selfie_frequency"] = "频繁"
+        svc._get_session_state(sid)["rounds_since_image"] = 99
+        svc._protected_image_tasks = set()
+        from unittest.mock import Mock
+        svc._find_background_task = lambda **kw: Mock()  # 非 None = 有任务
+        self.assertTrue(svc._should_block_chat_image(sid, "继续聊"))
+        svc._find_background_task = lambda **kw: None
+        self.assertFalse(svc._should_block_chat_image(sid, "继续聊"))
+
+    def test_schedule_post_chat_push_silent_when_quota_exhausted(self):
+        # 配额用完时静默返回 False（不写跳过日志），不排任务
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+                "post_chat_push_delay_min_minutes": "5",
+                "post_chat_push_delay_max_minutes": "15",
+                "post_chat_push_daily_limit": "3",
+                "post_chat_push_cooldown_minutes": "60",
+            })
+            state = svc._get_session_state(sid)
+            session_schema.set_last_message_time(state, time.time())
+            session_schema.set_last_message_text(state, "继续聊")
+            session_schema.set_post_chat_push_count(state, 3)
+            session_schema.set_post_chat_push_date(state, svc._session_now(sid).strftime("%Y-%m-%d"))
+            session_schema.set_last_post_chat_push_time(state, time.time())
+            svc._save_session_state(sid, state)
+            logs = []
+            svc._ulog = lambda s, tag, msg: logs.append((tag, msg))
+            self.assertFalse(svc._schedule_post_chat_push(sid))
+            self.assertNotIn(sid, getattr(svc, "_post_chat_push_tasks", {}))
+            # 静默：不写"跳过对话后续场推送"日志
+            self.assertFalse(any("跳过对话后续场推送" in m for _, m in logs), f"配额满应静默: {logs}")
+        asyncio.run(run())
+
+    def test_dream_resets_post_chat_push_counter(self):
+        # dream 成功后清空续场推送配额，避免凌晨跨自然日的推送占用当天白天配额
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc._dream_once = AsyncMock(return_value=None)  # dream 成功（无异常）
+            state = svc._get_session_state(sid)
+            session_schema.set_post_chat_push_count(state, 2)
+            session_schema.set_post_chat_push_date(state, "2026-07-20")
+            session_schema.set_last_post_chat_push_time(state, time.time())
+            svc._save_session_state(sid, state)
+            now = svc._session_now(sid)
+            await svc._run_dream(sid, now, reason="daily-wake", force=True)
+            new_state = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_post_chat_push_count(new_state), 0)
+            self.assertEqual(session_schema.get_post_chat_push_date(new_state), now.strftime("%Y-%m-%d"))
         asyncio.run(run())
 
     def test_judge_skips_plain_dialog_without_visual_trigger(self):

@@ -1260,6 +1260,18 @@ class SchedulerRuntimeMixin:
             try:
                 await self._dream_once(session_id, key, local_dt, reason=reason)
                 self._clear_background_retry("dream", session_id, key)
+                # dream 标志角色新一天开始（起床）；清空对话后续场推送配额，
+                # 避免凌晨跨自然日的续场推送（如 00:43）占用当天白天配额。
+                try:
+                    dream_state = self._get_session_state(session_id)
+                    if session_schema.get_post_chat_push_count(dream_state) > 0:
+                        dream_today = local_dt.strftime("%Y-%m-%d")
+                        session_schema.set_post_chat_push_date(dream_state, dream_today)
+                        session_schema.set_post_chat_push_count(dream_state, 0)
+                        self._save_session_state(session_id, dream_state)
+                        self._ulog(session_id, "PUSH", f"dream 完成清空续场推送配额 date={dream_today}")
+                except Exception:
+                    logger.debug("dream post-chat push counter reset failed", exc_info=True)
             except Exception as exc:
                 try:
                     base = max(1.0, float(self.config.get("dream_retry_base_seconds", 60) or 60))
