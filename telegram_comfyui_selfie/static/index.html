@@ -58,9 +58,6 @@
         <div class="top-actions">
           <select id="session-select" class="session-select" title="选择会话"></select>
           <span id="session-select-fixed" class="session-select-fixed" hidden></span>
-          <button id="session-hidden-toggle" class="ghost admin-panel" type="button" title="切换是否显示已隐藏会话">显示隐藏</button>
-          <button id="session-hide-btn" class="ghost admin-panel" type="button" title="隐藏当前会话但保留全部数据" disabled>隐藏</button>
-          <button id="session-purge-btn" class="ghost danger admin-panel" type="button" title="彻底删除当前会话及全部业务数据" disabled>彻底删除</button>
           <button id="refresh-btn" class="icon-btn" title="刷新">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
           </button>
@@ -116,6 +113,14 @@
               <h3>检查</h3>
             </div>
             <div class="button-row">
+              <button id="bot-start-btn" class="primary" style="display:none">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                启动机器人
+              </button>
+              <button id="bot-stop-btn" class="danger" style="display:none">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+                停止机器人
+              </button>
               <button data-action="test-comfyui">
                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
                 测试 ComfyUI
@@ -151,7 +156,7 @@
             <div class="empty-state">反馈加载中...</div>
           </div>
           <form id="feedback-form" class="feedback-form">
-            <label>新增反馈<textarea name="content" rows="4" placeholder="写下问题、建议或希望调整的地方"></textarea></label>
+            <label>新增反馈<textarea name="content" rows="4" maxlength="2000" placeholder="写下问题、建议或希望调整的地方"></textarea><small class="feedback-char-count">剩余 2000 字符</small></label>
             <div class="form-actions">
               <button class="primary" type="submit">提交反馈</button>
             </div>
@@ -251,17 +256,17 @@
           </div>
         </section>
         <section class="panel model-config-panel">
-          <div class="panel-head collapsible" data-collapse="model-config">
+          <button class="panel-head collapsible" data-collapse="model-config" type="button" aria-expanded="true">
             <h3>用户模型配置</h3>
-            <button id="model-refresh" class="icon-btn" title="刷新">
-              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
-            </button>
-          </div>
+          </button>
           <div id="model-config-body" class="collapse-body">
             <div id="model-manager" class="manager-box">
               <div class="empty-state">加载中...</div>
             </div>
           </div>
+          <button id="model-refresh" class="icon-btn" title="刷新" style="position:absolute;top:12px;right:12px">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+          </button>
         </section>
       </section>
 
@@ -329,18 +334,20 @@
                 </button>
               </div>
             </div>
-            <div id="log-chunk-bar" class="log-chunk-bar" hidden>
-              <label for="log-chunk-select">日志块</label>
-              <select id="log-chunk-select"></select>
-            </div>
-            <div id="log-page-bar" class="log-page-bar" hidden>
-              <button id="log-page-newer" type="button">较新一页</button>
-              <span id="log-page-status" aria-live="polite"></span>
-              <button id="log-page-older" type="button">更早一页</button>
-            </div>
-            <div class="log-filter-bar">
-              <label>筛选<input id="log-filter" type="search" placeholder="输入关键词" autocomplete="off"></label>
-              <label>读取行数<select id="log-tail"><option value="500">500</option><option value="1000" selected>1000</option><option value="3000">3000</option><option value="5000">5000</option></select></label>
+            <div class="log-toolbar">
+              <div id="log-chunk-bar" class="log-chunk-bar" hidden>
+                <label for="log-chunk-select">日志块</label>
+                <select id="log-chunk-select"></select>
+              </div>
+              <div id="log-page-bar" class="log-page-bar" hidden>
+                <button id="log-page-newer" type="button">较新一页</button>
+                <span id="log-page-status" aria-live="polite"></span>
+                <button id="log-page-older" type="button">更早一页</button>
+              </div>
+              <div class="log-filter-bar">
+                <label>筛选<input id="log-filter" type="search" placeholder="输入关键词" autocomplete="off"></label>
+                <label>读取行数<select id="log-tail"><option value="500">500</option><option value="1000" selected>1000</option><option value="3000">3000</option><option value="5000">5000</option></select></label>
+              </div>
             </div>
             <pre id="log-content" class="logbox">选择左侧日志类型查看内容。</pre>
           </section>

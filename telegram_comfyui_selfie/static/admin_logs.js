@@ -259,17 +259,18 @@ async function selectLog(chatId, chunk = null) {
   const chosenChunk = chunk === null ? (sameLog ? state.selectedLogChunk : "") : chunk;
   $("#log-title").textContent = `日志 · ${chatId}`;
   $all("#log-list .session-item").forEach(btn => btn.classList.toggle("active", btn.dataset.chat === chatId));
+  const box = $("#log-content");
+  box.textContent = "加载中...";
   try {
     const suffix = chosenChunk ? `&chunk=${encodeURIComponent(chosenChunk)}` : "";
     const data = await api(`/api/logs/${encodeURIComponent(chatId)}?tail=${state.logTail}${suffix}`);
-    const box = $("#log-content");
     state.selectedLogChunk = data.chunk || chosenChunk || "";
     renderLogChunkSelector(data.chunks || [], state.selectedLogChunk, nextChunk => selectLog(chatId, nextChunk));
     renderFilteredLog(data.content || "");
     box.scrollTop = box.scrollHeight;
   } catch (err) {
     hideLogChunkSelector();
-    $("#log-content").textContent = err.message;
+    box.textContent = err.message;
   }
 }
 

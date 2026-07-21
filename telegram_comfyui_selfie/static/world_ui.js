@@ -275,40 +275,93 @@ function findLifeGoal(kind, id) {
 }
 
 function promptLifeGoalPayload(kind, existing = null) {
-  const isLong = kind === "long";
-  const label = isLong ? "长期目标" : "中期目标";
-  const text = window.prompt(`${label}文本：`, existing?.text || "");
-  if (text === null) return null;
-  const cleanText = text.trim();
-  if (!cleanText) {
-    toast("目标文本不能为空", "error");
-    return null;
-  }
-  const payload = { kind, text: cleanText };
-  if (existing?.id) payload.id = existing.id;
-  if (isLong) {
-    const dimension = window.prompt("目标维度（如生活、理想、爱好、事业；可自定义）：", existing?.dimension || "");
-    if (dimension === null) return null;
-    payload.dimension = dimension.trim();
-    const motivation = window.prompt("内在动机（可留空）：", existing?.motivation || "");
-    if (motivation === null) return null;
-    payload.motivation = motivation.trim();
-  } else {
+  // 返回一个 Promise，由调用方 await 获取 payload 或 null（取消）
+  return new Promise((resolve) => {
+    const isLong = kind === "long";
+    const label = isLong ? "长期目标" : "中期目标";
     const plan = currentLifePlan();
     const activeLongs = (plan.long_goals || []).filter(item => (item.status || "active") === "active");
-    const parentHint = activeLongs.map(item => `${item.id}${item.dimension ? `(${item.dimension})` : ""}: ${item.text}`).join("\n");
-    const fallbackParent = existing?.parent_id || activeLongs[0]?.id || "";
-    const parentId = window.prompt(`承接的长期目标 ID：\n${parentHint || "暂无长期目标"}`, fallbackParent);
-    if (parentId === null) return null;
-    payload.parent_id = parentId.trim();
-    const progress = window.prompt("进展备注（可留空）：", existing?.progress_note || "");
-    if (progress === null) return null;
-    payload.progress_note = progress.trim();
-  }
-  const status = window.prompt("状态 active / achieved / abandoned：", existing?.status || "active");
-  if (status === null) return null;
-  payload.status = status.trim() || "active";
-  return payload;
+
+    const existing2 = document.getElementById("life-goal-dialog");
+    if (existing2) existing2.remove();
+    const dialog = document.createElement("dialog");
+    dialog.id = "life-goal-dialog";
+    dialog.style.cssText = "border:1px solid var(--line);border-radius:var(--radius-lg);padding:20px;max-width:520px;width:92vw;max-height:80vh;overflow:auto";
+    const parentOptions = isLong ? "" : activeLongs.map(item =>
+      `<option value="${escapeHtml(String(item.id || ""))}">${escapeHtml((item.dimension ? `[${item.dimension}] ` : "") + item.text)}</option>`
+    ).join("");
+    const dimensionOptions = existing?.dimension ? [existing.dimension] : [];
+    if (!dimensionOptions.length) {
+      const allLong = plan.long_goals || [];
+      allLong.forEach(item => { if (item.dimension && !dimensionOptions.includes(item.dimension)) dimensionOptions.push(item.dimension); });
+      ["生活", "理想", "爱好", "事业"].forEach(d => { if (!dimensionOptions.includes(d)) dimensionOptions.push(d); });
+    }
+    const dimOpts = dimensionOptions.map(d => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join("");
+
+    dialog.innerHTML = `
+      <form method="dialog">
+        <h3 style="margin:0 0 14px">${existing ? "编辑" : "新增"}${label}</h3>
+        <div style="display:grid;gap:12px">
+          <label>文本<textarea name="text" rows="3" required>${escapeHtml(existing?.text || "")}</textarea></label>
+          ${isLong ? `
+          <label>目标维度（可自定义）<input name="dimension" list="life-goal-dimensions" value="${escapeHtml(existing?.dimension || "")}">
+            <datalist id="life-goal-dimensions">${dimOpts}</datalist>
+          </label>
+          <label>内在动机<textarea name="motivation" rows="2">${escapeHtml(existing?.motivation || "")}</textarea></label>
+          ` : `
+          ${activeLongs.length ? `
+          <label>承接的长期目标<select name="parent_id">
+            ${parentOptions.replace(`value="${escapeHtml(String(existing?.parent_id || activeLongs[0]?.id || ""))}"`, `value="${escapeHtml(String(existing?.parent_id || activeLongs[0]?.id || ""))}" selected`)}
+          </select></label>
+          ` : `<p class="muted">暂无活跃的长期目标</p>`}
+          <label>进展备注<textarea name="progress_note" rows="2">${escapeHtml(existing?.progress_note || "")}</textarea></label>
+          `}
+          <label>状态
+            <select name="status">
+              <option value="active"${(existing?.status || "active") === "active" ? " selected" : ""}>进行中</option>
+              <option value="achieved"${existing?.status === "achieved" ? " selected" : ""}>已达成</option>
+              <option value="abandoned"${existing?.status === "abandoned" ? " selected" : ""}>已放下</option>
+            </select>
+          </label>
+        </div>
+        <div class="form-actions" style="margin-top:14px;border-top:none;padding-top:0">
+          <button type="button" value="cancel">取消</button>
+          <button class="primary" type="submit" value="confirm">${existing ? "保存" : "新增"}</button>
+        </div>
+      </form>
+    `;
+    document.body.appendChild(dialog);
+    dialog.querySelector('[value="cancel"]').onclick = () => { dialog.close(); resolve(null); };
+    dialog.querySelector("form").onsubmit = (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const text = String(form.elements.text?.value || "").trim();
+      if (!text) { toast("目标文本不能为空", "error"); return; }
+      const payload = { kind, text };
+      if (existing?.id) payload.id = existing.id;
+      if (isLong) {
+        payload.dimension = String(form.elements.dimension?.value || "").trim();
+        payload.motivation = String(form.elements.motivation?.value || "").trim();
+      } else {
+        payload.parent_id = String(form.elements.parent_id?.value || "").trim();
+        payload.progress_note = String(form.elements.progress_note?.value || "").trim();
+      }
+      payload.status = String(form.elements.status?.value || "active").trim() || "active";
+      dialog.close();
+      resolve(payload);
+    };
+    dialog.addEventListener("close", () => {
+      // 如果 dialog 被关闭但没有通过 submit 处理（如按 ESC），resolve null
+      // 但 submit handler 已经 resolve 了，这里需要避免重复 resolve
+      dialog._resolved = true;
+    });
+    // 超时保护：监听 close 来兜底
+    dialog.addEventListener("close", () => {
+      dialog.remove();
+      if (!dialog._resolved) resolve(null);
+    }, { once: true });
+    dialog.showModal();
+  });
 }
 
 async function applyLifePlanResponse(data) {
@@ -335,7 +388,7 @@ async function handleLifePlanAction(event) {
       await applyLifePlanResponse(data);
       toast("生活主线已重生成");
     } else if (action === "add") {
-      const payload = promptLifeGoalPayload(kind);
+      const payload = await promptLifeGoalPayload(kind);
       if (!payload) return;
       const data = await api(`/api/world/${encodeURIComponent(state.selectedWorldSession)}/life-plan/goals`, {
         method: "POST",
@@ -349,7 +402,7 @@ async function handleLifePlanAction(event) {
         toast("目标不存在", "error");
         return;
       }
-      const payload = promptLifeGoalPayload(kind, existing);
+      const payload = await promptLifeGoalPayload(kind, existing);
       if (!payload) return;
       const data = await api(`/api/world/${encodeURIComponent(state.selectedWorldSession)}/life-plan/goals/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`, {
         method: "PATCH",

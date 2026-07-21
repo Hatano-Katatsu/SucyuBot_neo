@@ -246,7 +246,8 @@ function setBusy(button, busy) {
   if (!button) return;
   button.disabled = busy;
   if (busy) {
-    if (!button.dataset.busyLabel) button.dataset.busyLabel = button.textContent.trim();
+    if (!button.dataset.originalText) button.dataset.originalText = button.textContent.trim();
+    button.textContent = button.dataset.originalText + "…";
     if (!button.querySelector(".spinner")) {
       const spinner = document.createElement("span");
       spinner.className = "spinner";
@@ -255,6 +256,7 @@ function setBusy(button, busy) {
     }
     button.setAttribute("aria-busy", "true");
   } else {
+    button.textContent = button.dataset.originalText || button.textContent;
     button.querySelector(".spinner")?.remove();
     button.removeAttribute("aria-busy");
   }
@@ -277,11 +279,12 @@ function delay(ms) {
 }
 
 function switchView(name) {
+  _stopOverviewPolling();
   $all(".nav").forEach(btn => btn.classList.toggle("active", btn.dataset.view === name));
   $all(".view").forEach(view => view.classList.toggle("active", view.id === `view-${name}`));
   $("#view-title").textContent = viewMeta[name][0];
   $("#view-subtitle").textContent = viewMeta[name][1];
-  if (name === "overview") loadFeedbackBoard();
+  if (name === "overview") { loadFeedbackBoard(); _startOverviewPolling(); }
   if (name === "world") loadWorldSessions();
   if (name === "logs") loadLogs();
   if (name === "usage") loadUsage();
@@ -421,6 +424,40 @@ function renderStatus() {
   $("#status-chat-llm-model").textContent = s.chat_llm_model ? `${s.chat_llm_model} @ ${s.chat_llm_api_base}` : "-";
   $("#status-image-llm-model").textContent = s.image_llm_model ? `${s.image_llm_model} @ ${s.image_llm_api_base}` : "-";
   $("#status-vision-llm-model").textContent = s.vision_llm_model ? `${s.vision_llm_model} @ ${s.vision_llm_api_base}` : "未配置";
+  const startBtn = $("#bot-start-btn");
+  const stopBtn = $("#bot-stop-btn");
+  if (startBtn && stopBtn) {
+    startBtn.style.display = s.bot_running ? "none" : "";
+    stopBtn.style.display = s.bot_running ? "" : "none";
+  }
+}
+
+let _overviewPollTimer = null;
+function _startOverviewPolling() {
+  if (_overviewPollTimer) return;
+  _overviewPollTimer = window.setInterval(async () => {
+    try {
+      const data = await api(`/api/status?t=${Date.now()}`);
+      state.status = data.status;
+      renderStatus();
+    } catch (_) { /* 轮询失败静默忽略 */ }
+  }, 15000);
+}
+
+function _stopOverviewPolling() {
+  if (_overviewPollTimer) {
+    window.clearInterval(_overviewPollTimer);
+    _overviewPollTimer = null;
+  }
+}
+
+function updateFeedbackCharCount() {
+  const ta = document.querySelector("#feedback-form textarea[name=content]");
+  const counter = document.querySelector("#feedback-form .feedback-char-count");
+  if (!ta || !counter) return;
+  const remaining = 2000 - String(ta.value || "").length;
+  counter.textContent = `剩余 ${remaining} 字符`;
+  counter.style.color = remaining < 100 ? "var(--warn)" : "var(--muted)";
 }
 
 function feedbackApiPath() {
@@ -634,8 +671,8 @@ async function loadModels() {
       <label>Base URL<input name="base_url" placeholder="https://api.example.com/v1" autocomplete="off"></label>
       <label>API Key<input name="api_key" type="password" placeholder="留空保留旧密钥" autocomplete="new-password"></label>
       <label>模型名<input name="model" placeholder="deepseek-chat" autocomplete="off"></label>
-      <label>最大 tokens<input name="max_tokens" type="number" min="1" step="1" placeholder="可选"></label>
-      <label>超时秒数<input name="timeout" type="number" min="1" step="1" placeholder="可选"></label>
+      <label>最大 tokens<input name="max_tokens" type="number" min="1" step="1" inputmode="decimal" placeholder="可选"></label>
+      <label>超时秒数<input name="timeout" type="number" min="1" step="1" inputmode="decimal" placeholder="可选"></label>
       <button type="submit">保存模型 profile</button>
       <button id="delete-model-profile" class="danger" type="button">删除指定 profile</button>
       <p class="muted">仅填写常用模型字段；api_key 返回时会显示为 ********，保存空值或 ******** 会保留原密钥。Thinking 使用默认策略。</p>
@@ -777,6 +814,33 @@ async function initEvents() {
       setBusy(btn, false);
     }
   };
+  $("#bot-start-btn").onclick = async (event) => {
+    const btn = event.currentTarget;
+    setBusy(btn, true);
+    try {
+      await api("/api/bot/start", { method: "POST" });
+      await loadAll();
+      toast("机器人已启动");
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+    }
+  };
+  $("#bot-stop-btn").onclick = async (event) => {
+    if (!confirm("确定停止机器人吗？停止后用户将无法收到消息。")) return;
+    const btn = event.currentTarget;
+    setBusy(btn, true);
+    try {
+      await api("/api/bot/stop", { method: "POST" });
+      await loadAll();
+      toast("机器人已停止");
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+    }
+  };
   $("#reload-world-sessions").onclick = () => loadWorldSessions().then(() => toast("动线用户已刷新"));
   $("#world-refresh").onclick = () => loadWorldRoute().then(() => toast("动线已刷新"));
   $("#world-refresh-places").onclick = async (event) => {
@@ -826,6 +890,10 @@ async function initEvents() {
       toast("反馈内容不能为空", "error");
       return;
     }
+    if (content.length > 2000) {
+      toast("反馈内容不能超过 2000 字符", "error");
+      return;
+    }
     setBusy(btn, true);
     try {
       await api("/api/feedback", {
@@ -833,6 +901,7 @@ async function initEvents() {
         body: { session_id: state.selectedSession || "", content },
       });
       form.reset();
+      updateFeedbackCharCount();
       await loadFeedbackBoard();
       toast("反馈已提交");
     } catch (err) {
@@ -841,6 +910,11 @@ async function initEvents() {
       setBusy(btn, false);
     }
   };
+  const feedbackTa = document.querySelector("#feedback-form textarea[name=content]");
+  if (feedbackTa) {
+    feedbackTa.oninput = updateFeedbackCharCount;
+    updateFeedbackCharCount();
+  }
   $("#log-refresh").onclick = () => {
     if (state.selectedLog) selectLog(state.selectedLog);
     else if (state.selectedLogType) selectSystemLog(state.selectedLogType);
@@ -1032,6 +1106,9 @@ async function initEvents() {
       const body = head.nextElementSibling;
       if (body) body.classList.toggle("collapsed");
       head.classList.toggle("collapsed");
+      if (head.tagName === "BUTTON") {
+        head.setAttribute("aria-expanded", head.classList.contains("collapsed") ? "false" : "true");
+      }
     };
   });
 
@@ -1104,6 +1181,23 @@ async function initEvents() {
       setBusy(btn, false);
     }
   };
+
+  document.addEventListener("keydown", (event) => {
+    const tag = document.activeElement?.tagName;
+    const editable = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || document.activeElement?.isContentEditable;
+    if ((event.ctrlKey || event.metaKey) && event.key === "s") {
+      event.preventDefault();
+      const form = document.querySelector(".view.active form");
+      if (form && form.requestSubmit) { form.requestSubmit(); toast("已保存"); }
+      return;
+    }
+    if (editable || event.ctrlKey || event.metaKey || event.altKey) return;
+    const key = Number(event.key);
+    if (key >= 1 && key <= 5) {
+      const views = Object.keys(viewMeta);
+      if (key <= views.length) switchView(views[key - 1]);
+    }
+  });
 }
 
 async function waitForServiceRestart(oldPid) {

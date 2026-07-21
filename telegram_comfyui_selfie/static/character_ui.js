@@ -578,6 +578,12 @@ function renderCharacterPool() {
 }
 
 function selectCharacter(characterId) {
+  if (state.selectedCharacter && state.selectedCharacter !== characterId) {
+    const form = $("#character-form");
+    if (form && form.dataset.modified === "true") {
+      if (!confirm("当前角色有未保存的修改，确定要切换吗？")) return;
+    }
+  }
   state.selectedCharacter = characterId;
   renderCharacterPool();
   renderCharacterForm();
@@ -679,8 +685,8 @@ function renderCharacterForm() {
   characterFieldSections.forEach(([sectionTitle, fields], index) => {
     const section = document.createElement("section");
     section.className = "form-section character-section";
-    const collapsed = index > 1;
-    section.innerHTML = `<h3 class="section-toggle ${collapsed ? "collapsed" : ""}" type="button">${sectionTitle}</h3>`;
+    const collapsed = index > 2;
+    section.innerHTML = `<h3 class="section-toggle ${collapsed ? "collapsed" : ""}" type="button" data-panel-id="${sectionTitle}">${sectionTitle}</h3>`;
     const grid = document.createElement("div");
     grid.className = `field-grid ${collapsed ? "collapsed" : ""}`;
     fields.forEach(field => grid.appendChild(inputFor(field, char)));
@@ -742,16 +748,32 @@ function renderCharacterForm() {
   form.appendChild(actions);
 
   form.querySelectorAll(".section-toggle").forEach(toggle => {
+    const panelId = toggle.dataset.panelId || "";
+    const storageKey = panelId ? `panel-collapse-${panelId}` : "";
+    // 恢复 localStorage 折叠状态
+    if (storageKey) {
+      const stored = localStorage.getItem(storageKey);
+      if (stored === "true") {
+        toggle.classList.add("collapsed");
+        if (toggle.nextElementSibling) toggle.nextElementSibling.classList.add("collapsed");
+      } else if (stored === "false") {
+        toggle.classList.remove("collapsed");
+        if (toggle.nextElementSibling) toggle.nextElementSibling.classList.remove("collapsed");
+      }
+    }
     toggle.onclick = () => {
       const grid = toggle.nextElementSibling;
       grid.classList.toggle("collapsed");
       toggle.classList.toggle("collapsed");
+      if (storageKey) {
+        localStorage.setItem(storageKey, toggle.classList.contains("collapsed") ? "true" : "false");
+      }
     };
   });
 
   if (!isDefault) {
     $("#delete-character").onclick = async () => {
-      if (!window.confirm(`确定要删除角色 ${state.selectedCharacter} 吗？`)) return;
+      if (!window.confirm(`确定要删除角色 ${state.selectedCharacter} 吗？\n\n角色的长期记忆、日记和检查点数据将被同时删除。`)) return;
       const sid = encodeURIComponent(state.selectedSession);
       await api(`/api/sessions/${sid}/characters/${encodeURIComponent(state.selectedCharacter)}`, { method: "DELETE" });
       state.selectedCharacter = null;
@@ -784,6 +806,7 @@ function renderCharacterForm() {
       if (isDefault) values.is_default = true;
       const sid = encodeURIComponent(state.selectedSession);
       await api(`/api/sessions/${sid}/characters`, { method: "POST", body: values });
+      form.dataset.modified = "false";
       await loadCharacters();
       await loadAll();
       toast("角色已保存");
@@ -793,6 +816,11 @@ function renderCharacterForm() {
       setBusy(btn, false);
     }
   };
+
+  // 监听表单修改
+  form.addEventListener("input", () => { form.dataset.modified = "true"; }, { once: false });
+  form.addEventListener("change", () => { form.dataset.modified = "true"; }, { once: false });
+  form.dataset.modified = "false";
 }
 
 async function loadHistorySummary() {
@@ -872,12 +900,14 @@ async function loadMemories() {
   const rawCharKey = state.selectedCharacter;
   const charKey = encodeURIComponent(characterApiKey(rawCharKey));
   try {
-    const data = await api(`/api/sessions/${sid}/memories?character_key=${charKey}`);
+    const limitEl = document.getElementById("memory-limit");
+    const limit = limitEl ? Number(limitEl.value || "60") : 60;
+    const data = await api(`/api/sessions/${sid}/memories?character_key=${charKey}&limit=${limit}`);
     if (state.selectedCharacter !== rawCharKey) return;
     const rows = (data.memories || []).map(mem => `
       <div class="manager-row memory-row${mem.kind === "user_profile" ? " is-user-profile" : ""}">
         ${mem.kind === "user_profile" ? `<div class="memory-row-label">置顶用户画像</div>` : ""}
-        <textarea data-memory-summary="${mem.id}" rows="1" placeholder="记忆内容">${escapeHtml(mem.summary || "")}</textarea>
+        <textarea data-memory-summary="${mem.id}" rows="2" placeholder="记忆内容">${escapeHtml(mem.summary || "")}</textarea>
         <select data-memory-kind="${mem.id}" title="类型">${memoryKindOptions(mem.kind || "manual")}</select>
         <div class="range-wrap" title="重要度 1-5">
           <input type="range" data-memory-importance="${mem.id}" min="1" max="5" step="1" value="${escapeHtml(String(mem.importance ?? 3))}">
@@ -888,8 +918,17 @@ async function loadMemories() {
       </div>
     `).join("");
     box.innerHTML = `
+      <div class="memory-toolbar">
+        <input id="memory-search" type="search" placeholder="搜索记忆…" autocomplete="off" style="flex:1;min-width:140px;max-width:280px">
+        <select id="memory-limit" title="显示条数" style="width:auto">
+          <option value="30">30 条</option>
+          <option value="60" selected>60 条</option>
+          <option value="120">120 条</option>
+          <option value="0">全部</option>
+        </select>
+      </div>
       <form id="memory-add-form" class="inline-manager-form memory-add-form">
-        <textarea name="summary" placeholder="新增一条手动记忆" rows="1"></textarea>
+        <textarea name="summary" placeholder="新增一条手动记忆" rows="2"></textarea>
         <select name="kind">${memoryKindOptions("manual")}</select>
         <div class="range-wrap">
           <input type="range" name="importance" min="1" max="5" step="1" value="3">
@@ -897,9 +936,40 @@ async function loadMemories() {
         </div>
         <button class="primary" type="submit">新增记忆</button>
       </form>
-      <div class="manager-list">${rows || `<div class="empty-state">暂无记忆。</div>`}</div>
+      <div id="memory-list" class="manager-list">${rows || `<div class="empty-state">暂无记忆。</div>`}</div>
     `;
     bindRangeInputs(box);
+    // 记忆搜索过滤
+    $("#memory-search").oninput = () => {
+      const q = ($("#memory-search").value || "").toLowerCase();
+      const rows = $all("#memory-list .memory-row");
+      rows.forEach(row => {
+        const text = (row.textContent || "").toLowerCase();
+        row.style.display = q && !text.includes(q) ? "none" : "";
+      });
+    };
+    // 记忆 limit 变化重新加载
+    const limitSelect = $("#memory-limit");
+    if (limitSelect) {
+      limitSelect.onchange = () => loadMemories();
+    }
+    // textarea auto-grow
+    box.querySelectorAll(".memory-row textarea").forEach(ta => {
+      ta.style.resize = "vertical";
+      ta.addEventListener("input", () => {
+        ta.style.height = "auto";
+        ta.style.height = ta.scrollHeight + "px";
+      });
+    });
+    // 新增记忆 textarea auto-grow
+    const addTa = box.querySelector("#memory-add-form textarea");
+    if (addTa) {
+      addTa.style.resize = "vertical";
+      addTa.addEventListener("input", () => {
+        addTa.style.height = "auto";
+        addTa.style.height = addTa.scrollHeight + "px";
+      });
+    }
     $("#memory-add-form").onsubmit = async event => {
       event.preventDefault();
       await api(`/api/sessions/${sid}/memories?character_key=${charKey}`, { method: "POST", body: formValues(event.currentTarget) });
@@ -1115,20 +1185,43 @@ function addNewCharacter() {
 
 async function importCharacter() {
   if (!state.selectedSession) return;
-  const raw = window.prompt("粘贴角色 JSON 或角色检查点 JSON：");
-  if (!raw) return;
-  let payload;
-  try {
-    payload = JSON.parse(raw);
-  } catch (err) {
-    toast("JSON 无效：" + err.message, "error");
-    return;
-  }
-  try {
-    await importCharacterPayload(payload);
-  } catch (err) {
-    toast(err.message, "error");
-  }
+  const existing = document.getElementById("import-json-dialog");
+  if (existing) existing.remove();
+  const dialog = document.createElement("dialog");
+  dialog.id = "import-json-dialog";
+  dialog.style.cssText = "border:1px solid var(--line);border-radius:var(--radius-lg);padding:20px;max-width:560px;width:92vw;max-height:80vh;overflow:auto";
+  dialog.innerHTML = `
+    <form method="dialog">
+      <h3 style="margin:0 0 12px">粘贴角色 JSON</h3>
+      <textarea name="json" rows="12" placeholder="粘贴角色 JSON 或角色检查点 JSON…" style="min-height:200px;font-size:13px;font-family:monospace"></textarea>
+      <div class="form-actions" style="margin-top:14px">
+        <button type="button" value="cancel">取消</button>
+        <button class="primary" type="submit" value="confirm">导入</button>
+      </div>
+    </form>
+  `;
+  document.body.appendChild(dialog);
+  dialog.querySelector('[value="cancel"]').onclick = () => dialog.close();
+  dialog.querySelector("form").onsubmit = async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const raw = String(form.elements.json.value || "").trim();
+    if (!raw) { toast("请粘贴 JSON 内容", "error"); return; }
+    dialog.close();
+    let payload;
+    try {
+      payload = JSON.parse(raw);
+    } catch (err) {
+      toast("JSON 无效：" + err.message, "error");
+      return;
+    }
+    try {
+      await importCharacterPayload(payload);
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  };
+  dialog.showModal();
 }
 function selectedCharacterImportMode() {
   return $("#character-import-mode")?.value || "basic";
