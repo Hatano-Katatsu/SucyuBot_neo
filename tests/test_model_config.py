@@ -72,6 +72,37 @@ class LlmPromptCompareScriptTestCase(unittest.TestCase):
         self.assertFalse(comparison.prompt_components_same["messages"])
         self.assertTrue(comparison.settings_same)
 
+    def test_compare_entries_prefix_uses_request_key_order(self):
+        """前缀字符数必须基于真实请求键序，语义相等判断不受键序影响。"""
+        from scripts.compare_llm_chat_prompts import build_entry_view, compare_entries
+
+        def entry(messages):
+            return {
+                "session_id": "telegram:1",
+                "time": "2026-06-26T10:00:00",
+                "ts": 1,
+                "request": {"body": {"messages": messages}},
+                "usage": {},
+            }
+
+        old = build_entry_view(0, entry([{"role": "system", "content": "stable"}]))
+        # 语义相同但键插入顺序不同：真实请求字节序在第一个键处即分岔。
+        new = build_entry_view(1, entry([{"content": "stable", "role": "system"}]))
+
+        comparison = compare_entries(old, new)
+
+        self.assertFalse(comparison.prompt_changed)
+        self.assertEqual(comparison.common_prefix_messages, 1)
+        self.assertEqual(comparison.common_prefix_chars, len('{"messages":[{"'))
+        self.assertLess(comparison.common_prefix_char_rate, 1.0)
+
+        same_order = build_entry_view(2, entry([{"role": "system", "content": "stable!"}]))
+        same_order_comparison = compare_entries(old, same_order)
+        self.assertGreater(
+            same_order_comparison.common_prefix_chars,
+            comparison.common_prefix_chars,
+        )
+
     def test_provider_cache_tokens_reads_nested_usage_fields(self):
         from scripts.compare_llm_chat_prompts import build_entry_view, cache_rate, provider_cache_tokens
 

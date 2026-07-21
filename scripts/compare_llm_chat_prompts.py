@@ -27,6 +27,7 @@ class EntryView:
     message_hashes: list[str]
     prompt_payload: dict[str, Any]
     prompt_text: str
+    ordered_prompt_text: str
     prompt_hash: str
     settings_text: str
     usage: dict[str, Any]
@@ -62,9 +63,19 @@ class PromptComparison:
 
 
 def stable_json(value: Any) -> str:
-    """用稳定 JSON 串作为 prompt 比对基准，避免字典顺序造成误判。"""
+    """用稳定 JSON 串作为语义相等比对基准，避免字典顺序造成误判。"""
 
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def ordered_json(value: Any) -> str:
+    """保留原始键序的 JSON 串，模拟真实请求体的线上字节序。
+
+    前缀缓存命中取决于请求体的字面字节序列，因此公共前缀字符数
+    必须基于保留插入顺序的序列化结果，不能用 sort_keys 重排。
+    """
+
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 def short_hash(value: Any) -> str:
@@ -158,6 +169,7 @@ def build_entry_view(source_index: int, entry: dict[str, Any]) -> EntryView:
     message_hashes = [short_hash(message) for message in messages]
     prompt_payload = prompt_payload_from_body(body)
     prompt_text = stable_json(prompt_payload)
+    ordered_prompt_text = ordered_json(prompt_payload)
     settings_text = stable_json(settings_payload_from_body(body))
     usage = usage_from_entry(entry)
     return EntryView(
@@ -169,6 +181,7 @@ def build_entry_view(source_index: int, entry: dict[str, Any]) -> EntryView:
         message_hashes=message_hashes,
         prompt_payload=prompt_payload,
         prompt_text=prompt_text,
+        ordered_prompt_text=ordered_prompt_text,
         prompt_hash=sha256(prompt_text.encode("utf-8")).hexdigest()[:16],
         settings_text=settings_text,
         usage=usage,
@@ -259,7 +272,9 @@ def diff_opcode_lines(old: EntryView, new: EntryView, *, snippet_chars: int = 0)
 
 
 def compare_entries(old: EntryView, new: EntryView, *, snippet_chars: int = 0) -> PromptComparison:
-    prefix_chars = common_prefix_chars(old.prompt_text, new.prompt_text)
+    # 前缀比对必须用保留键序的请求体文本，模拟线上字节序；
+    # 语义相等判断（prompt_changed 等）仍用 sort_keys 的稳定文本。
+    prefix_chars = common_prefix_chars(old.ordered_prompt_text, new.ordered_prompt_text)
     prefix_messages = common_prefix_items(old.message_hashes, new.message_hashes)
     suffix_messages = common_suffix_items(old.message_hashes, new.message_hashes, prefix_messages)
     old_tail = old.message_hashes[prefix_messages:]
@@ -274,7 +289,7 @@ def compare_entries(old: EntryView, new: EntryView, *, snippet_chars: int = 0) -
     prompt_components_same = {}
     for key in PROMPT_COMPONENT_KEYS:
         prompt_components_same[key] = stable_json(old.prompt_payload.get(key)) == stable_json(new.prompt_payload.get(key))
-    denominator = max(len(old.prompt_text), len(new.prompt_text), 1)
+    denominator = max(len(old.ordered_prompt_text), len(new.ordered_prompt_text), 1)
     return PromptComparison(
         old=old,
         new=new,
