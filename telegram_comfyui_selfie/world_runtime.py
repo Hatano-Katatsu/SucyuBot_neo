@@ -1049,6 +1049,19 @@ class WorldRuntimeMixin:
             cp_text = session_schema.get_checkpoint_summary(state) or ""
         if not cp_text:
             return None
+        cache = getattr(self, "_infer_user_place_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._infer_user_place_cache = cache
+        cached = cache.get(session_id)
+        if isinstance(cached, tuple) and len(cached) == 2 and cached[0] == cp_text:
+            return cached[1]
+        result = self._match_user_place_from_text(cp_text)
+        cache[session_id] = (cp_text, result)
+        return result
+
+    @staticmethod
+    def _match_user_place_from_text(cp_text: str) -> dict[str, Any] | None:
         for pkey, pinfo in PLACE_TYPES.items():
             label = pinfo["label"]
             if label in cp_text:

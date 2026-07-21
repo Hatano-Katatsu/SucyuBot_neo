@@ -107,8 +107,6 @@ class SchedulerRuntimeMixin:
             if text:
                 texts.append(text)
                 recent_user_texts.append(text)
-                if msg.get("role") == "user":
-                    recent_user_texts.append(text)
         for msg in self._active_chat_history(state, 8):
             if msg.get("role") not in ("user", "assistant"):
                 continue
@@ -2315,6 +2313,8 @@ class SchedulerRuntimeMixin:
                                 mode_override="morning",
                                 mark_morning=True,
                             )
+                    if session_schema.get_last_morning_greet_date(state) != today and now_minute - int(schedule.get("wake", 0)) > 5:
+                        self._ulog(session_id, "NOTIFY", "missed-morning-window")
 
                     triggered = session_schema.get_daily_triggered_times(state)
                     for t in session_schema.get_daily_trigger_times(state):

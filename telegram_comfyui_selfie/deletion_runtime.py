@@ -276,6 +276,7 @@ class DeletionRuntimeMixin:
                 "_chat_world_conditions_cache",
                 "_world_conditions_context_signatures",
                 "_dynamic_context_signatures",
+                "_infer_user_place_cache",
             ):
                 bucket = getattr(self, name, None)
                 if isinstance(bucket, dict):
@@ -315,6 +316,7 @@ class DeletionRuntimeMixin:
             "_chat_world_conditions_cache",
             "_world_conditions_context_signatures",
             "_dynamic_context_signatures",
+            "_infer_user_place_cache",
         ):
             bucket = getattr(self, name, None)
             if isinstance(bucket, dict):

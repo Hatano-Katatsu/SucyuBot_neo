@@ -3820,8 +3820,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("办公室灯下自拍", photos)
 
     def test_clear_conversation_context_clears_both_places(self):
-        """① 硬重置对称：换角色/clearup 的 _clear_conversation_context 同时清空 character_place 和
-        user_place（修复原先漏清 user_place、用户所在渗进新角色的不对称）。"""
+        """① 硬重置对称：换角色/clearup 的 _clear_conversation_context 清空 character_place；
+        user_place 已移至 session box（会话全局，不随角色冻结/恢复），需手动显式清除。"""
         svc = self.make_service()
         sid = "telegram:123"
         state = svc._get_session_state(sid)
@@ -3832,10 +3832,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         svc._clear_conversation_context(state)
 
         self.assertEqual(session_schema.get_character_place(state), "")
-        self.assertEqual(session_schema.get_user_place(state), "")
-        self.assertEqual(session_schema.get_user_place_updated_at(state), 0)
-        self.assertEqual(session_schema.get_user_place_confidence(state), 0)
-        self.assertFalse(session_schema.get_user_co_located(state))
+        # user_place 在 session box，_clear_conversation_context 不触及 session 域
+        self.assertEqual(session_schema.get_user_place(state), "mall")
+        self.assertGreater(session_schema.get_user_place_updated_at(state), 0)
+        self.assertGreater(session_schema.get_user_place_confidence(state), 0)
+        self.assertTrue(session_schema.get_user_co_located(state))
 
     def test_within_primitive_semantics(self):
         """② 薄时效原语：年龄上限 + 可选 since 切点；ttl=None 表示只按 since 过滤。"""
@@ -7429,12 +7430,13 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         ss.increment_rounds_since_location(st)
         self.assertEqual(ss.get_rounds_since_location(st), 1)
 
-        # clear_transient 可正确复位 place box
+        # clear_transient 可正确复位 place box（user_place 已移至 session box，不受 place box reset 影响）
         defaults = ss.state_defaults()
         st["place"] = defaults.get("place", {})
-        self.assertEqual(ss.get_user_place(st), "")
         self.assertEqual(ss.get_character_place(st), "")
         self.assertEqual(ss.get_rounds_since_location(st), 0)
+        # user_place 在 session box 中，place box reset 不影响它
+        self.assertEqual(ss.get_user_place(st), "mall")
 
         # 幂等：再 ensure 一次不改变内容
         before = copy.deepcopy(st["place"])
@@ -7708,12 +7710,13 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             await svc.cmd_character(1, sid, "load 角色B")
             after_b = svc._get_session_state(sid)
-            # B 不继承 A 的任何短期态（含原先会串味的 wardrobe/dynamic_appearance/user_place）
+            # B 不继承 A 的短期态（wardrobe/dynamic_appearance 等），但 user_place 是 session-scoped 已保留
             self.assertEqual(after_b["chat_history"], [])
             self.assertEqual(after_b["sent_photos_history"], [])
             self.assertEqual(session_schema.get_outfit(after_b), "")
             self.assertEqual(session_schema.get_wardrobe(after_b), {})
-            self.assertEqual(session_schema.get_user_place(after_b), "")
+            # user_place 在 session box（会话全局），不随角色切换清除
+            self.assertEqual(session_schema.get_user_place(after_b), "mall")
             # B 期间产生自己的短期态
             after_b["chat_history"] = [{"role": "assistant", "content": "B的台词"}]
             session_schema.set_outfit(after_b, "B的西装")

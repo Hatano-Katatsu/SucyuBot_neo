@@ -1057,7 +1057,8 @@ async def plan_roleplay_image(
             active_user_place = service._active_user_place(state)
             persisted_co_located = bool(active_user_place and active_user_place.get("co_located"))
         except Exception:
-            logger.debug("active user place lookup failed, fallback to raw co_located", exc_info=True)
+            logger.debug("active user place lookup failed, fallback to co_located=False", exc_info=True)
+            persisted_co_located = False
     if now is None:
         now = service._session_now(session_id)
     if not service.has_llm_config("image", session_id):

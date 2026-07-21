@@ -113,6 +113,13 @@ STATE_SCHEMA: dict[str, Field] = {
         "frozen": False,
         "frozen_at": 0,
         "web_hidden": False,
+        "user_place": "",
+        "user_place_label": "",
+        "user_place_text": "",
+        "user_place_updated_at": 0,
+        "user_place_confidence": 0,
+        "user_co_located": False,
+        "user_place_source": "",
     }),
 
     # —— 角色配置：custom_* 身份/人设/外貌设定 ——
@@ -187,16 +194,9 @@ STATE_SCHEMA: dict[str, Field] = {
     }, reset_preserved=True),
     "life_profile": Field(T, reset_preserved=True),  # 动态产生，不进默认表
     # —— 角色短期态：位置（place box）——
-    # 用户位置 / 角色位置 / 同处判定 / 陈旧度全部收进 state["place"] 子字典。
+    # 用户位置已移入 session box（会话全局），place box 仅保留角色位置。
     # 访问一律走本模块的访问器，不要直接下钻 state["place"][...]。
     "place": Field(T, default={
-        "user_place": "",
-        "user_place_label": "",
-        "user_place_text": "",
-        "user_place_updated_at": 0,
-        "user_place_confidence": 0,
-        "user_co_located": False,
-        "user_place_source": "",
         "character_place": "",
         "character_place_label": "",
         "character_place_text": "",
@@ -619,13 +619,6 @@ def clear_nudity(state: dict[str, Any]) -> None:
 
 # 盒内默认值（与 STATE_SCHEMA["place"].default 同源含义）。
 _PLACE_DEFAULT: dict[str, Any] = {
-    "user_place": "",
-    "user_place_label": "",
-    "user_place_text": "",
-    "user_place_updated_at": 0,
-    "user_place_confidence": 0,
-    "user_co_located": False,
-    "user_place_source": "",
     "character_place": "",
     "character_place_label": "",
     "character_place_text": "",
@@ -636,8 +629,6 @@ _PLACE_DEFAULT: dict[str, Any] = {
     "rounds_since_location": 0,
 }
 _LEGACY_PLACE_FLAT_KEYS = (
-    "user_place", "user_place_label", "user_place_text", "user_place_updated_at",
-    "user_place_confidence", "user_co_located", "user_place_source",
     "character_place", "character_place_label", "character_place_text", "character_place_name",
     "character_place_updated_at", "character_place_confidence", "character_place_history",
     "rounds_since_location",
@@ -662,52 +653,111 @@ def ensure_place_box(state: dict[str, Any]) -> dict[str, Any]:
 # ── 用户位置访问器 ──
 
 def get_user_place(state: dict[str, Any]) -> str:
-    return (ensure_place_box(state).get("user_place") or "").strip()
+    box = ensure_session_box(state)
+    val = box.get("user_place")
+    # 兼容旧数据：session box 无值时从 place box 迁移（一次性）。
+    if not val:
+        old_box = state.get("place")
+        if isinstance(old_box, dict) and old_box.get("user_place"):
+            val = old_box["user_place"]
+            box["user_place"] = val
+    return (val or "").strip()
 
 def get_user_place_label(state: dict[str, Any]) -> str:
-    return ensure_place_box(state).get("user_place_label") or ""
+    box = ensure_session_box(state)
+    val = box.get("user_place_label")
+    if not val:
+        old_box = state.get("place")
+        if isinstance(old_box, dict) and old_box.get("user_place_label"):
+            val = old_box["user_place_label"]
+            box["user_place_label"] = val
+    return val or ""
 
 def get_user_place_text(state: dict[str, Any]) -> str:
-    return ensure_place_box(state).get("user_place_text") or ""
+    box = ensure_session_box(state)
+    val = box.get("user_place_text")
+    if not val:
+        old_box = state.get("place")
+        if isinstance(old_box, dict) and old_box.get("user_place_text"):
+            val = old_box["user_place_text"]
+            box["user_place_text"] = val
+    return val or ""
 
 def get_user_place_updated_at(state: dict[str, Any]) -> float:
     try:
-        return float(ensure_place_box(state).get("user_place_updated_at", 0) or 0)
+        box = ensure_session_box(state)
+        val = box.get("user_place_updated_at", 0)
+        if not val:
+            old_box = state.get("place")
+            if isinstance(old_box, dict) and old_box.get("user_place_updated_at"):
+                val = old_box["user_place_updated_at"]
+                box["user_place_updated_at"] = float(val or 0)
+        return float(val or 0)
     except (TypeError, ValueError):
         return 0.0
 
 def get_user_place_confidence(state: dict[str, Any]) -> float:
     try:
-        return float(ensure_place_box(state).get("user_place_confidence", 0) or 0)
+        box = ensure_session_box(state)
+        val = box.get("user_place_confidence", 0)
+        if not val:
+            old_box = state.get("place")
+            if isinstance(old_box, dict) and old_box.get("user_place_confidence"):
+                val = old_box["user_place_confidence"]
+                box["user_place_confidence"] = float(val or 0)
+        return float(val or 0)
     except (TypeError, ValueError):
         return 0.0
 
 def get_user_co_located(state: dict[str, Any]) -> bool:
-    return bool(ensure_place_box(state).get("user_co_located", False))
+    box = ensure_session_box(state)
+    val = box.get("user_co_located")
+    if not val:
+        old_box = state.get("place")
+        if isinstance(old_box, dict) and old_box.get("user_co_located"):
+            val = old_box["user_co_located"]
+            box["user_co_located"] = bool(val)
+    return bool(val or False)
 
 def get_user_place_source(state: dict[str, Any]) -> str:
-    return ensure_place_box(state).get("user_place_source") or ""
+    box = ensure_session_box(state)
+    val = box.get("user_place_source")
+    if not val:
+        old_box = state.get("place")
+        if isinstance(old_box, dict) and old_box.get("user_place_source"):
+            val = old_box["user_place_source"]
+            box["user_place_source"] = val
+    return val or ""
 
 def set_user_place(state: dict[str, Any], *, key="", label="", text="",
                    updated_at=None, confidence=None, co_located=None, source=None):
-    box = ensure_place_box(state)
+    box = ensure_session_box(state)
     if key is not None:
         box["user_place"] = key or ""
+        state["user_place"] = key or ""
     if label is not None:
         box["user_place_label"] = label or ""
+        state["user_place_label"] = label or ""
     if text is not None:
         box["user_place_text"] = text or ""
+        state["user_place_text"] = text or ""
     if updated_at is not None:
         box["user_place_updated_at"] = float(updated_at or 0)
+        state["user_place_updated_at"] = float(updated_at or 0)
     if confidence is not None:
         box["user_place_confidence"] = float(confidence or 0)
+        state["user_place_confidence"] = float(confidence or 0)
     if co_located is not None:
         box["user_co_located"] = bool(co_located)
+        state["user_co_located"] = bool(co_located)
     if source is not None:
         box["user_place_source"] = source or ""
+        state["user_place_source"] = source or ""
 
 def set_user_co_located(state: dict[str, Any], value: bool):
-    ensure_place_box(state)["user_co_located"] = bool(value)
+    box = ensure_session_box(state)
+    box["user_co_located"] = bool(value)
+    state["user_co_located"] = bool(value)
 
 
 # ── 角色位置访问器 ──
@@ -1200,6 +1250,13 @@ _SESSION_DEFAULT: dict[str, Any] = {
     "ntr_affection_reset": False,
     "frozen": False,
     "frozen_at": 0,
+    "user_place": "",
+    "user_place_label": "",
+    "user_place_text": "",
+    "user_place_updated_at": 0,
+    "user_place_confidence": 0,
+    "user_co_located": False,
+    "user_place_source": "",
 }
 _LEGACY_SESSION_FLAT_KEYS = (
     "last_interaction", "last_morning_greet_date",
@@ -1210,6 +1267,9 @@ _LEGACY_SESSION_FLAT_KEYS = (
     "saved_characters", "character_contexts", "init_flow",
     "ntr_stage_reached", "ntr_reconcile_count", "ntr_affection_reset",
     "frozen", "frozen_at",
+    "user_place", "user_place_label", "user_place_text",
+    "user_place_updated_at", "user_place_confidence",
+    "user_co_located", "user_place_source",
 )
 
 
