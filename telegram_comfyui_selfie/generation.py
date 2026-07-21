@@ -778,7 +778,7 @@ _EXPLICIT_SEXUAL_TAG_MAP = (
     (re.compile(r"\b(?:testicles|balls|scrotum)\b", re.IGNORECASE), "testicles"),
     (re.compile(r"\b(?:pussy|vagina|vaginal|clitoris|clit|labia|cervix|womb|uterus)\b", re.IGNORECASE), "pussy"),
     (re.compile(r"\b(?:anus|anal|asshole|butthole|rectum)\b", re.IGNORECASE), "anus"),
-    (re.compile(r"\b(?:cum|semen|creampie|ejaculat\w*|sperm)\b", re.IGNORECASE), "cum"),
+    (re.compile(r"\b(?:cum(?:ming)?|semen|creampie|ejaculat\w*|sperm)\b", re.IGNORECASE), "cum"),
     (re.compile(r"\b(?:fellatio|blowjob)\b", re.IGNORECASE), "fellatio"),
     (re.compile(r"\b(?:orgasm|climax|cumming)\b", re.IGNORECASE), "orgasm"),
     (re.compile(r"\b(?:pussy juice|love juice|wetness)\b", re.IGNORECASE), "pussy juice"),
