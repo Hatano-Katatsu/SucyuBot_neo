@@ -48,11 +48,11 @@ class MemoryPolicyMixin:
             return ""
         return (self._get_session_state(session_id).get("custom_character") or "").strip()
 
-    def _long_term_memory_context(self, session_id: str, query: str = "", limit: int | None = None) -> str:
+    def _long_term_memory_context(self, session_id: str, limit: int | None = None) -> str:
         if not session_id or not self._long_memory_enabled():
             return ""
         memories = self.memory.context_memories(
-            session_id, query, character=self._memory_character(session_id), limit=limit or self._long_memory_limit()
+            session_id, character=self._memory_character(session_id), limit=limit or self._long_memory_limit()
         )
         if not memories:
             return ""
@@ -153,7 +153,7 @@ class MemoryPolicyMixin:
         existing = ""
         if self._long_memory_enabled():
             contextual = self.memory.context_memories(
-                session_id, f"{user_text}\n{assistant_text}", character=character_key, limit=10
+                session_id, character=character_key, limit=10
             )
             stable = [
                 memory

@@ -1557,7 +1557,6 @@ class ChatContextMixin:
             else:
                 memories = self.memory.context_memories(
                     session_id,
-                    "",
                     character=key,
                     limit=self._long_memory_limit(),
                 )

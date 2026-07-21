@@ -1886,7 +1886,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             "checkpoint_summary": "旧场景摘要",
         })
         session_schema.set_character_history_summary(state, "长期关系阶段")
-        svc._long_term_memory_context = lambda session_id, query="": "重要记忆"
+        svc._long_term_memory_context = lambda session_id: "重要记忆"
         session_schema.set_chat_history(state, [
             {"role": "user", "content": "用户消息 0"},
             {"role": "assistant", "content": "角色回复 0"},
@@ -1914,7 +1914,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             {"role": "user", "content": "用户消息 0"},
             {"role": "assistant", "content": "角色回复 0"},
         ])
-        svc._long_term_memory_context = lambda session_id, query="": "重要记忆"
+        svc._long_term_memory_context = lambda session_id: "重要记忆"
 
         messages = svc._build_chat_messages(sid, "继续")
 
@@ -2046,7 +2046,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             tags=["穿搭", "语气"],
         )
 
-        context = svc._long_term_memory_context(sid, "今晚穿黑色吊带裙", limit=4)
+        context = svc._long_term_memory_context(sid, limit=4)
         self.assertIn("黑色吊带裙", context)
 
         messages = svc._build_chat_messages(sid, "今晚穿黑色吊带裙可以吗")
@@ -2054,42 +2054,16 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("长期记忆", all_sys)
         self.assertIn("温柔安抚式回复", all_sys)
 
-    def test_long_memory_hit_count_does_not_change_retrieval_order(self):
-        svc = self.make_service()
-        sid = "telegram:123"
-        old_id = svc.memory.add_memory(sid, "event", "共同关键词 旧记忆", importance=3)
-        time.sleep(0.01)
-        new_id = svc.memory.add_memory(sid, "event", "共同关键词 新记忆", importance=3)
-
-        before = svc.memory.context_memories(sid, "共同关键词", limit=2, stable_limit=0)
-        self.assertEqual(int(before[0]["id"]), int(new_id))
-
-        for _ in range(10):
-            svc.memory.context_memories(sid, "共同关键词", limit=2, stable_limit=0)
-
-        after = svc.memory.context_memories(sid, "共同关键词", limit=2, stable_limit=0)
-        self.assertEqual(int(after[0]["id"]), int(new_id))
-
     def test_long_memory_context_uses_importance_not_query_match(self):
         svc = self.make_service()
         sid = "telegram:123"
         svc.memory.add_memory(sid, "event", "普通但重要的关系事实", importance=5)
         svc.memory.add_memory(sid, "event", "共同关键词 低重要事件", importance=1)
 
-        context = svc._long_term_memory_context(sid, "共同关键词", limit=1)
+        context = svc._long_term_memory_context(sid, limit=1)
 
         self.assertIn("普通但重要的关系事实", context)
         self.assertNotIn("低重要事件", context)
-
-    def test_long_memory_context_does_not_maintain_hit_count(self):
-        svc = self.make_service()
-        sid = "telegram:123"
-        memory_id = svc.memory.add_memory(sid, "event", "稳定记忆", importance=5)
-
-        svc._long_term_memory_context(sid, "稳定记忆", limit=1)
-
-        memory = next(m for m in svc.memory.list_memories(sid, limit=10) if int(m["id"]) == int(memory_id))
-        self.assertEqual(memory.get("hit_count"), 0)
 
     def test_user_profile_memory_is_pinned_and_character_scoped(self):
         svc = self.make_service()
@@ -2103,7 +2077,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("短发女性", memories_a[0].get("summary", ""))
         self.assertNotIn("长发男性", "\n".join(m.get("summary", "") for m in memories_a))
 
-        context = svc.memory.context_memories(sid, "", character="角色A", limit=1)
+        context = svc.memory.context_memories(sid, character="角色A", limit=1)
         self.assertEqual(context[0].get("kind"), "user_profile")
 
     def test_user_profile_memory_merge_keeps_one_per_character(self):
@@ -3688,14 +3662,14 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         # 切换到角色 B：召回里不应出现 A 的记忆。
         state["custom_character"] = "角色B"
-        ctx_b = svc._long_term_memory_context(sid, "星空")
+        ctx_b = svc._long_term_memory_context(sid)
         self.assertNotIn("星空", ctx_b)
         svc.memory.add_memory(sid, "preference", "用户喜欢和B聊机甲", character=svc._memory_character(sid), importance=5)
-        self.assertIn("机甲", svc._long_term_memory_context(sid, "机甲"))
+        self.assertIn("机甲", svc._long_term_memory_context(sid))
 
         # 切回角色 A：A 的记忆复原，且看不到 B 的。
         state["custom_character"] = "角色A"
-        ctx_a = svc._long_term_memory_context(sid, "星空 机甲")
+        ctx_a = svc._long_term_memory_context(sid)
         self.assertIn("星空", ctx_a)
         self.assertNotIn("机甲", ctx_a)
 
@@ -7419,19 +7393,19 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             "some_other": "keep",
         }
         box = ss.ensure_place_box(legacy)
-        self.assertNotIn("user_place", legacy)       # 顶层已删
+        self.assertIn("user_place", legacy)       # 顶层保留：user_place 不再由 ensure_place_box 迁移，已移至 session box 域
         self.assertNotIn("character_place", legacy)
         self.assertNotIn("character_place_history", legacy)
         self.assertIn("some_other", legacy)          # 非位置字段保留
-        self.assertEqual(legacy["place"]["user_place"], "cafe")
+        # user_place 不再在 place box 中，走 session box；访问器从 ensure_session_box 读取。
         self.assertEqual(ss.get_user_place(legacy), "cafe")
         self.assertEqual(ss.get_character_place(legacy), "home")
         self.assertEqual(ss.get_character_place_name(legacy), "家")
         self.assertEqual(ss.get_rounds_since_location(legacy), 5)
-        # 子键补齐 + 默认值
+        # 子键补齐 + 默认值（session box 内）
         self.assertFalse(ss.get_user_co_located(legacy))
         self.assertEqual(ss.get_user_place_source(legacy), "")
-        self.assertEqual(box["user_place_updated_at"], 0)
+        self.assertEqual(ss.ensure_session_box(legacy)["user_place_updated_at"], 0)
 
         # 访问器读写
         st = {}
@@ -9924,7 +9898,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             sid = "telegram:1"
             key = svc._context_character_key(sid)
             svc.has_llm_config = lambda purpose, session_id="": purpose == "chat"
-            svc._long_term_memory_context = lambda session_id, query="", limit=None: "长期记忆: 用户怕冷。"
+            svc._long_term_memory_context = lambda session_id, limit=None: "长期记忆: 用户怕冷。"
             svc.app_store.upsert_checkpoint(sid, key, "checkpoint: 还在门口等一句回答", 1)
             state = svc._get_session_state(sid)
             session_schema.set_chat_history(state, [

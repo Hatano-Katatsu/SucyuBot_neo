@@ -61,8 +61,7 @@ class SQLiteMigrationTestCase(unittest.TestCase):
                     status TEXT NOT NULL DEFAULT 'active',
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
-                    last_used_at REAL,
-                    hit_count INTEGER NOT NULL DEFAULT 0
+                    last_used_at REAL
                 )
                 """
             )
@@ -70,8 +69,8 @@ class SQLiteMigrationTestCase(unittest.TestCase):
                 """
                 INSERT INTO memories(
                     session_id, kind, summary, tags, importance, source,
-                    status, created_at, updated_at, hit_count
-                ) VALUES ('telegram:old', 'event', '旧记忆', '[]', 3, '', 'active', 1, 1, 0)
+                    status, created_at, updated_at
+                ) VALUES ('telegram:old', 'event', '旧记忆', '[]', 3, '', 'active', 1, 1)
                 """
             )
             conn.commit()
@@ -111,8 +110,8 @@ class SQLiteMigrationTestCase(unittest.TestCase):
                             """
                             INSERT INTO memories(
                                 session_id, character, kind, summary, tags, importance,
-                                source, status, created_at, updated_at, hit_count
-                            ) VALUES (?, '', 'event', '版本记忆', '[]', 3, '', 'active', 1, 1, 0)
+                                source, status, created_at, updated_at
+                            ) VALUES (?, '', 'event', '版本记忆', '[]', 3, '', 'active', 1, 1)
                             """,
                             (f"telegram:v{historical_version}",),
                         )
@@ -121,8 +120,8 @@ class SQLiteMigrationTestCase(unittest.TestCase):
                             """
                             INSERT INTO memories(
                                 session_id, kind, summary, tags, importance,
-                                source, status, created_at, updated_at, hit_count
-                            ) VALUES (?, 'event', '版本记忆', '[]', 3, '', 'active', 1, 1, 0)
+                                source, status, created_at, updated_at
+                            ) VALUES (?, 'event', '版本记忆', '[]', 3, '', 'active', 1, 1)
                             """,
                             (f"telegram:v{historical_version}",),
                         )

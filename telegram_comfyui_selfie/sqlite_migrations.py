@@ -69,8 +69,7 @@ def _migration_v1_base_schema(conn: sqlite3.Connection) -> None:
                 status TEXT NOT NULL DEFAULT 'active',
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
-                last_used_at REAL,
-                hit_count INTEGER NOT NULL DEFAULT 0
+                last_used_at REAL
             )
             """,
             """
@@ -284,7 +283,7 @@ LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS[-1][0]
 _BASE_EXPECTED_COLUMNS: dict[str, set[str]] = {
     "memories": {
         "id", "session_id", "kind", "summary", "tags", "importance", "source",
-        "status", "created_at", "updated_at", "last_used_at", "hit_count",
+        "status", "created_at", "updated_at", "last_used_at",
     },
     "chat_messages": {
         "id", "session_id", "user_id", "character_key", "role", "content",

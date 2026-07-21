@@ -97,6 +97,7 @@ class LongTermMemoryStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.schema_migration: SchemaMigrationResult = self._init_schema()
+        self._mem_cache: dict[str, list[dict[str, Any]]] = {}
 
     def _connect(self):
         conn = sqlite3.connect(self.path, timeout=10)
@@ -159,6 +160,7 @@ class LongTermMemoryStore:
                     ),
                 )
                 conn.commit()
+                self._evict_mem_cache(session_id, character)
                 return int(existing["id"])
             cur = conn.execute(
                 """
@@ -178,6 +180,7 @@ class LongTermMemoryStore:
                 ),
             )
             conn.commit()
+            self._evict_mem_cache(session_id, character)
             return int(cur.lastrowid)
 
     @staticmethod
@@ -465,8 +468,20 @@ class LongTermMemoryStore:
         scored.sort(key=lambda item: item[0], reverse=True)
         return [memory for _, memory in scored[:limit]]
 
-    def context_memories(self, session_id: str, query: str, *, character: str | None = None, limit: int = 8, stable_limit: int = 4) -> list[dict[str, Any]]:
-        return self.list_memories(session_id, character=character, limit=limit)
+    def context_memories(self, session_id: str, *, character: str | None = None, limit: int = 8) -> list[dict[str, Any]]:
+        cache_key = f"{session_id}:{character or ''}:{limit}"
+        cached = self._mem_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = self.list_memories(session_id, character=character, limit=limit)
+        self._mem_cache[cache_key] = result
+        return result
+
+    def _evict_mem_cache(self, session_id: str, character: str = "") -> None:
+        prefix = f"{session_id}:{character or ''}:"
+        for key in list(self._mem_cache.keys()):
+            if key.startswith(prefix):
+                self._mem_cache.pop(key, None)
 
     def delete_character_memories(self, session_id: str, character: str) -> int:
         """硬删除指定角色的全部长期记忆，用于删除角色时避免孤儿数据复活。"""
@@ -476,6 +491,7 @@ class LongTermMemoryStore:
                 (session_id, (character or "").strip()),
             )
             conn.commit()
+            self._evict_mem_cache(session_id, character)
             return int(cur.rowcount or 0)
 
     def update_memory(self, session_id: str, memory_id: int, *, character: str | None = None, summary: str | None = None, kind: str | None = None, importance: Any = None, tags: Any = None, source: str | None = None) -> bool:
@@ -513,6 +529,7 @@ class LongTermMemoryStore:
                 (*values, *params, int(memory_id)),
             )
             conn.commit()
+            self._evict_mem_cache(session_id, character or "")
             return cur.rowcount > 0
 
     def edit_memory(self, session_id: str, memory_id: int, *, character: str | None = None, summary: str | None = None, kind: str | None = None, importance: Any = None, tags: Any = None, source: str | None = None) -> bool:
@@ -545,6 +562,7 @@ class LongTermMemoryStore:
                 (*values, *params, int(memory_id)),
             )
             conn.commit()
+            self._evict_mem_cache(session_id, character or "")
             return cur.rowcount > 0
 
     def deactivate_non_manual_memory(self, session_id: str, memory_id: int, *, character: str | None = None) -> bool:
@@ -555,6 +573,7 @@ class LongTermMemoryStore:
                 (time.time(), *params, int(memory_id)),
             )
             conn.commit()
+            self._evict_mem_cache(session_id, character or "")
             return cur.rowcount > 0
 
     def deactivate_memory(self, session_id: str, memory_id: int, *, character: str | None = None) -> bool:
@@ -565,6 +584,7 @@ class LongTermMemoryStore:
                 (time.time(), *params, int(memory_id)),
             )
             conn.commit()
+            self._evict_mem_cache(session_id, character or "")
             return cur.rowcount > 0
 
     def clear_session(self, session_id: str, *, character: str | None = None) -> int:
@@ -575,6 +595,7 @@ class LongTermMemoryStore:
                 (time.time(), *params),
             )
             conn.commit()
+            self._evict_mem_cache(session_id, character or "")
             return int(cur.rowcount)
 
     def count_active(self, session_id: str, *, character: str | None = None) -> int:
@@ -600,8 +621,6 @@ class LongTermMemoryStore:
         score = float(memory.get("importance") or 3) * 2
         if memory.get("kind") in STABLE_KINDS:
             score += 2
-        # hit_count 是观测指标，不参与检索排序；否则每次注入记忆都会改变下次排序，
-        # 造成相同数据下的上下文漂移，并削弱前缀缓存可复现性。
         return score
 
     def _score_memory(self, memory: dict[str, Any], terms: list[str]) -> float:

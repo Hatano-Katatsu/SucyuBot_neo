@@ -54,6 +54,7 @@ class AppStateStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.schema_migration: SchemaMigrationResult = self._init_schema()
+        self._read_cache: dict[str, Any] = {}
 
     def _connect(self):
         conn = sqlite3.connect(self.path, timeout=10)
@@ -324,14 +325,22 @@ class AppStateStore:
         return int(row["id"] or 0) if row else 0
 
     def get_checkpoint(self, session_id: str, character_key: str) -> dict[str, Any]:
+        cache_key = f"cp:{session_id}:{character_key or ''}"
+        cached = self._read_cache.get(cache_key)
+        if cached is not None:
+            return cached
         with closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT * FROM checkpoints WHERE session_id = ? AND character_key = ?",
                 (session_id, character_key or ""),
             ).fetchone()
+        result: dict[str, Any]
         if not row:
-            return {"summary": "", "source_until_id": 0, "version": 0, "updated_at": 0}
-        return dict(row)
+            result = {"summary": "", "source_until_id": 0, "version": 0, "updated_at": 0}
+        else:
+            result = dict(row)
+        self._read_cache[cache_key] = result
+        return result
 
     def upsert_checkpoint(
         self,
@@ -399,6 +408,8 @@ class AppStateStore:
                 (session_id, character_key or "", until),
             )
             conn.commit()
+        self._read_cache.pop(f"cp:{session_id}:{character_key or ''}", None)
+        self._read_cache.pop(f"meta:{session_id}:{character_key or ''}", None)
         return True
 
     def clear_checkpoint(
@@ -423,20 +434,28 @@ class AppStateStore:
         )
 
     def get_context_meta(self, session_id: str, character_key: str) -> dict[str, Any]:
+        cache_key = f"meta:{session_id}:{character_key or ''}"
+        cached = self._read_cache.get(cache_key)
+        if cached is not None:
+            return cached
         with closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT * FROM context_meta WHERE session_id = ? AND character_key = ?",
                 (session_id, character_key or ""),
             ).fetchone()
+        result: dict[str, Any]
         if not row:
-            return {
+            result = {
                 "last_dream_at": 0,
                 "last_dream_message_id": 0,
                 "last_checkpoint_at": 0,
                 "last_checkpoint_message_id": 0,
                 "character_history_summary": "",
             }
-        return dict(row)
+        else:
+            result = dict(row)
+        self._read_cache[cache_key] = result
+        return result
 
     def mark_dream(self, session_id: str, character_key: str, to_message_id: int) -> bool:
         """单调推进 dream 游标，避免旧任务完成较晚时回滚边界。"""
@@ -454,6 +473,7 @@ class AppStateStore:
                 (session_id, character_key or "", _now(), until),
             )
             conn.commit()
+        self._read_cache.pop(f"meta:{session_id}:{character_key or ''}", None)
         return bool(cur.rowcount)
 
     def upsert_character_history_summary(self, session_id: str, character_key: str, summary: str):
@@ -468,6 +488,7 @@ class AppStateStore:
                 (session_id, character_key or "", summary or ""),
             )
             conn.commit()
+        self._read_cache.pop(f"meta:{session_id}:{character_key or ''}", None)
 
     def upsert_diary(
         self,
@@ -882,6 +903,32 @@ class AppStateStore:
                 conn.rollback()
                 raise
         return deleted
+
+    def clear_session_character_cascade(self, session_id: str) -> dict[str, int]:
+        """清除会话下全部角色的记忆/检查点/日记/上下文元数据，不删聊天记录与会话状态。"""
+        cleaned: dict[str, int] = {}
+        with closing(self._connect()) as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                cursor = conn.execute(
+                    "DELETE FROM memories WHERE session_id = ?",
+                    (session_id,),
+                )
+                cleaned["memories"] = int(cursor.rowcount or 0)
+                for table in ("checkpoints", "diaries", "context_meta"):
+                    cursor = conn.execute(
+                        f"DELETE FROM {table} WHERE session_id = ?",
+                        (session_id,),
+                    )
+                    cleaned[table] = int(cursor.rowcount or 0)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        for key in list(self._read_cache.keys()):
+            if key.startswith(f"cp:{session_id}:") or key.startswith(f"meta:{session_id}:"):
+                self._read_cache.pop(key, None)
+        return cleaned
 
     def delete_session_bundle(
         self,
