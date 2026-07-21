@@ -483,6 +483,13 @@ class LongTermMemoryStore:
             if key.startswith(prefix):
                 self._mem_cache.pop(key, None)
 
+    def evict_session_mem_cache(self, session_id: str) -> None:
+        """整会话级联清库（绕过记忆层写路径）后，失效该会话全部记忆读缓存。"""
+        prefix = f"{session_id}:"
+        for key in list(self._mem_cache.keys()):
+            if key.startswith(prefix):
+                self._mem_cache.pop(key, None)
+
     def delete_character_memories(self, session_id: str, character: str) -> int:
         """硬删除指定角色的全部长期记忆，用于删除角色时避免孤儿数据复活。"""
         with closing(self._connect()) as conn:

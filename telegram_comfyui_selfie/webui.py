@@ -1639,9 +1639,10 @@ async def api_admin_llm_usage(request: web.Request):
     service = service_from(request)
     query = request.query
     now = time.time()
-    # 默认最近 24 小时
+    # 默认最近 24 小时；显式传 after=0 表示全部
+    raw_after = query.get("after")
     try:
-        after = float(query.get("after") or 0) or (now - 86400)
+        after = float(raw_after) if raw_after else (now - 86400)
     except ValueError:
         after = now - 86400
     try:

@@ -245,9 +245,11 @@ function toast(message, kind = "info") {
 function setBusy(button, busy) {
   if (!button) return;
   button.disabled = busy;
+  // 只改写按钮内的直接文本节点，避免 textContent 覆写销毁 SVG 图标等子元素
+  const textNode = [...button.childNodes].find(node => node.nodeType === 3 && node.textContent.trim());
   if (busy) {
-    if (!button.dataset.originalText) button.dataset.originalText = button.textContent.trim();
-    button.textContent = button.dataset.originalText + "…";
+    if (!button.dataset.originalText) button.dataset.originalText = (textNode ? textNode.textContent : button.textContent).trim();
+    if (textNode) textNode.textContent = button.dataset.originalText + "…";
     if (!button.querySelector(".spinner")) {
       const spinner = document.createElement("span");
       spinner.className = "spinner";
@@ -256,7 +258,7 @@ function setBusy(button, busy) {
     }
     button.setAttribute("aria-busy", "true");
   } else {
-    button.textContent = button.dataset.originalText || button.textContent;
+    if (textNode) textNode.textContent = button.dataset.originalText || textNode.textContent;
     button.querySelector(".spinner")?.remove();
     button.removeAttribute("aria-busy");
   }
@@ -348,6 +350,10 @@ async function loadAll() {
   renderWorldSessionList();
   if (document.querySelector('.nav[data-view="characters"].active')) {
     loadCharacterPage();
+  }
+  // 初始加载默认停在 overview，需在此启动轮询；switchView 只负责切换视图时的启停
+  if (document.querySelector('.nav[data-view="overview"].active')) {
+    _startOverviewPolling();
   }
 }
 

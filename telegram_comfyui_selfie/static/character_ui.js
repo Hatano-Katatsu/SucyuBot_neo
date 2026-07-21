@@ -686,7 +686,7 @@ function renderCharacterForm() {
     const section = document.createElement("section");
     section.className = "form-section character-section";
     const collapsed = index > 2;
-    section.innerHTML = `<h3 class="section-toggle ${collapsed ? "collapsed" : ""}" type="button" data-panel-id="${sectionTitle}">${sectionTitle}</h3>`;
+    section.innerHTML = `<button type="button" class="section-toggle ${collapsed ? "collapsed" : ""}" data-panel-id="${sectionTitle}" aria-expanded="${collapsed ? "false" : "true"}">${sectionTitle}</button>`;
     const grid = document.createElement("div");
     grid.className = `field-grid ${collapsed ? "collapsed" : ""}`;
     fields.forEach(field => grid.appendChild(inputFor(field, char)));
@@ -697,7 +697,7 @@ function renderCharacterForm() {
   const histSection = document.createElement("section");
   histSection.className = "form-section character-section";
   histSection.innerHTML = `
-    <h3 class="section-toggle" type="button">角色历史提要</h3>
+    <button type="button" class="section-toggle" aria-expanded="true">角色历史提要</button>
     <div class="field-grid">
       <div class="field-wrap full-width">
         <label for="history-summary-editor">历史提要 <span class="muted">（dream 自动生成，可手动编辑）</span></label>
@@ -728,7 +728,7 @@ function renderCharacterForm() {
   const checkpointSection = document.createElement("section");
   checkpointSection.className = "form-section character-section";
   checkpointSection.innerHTML = `
-    <h3 class="section-toggle" type="button">角色检查点</h3>
+    <button type="button" class="section-toggle" aria-expanded="true">角色检查点</button>
     <div class="field-grid">
       <div class="field-wrap full-width">
         <label for="character-checkpoint-select">JSON 检查点 <span class="muted">（dream 前自动生成，保留最近 7 天）</span></label>
@@ -760,11 +760,13 @@ function renderCharacterForm() {
         toggle.classList.remove("collapsed");
         if (toggle.nextElementSibling) toggle.nextElementSibling.classList.remove("collapsed");
       }
+      toggle.setAttribute("aria-expanded", toggle.classList.contains("collapsed") ? "false" : "true");
     }
     toggle.onclick = () => {
       const grid = toggle.nextElementSibling;
       grid.classList.toggle("collapsed");
       toggle.classList.toggle("collapsed");
+      toggle.setAttribute("aria-expanded", toggle.classList.contains("collapsed") ? "false" : "true");
       if (storageKey) {
         localStorage.setItem(storageKey, toggle.classList.contains("collapsed") ? "true" : "false");
       }
@@ -924,7 +926,7 @@ async function loadMemories() {
           <option value="30">30 条</option>
           <option value="60" selected>60 条</option>
           <option value="120">120 条</option>
-          <option value="0">全部</option>
+          <option value="200">全部</option>
         </select>
       </div>
       <form id="memory-add-form" class="inline-manager-form memory-add-form">

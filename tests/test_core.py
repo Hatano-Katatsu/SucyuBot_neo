@@ -5882,6 +5882,30 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("character full body in frame", low)
         self.assertNotIn("intimate close-up", low)
 
+    def test_build_prompt_fellatio_counts_as_male_partner_signal(self):
+        """场景只提 fellatio（无 penis/testicles/二人称身体线索）也必须判为伴侣在场：
+        去掉 solo、走男性伴侣局部入画路径，而不是“off-frame partner”单人特写。"""
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        svc._set_character_place(sid, "home", "家里", 0.95, source="test")
+        state["custom_positive_prefix"] = "1girl, long hair, blond hair, blue eyes"
+        state["custom_user_gender"] = "male"
+        session_schema.set_wardrobe(state, {"top": "white camisole"})
+        session_schema.set_outfit(state, "white camisole")
+        # 刻意只用 fellatio，不含 he/him、your <body> 等其他伴侣信号
+        scene = "POV close-up, the character performing fellatio, saliva trail, dim bedroom"
+
+        pos, neg = svc._build_prompt(scene, session_id=sid, is_intimate=True)
+        low = pos.lower()
+
+        self.assertIn("fellatio", low)
+        self.assertNotIn("solo", low)
+        self.assertIn("partial male body visible", low)
+        self.assertNotIn("off-frame partner", low)
+        self.assertNotIn("no visible second person", low)
+        self.assertNotIn("male", neg.lower())
+
     def test_build_animatool_neg_explicit_has_no_uncensored_double_negative(self):
         """与服务端修复后的 schema 一致：显式场景 neg 不再含 "no mosaic, uncensored" 双重否定。"""
         from telegram_comfyui_selfie.generation import _build_animatool_neg, PromptSlots
@@ -7878,6 +7902,94 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_character_clearup_cascades_memory_checkpoint_diary_context_meta(self):
+        """/角色 clearup 级联清空本会话 memories/checkpoints/diaries/context_meta 四表，
+        其他会话的同角色数据不受影响。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            other_sid = "telegram:2"
+            for target in (sid, other_sid):
+                svc.memory.add_memory(target, "event", f"{target} 的专属记忆", character="角色A")
+                svc.app_store.upsert_checkpoint(target, "角色A", f"{target} 的检查点摘要", 3)
+                svc.app_store.upsert_diary(target, "角色A", "2026-07-20", f"{target} 的日记")
+                svc.app_store.mark_dream(target, "角色A", 3)
+            state = svc._get_session_state(sid)
+            state["custom_character"] = "角色A"
+            svc._save_session_state(sid, state)
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_character(1, sid, "clearup")
+
+            # 本会话四表清空
+            self.assertEqual(svc.memory.list_memories(sid, character="角色A"), [])
+            checkpoint = svc.app_store.get_checkpoint(sid, "角色A")
+            self.assertEqual(checkpoint["summary"], "")
+            self.assertEqual(checkpoint["version"], 0)
+            self.assertIsNone(svc.app_store.get_diary(sid, "角色A", "2026-07-20"))
+            meta = svc.app_store.get_context_meta(sid, "角色A")
+            self.assertEqual(meta["last_dream_message_id"], 0)
+            self.assertEqual(meta["last_checkpoint_message_id"], 0)
+
+            # 其他会话数据不受影响
+            self.assertEqual(
+                [m["summary"] for m in svc.memory.list_memories(other_sid, character="角色A")],
+                ["telegram:2 的专属记忆"],
+            )
+            self.assertEqual(
+                svc.app_store.get_checkpoint(other_sid, "角色A")["summary"],
+                "telegram:2 的检查点摘要",
+            )
+            self.assertIsNotNone(svc.app_store.get_diary(other_sid, "角色A", "2026-07-20"))
+            self.assertEqual(
+                svc.app_store.get_context_meta(other_sid, "角色A")["last_dream_message_id"],
+                3,
+            )
+
+        asyncio.run(run())
+
+    def test_character_clearup_evicts_memory_read_cache(self):
+        """/角色 clearup 级联直接 DELETE memories 表，必须同时失效记忆读缓存，
+        否则 clearup 后 context_memories 仍返回旧记忆。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.memory.add_memory(sid, "event", "待清除的记忆", character="角色A")
+            # 预热 context_memories 读缓存
+            self.assertEqual(len(svc.memory.context_memories(sid, character="角色A")), 1)
+            state = svc._get_session_state(sid)
+            state["custom_character"] = "角色A"
+            svc._save_session_state(sid, state)
+            svc.send_message = AsyncMock()
+
+            await svc.cmd_character(1, sid, "clearup")
+
+            self.assertEqual(svc.memory.context_memories(sid, character="角色A"), [])
+
+        asyncio.run(run())
+
+    def test_store_read_caches_invalidate_on_write(self):
+        """C14 读缓存回归：checkpoint/context_meta/长期记忆写入后读缓存必须失效，返回新值。"""
+        svc = self.make_service()
+        sid = "telegram:1"
+        char = "角色A"
+
+        # checkpoint：先读（写入缓存）再写，重读必须是新摘要
+        self.assertEqual(svc.app_store.get_checkpoint(sid, char)["summary"], "")
+        svc.app_store.upsert_checkpoint(sid, char, "第一段摘要", 5)
+        self.assertEqual(svc.app_store.get_checkpoint(sid, char)["summary"], "第一段摘要")
+
+        # context_meta：先读（写入缓存）再推进 dream 游标，重读必须是新游标
+        self.assertEqual(svc.app_store.get_context_meta(sid, char)["last_dream_message_id"], 0)
+        svc.app_store.mark_dream(sid, char, 5)
+        self.assertEqual(svc.app_store.get_context_meta(sid, char)["last_dream_message_id"], 5)
+
+        # 长期记忆：context_memories 先读（写入缓存）再 add_memory，重读必须含新记忆
+        self.assertEqual(svc.memory.context_memories(sid, character=char, limit=8), [])
+        svc.memory.add_memory(sid, "event", "她喜欢吃草莓", character=char)
+        after = svc.memory.context_memories(sid, character=char, limit=8)
+        self.assertEqual([m["summary"] for m in after], ["她喜欢吃草莓"])
+
     def test_character_reset_aliases_do_not_hard_reset(self):
         async def run():
             svc = self.make_service()
@@ -9365,6 +9477,35 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertTrue(_detect_intimate_context("骑乘", "迷离表情"))
         self.assertFalse(_detect_intimate_context("角色坐在窗边看书"))
         self.assertFalse(_detect_intimate_context(""))
+
+    def test_plan_roleplay_image_intimate_hint_from_chinese_fallback(self):
+        """确定性中文兜底链路：隐晦中文（缠绵/余韵）在 ① 未配置图像 LLM 的纯兜底分支、
+        ② LLM 配置了但漏判 is_intimate=false 时，最终 plan 都必须带 is_intimate=True。"""
+        async def run():
+            # ① 无图像 LLM：_detect_intimate_context → fallback_intimate_hint → plan["is_intimate"]
+            svc = self.make_service()
+            plan = await plan_roleplay_image(svc, "telegram:1", intent="想看两人缠绵后的余韵")
+            self.assertTrue(plan["is_intimate"])
+
+            # ② 有图像 LLM 但规划器返回 is_intimate=false：关键词 hint 以 OR 兜底纠偏
+            svc2 = self.make_service()
+            svc2.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            svc2._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            self.mock_image_planner_messages(svc2, {
+                "scene": "她窝在床头发呆",
+                "view": "selfie",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            })
+            plan2 = await plan_roleplay_image(svc2, "telegram:1", intent="想看两人缠绵后的余韵")
+            self.assertTrue(plan2["is_intimate"])
+
+        asyncio.run(run())
 
     def test_build_prompt_sex_scene_keeps_pov_and_strips_selfie(self):
         svc = self.make_service()

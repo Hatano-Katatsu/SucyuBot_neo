@@ -2065,6 +2065,8 @@ class CommandHandlersMixin:
         if sub == "clearup":
             count = len(saved)
             self.app_store.clear_session_character_cascade(session_id)
+            # 级联直接 DELETE memories 表，绕过记忆层写路径，需手动失效整会话读缓存
+            self.memory.evict_session_mem_cache(session_id)
             if hasattr(self, "_character_checkpoint_root") and hasattr(self, "_safe_checkpoint_part"):
                 checkpoint_dir = self._character_checkpoint_root() / self._safe_checkpoint_part(session_id, "session")
                 if checkpoint_dir.exists():

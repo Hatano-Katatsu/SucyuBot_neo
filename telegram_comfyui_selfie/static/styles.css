@@ -1702,19 +1702,6 @@ select {
   .runtime-clothing-pane.is-current {
     grid-row: auto;
   }
-
-  .character-form .field-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .character-form .field-wrap,
-  .character-form .field-half,
-  .character-form .field-third,
-  .character-form .field-quarter,
-  .character-form .field-wide,
-  .character-form .field-wrap.full-width {
-    grid-column: 1 / span 1;
-  }
 }
 
 @media (max-width: 900px) {
@@ -1752,12 +1739,6 @@ select {
   .top-actions { width: 100%; }
   .top-actions button { flex: 1; }
   .session-list { max-height: 240px; overflow-y: auto; }
-  .character-form .field-grid { grid-template-columns: 1fr; }
-  .character-form .field-wrap,
-  .character-form .field-half,
-  .character-form .field-third,
-  .character-form .field-quarter,
-  .character-form .field-wide { grid-column: 1 / -1; }
 }
 
 @media (max-width: 600px) {
@@ -2241,6 +2222,22 @@ button:disabled .spinner {
   grid-column: 1 / -1;
 }
 
+/* 窄屏单列：必须写在上方无条件规则之后，同特异性下后写才生效 */
+@media (max-width: 1100px) {
+  .character-form .field-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .character-form .field-wrap,
+  .character-form .field-half,
+  .character-form .field-third,
+  .character-form .field-quarter,
+  .character-form .field-wide,
+  .character-form .field-wrap.full-width {
+    grid-column: 1 / -1;
+  }
+}
+
 .character-form .field-wrap label {
   display: block;
   margin-bottom: 5px;
@@ -2273,6 +2270,24 @@ button:disabled .spinner {
   align-items: center;
   gap: 8px;
   user-select: none;
+  /* 段头已改为 button 元素，归零全局 button 样式以保持原 h3 外观 */
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  min-height: 0;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+}
+
+.section-toggle:hover {
+  border: none;
+  background: transparent;
+  color: var(--text);
+  transform: none;
+  box-shadow: none;
 }
 
 .section-toggle::after {
@@ -2672,19 +2687,6 @@ button:disabled .spinner {
   .mini-btn { min-height: 40px; padding: 8px 12px; }
   .closet-option-tools { gap: 10px; }
   input, textarea, select { font-size: 16px; }
-  .character-form .field-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .character-form .field-wrap,
-  .character-form .field-half,
-  .character-form .field-third,
-  .character-form .field-quarter,
-  .character-form .field-wide,
-  .character-form .field-wrap.full-width {
-    grid-column: 1 / -1;
-  }
-
   .runtime-clothing-head {
     display: grid;
     gap: 10px;

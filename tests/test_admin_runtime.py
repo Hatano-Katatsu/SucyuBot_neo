@@ -240,6 +240,25 @@ class LLMUsageTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_webui_llm_usage_explicit_after_zero_returns_all(self):
+        """显式 after=0 表示查询全部用量，不应被回退成最近 24 小时。"""
+        from aiohttp import web
+        from telegram_comfyui_selfie.webui import api_admin_llm_usage
+
+        async def run():
+            svc = self.make_service()
+            svc.app_store.record_llm_usage(profile_id="p", model="m", purpose="chat", tag="t", prompt_tokens=100, completion_tokens=50, cached_tokens=20, total_tokens=150)
+            app = web.Application()
+            app["service"] = svc
+            req = make_mock_request(app, "/api/admin/llm-usage?after=0", method="GET", admin=True)
+            resp = await api_admin_llm_usage(req)
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.text)
+            self.assertEqual(data.get("time_range", {}).get("after"), 0)
+            self.assertEqual(data.get("summary", {}).get("requests"), 1)
+
+        asyncio.run(run())
+
     def test_llm_debug_records_are_buffered_then_appended_as_jsonl(self):
         svc = self.make_service()
         path = svc._llm_debug_log_path()

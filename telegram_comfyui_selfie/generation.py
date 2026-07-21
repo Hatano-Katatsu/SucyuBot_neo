@@ -796,6 +796,12 @@ def _explicit_sexual_scene_tags(scene_desc: str) -> list[str]:
         if rx.search(scene_desc or "") and tag not in tags:
             tags.append(tag)
     return tags
+
+
+# 明确提到即意味着男性伴侣必然在场的性爱 tag：fellatio 必然有男性性器在场，
+# 与直接提到 penis/testicles 等价。scene_has_partner 判定与伴侣局部入画措辞分支共用此集合，
+# 避免两处字面量各自漂移。
+_MALE_PARTNER_SIGNAL_TAGS = frozenset({"penis", "testicles", "fellatio"})
 _NUDE_STATE_WORDS = (
     "topless", "bottomless", "barefoot", "no panties", "no underwear", "no bra",
     "exposed breasts", "exposed nipples", "bare shoulders",
@@ -1486,7 +1492,7 @@ def build_prompt(
         partner_in_frame
         or bool(partner_re.search(scene_desc))
         or bool(USER_BODY_PART_RE.search(scene_desc))
-        or any(tag in {"penis", "testicles"} for tag in explicit_sex_tags)
+        or any(tag in _MALE_PARTNER_SIGNAL_TAGS for tag in explicit_sex_tags)
     )
     device_present = device_in_frame or bool(DEVICE_SCENE_RE.search(scene_desc))
     scene_has_sex_keyword = any(k in scene_lower for k in sex_keywords)
@@ -1642,7 +1648,7 @@ def build_prompt(
             neg = _remove_negatives(neg, "male", "boy", "man", "1boy")
         else:
             if is_sex_scene:
-                if any(tag in {"penis", "testicles"} for tag in explicit_sex_tags):
+                if any(tag in _MALE_PARTNER_SIGNAL_TAGS for tag in explicit_sex_tags):
                     scene_desc += ", partial male body visible, male torso, male hands, character full body in frame"
                 else:
                     scene_desc += ", partner's hands or arms visible only as required by the pose, character full body in frame"
