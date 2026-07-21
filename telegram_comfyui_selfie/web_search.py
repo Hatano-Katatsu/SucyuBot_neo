@@ -17,13 +17,39 @@ SEARCH_CACHE_MAX_ENTRIES = 64
 
 _search_cache: dict[str, tuple[float, list[dict[str, str]]]] = {}
 
-
-def _cache_key(query: str) -> str:
-    return " ".join(str(query or "").lower().split())
+SEARCH_TOPICS = ("general", "news", "finance")
 
 
-def cache_get(query: str) -> list[dict[str, str]] | None:
-    key = _cache_key(query)
+def choose_search_topic(query: str, requested: str = "") -> str:
+    """在 Tavily 支持的三类 topic 中选择；模型显式给出合法值时优先。"""
+    topic = str(requested or "").strip().lower()
+    if topic in SEARCH_TOPICS:
+        return topic
+    text = str(query or "").lower()
+    finance_terms = (
+        "股票", "股价", "基金", "债券", "汇率", "财报", "营收", "市值", "金融", "加密货币",
+        "stock", "shares", "forex", "earnings", "revenue", "finance", "crypto", "bitcoin",
+    )
+    news_terms = (
+        "最新", "今天", "今日", "目前", "实时", "刚刚", "新闻", "时事", "选举", "政治", "赛事",
+        "比分", "冠军", "地震", "台风", "发布", "宣布", "近况", "动态", "本周", "本月",
+        "latest", "today", "breaking", "news", "election", "politics", "score", "tournament",
+    )
+    if any(term in text for term in finance_terms):
+        return "finance"
+    if any(term in text for term in news_terms):
+        return "news"
+    return "general"
+
+
+def _cache_key(query: str, topic: str = "") -> str:
+    normalized_query = " ".join(str(query or "").lower().split())
+    normalized_topic = str(topic or "").strip().lower()
+    return f"{normalized_topic}\0{normalized_query}"
+
+
+def cache_get(query: str, topic: str = "") -> list[dict[str, str]] | None:
+    key = _cache_key(query, topic)
     hit = _search_cache.get(key)
     if not hit:
         return None
@@ -34,8 +60,8 @@ def cache_get(query: str) -> list[dict[str, str]] | None:
     return results
 
 
-def cache_put(query: str, results: list[dict[str, str]]) -> None:
-    _search_cache[_cache_key(query)] = (time.time(), results)
+def cache_put(query: str, results: list[dict[str, str]], topic: str = "") -> None:
+    _search_cache[_cache_key(query, topic)] = (time.time(), results)
     if len(_search_cache) > SEARCH_CACHE_MAX_ENTRIES:
         doomed = sorted(_search_cache, key=lambda k: _search_cache[k][0])
         for key in doomed[: len(_search_cache) - SEARCH_CACHE_MAX_ENTRIES]:
@@ -50,8 +76,10 @@ async def tavily_search(
     api_key: str,
     query: str,
     *,
-    max_results: int = 5,
-    topic: str = "general",
+    max_results: int = 10,
+    topic: str = "",
+    search_depth: str = "basic",
+    include_answer: str | bool = "advanced",
     days: int = 0,
     timeout: float = 15.0,
     max_response_bytes: int | None = None,
@@ -61,9 +89,9 @@ async def tavily_search(
     payload: dict[str, Any] = {
         "query": str(query or "").strip(),
         "search_depth": "basic",
-        "topic": topic,
-        "max_results": max(1, min(int(max_results or 5), 10)),
-        "include_answer": True,
+        "topic": choose_search_topic(query, topic),
+        "max_results": max(1, min(int(max_results or 10), 10)),
+        "include_answer": include_answer,
     }
     if days > 0:
         payload["days"] = int(days)
@@ -108,8 +136,8 @@ def format_results_for_roleplay(
     query: str,
     results: list[dict[str, str]],
     *,
-    max_items: int = 5,
-    snippet_chars: int = 160,
+    max_items: int = 10,
+    snippet_chars: int = 120,
     total_chars: int = 900,
 ) -> str:
     """把搜索结果压成给聊天模型转述的资料块。

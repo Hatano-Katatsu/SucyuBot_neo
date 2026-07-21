@@ -1579,19 +1579,21 @@ class TelegramComfyUIService(
         except ValueError:
             return 5
 
-    async def tool_search_web(self, session_id: str, query: str = "") -> str:
+    async def tool_search_web(self, session_id: str, query: str = "", topic: str = "general") -> str:
         """聊天工具：角色遇到不熟悉/时效性话题时联网查资料。
 
         所有失败路径都返回可扮演的软失败文案（不抛异常穿透聊天回合）；
         缓存命中不扣每日限额，资料只进对话动态尾部。
         """
         query = (query or "").strip()
-        self._ulog(session_id, "SEARCH", f'模型调用 search_web query="{query[:100]}"')
+        from . import web_search
+        topic = web_search.choose_search_topic(query, topic)
+        self._ulog(session_id, "SEARCH", f'模型调用 search_web topic={topic} query="{query[:100]}"')
         if not query:
             return "搜索关键词为空，没有执行搜索。"
         if not self._web_search_enabled():
             return "联网搜索功能未开启，查不到外部资料。用角色口吻坦然承认不了解这个话题或把话题引回对话，不要编造事实。"
-        cached = web_search.cache_get(query)
+        cached = web_search.cache_get(query, topic)
         if cached is not None:
             self._ulog(session_id, "SEARCH", f"命中缓存 {len(cached)} 条")
             return web_search.format_results_for_roleplay(query, cached)
@@ -1610,6 +1612,10 @@ class TelegramComfyUIService(
             results = await web_search.tavily_search(
                 str(self.config.get("tavily_api_key", "") or "").strip(),
                 query,
+                search_depth="basic",
+                max_results=10,
+                include_answer="advanced",
+                topic=topic,
                 max_response_bytes=response_limit(self.config, "search_json"),
                 max_error_bytes=response_limit(self.config, "error_text"),
             )
@@ -1621,7 +1627,7 @@ class TelegramComfyUIService(
         if not results:
             self._ulog(session_id, "SEARCH", f"无结果 {used + 1}/{limit}")
             return f"没有搜到关于「{query}」的资料。用角色口吻自然带过，不要编造事实。"
-        web_search.cache_put(query, results)
+        web_search.cache_put(query, results, topic)
         self._ulog(session_id, "SEARCH", f"返回 {len(results)} 条 {used + 1}/{limit}")
         return web_search.format_results_for_roleplay(query, results)
 

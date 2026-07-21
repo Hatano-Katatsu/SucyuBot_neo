@@ -422,7 +422,7 @@ DEFAULT_CONFIG = {
     "tavily_api_key": "",
     "web_search_enabled": False,
     "web_search_daily_limit": "5",
-    # 推送侧外部话题搜索：每天最多搜索几次用来给推送找新鲜话题（与聊天侧 web_search 独立计数）。
+    # 推送侧网络话题池：每日首次 normal 独立话题推送完成后最多搜索几次（与聊天侧独立计数）。
     "push_topic_search_daily_limit": "1",
     # 外部 HTTP 响应体按用途设限；可在配置文件中覆盖单项字节数。
     "http_response_limits": {

@@ -1570,6 +1570,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("search_web", text)
         self.assertIn("时效性内容", text)
         self.assertIn("不要写整句对话", text)
+        self.assertIn('"topic": {"type": "string", "enum": ["general", "news", "finance"]', text)
+        self.assertNotIn("英雄联盟 S16", text)
+        self.assertNotIn("东京 樱花", text)
 
     def test_execute_tool_call_routes_search_web(self):
         async def run():
@@ -1577,10 +1580,10 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             sid = "telegram:1"
             svc.tool_search_web = AsyncMock(return_value="资料块")
             out = await svc._execute_tool_call(1, sid, {
-                "function": {"name": "search_web", "arguments": json.dumps({"query": "英雄联盟 S16"})},
+                "function": {"name": "search_web", "arguments": json.dumps({"query": "英雄联盟 S16", "topic": "news"})},
             })
             self.assertEqual(out, "资料块")
-            svc.tool_search_web.assert_awaited_once_with(sid, "英雄联盟 S16")
+            svc.tool_search_web.assert_awaited_once_with(sid, "英雄联盟 S16", "news")
 
         asyncio.run(run())
 
@@ -1613,6 +1616,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 self.assertIn("T1 击败 BLG 夺得 S16 冠军", result)
                 self.assertNotIn("https://example.com/a", result)
                 self.assertEqual(session_schema.get_web_search_count(svc._get_session_state(sid)), 1)
+                kwargs = mock_search.await_args.kwargs
+                self.assertEqual(kwargs["search_depth"], "basic")
+                self.assertEqual(kwargs["max_results"], 10)
+                self.assertEqual(kwargs["include_answer"], "advanced")
+                self.assertEqual(kwargs["topic"], "general")
 
                 # 同 query 再问 → 命中缓存：不再请求也不再扣额
                 result = await svc.tool_search_web(sid, "英雄联盟 S16 冠军")
@@ -1651,9 +1659,13 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         from telegram_comfyui_selfie import web_search
 
         web_search.clear_cache()
+        self.assertEqual(web_search.choose_search_topic("普通资料检索", "general"), "general")
+        self.assertEqual(web_search.choose_search_topic("实时赛事结果", "news"), "news")
+        self.assertEqual(web_search.choose_search_topic("公司财报", "finance"), "finance")
         # 缓存 roundtrip：query 归一（大小写/空白）视为同一条
         web_search.cache_put("Tokyo  Sakura", [{"title": "t", "content": "c", "url": ""}])
         self.assertIsNotNone(web_search.cache_get("tokyo sakura"))
+        self.assertIsNone(web_search.cache_get("tokyo sakura", "news"))
         self.assertIsNone(web_search.cache_get("其他"))
         # 长摘要被截断，总长有上限
         results = [{"title": f"标题{i}", "content": "字" * 500, "url": ""} for i in range(8)]
@@ -2546,6 +2558,12 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc.config["default_purity"] = "6"
             svc._should_run_dream_before_push = lambda session_id, state: True
             svc._run_dream = AsyncMock()
+            svc._decide_push_topic_direction = AsyncMock(return_value={
+                "topic_direction": "life",
+                "topic_guides": ["分享午后的一个具体生活片段。"],
+                "topic_seed": "",
+                "search_query": "",
+            })
             svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22", "code": "113"})
             svc._llm_write_scene = AsyncMock(return_value={
                 "scene": "window selfie", "caption": "caption", "new_appearance_tags": "",
@@ -2565,6 +2583,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             self.assertTrue(ok)
             svc._run_dream.assert_awaited_once_with(sid, fixed_now, reason="morning", force=True)
+            svc._decide_push_topic_direction.assert_awaited_once_with(
+                sid, "normal", svc._get_session_state(sid), fixed_now,
+            )
 
         asyncio.run(run())
 
@@ -3072,6 +3093,21 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         topics = session_schema.get_recent_push_topics(state)
         self.assertEqual(len(topics), 2, "recent_push_topics 应跨场景重置保留")
 
+    def test_push_web_topic_pool_accessor_and_reset_preserved(self):
+        svc = self.make_service()
+        state = svc._get_session_state("telegram:123")
+        session_schema.set_push_web_topic_pool(state, {
+            "date": "2026-07-20",
+            "search_query": "动画展 新作",
+            "topics": [{"guide": "从新作预告里的舞台设计切入，聊角色最喜欢的视觉细节。", "source": "search"}],
+        })
+
+        svc._clear_conversation_context(state)
+
+        pool = session_schema.get_push_web_topic_pool(state)
+        self.assertEqual(pool["date"], "2026-07-20")
+        self.assertEqual(len(pool["topics"]), 1)
+
     def test_pushes_since_last_user_message_counts_after_user_ts(self):
         svc = self.make_service()
         sid = "telegram:123"
@@ -3104,6 +3140,30 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         # 跨日重置
         self.assertTrue(svc._push_topic_search_quota_ok(state, "2026-07-21"))
 
+    def test_push_topic_search_uses_unified_tavily_parameters(self):
+        async def run():
+            from telegram_comfyui_selfie import web_search
+
+            web_search.clear_cache()
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({"web_search_enabled": True, "tavily_api_key": "tavily-key"})
+            state = svc._get_session_state(sid)
+            now = datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc)
+            with patch.object(web_search, "tavily_search", new=AsyncMock(return_value=[
+                {"title": "市场摘要", "content": "财报公布后市场出现新变化", "url": ""},
+            ])) as mock_search:
+                digest = await svc._fetch_push_topic_seed(sid, state, "公司最新财报", now, "finance")
+
+            self.assertIn("市场摘要", digest)
+            kwargs = mock_search.await_args.kwargs
+            self.assertEqual(kwargs["search_depth"], "basic")
+            self.assertEqual(kwargs["max_results"], 10)
+            self.assertEqual(kwargs["include_answer"], "advanced")
+            self.assertEqual(kwargs["topic"], "finance")
+            web_search.clear_cache()
+        asyncio.run(run())
+
     def test_decide_push_topic_direction_followup_defaults_dialogue(self):
         async def run():
             svc = self.make_service()
@@ -3118,7 +3178,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(svc._call_llm.await_count, 0)
         asyncio.run(run())
 
-    def test_decide_push_topic_direction_external_downgrades_when_quota_used(self):
+    def test_decide_independent_topic_skips_daily_refresh_when_quota_used(self):
         async def run():
             svc = self.make_service()
             sid = "telegram:123"
@@ -3128,15 +3188,209 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             today = now.strftime("%Y-%m-%d")
             # 用完配额
             svc._consume_push_topic_search_quota(sid, state, today)
-            # LLM 返回 external_topic，但配额已满应降级 life
+            # 配额已满时仍可走 independent 生活线，但不安排推送后的搜索。
             svc._call_llm = AsyncMock(return_value=json.dumps({
-                "topic_direction": "external_topic",
+                "topic_mode": "independent",
+                "topic_guides": [{"source": "life", "guide": "沿着下午的采购动线，聊新发现的一种香料。"}],
                 "search_query": "原神 活动",
                 "reason": "test",
             }))
             decision = await svc._decide_push_topic_direction(sid, "normal", state, now)
-            self.assertEqual(decision["topic_direction"], "life")
-            self.assertEqual(decision["search_query"], "")
+            self.assertEqual(decision["topic_direction"], "independent")
+            self.assertEqual(decision["post_push_search_query"], "")
+        asyncio.run(run())
+
+    def test_normal_push_refreshes_web_topics_after_photo_is_sent(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc)
+            events = []
+            svc._fetch_weather = AsyncMock(return_value={"desc": "sunny", "temp": "22", "code": "113"})
+            svc._decide_push_topic_direction = AsyncMock(return_value={
+                "topic_direction": "independent",
+                "topic_guides": ["沿着下午生活线分享一件具体小事。"],
+                "post_push_search_query": "角色兴趣 最新动态",
+                "post_push_search_topic": "news",
+            })
+            svc._llm_write_scene = AsyncMock(return_value={
+                "scene": "window selfie", "caption": "caption", "new_appearance_tags": "",
+                "view": "selfie", "aspect_ratio": "2:3", "is_intimate": False,
+                "partner_in_frame": False, "device_in_frame": False, "clothing_off": "",
+            })
+            svc._translate_to_tags = AsyncMock(return_value="english prompt")
+            svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
+
+            async def send_photo(*args, **kwargs):
+                events.append("send")
+
+            async def refresh(*args, **kwargs):
+                events.append("refresh")
+                return []
+
+            svc.send_photo = AsyncMock(side_effect=send_photo)
+            svc._refresh_push_web_topics_after_push = AsyncMock(side_effect=refresh)
+
+            ok = await svc._sched_fire(sid, fixed_now, mode_override="normal", skip_active_check=True)
+
+            self.assertTrue(ok)
+            self.assertEqual(events, ["send", "refresh"])
+            svc._refresh_push_web_topics_after_push.assert_awaited_once()
+        asyncio.run(run())
+
+    def test_decide_push_topic_direction_returns_one_to_three_specific_guides(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({"image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "u"})
+            state = svc._get_session_state(sid)
+            now = datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc)
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "topic_mode": "independent",
+                "topic_guides": [
+                    {"source": "life", "guide": "沿着午后去书店的生活线，挑新到的摄影集聊封面构图。"},
+                    {"source": "life", "guide": "从回程时突然下雨切入，分享躲雨时看到的橱窗小物。"},
+                    {"source": "life", "guide": "把晚饭备菜推进到第一次尝试的新调味组合。"},
+                    {"source": "life", "guide": "这一条应被截掉。"},
+                ],
+                "search_query": "",
+                "reason": "生活线有多个未展开细节",
+            }, ensure_ascii=False))
+
+            decision = await svc._decide_push_topic_direction(sid, "normal", state, now)
+
+            self.assertEqual(decision["topic_direction"], "independent")
+            self.assertEqual(len(decision["topic_guides"]), 3)
+            self.assertIn("摄影集", decision["topic_guides"][0])
+            prompt = svc._call_llm.await_args.args[0]
+            self.assertIn("1-3", prompt)
+            self.assertIn("具体话题引导", prompt)
+        asyncio.run(run())
+
+    def test_dialogue_decision_does_not_schedule_daily_web_topic_refresh(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({
+                "image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "u",
+                "web_search_enabled": True, "tavily_api_key": "tavily-key",
+            })
+            state = svc._get_session_state(sid)
+            session_schema.set_chat_history(state, [{"role": "user", "content": "周末一起去摄影展吧"}])
+            now = datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc)
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "topic_mode": "dialogue",
+                "topic_guides": [{"source": "dialogue", "guide": "回应摄影展约定，具体聊周末出发时间。"}],
+                "search_interest": "摄影展",
+                "search_query": "摄影展 最新消息",
+                "search_topic": "news",
+                "reason": "用户刚提出明确约定",
+            }, ensure_ascii=False))
+
+            decision = await svc._decide_push_topic_direction(sid, "normal", state, now)
+
+            self.assertEqual(decision["topic_direction"], "dialogue")
+            self.assertEqual(decision["post_push_search_query"], "")
+        asyncio.run(run())
+
+    def test_first_independent_push_defers_search_then_builds_reusable_pool(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({
+                "image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "u",
+                "web_search_enabled": True, "tavily_api_key": "tavily-key",
+            })
+            state = svc._get_session_state(sid)
+            session_schema.set_push_web_topic_pool(state, {
+                "date": "2026-07-19",
+                "refresh_attempt_date": "2026-07-19",
+                "search_query": "旧搜索",
+                "topics": [{"guide": "仍在连载的旧作本周更新值得继续聊。", "source": "search"}],
+            })
+            now = datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc)
+            svc._fetch_push_topic_seed = AsyncMock(return_value=(
+                "- 官方公开新作预告：主舞台改到海边城市。\n"
+                "- 制作访谈：美术团队采用手绘水彩背景。\n"
+                "- 展会公布角色设定图与主题曲阵容。\n"
+                "- 试玩报告提到新的拍照玩法。"
+            ))
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                    "topic_mode": "independent",
+                    "topic_guides": [
+                        {"source": "life", "guide": "沿着下午回家动线，聊路边新开的甜品店。"},
+                        {"source": "web", "guide": "仍在连载的旧作本周更新值得继续聊。"},
+                    ],
+                    "search_interest": "喜欢作品的新作动态",
+                    "search_query": "喜欢作品 2026 新作 最新预告",
+                    "search_topic": "news",
+                    "reason": "今天还没有网络话题池",
+                }, ensure_ascii=False))
+
+            decision = await svc._decide_push_topic_direction(sid, "normal", state, now)
+
+            self.assertEqual(decision["topic_direction"], "independent")
+            self.assertEqual([item["source"] for item in decision["topic_guide_items"]], ["life", "web"])
+            self.assertEqual(decision["post_push_search_topic"], "news")
+            svc._fetch_push_topic_seed.assert_not_awaited()
+            self.assertEqual(session_schema.get_push_web_topic_pool(state)["date"], "2026-07-19")
+
+            svc._call_llm = AsyncMock(return_value=json.dumps({"topics": [
+                    {"guide": "从新作把舞台搬到海边城市切入，聊这种环境会怎样改变角色日常。", "source": "search"},
+                    {"guide": "结合美术团队的手绘水彩背景访谈，聊最期待看到的光影质感。", "source": "search"},
+                    {"guide": "从刚公开的角色设定图挑一个服装细节，分享角色自己的审美反应。", "source": "search"},
+                    {"guide": "围绕新拍照玩法，联想到角色今天生活线里适合取景的地点。", "source": "search"},
+                    {"guide": "保留仍在连载的旧作本周更新，接续之前没聊完的伏笔。", "source": "history"},
+                ]}, ensure_ascii=False))
+            refreshed = await svc._refresh_push_web_topics_after_push(
+                sid, state, decision["post_push_search_query"], decision["post_push_search_topic"], now,
+            )
+
+            svc._fetch_push_topic_seed.assert_awaited_once()
+            self.assertEqual(len(refreshed), 5)
+            self.assertIn("海边城市", refreshed[0])
+            pool = session_schema.get_push_web_topic_pool(state)
+            self.assertEqual(pool["date"], "2026-07-20")
+            self.assertEqual(pool["refresh_attempt_date"], "2026-07-20")
+            self.assertEqual(pool["search_topic"], "news")
+            self.assertEqual(len(pool["topics"]), 5)
+            self.assertEqual(sum(1 for item in pool["topics"] if item.get("source") == "history"), 1)
+        asyncio.run(run())
+
+    def test_independent_decision_can_mix_life_and_web_after_search_quota(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({"image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "u"})
+            state = svc._get_session_state(sid)
+            now = datetime(2026, 7, 20, 18, 0, tzinfo=timezone.utc)
+            session_schema.set_push_web_topic_pool(state, {
+                "date": "2026-07-20",
+                "refresh_attempt_date": "2026-07-20",
+                "search_query": "新作 访谈",
+                "topics": [
+                    {"guide": "从水彩背景访谈切入，聊傍晚场景的光影。", "source": "search"},
+                    {"guide": "从海边城市舞台切入，聊角色会先去哪里散步。", "source": "search"},
+                ],
+            })
+            svc._consume_push_topic_search_quota(sid, state, "2026-07-20")
+            svc._fetch_push_topic_seed = AsyncMock()
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "topic_mode": "independent",
+                "topic_guides": [
+                    {"source": "life", "guide": "把傍晚散步生活线推进到海边步道。"},
+                    {"source": "web", "guide": "从海边城市舞台切入，聊角色会先去哪里散步。"},
+                ],
+                "search_query": "不应再次搜索",
+                "reason": "选列表中尚未使用的话题",
+            }, ensure_ascii=False))
+
+            decision = await svc._decide_push_topic_direction(sid, "normal", state, now)
+
+            self.assertEqual(decision["topic_direction"], "independent")
+            self.assertEqual(decision["post_push_search_query"], "")
+            self.assertEqual([item["source"] for item in decision["topic_guide_items"]], ["life", "web"])
+            svc._fetch_push_topic_seed.assert_not_awaited()
         asyncio.run(run())
 
     def test_append_push_topic_bounded_to_eight(self):
@@ -3175,13 +3429,18 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             {"ts": yesterday_ts, "caption": "昨天在追番", "topic": "追番", "direction": "life", "search_query": ""},
             {"ts": now.timestamp() - 3600, "caption": "今天做了咖喱", "topic": "咖喱 做饭", "direction": "life", "search_query": ""},
         ])
+        session_schema.set_chat_history(state, [
+            {"role": "user", "content": "周末想一起去看海边摄影展"},
+            {"role": "assistant", "content": "我记住啦，先看看展览时间。"},
+        ])
         ctx = svc._push_topic_direction_context(sid, state, now)
         # 话题历史带相对日期
         self.assertIn("昨天", ctx)
         self.assertIn("追番", ctx)
         self.assertIn("咖喱", ctx)
-        # external_topic 配额状态
-        self.assertIn("外部话题搜索今日配额", ctx)
+        self.assertIn("海边摄影展", ctx)
+        # 推送后网络话题补充状态
+        self.assertIn("推送结束后补充网络话题的今日配额", ctx)
 
     def test_plan_roleplay_image_injects_topic_direction_hint(self):
         async def run():
@@ -3210,11 +3469,14 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             await plan_roleplay_image(
                 svc, sid, mode="normal",
                 weather_data={"desc": "晴", "temp": "22"},
-                push_topic_direction="life",
+                push_topic_direction="independent",
+                push_topic_guides=["沿着书店生活线，聊刚翻到的摄影集里一张雨夜街景。"],
             )
             joined = "\n".join(m.get("content", "") for m in svc._call_llm_messages.await_args.args[0])
             self.assertIn("本次推送方向", joined)
-            self.assertIn("life", joined)
+            self.assertIn("independent", joined)
+            self.assertIn("本次具体话题引导", joined)
+            self.assertIn("摄影集里一张雨夜街景", joined)
         asyncio.run(run())
 
     def test_scheduled_push_planner_injects_today_life_candidates(self):
@@ -6880,9 +7142,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(set(ss.CHARACTER_CONFIG_EXTRA_KEYS),
                          {"character", "purity", "purity_user_set", "persona_user_set"})
         # clothing 三字段已收进 clothing 盒；reset 保留的短期态单元现为
-        # clothing + life_profile + life_plan + recent_push_topics（推送话题日志跨场景重置保留）。
+        # clothing + life_profile + life_plan + 推送话题日志/网络话题池（跨场景重置保留）。
         self.assertEqual(set(ss.RESET_PRESERVED_TRANSIENT_KEYS),
-                         {"clothing", "life_profile", "life_plan", "recent_push_topics"})
+                         {"clothing", "life_profile", "life_plan", "recent_push_topics", "push_web_topic_pool"})
         # 默认值表：代表性字段 + 无默认字段不进表
         defaults = ss.state_defaults()
         self.assertIn("last_interaction", defaults)          # 动态时间戳

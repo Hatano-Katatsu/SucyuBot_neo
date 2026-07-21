@@ -1104,9 +1104,14 @@ class ChatContextMixin:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "query": {"type": "string", "description": "搜索关键词，如「英雄联盟 S16 冠军」「东京 樱花 见顷 2026」。"},
+                            "query": {"type": "string", "description": "要检索的具体关键词，应包含理解问题所需的对象和时效范围。"},
+                            "topic": {
+                                "type": "string",
+                                "enum": ["general", "news", "finance"],
+                                "description": "搜索类别：实时政治、体育和重大事件用 news，金融市场用 finance，其他用途用 general。",
+                            },
                         },
-                        "required": ["query"],
+                        "required": ["query", "topic"],
                     },
                 },
             })
@@ -1150,7 +1155,7 @@ class ChatContextMixin:
         if fn == "update_user_location":
             return await self.tool_update_user_location(session_id, args.get("place", ""))
         if fn == "search_web":
-            return await self.tool_search_web(session_id, args.get("query", ""))
+            return await self.tool_search_web(session_id, args.get("query", ""), args.get("topic", ""))
         return f"未知工具: {fn}"
 
     async def _run_background_roleplay_image(self, chat_id: int | str, session_id: str, **kwargs):

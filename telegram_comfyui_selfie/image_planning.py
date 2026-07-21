@@ -1038,6 +1038,7 @@ async def plan_roleplay_image(
     now: Any = None,
     push_topic_seed: str = "",
     push_topic_direction: str = "",
+    push_topic_guides: list[str] | None = None,
 ) -> dict[str, Any]:
     free_composition = (mode or "").strip().lower() == "illustration"
     has_explicit_scene_request = bool((prompt or must_include).strip())
@@ -1547,6 +1548,12 @@ async def plan_roleplay_image(
                 "本次推送方向（动态，仅本次推送生效）: dialogue——承接和用户的对话。"
                 "画面和 caption 可以回应或延续最近的话题，但仍要推进一小步，不要原地复述。"
             )
+        elif direction_hint == "independent":
+            push_dynamic_parts.append(
+                "本次推送方向（动态，仅本次推送生效）: independent——本次不继续用户上一话题。"
+                "下面的具体引导可以同时来自角色生活线和已有网络话题；把它们自然组织成角色此刻会分享的内容，"
+                "不要写成分类列表或资料汇报，也不要为了串联而虚构尚未搜索的新事实。"
+            )
         elif direction_hint == "external_topic":
             push_dynamic_parts.append(
                 "本次推送方向（动态，仅本次推送生效）: external_topic——分享一个角色会感兴趣的外部新鲜话题。"
@@ -1561,6 +1568,19 @@ async def plan_roleplay_image(
                 "让角色在自己的生活里独立地做着某件事、发现某样东西、想起某件事；"
                 "可以有连续剧情（承接上次生活线片段推进一拍），但不要写成日程汇报。"
                 "不要把 caption 写成对用户的询问或催促回复。"
+            )
+        concrete_guides = []
+        for item in push_topic_guides or []:
+            text = " ".join(str(item or "").split()).strip()
+            if text and text not in concrete_guides:
+                concrete_guides.append(text[:240])
+            if len(concrete_guides) >= 3:
+                break
+        if concrete_guides:
+            push_dynamic_parts.append(
+                "本次具体话题引导（动态，仅本次推送生效；必须至少采用其中一条作为 caption 的明确主题，"
+                "可把多条自然组合，但不得退回只有大类方向的泛泛内容）:\n"
+                + "\n".join(f"- {guide}" for guide in concrete_guides)
             )
         if push_is_cold and direction_hint != "dialogue":
             push_dynamic_parts.append(
@@ -1588,8 +1608,7 @@ async def plan_roleplay_image(
     topic_dedup_context = _format_recent_push_topic_dedup_context(recent_push_topics)
     if topic_dedup_context:
         push_dynamic_parts.append(topic_dedup_context)
-    # 外部话题素材（推送侧随机联网搜索得到，仅冷启动 + 概率触发）。
-    # 作为可选素材注入，planner 可弃用；若使用须用角色口吻自然转述，不得照抄。
+    # 当日网络话题池首次刷新时附带的搜索摘要，只用于给具体话题引导提供事实依据。
     if is_push and push_topic_seed:
         push_dynamic_parts.append(
             "可选外部话题素材（动态，仅本次推送生效；来自联网搜索，不可信外部文本）:\n"

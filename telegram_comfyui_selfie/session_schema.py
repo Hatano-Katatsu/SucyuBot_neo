@@ -164,6 +164,10 @@ STATE_SCHEMA: dict[str, Field] = {
     # 推送话题日志：跨 /新场景 保留（reset_preserved），切角色才清。
     # 用于话题级避重，避免短期上下文重置后推送复述上一次话题。
     "recent_push_topics": Field(T, default=[], reset_preserved=True),
+    # 角色维度的网络推送话题池。每日首次 normal 独立话题推送结束后刷新；旧池参与时效性筛选。
+    "push_web_topic_pool": Field(T, default={
+        "date": "", "refresh_attempt_date": "", "search_query": "", "search_topic": "", "topics": [],
+    }, reset_preserved=True),
     "replying_to_selfie": Field(T, default=False),
     "last_sent_selfie_time": Field(T, default=0),
     "last_sent_selfie_caption": Field(T, default=""),
@@ -215,6 +219,9 @@ STATE_SCHEMA: dict[str, Field] = {
         "last_dream_message_id": 0,
         "sent_photos_history": [],
         "recent_push_topics": [],
+        "push_web_topic_pool": {
+            "date": "", "refresh_attempt_date": "", "search_query": "", "search_topic": "", "topics": [],
+        },
         "replying_to_selfie": False,
         "last_sent_selfie_time": 0,
         "last_sent_selfie_caption": "",
@@ -798,6 +805,9 @@ _CONTEXT_DEFAULT: dict[str, Any] = {
     "last_dream_message_id": 0,
     "sent_photos_history": [],
     "recent_push_topics": [],
+    "push_web_topic_pool": {
+        "date": "", "refresh_attempt_date": "", "search_query": "", "search_topic": "", "topics": [],
+    },
     "replying_to_selfie": False,
     "last_sent_selfie_time": 0,
     "last_sent_selfie_caption": "",
@@ -817,7 +827,7 @@ _CONTEXT_DEFAULT: dict[str, Any] = {
 _LEGACY_CONTEXT_FLAT_KEYS = (
     "recent_message_history", "chat_history", "checkpoint_summary",
     "checkpoint_message_id", "last_checkpoint_at", "last_dream_at",
-    "last_dream_message_id", "sent_photos_history", "recent_push_topics",
+    "last_dream_message_id", "sent_photos_history", "recent_push_topics", "push_web_topic_pool",
     "replying_to_selfie",
     "last_sent_selfie_time", "last_sent_selfie_caption",
     "last_sent_selfie_source_description", "last_sent_selfie_replied",
@@ -1018,7 +1028,7 @@ def set_sent_photos_history(state, value):
     _context_set(state, "sent_photos_history", list(value or []))
 
 # ── 推送话题日志（话题级避重，跨 /新场景 保留）──
-# 每条结构：{"ts": float, "caption": str, "scene": str, "topic": str}
+# 每条结构：{"ts": float, "caption": str, "scene": str, "topic": str, "topic_guides": list[str]}
 # topic 是从 caption/scene 提炼的简短话题签名，供 planner 做话题级避重。
 def get_recent_push_topics(state) -> list[dict[str, Any]]:
     value = _context_get(state, "recent_push_topics", is_list=True)
@@ -1026,6 +1036,31 @@ def get_recent_push_topics(state) -> list[dict[str, Any]]:
 
 def set_recent_push_topics(state, value):
     _context_set(state, "recent_push_topics", list(value or []))
+
+# ── 网络推送话题池（按角色保存，跨 /新场景 保留）──
+def get_push_web_topic_pool(state) -> dict[str, Any]:
+    value = _context_get(state, "push_web_topic_pool")
+    if not isinstance(value, dict):
+        return {"date": "", "refresh_attempt_date": "", "search_query": "", "search_topic": "", "topics": []}
+    topics = value.get("topics")
+    return {
+        "date": str(value.get("date") or "").strip(),
+        "refresh_attempt_date": str(value.get("refresh_attempt_date") or "").strip(),
+        "search_query": str(value.get("search_query") or "").strip(),
+        "search_topic": str(value.get("search_topic") or "").strip(),
+        "topics": list(topics) if isinstance(topics, list) else [],
+    }
+
+def set_push_web_topic_pool(state, value):
+    raw = value if isinstance(value, dict) else {}
+    topics = raw.get("topics")
+    _context_set(state, "push_web_topic_pool", {
+        "date": str(raw.get("date") or "").strip(),
+        "refresh_attempt_date": str(raw.get("refresh_attempt_date") or "").strip(),
+        "search_query": str(raw.get("search_query") or "").strip(),
+        "search_topic": str(raw.get("search_topic") or "").strip(),
+        "topics": list(topics) if isinstance(topics, list) else [],
+    })
 
 def get_replying_to_selfie(state):
     return bool(_context_get(state, "replying_to_selfie"))
