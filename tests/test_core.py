@@ -6247,6 +6247,36 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_planner_stable_front_excludes_session_specific_values(self):
+        """planner stable_front 不含用户性别/空间关系等会话级插值，跨会话字节一致。"""
+        async def run():
+            systems = []
+            for gender, spatial in (("女", "异地网恋"), ("男", "同居")):
+                svc = self.make_service()
+                svc.config.update({
+                    "image_llm_api_key": "image-key",
+                    "image_llm_model": "image-model",
+                    "image_llm_api_base": "https://image.example",
+                    "user_gender": gender,
+                    "spatial_relationship": spatial,
+                })
+                sid = f"telegram:{1 if gender == '女' else 2}"
+                svc._call_llm = AsyncMock(return_value=json.dumps({
+                    "scene": "test", "view": "selfie",
+                    "character_location": "home", "user_location": "unknown",
+                    "is_intimate": False, "partner_in_frame": False,
+                    "device_in_frame": False,
+                }, ensure_ascii=False))
+                await plan_roleplay_image(svc, sid, intent="看看你在干嘛")
+                systems.append(svc._call_llm.await_args.args[0])
+            head_a = systems[0].split("你是角色扮演")[0]
+            head_b = systems[1].split("你是角色扮演")[0]
+            self.assertEqual(head_a, head_b)
+            self.assertIn("用户性别: 女性", systems[0])
+            self.assertIn("用户性别: 男性", systems[1])
+
+        asyncio.run(run())
+
     def test_animatool_slots_planner_injects_current_weather(self):
         async def run():
             svc = self.make_service()
@@ -9775,18 +9805,34 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
     def test_checkpoint_summarizer_prompt_has_grounding_rule(self):
         """checkpoint 摘要 prompt 应包含反幻觉约束。"""
-        svc = self.make_service()
-        import inspect
-        src = inspect.getsource(svc._summarize_checkpoint)
+        from telegram_comfyui_selfie import chat_context as chat_context_mod
+
+        src = chat_context_mod._CHECKPOINT_SUMMARY_SYSTEM_TEMPLATE
         self.assertIn("Do not invent", src)
         self.assertIn("literally stated", src)
         self.assertIn("time anchors", src)
         self.assertIn("deadlines", src)
-        self.assertIn("_dialog_role_legend", src)
+        self.assertIn("{role_legend}", src)
+        self.assertIn("{durable_rules}", src)
         self.assertIn("Do not swap their perspective", src)
-        self.assertIn("Stable user facts, preferences, boundaries, and corrections belong to long-term memory", src)
-        self.assertIn("macro relationship arcs, major event ledger, character trajectory", src)
-        self.assertIn("Drop expired, resolved, superseded", src)
+        durable = chat_context_mod._CHECKPOINT_DURABLE_RULES
+        self.assertIn("Stable user facts, preferences, boundaries, and corrections belong to long-term memory", durable)
+        self.assertIn("macro relationship arcs, major event ledger, character trajectory", durable)
+        self.assertIn("Drop expired, resolved, superseded", durable)
+
+    def test_checkpoint_summarizer_templates_render_single_source(self):
+        """两分支共用模块级模板，渲染后含 role_legend 与 durable rules 且无占位符残留。"""
+        from telegram_comfyui_selfie import chat_context as chat_context_mod
+
+        rendered = chat_context_mod._CHECKPOINT_SUMMARY_SYSTEM_TEMPLATE.format(
+            durable_rules=chat_context_mod._CHECKPOINT_DURABLE_RULES,
+            soft="2000",
+            role_legend="User = human user; Assistant = the current bot roleplay character.",
+        )
+        self.assertNotIn("{", rendered)
+        self.assertIn("User = human user", rendered)
+        self.assertIn("Drop expired, resolved, superseded", rendered)
+        self.assertIn("Soft limit: 2000 Chinese characters", rendered)
 
     def test_checkpoint_summarizer_injects_role_legend(self):
         async def run():

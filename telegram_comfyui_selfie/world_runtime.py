@@ -339,6 +339,9 @@ PLACE_TYPES: dict[str, dict[str, Any]] = {
 
 CITY_CATALOG_KEYS = set(PLACE_TYPES)
 
+# location-extract prompt 的地点枚举单一来源：与 PLACE_TYPES 键保持一致，避免 prompt 内写两遍。
+PLACE_ENUM_CSV = ", ".join(PLACE_TYPES)
+
 # 聊天工具拿到的是自然语言位置，不总是 PLACE_TYPES 的规范 label。
 # 这里只做保守类目归一：保留原始 place 作为显示名，key 只用于动线/生图场所类别。
 PLACE_TEXT_ALIASES: dict[str, tuple[str, ...]] = {
@@ -975,12 +978,9 @@ class WorldRuntimeMixin:
             "规则:\n"
             "- 只认角色作为【第一人称自述此刻所在】的明确交代（如“我现在在公司”“刚到家”“坐在星巴克”）。"
             "回忆、计划、提及他人位置、否定句（“不在家”）、反问（“你猜我在哪”）一律算 unknown。\n"
-            "- 必须是具体场所，映射到枚举之一: home, company, school, park, mall, street, cafe, restaurant, "
-            "transit, convenience, cinema, hotel, hospital, gym, factory, farm, construction, "
-            "museum, landmark, temple, library, zoo, amusement, bar, ktv, stadium, supermarket, bookstore, beach, salon。"
-            "无法判断或未交代填 unknown。\n"
+            "- 必须是具体场所，映射到下方输出格式给出的枚举之一；无法判断或未交代填 unknown。\n"
             "- place_name 填角色自述的【具体地点名】（如\"上海海军博物馆\"、\"星巴克国金中心店\"、\"陆家嘴\"），没有具体名就填空字符串。\n"
-            f"只输出: {{\"place\":\"home|company|school|park|mall|street|cafe|restaurant|transit|convenience|cinema|hotel|hospital|gym|factory|farm|construction|museum|landmark|temple|library|zoo|amusement|bar|ktv|stadium|supermarket|bookstore|beach|salon|unknown\",\"place_name\":\"具体地名或空\"}}"
+            f"只输出: {{\"place\":\"{PLACE_ENUM_CSV.replace(', ', '|')}|unknown\",\"place_name\":\"具体地名或空\"}}"
         )
         try:
             raw = await self._call_llm(
@@ -1322,12 +1322,11 @@ class WorldRuntimeMixin:
         weather: Any = None,
         mode: str = "chat",
         now: datetime | None = None,
-        pin_location: bool = True,
     ) -> str:
         """聊天用低频世界模板：只保留 session 内不变的世界规则。
 
-        城市/日期/天气/季节自然光等会日内随时钟漂移的字段已移到动态尾部
-        （见 _format_world_conditions_context），避免常驻槽内容随时间滚动
+        城市/日期/天气/季节自然光等会日内随时钟漂移的字段已移到半稳定槽
+        （见 chat_context._chat_world_conditions_context），避免常驻槽内容随时间滚动
         而作废后面的 checkpoint+历史前缀缓存，并避免触发多余的强制 checkpoint。
         """
         if weather is None:
@@ -1353,35 +1352,6 @@ class WorldRuntimeMixin:
             "只有开启全新话题、对话出现明显时间跳跃、或需要交代独自近况时，才依据动线更新所在地。"
             "无论如何不要无理由瞬移；与用户不在同一地点时，用消息、自拍、电话或约定见面推进。"
         )
-        return "\n".join(lines)
-
-    def _format_world_conditions_context(
-        self,
-        session_id: str,
-        weather: Any = None,
-        mode: str = "chat",
-        now: datetime | None = None,
-    ) -> str:
-        """动态尾部世界条件：城市/日期/天气/季节自然光等日内随时钟漂移的字段。
-
-        这些放在非缓存尾部（system_dynamic），让它们的变化不再作废常驻前缀，
-        模型每轮仍能看到当前真实的天气/光线（与移动前展示内容一致，只换了位置）。
-        """
-        if weather is None:
-            cached = getattr(self, "_weather_caches", {}).get(session_id or "__default__")
-            if isinstance(cached, dict):
-                weather = cached.get("data")
-        world = self.build_world_state(session_id, user_text="", weather=weather, now=now, mode=mode)
-        if not world:
-            return ""
-        now = world["now"]
-        lines = [
-            "世界当前条件（动态；随时间/天气变化，不影响前缀缓存）:",
-            f"- 城市/日期: {world['city']}，{now.strftime('%Y-%m-%d')}，{world['day_type']}",
-            f"- 天气: {world['weather']}",
-        ]
-        if hasattr(self, "_format_time_context"):
-            lines.append(f"- 季节/自然光: {self._format_time_context(session_id, now=now, weather=weather)}")
         return "\n".join(lines)
 
     def _format_world_dynamic_context(

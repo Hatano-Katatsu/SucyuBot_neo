@@ -93,6 +93,39 @@ CHAT_INTIMATE_LANGUAGE_RULES = (
 )
 
 
+# checkpoint 摘要 prompt 模板（模块级单一来源，chat/image 两分支仅 purpose 不同）。
+_CHECKPOINT_DURABLE_RULES = (
+    "Use durable context only as a de-duplication and ownership reference. "
+    "Stable user facts, preferences, boundaries, and corrections belong to long-term memory; "
+    "macro relationship arcs, major event ledger, character trajectory, and acting direction belong to character history. "
+    "Checkpoint should keep only short-term current-scene continuity, unresolved near-term actions, latest explicit state, and immediate promises. "
+    "Drop expired, resolved, superseded, or no-longer-actionable short-term facts. "
+    "Do not restate durable context unless a tiny pointer is necessary for continuity. "
+)
+_CHECKPOINT_SUMMARY_SYSTEM_TEMPLATE = (
+    "You are a checkpoint summarizer for a long roleplay chat. Merge the existing checkpoint "
+    "and the overflowed dialogue into one short-term continuity summary for the next few turns only. "
+    "Focus on the current or most recent scene, unfinished actions, immediate emotions, near-term promises, "
+    "current places, and the latest photo only when the dialogue is directly responding to it. "
+    "Actively preserve explicit time anchors mentioned by the user, such as dates, clock times, deadlines, "
+    "appointments, countdowns, and relative time nodes, with their related event and status when stated. "
+    "{durable_rules}"
+    "Do not duplicate character-history arcs, durable relationship progress, permanent profile facts, "
+    "stable preferences, boundaries, corrections, or memory-worthy facts. "
+    "Soft limit: {soft} Chinese characters. Output only the summary text. "
+    "Do not invent, infer, or add details not explicitly present in the source dialogue. "
+    "Only include rules, promises, constraints, or events that were literally stated by the user or character. "
+    "If uncertain, omit rather than fabricate. "
+    "{role_legend} Keep ownership clear: Assistant is the bot character's speech/actions; User is the human user's speech/actions. "
+    "Do not swap their perspective, emotions, promises, or physical actions."
+)
+_CHECKPOINT_SUMMARY_USER_TEMPLATE = (
+    "Durable context for de-duplication only:\n{durable_context}\n\n"
+    "Existing checkpoint:\n{previous}\n\n"
+    "Dialogue role legend:\n{role_legend}\n\nOverflow dialogue:\n{dialog}"
+)
+
+
 def _sanitize_judge_view_hint(view: str | None, *sources: str) -> str:
     """自动配图判断器的 view 只保留硬相机约束，普通场景交给后续规划器决策。"""
     normalized = (view or "").strip().lower()
@@ -714,19 +747,16 @@ class ChatContextMixin:
             "不要不自然地反复报全名。\n"
             f"{rel_line}{address_line}"
         )
+        # 静态前缀只保留「何时必须调用」与行为约束；参数机制以 tools schema 为单一来源，避免双份描述。
         system_static = (
             "当用户明示或暗示想看你的样子、照片、穿着或当前场景时，应调用 generate_roleplay_image。"
-            "工具调用只需要描述这张图要回应的对话意图、情绪和必要元素；"
-            "若场景涉及性爱，intent 与 must_include 必须如实描述性行为，露骨度由评级系统控制，不需要你自行淡化或省略。"
-            "最终画面会由生图辅助模型结合完整上下文整合。不要把工具名、函数调用或内部指令写进聊天文字。"
+            "不要把工具名、函数调用或内部指令写进聊天文字。"
             "\n换装持久化（重要）：当剧情里角色换上/移除服装配饰、一次更换多件衣物，或衣物变为半脱/破损/脱下/恢复正常时，必须调用 change_appearance；"
-            "每件变化分别写入 items，工具会返回完整最新着装，之后的配图和对话以工具结果及历史中的衣橱状态 system 记录为准。"
-            "性爱/亲密/洗澡中的临时衣物状态也用 set_state 记录，事件结束时再恢复 normal；全裸/脱光用 clear_all。"
-            "明确摘掉并继续不戴的配饰用 remove，换整套才用 mode=replace。"
+            "工具会返回完整最新着装，之后的配图和对话以工具结果及历史中的衣橱状态 system 记录为准。"
             "不要只在文字里描述换装却不调用工具。"
-            "\n位置持久化：当剧情里角色移动到新地点、或你明确交代了此刻在哪（出门、到公司、回家、到了某店等）时，调用 update_location 工具记录，"
-            "这样之后的配图和推送会和你说的位置保持一致，不会无理由瞬移。位置没变就不用调。"
-            "当用户消息里明确透露了自己当前在哪（如「我刚到家」「在公司加班」「和你在一起」等），可调用 update_user_location 工具辅助记录。"
+            "\n位置持久化：当剧情里角色移动到新地点、或你明确交代了此刻在哪时，调用 update_location 记录，"
+            "之后的配图和推送才会和你的叙述保持一致、不无理由瞬移。"
+            "用户明确透露自己当前在哪时，可调用 update_user_location 辅助记录。"
             "\n照片历史规则：历史中 role=system 且以「照片历史」开头的内容，是你之前发给用户的照片记录。"
             "当用户紧接照片历史回复，或提到“刚才那张/照片/图/自拍/画面/出来看看”等内容时，优先理解为用户在回应最近一张照片；"
             "依据照片历史自然承接，但不要主动复述系统记录。"
@@ -777,7 +807,7 @@ class ChatContextMixin:
             )
         if hasattr(self, "_format_world_semistable_context"):
             world_semistable = self._format_world_semistable_context(
-                session_id, mode="chat", now=now, pin_location=not active_dialog
+                session_id, mode="chat", now=now
             )
             if world_semistable:
                 semistable_parts.append(world_semistable)
@@ -1948,6 +1978,8 @@ class ChatContextMixin:
                     and str(message.get("content") or "").strip()
                 ])
                 session_schema.set_short_context_start(state, 0)
+                # checkpoint 落地后旧场景已被摘要接管，"短期注意规则"不再常驻稳定前缀。
+                session_schema.set_short_context_reset_reason(state, "")
                 self._save_session_state(session_id, state)
             except Exception:
                 logger.warning("checkpoint live state sync failed at boundary #%s", until_id, exc_info=True)
@@ -2024,65 +2056,26 @@ class ChatContextMixin:
         dialog = self._format_store_messages(messages, limit_chars=None)
         role_legend = self._dialog_role_legend()
         durable_context = self._checkpoint_summary_durable_context(session_id, character_key)
-        durable_rules = (
-            "Use durable context only as a de-duplication and ownership reference. "
-            "Stable user facts, preferences, boundaries, and corrections belong to long-term memory; "
-            "macro relationship arcs, major event ledger, character trajectory, and acting direction belong to character history. "
-            "Checkpoint should keep only short-term current-scene continuity, unresolved near-term actions, latest explicit state, and immediate promises. "
-            "Drop expired, resolved, superseded, or no-longer-actionable short-term facts. "
-            "Do not restate durable context unless a tiny pointer is necessary for continuity. "
-        )
         if not self.has_llm_config("image", session_id):
             if not self.has_llm_config("chat", session_id):
                 combined = (previous + "\n" if previous else "") + dialog
                 return combined[-int(soft):]
-            # 回退到 chat 模型
-            system = (
-                "You are a checkpoint summarizer for a long roleplay chat. Merge the existing checkpoint "
-                "and the overflowed dialogue into one short-term continuity summary for the next few turns only. "
-                "Focus on the current or most recent scene, unfinished actions, immediate emotions, near-term promises, "
-                "current places, and the latest photo only when the dialogue is directly responding to it. "
-                "Actively preserve explicit time anchors mentioned by the user, such as dates, clock times, deadlines, "
-                "appointments, countdowns, and relative time nodes, with their related event and status when stated. "
-                f"{durable_rules}"
-                "Do not duplicate character-history arcs, durable relationship progress, permanent profile facts, "
-                "stable preferences, boundaries, corrections, or memory-worthy facts. "
-                f"Soft limit: {soft} Chinese characters. Output only the summary text. "
-                "Do not invent, infer, or add details not explicitly present in the source dialogue. "
-                "Only include rules, promises, constraints, or events that were literally stated by the user or character. "
-                "If uncertain, omit rather than fabricate. "
-                f"{role_legend} Keep ownership clear: Assistant is the bot character's speech/actions; User is the human user's speech/actions. "
-                "Do not swap their perspective, emotions, promises, or physical actions."
-            )
-            user = (
-                f"Durable context for de-duplication only:\n{durable_context or 'none'}\n\n"
-                f"Existing checkpoint:\n{previous or 'none'}\n\n"
-                f"Dialogue role legend:\n{role_legend}\n\nOverflow dialogue:\n{dialog}"
-            )
-            return await self._call_llm(system, user, temp=0.1, tag="checkpoint", purpose="chat", disable_thinking=True, session_id=session_id)
-        system = (
-            "You are a checkpoint summarizer for a long roleplay chat. Merge the existing checkpoint "
-            "and the overflowed dialogue into one short-term continuity summary for the next few turns only. "
-            "Focus on the current or most recent scene, unfinished actions, immediate emotions, near-term promises, "
-            "current places, and the latest photo only when the dialogue is directly responding to it. "
-            "Actively preserve explicit time anchors mentioned by the user, such as dates, clock times, deadlines, "
-            "appointments, countdowns, and relative time nodes, with their related event and status when stated. "
-            f"{durable_rules}"
-            "Do not duplicate character-history arcs, durable relationship progress, permanent profile facts, "
-            "stable preferences, boundaries, corrections, or memory-worthy facts. "
-            f"Soft limit: {soft} Chinese characters. Output only the summary text. "
-            "Do not invent, infer, or add details not explicitly present in the source dialogue. "
-            "Only include rules, promises, constraints, or events that were literally stated by the user or character. "
-            "If uncertain, omit rather than fabricate. "
-            f"{role_legend} Keep ownership clear: Assistant is the bot character's speech/actions; User is the human user's speech/actions. "
-            "Do not swap their perspective, emotions, promises, or physical actions."
+            purpose = "chat"  # 回退到 chat 模型
+        else:
+            purpose = "image"
+        # system/user 模板模块级单一来源，两分支仅 purpose 不同。
+        system = _CHECKPOINT_SUMMARY_SYSTEM_TEMPLATE.format(
+            durable_rules=_CHECKPOINT_DURABLE_RULES,
+            soft=soft,
+            role_legend=role_legend,
         )
-        user = (
-            f"Durable context for de-duplication only:\n{durable_context or 'none'}\n\n"
-            f"Existing checkpoint:\n{previous or 'none'}\n\n"
-            f"Dialogue role legend:\n{role_legend}\n\nOverflow dialogue:\n{dialog}"
+        user = _CHECKPOINT_SUMMARY_USER_TEMPLATE.format(
+            durable_context=durable_context or "none",
+            previous=previous or "none",
+            role_legend=role_legend,
+            dialog=dialog,
         )
-        return await self._call_llm(system, user, temp=0.1, tag="checkpoint", purpose="image", disable_thinking=True, session_id=session_id)
+        return await self._call_llm(system, user, temp=0.1, tag="checkpoint", purpose=purpose, disable_thinking=True, session_id=session_id)
 
     @staticmethod
     def _dialog_role_legend() -> str:

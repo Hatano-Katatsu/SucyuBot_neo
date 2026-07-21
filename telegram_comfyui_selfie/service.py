@@ -1211,18 +1211,27 @@ class TelegramComfyUIService(
                 "Preserve visible weather in the English visual description. "
                 "For rain, snow, fog, thunderstorm, wind, heat or cold, show it through the window, ground, umbrella, wet surfaces, clothing, air, sky, or lighting. "
             )
+        # 三分支公共开头：主体/稳定外貌规则 + 工程师职责 + 输出约束。
+        # 公共段统一前置，让 free_composition / 固定视角 / 默认三种翻译共享同一前缀。
+        translate_common = (
+            "For default or original characters, do not turn role names into English names or visual tags; describe appearance and action instead. "
+            "Only keep a character name when it is paired with its published series. "
+            "Stable appearance is injected later; do not invent or restate stable hair, eye, body, species, clothing, or accessory traits unless the source explicitly asks for a one-shot change. "
+            "你是专业的 Anima3 提示词工程师。Anima3 支持英文自然语言与 danbooru 标签混编。"
+            "把中文场景重构为一句英文自然语言画面描述，后接少量 danbooru 补强标签。"
+            "直接输出英文提示词，不要 JSON、不要前缀、不要解释，不要压缩成纯标签列表。"
+        )
+        translate_output_rule = (
+            "自然语言句子尽量不要使用逗号。输出格式: English visual sentence. key tag, key tag, key tag"
+        )
         if free_composition:
             system = (
+                f"{translate_common}"
                 "Visual subject rule: the image subject remains the roleplay scene, usually the character, "
                 "but the user's explicit composition request has highest priority. "
-                "For default or original characters, do not turn role names into English names or visual tags; describe appearance and action instead. "
-                "Only keep a character name when it is paired with its published series. "
-                "Stable appearance is injected later; do not invent or restate stable hair, eye, body, species, clothing, or accessory traits unless the source explicitly asks for a one-shot change. "
-                "你是专业的 Anima3 提示词工程师。把中文场景重构为英文自然语言画面描述，后接少量 danbooru 补强标签。"
-                "直接输出英文提示词，不要 JSON、不要解释，不要压缩成纯标签列表。"
                 "保留用户指定的视角、机位、远近、焦段、构图和局部特写；不要自动改写成自拍、POV 或看镜头。"
                 "允许部位特写、背影、环境承接、道具或手机/相机入画，只要原文明确要求。"
-                "自然语言句子尽量不要使用逗号。输出格式: English visual sentence. key tag, key tag, key tag"
+                f"{translate_output_rule}"
             )
         elif view:
             if view == "mirror":
@@ -1236,33 +1245,23 @@ class TelegramComfyUIService(
             else:
                 view_rule = "固定视角是 third 第三人称；不要把画面写成自拍或对镜自拍。"
             system = (
-                "你是专业的 Anima3 提示词工程师。Anima3 支持英文自然语言与 danbooru 标签混编。"
-                "把中文画面重构为一句英文自然语言画面描述，后接少量 danbooru 补强标签。"
-                "不要输出 JSON、不要前缀、不要解释；不要压缩成纯标签列表。"
+                f"{translate_common}"
+                "Visual subject rule: the image subject is the character, not the user. "
                 "不要重复输出自拍/POV/镜子/手机/1girl/1boy 等结构词，系统会统一添加。"
                 "可以保留 she/the character 作为动作主语，确保坐、站、躺、跪、脚边、腿上、身后、肩膀、手脚等动作和身体关系归属清楚。"
                 f"{view_rule}"
-                "Visual subject rule: the image subject is the character, not the user. "
-                "For default or original characters, do not turn role names into English names or visual tags; describe appearance and action instead. "
-                "Only keep a character name when it is paired with its published series. "
-                "Stable appearance is injected later; do not invent or restate stable hair, eye, body, species, clothing, or accessory traits unless the source explicitly asks for a one-shot change. "
-                "自然语言句子尽量不要使用逗号；重点保留动作、表情、姿态、环境光线、空间关系和氛围。"
+                "重点保留动作、表情、姿态、环境光线、空间关系和氛围。"
                 "避免复杂手势和多手互动；除非原文强制要求，尽量不强调手部。"
-                "输出格式: English visual sentence. key tag, key tag, key tag"
+                f"{translate_output_rule}"
             )
         else:
             system = (
+                f"{translate_common}"
                 "Visual subject rule: the image subject is the character, not the user. "
-                "For default or original characters, do not turn role names into English names or visual tags; describe appearance and action instead. "
-                "Only keep a character name when it is paired with its published series. "
-                "Stable appearance is injected later; do not invent or restate stable hair, eye, body, species, clothing, or accessory traits unless the source explicitly asks for a one-shot change. "
-                "你是专业的 Anima3 提示词工程师。Anima3 支持英文自然语言与 danbooru 标签混编。"
-                "将中文场景描述重构为一句英文自然语言画面描述，后接少量 danbooru 补强标签。"
-                "直接输出英文提示词，不要 JSON、不要解释，不要压缩成纯标签列表。"
                 "根据物理距离判断自拍、对镜、POV 或第三人称视角。"
                 "前摄自拍不出现手机和镜子；只有对镜自拍才允许镜子和手机同时出现。"
                 "避免复杂手势和多手互动；除非原文强制要求，尽量不强调手部。"
-                "自然语言句子尽量不要使用逗号。输出格式: English visual sentence. key tag, key tag, key tag"
+                f"{translate_output_rule}"
             )
         if is_intimate:
             # 亲密场景翻译护栏：第二人称身体翻成“用户作为伴侣的局部身体”，按用户性别决定男/女，绝不能写成完整的第二个主角（双女根因）。

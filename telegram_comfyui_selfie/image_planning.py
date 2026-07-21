@@ -1273,10 +1273,9 @@ async def plan_roleplay_image(
     device_hint = _detect_device_context(intent, mood, prompt, continuity_context or "")
     clothing_off_hint = _infer_clothing_off_fallback(intent, mood, prompt, continuity_context or "")
     user_gender = service._get_user_gender(session_id) if hasattr(service, "_get_user_gender") else ""
-    user_g_zh = "女性" if user_gender == "female" else ("男性" if user_gender == "male" else "用户性别对应的")
-
-    spatial_hint = service._get_session_cfg(session_id, "spatial_relationship", DEFAULT_CONFIG["spatial_relationship"])
-    spatial_label = f"默认物理空间设定（{spatial_hint}）" if str(spatial_hint).strip() else "默认无固定空间设定"
+    # stable_front 必须跨会话字节一致：会话级取值（用户性别、空间关系、intimate 预判）
+    # 一律放 stable_front 之后的动态段，不在 stable 规则里插值。
+    user_gender_label = {"female": "女性", "male": "男性"}.get(user_gender, "未知（按上下文推断）")
 
     scene_boundary_rules = (
         "Scene boundary: write scene as environment, camera framing, action, lighting, mood, and spatial context. "
@@ -1290,7 +1289,7 @@ async def plan_roleplay_image(
         "若当前可见外貌仍带着昨晚的半脱/裸体状态，scene 要与之自洽（刚醒未整理、衣衫不整或裸睡刚起），不要写成已经穿戴整齐。\n"
         "followup: 用户刚结束对话后的短时间续场推送，优先保持最近地点、关系、情绪和相邻动作；"
         "若节拍推进/转场判定已触发，则按判定让时间自然推进一拍，不要停在上一句话附近。\n"
-        f"normal: 根据{spatial_label}和近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror/third。\n"
+        "normal: 根据下方动态信息给出的物理空间关系与近期对话判断，身处同一空间用 pov，异地或上班时段用 selfie/mirror/third。\n"
         "ntr: 用户长时间未互动的冷落惩罚推送，强烈 NTR 危机感。NTR 模式不适用单人构图规则、不强制 POV；"
         "允许伴侣（第三人）完整入画；sex 场景允许 portrait（第三人拍摄）、selfie、第三人视角或角色第一人称视角。\n"
         "推送转场通用规则: 最近对话/照片只能作为情绪、约定和避免重复的参考；判定应转场时，不要把上一幕地点、姿势或话题强行续写成此刻仍在发生。\n"
@@ -1313,7 +1312,6 @@ async def plan_roleplay_image(
         "性事刚结束的事后温存、同床共枕、相拥而眠、躺在对方身边、爱抚余韵等画面，只要用户的身体仍与角色同框贴近，"
         "同样判为 is_intimate=true（不要因为‘性行为已结束’就当成日常）。请在 JSON 里输出 is_intimate 布尔值。"
         "注意: is_intimate 只表示亲密/性爱语境，不等于用户身体必须入画；POV 可以只看到角色，用户在画外。"
-        + ("系统初步判断本次可能属于亲密场景，请重点确认。" if intimate_hint else "")
     )
     if is_ntr:
         interaction_rules = (
@@ -1328,7 +1326,7 @@ async def plan_roleplay_image(
     elif free_composition:
         interaction_rules = (
             "\n【自由配图模式的亲密构图】若 is_intimate=true，仍要避免把用户误画成抢主体的完整第二人；"
-            f"只有用户要求或场景硬约束明确需要用户身体可见时，才把用户写成{user_g_zh}局部、手臂、胸腹、背或腿入画；"
+            "只有用户要求或场景硬约束明确需要用户身体可见时，才把用户写成符合其性别的身体局部（手臂、胸腹、背或腿）入画；"
             "没有可见身体线索时，保持角色单人画面，用户只作为画外视角或互动对象。"
             "但用户本次明确指定的视角、机位、远近、局部特写、手机/相机/镜子入画优先，不要硬改成 POV。"
             "判定 is_intimate=true 时，scene 必须如实写出可见性行为、性器或性征的明确英文词（penis/pussy/nipples/cum/sex 等），"
@@ -1342,11 +1340,11 @@ async def plan_roleplay_image(
             "- 视角固定为 pov（用户第一人称视角），严禁 selfie 或 mirror，不需要第三人称全景。\n"
             "- 用户身体入画闸门: is_intimate 不等于 partner_in_frame。没有明确可见的用户身体部位时，scene 可以只写 POV 看向角色，用户在画外；"
             "只有原文、短期连续性或空间硬约束明确出现用户的手/手臂/胸腹/背/腿/脚/怀里/腿上/躺在身边/骑乘/搂抱等可见身体线索时，才写用户局部并把 partner_in_frame 置 true。\n"
-            f"- 用户身体归属（关键，针对双人误画）: 画面焦点永远是角色（一名女性）。用户作为亲密伴侣入画时，只画用户的【{user_g_zh}】身体局部（手、手臂、胸膛或胸部、腹、背、腿），"
+            "- 用户身体归属（关键，针对双人误画）: 画面焦点永远是角色（一名女性）。用户作为亲密伴侣入画时，只画用户符合其性别的身体局部（手、手臂、胸膛或胸部、腹、背、腿），"
             "绝不能把用户写成有完整面部、发型、表情、迷离眼神的第二个主角，更不能让用户喧宾夺主。\n"
-            f"凡“你的手/你的胸/你的背/你的腿”等用户身体部位，scene 要写成可见的{user_g_zh}身体局部，不要写成“另一个角色/她/第二个人”。"
+            "凡“你的手/你的胸/你的背/你的腿”等用户身体部位，scene 要写成可见的、符合用户性别的身体局部，不要写成“另一个角色/她/第二个人”。"
             "除非用户明确要求双人同框，画面里被完整刻画的人物只有角色一名。\n"
-            f"- 只画用户身体局部（手/臂/胸/腹/背/腿），不要画完整的{user_g_zh}全身或面部。\n"
+            "- 只画用户身体局部（手/臂/胸/腹/背/腿），不要画完整的用户全身或面部。\n"
             "- 人物优先: 重点在角色的表情（迷离、红晕、咬唇）、身体反应（汗水、潮红、轻颤）和互动姿态，弱化环境背景。\n"
             "- 场景精简: 环境灯光压到最短；构图默认能看到角色全身或大半身的中景——交合/骑乘等动作需要身体和交合处入画，"
             "不要用脸部/上半身特写把身体裁掉；只有原文明确要求局部特写时才用近景。\n"
@@ -1508,9 +1506,11 @@ async def plan_roleplay_image(
         f"当前可见外貌: {visible_appearance or '无'}\n"
         f"当前附加外貌: {dynamic or '无'}\n"
         f"用户画面偏好: 场景偏好={prompt_prefs.get('scene_preference') or '无'}；自拍偏好={prompt_prefs.get('selfie_preference') or '无'}。\n"
+        f"用户性别: {user_gender_label}\n"
         f"角色性观念: {service._purity_directive(purity)}\n"
         f"{spatial_line}"
-        "你要综合用户最近的话、聊天模型的意图、最近已发图片摘要、时间天气、外貌和安全约束，"
+        + ("系统初步判断本次可能属于亲密场景，请重点确认。\n" if intimate_hint else "")
+        + "你要综合用户最近的话、聊天模型的意图、最近已发图片摘要、时间天气、外貌和安全约束，"
         "输出适合发给用户的一张图。不要输出英文画图标签。\n"
         + ("purity≤2：公开场合不限制暴露或穿着程度。" if purity <= 2 else "公开场合必须穿着得体；私密场合可以更放松。")
         + "避免和最近照片重复。"
