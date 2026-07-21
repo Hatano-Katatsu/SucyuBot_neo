@@ -84,6 +84,10 @@ telegram_comfyui_selfie/
 - 默认第一条 system 是跨角色稳定规则，第二条才是角色身份与人格，以提高跨角色前缀复用；`chat_persona_first=true` 可恢复人格优先的兼容顺序。
 - 上下文按稳定度分层：全局规则、角色人格、低频记忆/历史、外观与世界半稳定槽、checkpoint、未折叠历史、精确时间与本轮输入动态尾部。
 - 天气半稳定槽使用天气描述与温度区间；精确温度只放动态尾部，避免小幅温度变化破坏稳定前缀。
+- 稳定前缀（system_static、stable_front）必须不含会话级插值（用户性别、空间关系、intimate 预判等），这些值统一放动态尾部；location-extract 等 prompt 的地点枚举从 `PLACE_TYPES` 运行时推导，不得硬编码两遍。
+- chat system_static 只保留「何时必须调用工具」与行为约束；工具参数机制以 tools schema 为单一来源，避免双份描述。
+- checkpoint 摘要 system/user 模板为模块级常量，chat/image 两分支共用同一文本仅 purpose 不同。
+- 短期注意规则（切场景后提醒模型不要续旧上下文）在 checkpoint 落库后自动清除，不在稳定前缀永久驻留。
 - `_chat_prompt_history()` 使用 checkpoint 之后的全量历史；裁剪后第一条必须为 `user`。
 - checkpoint 按最旧完整轮次和实际字符预算正序分页；超长单轮分块全部成功后才推进其消息 ID。所有入口共享 `session_id + character` 锁，SQLite 提交使用版本 CAS 且边界只允许单调前进。
 - 照片历史是精简后的历史 `system` 消息。dream 与长期记忆提取只消费真实 `user/assistant` 对话。
@@ -97,7 +101,8 @@ telegram_comfyui_selfie/
 - 手动记忆不可被自动整理删除。自动提取可通过配置关闭，但角色历史总结与 dream 仍可独立工作。
 - 增量整理允许只调整重要性；只有记忆显著超限才执行全量重写。重写失败时不得先删除旧记忆。
 - `character_card.py` 是角色卡字段单一来源。角色切换必须保存并恢复该角色的上下文、衣柜、地点和照片历史。
-- Telegram 与 Web 删除角色必须共用 `delete_character()`；彻底删除会话必须共用 `delete_session()`，先停稳作用域任务，再以单事务清库并清理检查点、头像和缓存。Web“隐藏”不得删除业务数据，彻底删除必须校验完整 session_id 二次确认。
+- `/角色 clearup` 级联清空长期记忆、日记、检查点和检查点目录；删除角色/会话统一走 `delete_character()`/`delete_session()`，先停稳作用域任务，再以单事务清库并清理检查点、头像和缓存。Web隐藏不得删除业务数据，彻底删除必须校验完整 session_id 二次确认。
+- checkpoint、context_meta、长期记忆查询有会话级读缓存；写入操作（upsert_checkpoint、add_memory 等）失效对应缓存键。
 - dream、checkpoint、记忆与角色历史必须保持视角：User 是人类用户，Assistant/第一人称“我”是 bot 角色。
 
 ## 外观、衣柜与纯良度
@@ -138,6 +143,7 @@ telegram_comfyui_selfie/
 - 短英文关键词使用单词边界匹配，避免 `bed` 命中 `bedroom` 等子串。
 - 天气缓存必须绑定城市；城市变化不能复用旧城市数据。外部天气请求复用统一代理配置。
 - 地点匹配优先识别路线、街道等动线提示，再匹配普通地点标签。
+- 用户位置（user_place）是会话级字段，不与角色地点一起随角色切换冻结/恢复；同处状态读取必须遵守 TTL。checkpoint 地点推断有内存缓存，切角色/更新位置时失效。
 
 ## Telegram 与 WebUI
 
