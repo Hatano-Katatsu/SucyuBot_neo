@@ -1219,10 +1219,9 @@ async def plan_roleplay_image(
         push_photo_context = None if hard_scene_transition else format_sent_photo_context(service, state, session_id, limit=3)
     else:
         push_photo_context = None
-    memory_query = "\n".join(part for part in (intent, mood, must_include, prompt, continuity_context or "") if part)
     memory_context = ""
     if not is_push and hasattr(service, "_long_term_memory_context"):
-        memory_context = service._long_term_memory_context(session_id, memory_query, limit=8)
+        memory_context = service._long_term_memory_context(session_id, limit=8)
     user_profile_context = ""
     if not is_push and hasattr(service, "memory"):
         try:

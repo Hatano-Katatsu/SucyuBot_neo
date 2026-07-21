@@ -2004,7 +2004,7 @@ class SchedulerRuntimeMixin:
                 long_memory = self._long_term_memory_context(session_id, limit=10)
             else:
                 # 非活动角色：character-scoped 按 key 查
-                mems = self.memory.context_memories(session_id, "", character=key, limit=10)
+                mems = self.memory.context_memories(session_id, character=key, limit=10)
                 if mems:
                     long_memory = format_memory_lines(mems, with_ids=False)
         except Exception:

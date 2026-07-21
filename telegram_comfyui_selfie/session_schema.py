@@ -514,20 +514,18 @@ def normalize_wardrobe_item_state(value: Any) -> str:
 
 
 def get_wardrobe_item_states(state: dict[str, Any]) -> dict[str, str]:
-    """读取分槽衣物状态；懒清理旧格式/非法值。"""
+    """读取分槽衣物状态。"""
     box = ensure_clothing_box(state)
     raw = box.get("wardrobe_item_states")
     if not isinstance(raw, dict):
-        raw = {}
+        return {}
     normalized: dict[str, str] = {}
     for slot, value in raw.items():
         slot_text = str(slot or "").strip()
         norm = normalize_wardrobe_item_state(value)
         if slot_text and norm:
             normalized[slot_text] = norm
-    if normalized != raw:
-        box["wardrobe_item_states"] = normalized
-    return box["wardrobe_item_states"]
+    return normalized
 
 
 def set_wardrobe_item_state(state: dict[str, Any], slot: str, value: Any) -> None:
