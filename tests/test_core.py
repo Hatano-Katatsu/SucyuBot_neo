@@ -6484,6 +6484,52 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_animatool_slots_nude_guard_removes_llm_clothing_conflicts(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "quality_meta_year_safe": "masterpiece, best quality, nsfw",
+                "count": "1girl",
+                "appearance": "black lace dress, spaghetti straps, deep v-neck",
+                "tags": "A woman in a deep V red lace dress with a high front slit sits on the bed.",
+            }, ensure_ascii=False))
+            slots = PromptSlots(
+                scene="A woman sits on the bed.",
+                quality="masterpiece",
+                count="1girl",
+                effective_appearance="completely nude",
+                negative="bad hands",
+            )
+            schema = {
+                "parameters": {
+                    "properties": {
+                        "quality_meta_year_safe": {"description": "quality and safety"},
+                        "count": {"description": "count"},
+                        "appearance": {"description": "appearance"},
+                        "tags": {"description": "natural language scene"},
+                    },
+                    "required": ["quality_meta_year_safe", "count", "tags"],
+                }
+            }
+
+            with patch("telegram_comfyui_selfie.image_planning._fetch_animatool_turbo_knowledge", new=AsyncMock(return_value={})), \
+                 patch("telegram_comfyui_selfie.image_planning._fetch_animatool_turbo_schema", new=AsyncMock(return_value=schema)):
+                payload = await plan_animatool_slots(svc, sid, slots)
+
+            self.assertIsNotNone(payload)
+            payload_text = json.dumps(payload, ensure_ascii=False).lower()
+            self.assertIn("completely nude", payload_text)
+            for clothing_detail in ("dress", "spaghetti straps", "deep v-neck", "high front slit"):
+                self.assertNotIn(clothing_detail, payload_text)
+
+        asyncio.run(run())
+
     def test_animatool_generation_does_not_pass_raw_scene_as_slots_intent(self):
         async def run():
             svc = self.make_service()
@@ -8367,6 +8413,36 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("voluminous curls", neg_lower)
         self.assertNotIn("middle part bangs", neg_lower)
 
+    def test_clothing_off_nude_removes_detail_tags_and_scene_clothing(self):
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        session_schema.set_outfit(
+            state,
+            "black sheer one-piece lingerie dress, see-through mesh bodice, short black chiffon skirt, "
+            "black lace panties, spaghetti straps, deep v-neck, red lace embroidery, floral lace pattern, "
+            "high front slit, waist cutout",
+        )
+
+        pos, _ = svc._build_prompt(
+            "wearing a red lace dress with a high front slit, sitting on the bed",
+            session_id=sid,
+            clothing_off="completely nude",
+        )
+        pos_lower = pos.lower()
+        self.assertIn("completely nude", pos_lower)
+        for clothing_detail in (
+            "sheer mesh bodice",
+            "spaghetti straps",
+            "deep v-neck",
+            "lace embroidery",
+            "floral lace pattern",
+            "high front slit",
+            "waist cutout",
+            "red lace dress",
+        ):
+            self.assertNotIn(clothing_detail, pos_lower)
+
     def test_clothing_off_panties_frees_underwear_negative(self):
         svc = self.make_service()
         sid = "telegram:1"
@@ -8476,6 +8552,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
     def test_clothing_off_fallback_distinguishes_full_and_partial_nudity(self):
         self.assertEqual(_infer_clothing_off_fallback("衣服脱了"), "completely nude")
         self.assertEqual(_infer_clothing_off_fallback("她宽衣解带坐到床边"), "completely nude")
+        self.assertEqual(_infer_clothing_off_fallback("让我看着你被体育生猛猛肏"), "")
+        self.assertEqual(_infer_clothing_off_fallback("普通动作", "上一轮提到肉棒"), "")
         self.assertEqual(_infer_clothing_off_fallback("寝衣滑落到手肘"), "topless")
         self.assertEqual(_infer_clothing_off_fallback("衣襟敞开，露出胸口"), "topless")
         self.assertEqual(_infer_clothing_off_fallback("脱了外套"), "")
@@ -8500,6 +8578,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             # ① 意图含明确性爱/裸体 → 兜底补 nude
             plan = await plan_roleplay_image(svc, "telegram:101", intent="做爱后想要一张全裸的照片")
             self.assertEqual(plan["clothing_off"], "completely nude")
+            plan = await plan_roleplay_image(svc, "telegram:107", intent="让我看着你被体育生猛猛肏")
+            self.assertEqual(plan["clothing_off"], "")
             plan = await plan_roleplay_image(svc, "telegram:104", intent="衣服脱了")
             self.assertEqual(plan["clothing_off"], "completely nude")
 
@@ -8533,7 +8613,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             # 图1：性爱意图 → 兜底全裸，但规划器只提出 mutation。
             svc._call_llm = AsyncMock(return_value=json.dumps({"scene": "床上", "view": "pov"}, ensure_ascii=False))
-            plan1 = await plan_roleplay_image(svc, sid, intent="两人做爱中")
+            plan1 = await plan_roleplay_image(svc, sid, intent="两人做爱中，已经全裸")
             self.assertEqual(plan1["clothing_off"], "completely nude")
             self.assertEqual(session_schema.get_nudity(state), "")
             svc._record_sent_photo(sid, plan1["scene"], source_kind="test")
@@ -8554,7 +8634,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             # 再次裸体后 /新场景 → 解除
             svc._call_llm = AsyncMock(return_value=json.dumps({"scene": "床上", "view": "pov"}, ensure_ascii=False))
-            plan4 = await plan_roleplay_image(svc, sid, intent="插入她")
+            plan4 = await plan_roleplay_image(svc, sid, intent="插入她，保持全裸")
             self.assertEqual(session_schema.get_nudity(state), "")
             svc._record_sent_photo(sid, plan4["scene"], source_kind="test")
             svc._commit_image_state_mutation(sid, plan4["state_mutation"])

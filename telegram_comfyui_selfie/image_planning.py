@@ -498,6 +498,15 @@ NUDITY_CONTEXT_ZH = frozenset({
     "宽衣解带", "扒光", "扒掉衣服",
 })
 
+# 仅用于 clothing_off 的确定性兜底。性行为词仍可用于判断 intimate/nudity context，
+# 但不能单独把当前画面改成全裸；否则“肉棒/肏”等场景词会被误当成脱衣指令。
+EXPLICIT_CLOTHING_OFF_ZH = frozenset({
+    "裸体", "全裸", "赤裸", "赤身", "裸身", "裸着", "光着身", "光溜溜",
+    "一丝不挂", "没穿衣服", "没穿任何衣服", "什么都没穿",
+    "脱光", "衣服都脱", "衣服脱了", "脱了衣服", "褪去衣物", "褪下衣物",
+    "褪下衣服", "脱掉衣服", "脱下衣服", "宽衣解带", "扒光", "扒掉衣服",
+})
+
 _PARTIAL_TOPLESS_RE = re.compile(
     r"(?:衣襟|领口|襟口|上衣|睡衣|寝衣|衬衫|衣物|衣服).{0,8}(?:敞开|滑落|褪下|褪到|落到|滑到)|"
     r"(?:敞开|拉开|扯开).{0,8}(?:衣襟|领口|胸口|上衣|睡衣|寝衣|衬衫)|"
@@ -530,7 +539,9 @@ def _infer_clothing_off_fallback(*sources: str) -> str:
     combined = _combined_context(*sources)
     if not combined:
         return ""
-    if _detect_nudity_context(combined):
+    # 这里不能复用 NUDITY_CONTEXT_ZH：其中包含性行为/性器词，它们只代表场景语境，
+    # 不代表角色被脱光。只有明确裸体或明确脱衣词才允许兜底为全裸。
+    if any(kw in combined for kw in EXPLICIT_CLOTHING_OFF_ZH):
         return "completely nude"
     if _PARTIAL_TOPLESS_RE.search(combined):
         return "topless"
@@ -1272,7 +1283,8 @@ async def plan_roleplay_image(
 
     intimate_hint = _detect_intimate_context(intent, mood, prompt, continuity_context or "")
     device_hint = _detect_device_context(intent, mood, prompt, continuity_context or "")
-    clothing_off_hint = _infer_clothing_off_fallback(intent, mood, prompt, continuity_context or "")
+    # 脱衣兜底只看本轮输入；历史连续性可以维持已经提交的裸体状态，但不能制造新的脱衣状态。
+    clothing_off_hint = _infer_clothing_off_fallback(intent, prompt)
     user_gender = service._get_user_gender(session_id) if hasattr(service, "_get_user_gender") else ""
     # stable_front 必须跨会话字节一致：会话级取值（用户性别、空间关系、intimate 预判）
     # 一律放 stable_front 之后的动态段，不在 stable 规则里插值。
@@ -1960,8 +1972,11 @@ async def plan_animatool_slots(
         ANIMATOOL_NEGATIVE_FIELDS,
         ANIMATOOL_WORKFLOWS,
         _apply_animatool_guard_contract,
+        _apply_clothing_off,
         _build_animatool_guard_contract,
         _get_animatool_workflow,
+        _is_full_nude_appearance,
+        _strip_nude_scene_clothing,
     )
 
     if not service.has_llm_config("image", session_id):
@@ -2196,12 +2211,27 @@ async def plan_animatool_slots(
         nltag_value = raw_nltag or slots.scene or ""
         view_for_nltag = prompt_view or _infer_prompt_view(nltag_value)
         nltag_value = _sanitize_nltag_for_view(nltag_value, view_for_nltag)
+        if _is_full_nude_appearance(slots.effective_appearance):
+            # LLM 可能把旧衣服重新写进 tags；全裸 appearance 是更高优先级的确定性约束。
+            nltag_value = _strip_nude_scene_clothing(service, nltag_value)
         if not nltag_value and slots.scene:
             nltag_value = _sanitize_nltag_for_view(slots.scene, prompt_view or _infer_prompt_view(slots.scene))
         parsed[nltag_field] = nltag_value
         for field in ANIMATOOL_NLTAG_FIELDS:
             if field != nltag_field:
                 parsed.pop(field, None)
+
+    if _is_full_nude_appearance(slots.effective_appearance):
+        # appearance 也做一次终裁，覆盖 AnimaTool LLM 自行补回的 dress/straps/lace 等残留。
+        raw_appearance = parsed.get("appearance")
+        if isinstance(raw_appearance, str) and raw_appearance.strip():
+            parsed["appearance"], _ = _apply_clothing_off(
+                service,
+                "completely nude",
+                raw_appearance,
+                "",
+                [],
+            )
 
     for field in ANIMATOOL_NLTAG_FIELDS:
         if str(parsed.get(field) or "").strip():

@@ -810,6 +810,24 @@ _BOTTOM_CLOTHING_OFF_WORDS = (
     "bottomless", "no panties", "no underwear", "panties", "panty",
     "g-string", "thong", "knickers", "briefs", "underwear",
 )
+# 服装细节有时会因未被 parse_appearance 归入 outfit 而落到 other。
+# 全裸时这些细节同样必须移除，但只在 appearance 槽内处理，避免误伤 scene 中的普通材质/道具。
+_CLOTHING_DETAIL_RE = re.compile(
+    r"\b(?:spaghetti\s+straps?|thin\s+straps?|shoulder\s+straps?|"
+    r"halter(?:\s+neck)?|(?:deep\s+)?v[-\s]?neck|neckline|collar|"
+    r"lace|mesh|bodice|chiffon|sheer|see[-\s]?through|transparent|"
+    r"sleeveless|sleeves?|embroider(?:y|ed)|"
+    r"(?:high|front|side)\s+(?:front\s+)?slit|cut[-\s]?out)\b",
+    re.IGNORECASE,
+)
+_NUDE_SCENE_CLOTHING_DETAIL_RE = re.compile(
+    r"\b(?:spaghetti\s+straps?|thin\s+straps?|shoulder\s+straps?|"
+    r"(?:deep\s+)?v[-\s]?neck|neckline|"
+    r"(?:high|front|side)\s+(?:front\s+)?slit|waist\s+cut[-\s]?out|"
+    r"cut[-\s]?out|mesh\s+bodice|see[-\s]?through\s+mesh\s+bodice|"
+    r"lace\s+(?:embroidery|pattern)|floral\s+lace(?:\s+pattern)?)\b",
+    re.IGNORECASE,
+)
 _WARDROBE_STATE_PREFIX = {
     "half_off": "half-removed",
     "damaged": "torn",
@@ -833,12 +851,39 @@ def _removable_appearance_tags(service: Any, appearance: str) -> list[str]:
     removable: list[str] = []
     if not isinstance(parsed, dict):
         return removable
-    for key in ("outfit", "accessory"):
+    for key in ("outfit", "accessory", "other"):
         for tag in parsed.get(key, []) or []:
             tag = str(tag or "").strip()
-            if tag and tag not in removable:
+            if not tag:
+                continue
+            # other 中只接纳明确的服装细节，保留发色、体态和普通视觉特征。
+            if key == "other" and not _CLOTHING_DETAIL_RE.search(tag):
+                continue
+            if tag not in removable:
                 removable.append(tag)
     return removable
+
+
+def _is_full_nude_appearance(appearance: str) -> bool:
+    return bool(_FULL_NUDE_RE.search(str(appearance or "")))
+
+
+def _strip_nude_scene_clothing(service: Any, scene_desc: str, worn_tags: list[str] | None = None) -> str:
+    """全裸画面中清理 scene/tags 的服装短语，避免自然语言层把衣服重新画回去。"""
+    text = str(scene_desc or "").strip()
+    if not text:
+        return ""
+    # 传入哨兵值是为了在没有衣柜标签时也启用服装关键词匹配；实际服装词仍由配置提供。
+    outfit_override = list(worn_tags or []) or ["__full_nude__"]
+    text = _strip_conflicting_scene_outfit(text, outfit_override, service._outfit_kw)
+    # 处理没有带衣物名词的细节短语，例如 "with a high front slit"。
+    text = _NUDE_SCENE_CLOTHING_DETAIL_RE.sub("", text)
+    text = re.sub(r"\b(?:with|in|wearing|dressed\s+in)\s+(?:a|an|the)?\s*(?=[,.;]|$)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:a|an|the)\s+(?=[,.;]|$)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*,\s*,+", ", ", text)
+    text = re.sub(r"\s*,\s*(?=[.!?;])", "", text)
+    text = re.sub(r"\s+([,.;])", r"\1", text)
+    return re.sub(r"\s{2,}", " ", text).strip(" ,")
 
 
 def _apply_clothing_off(service: Any, clothing_off: str, effective_appearance: str, neg: str, worn_tags: list[str]) -> tuple[str, str]:
@@ -858,13 +903,19 @@ def _apply_clothing_off(service: Any, clothing_off: str, effective_appearance: s
     appearance = effective_appearance
     worn = [w for w in (worn_tags or []) if w and w.strip()]
     if _FULL_NUDE_RE.search(raw):
-        for tag in worn:
+        # 除了当前衣柜标签，也扫描 effective_appearance 本身，覆盖被解析到 other 的
+        # spaghetti straps / deep v-neck / lace pattern / high slit / waist cutout 等细节。
+        removable = list(worn)
+        for tag in _removable_appearance_tags(service, appearance):
+            if tag not in removable:
+                removable.append(tag)
+        for tag in removable:
             appearance = service._remove_tag(appearance, tag)
         if "nude" not in appearance.lower():
             appearance = f"{appearance}, completely nude" if appearance.strip() else "completely nude"
         # 把刚脱掉的衣物压进负向：scene 里若仍残留"湿裙子贴着胸口"之类描述，靠它抵消，避免衣服被画回去。
-        if worn:
-            neg = _append_negatives(neg, *worn)
+        if removable:
+            neg = _append_negatives(neg, *removable)
     else:
         extra: list[str] = []
         for tok in [t.strip() for t in re.split(r"[,;]+", raw) if t.strip()]:
@@ -1762,6 +1813,9 @@ def build_prompt(
     if one_shot_effective:
         worn_tags += _removable_appearance_tags(service, one_shot_effective)
     effective_appearance, neg = _apply_clothing_off(service, clothing_off, effective_appearance, neg, worn_tags)
+    if _is_full_nude_appearance(effective_appearance):
+        # 最终兜底：scene 是 AnimaTool 的 tags 来源之一，不能与全裸 appearance 冲突。
+        scene_desc = _strip_nude_scene_clothing(service, scene_desc, worn_tags)
     if public_ctx:
         # 公开场景不能因为半脱状态放开裸体负向；被门控剥离的暴露词继续由安全护栏压制。
         neg = _append_negatives(neg, *wardrobe_state_removed_tags, *PUBLIC_EXPOSURE_NEGATIVE_GUARDS)
