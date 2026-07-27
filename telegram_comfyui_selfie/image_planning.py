@@ -1039,6 +1039,7 @@ async def plan_roleplay_image(
     push_topic_seed: str = "",
     push_topic_direction: str = "",
     push_topic_guides: list[str] | None = None,
+    temporary_system_prompt: str = "",
 ) -> dict[str, Any]:
     free_composition = (mode or "").strip().lower() == "illustration"
     has_explicit_scene_request = bool((prompt or must_include).strip())
@@ -1487,6 +1488,7 @@ async def plan_roleplay_image(
                 "主动推送应优先分享角色自己此刻的生活片段、看到想到的事、或一个角色感兴趣的话题，"
                 "让用户看到角色独立于对话的生活感和情绪，而不是总在等用户回话。"
                 "可以是一到三句，通常控制在 30-120 个中文字符。"
+                "caption 必须写成单段单行，禁止使用换行或分段回复。"
                 "避免写成对用户的询问式开场（如「在吗」「你干嘛呢」「怎么不理我」），"
                 "也不要写成流水账、任务汇报或重复上一条推送；"
                 "若下方提供了外部话题素材，可在角色口吻下自然转述或评论，但不要照抄资料、不要罗列来源。"
@@ -1516,6 +1518,8 @@ async def plan_roleplay_image(
         + "避免和最近照片重复。"
     )
     push_dynamic_parts: list[str] = []
+    if is_push and str(temporary_system_prompt or "").strip():
+        push_dynamic_parts.append(str(temporary_system_prompt).strip())
     if push_transition_context:
         push_dynamic_parts.append(push_transition_context)
     if push_advance_context:

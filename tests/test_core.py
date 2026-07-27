@@ -2540,7 +2540,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             })
             svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22", "code": "113"})
             svc._llm_write_scene = AsyncMock(return_value={
-                "scene": "window selfie", "caption": "caption", "new_appearance_tags": "",
+                "scene": "window selfie", "caption": "第一行\n第二行", "new_appearance_tags": "",
                 "view": "selfie", "aspect_ratio": "2:3",
                 "is_intimate": False, "partner_in_frame": False, "device_in_frame": False, "clothing_off": "",
             })
@@ -2548,10 +2548,19 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
             svc.send_photo = AsyncMock()
 
-            ok = await svc._sched_fire(sid, fixed_now, mode_override="normal", skip_active_check=True)
+            temporary_prompt = svc._goodnight_push_system_prompt()
+            ok = await svc._sched_fire(
+                sid,
+                fixed_now,
+                mode_override="normal",
+                skip_active_check=True,
+                temporary_system_prompt=temporary_prompt,
+            )
 
             self.assertTrue(ok)
             svc._run_dream.assert_not_awaited()
+            svc.send_photo.assert_awaited_once_with(123, b"image", "第一行 第二行")
+            self.assertEqual(svc._llm_write_scene.await_args.kwargs["temporary_system_prompt"], temporary_prompt)
 
             ok = await svc._sched_fire(sid, fixed_now, mode_override="morning", skip_active_check=True)
 
@@ -2560,6 +2569,46 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._decide_push_topic_direction.assert_awaited_once_with(
                 sid, "normal", svc._get_session_state(sid), fixed_now,
             )
+
+        asyncio.run(run())
+
+    def test_goodnight_guidance_is_a_temporary_planner_system_message(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            sid = "telegram:123"
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22"})
+            planner = self.mock_image_planner_messages(svc, {
+                "scene": "quiet bedroom before sleep",
+                "view": "selfie",
+                "aspect_ratio": "2:3",
+                "caption": "晚安，做个好梦。",
+                "new_appearance_tags": "",
+                "clothing_off": "",
+                "character_location": "home",
+                "user_location": "unknown",
+                "is_intimate": False,
+                "partner_in_frame": False,
+                "device_in_frame": False,
+            })
+            temporary_prompt = svc._goodnight_push_system_prompt()
+
+            await plan_roleplay_image(
+                svc,
+                sid,
+                mode="normal",
+                weather_data={"desc": "晴", "temp": "22"},
+                temporary_system_prompt=temporary_prompt,
+            )
+
+            messages = planner.await_args.args[0]
+            system_messages = [m["content"] for m in messages if m.get("role") == "system"]
+            self.assertTrue(any(temporary_prompt in text for text in system_messages))
+            self.assertTrue(any("caption 必须写成单段单行" in text for text in system_messages))
 
         asyncio.run(run())
 
@@ -2583,8 +2632,33 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(svc._dream_diary_date(weekday.replace(hour=7, minute=0), session_id=sid), "2026-07-09")
 
         with patch("telegram_comfyui_selfie.scheduler_runtime.random.randint", side_effect=lambda low, high: low):
-            self.assertEqual(svc._build_daily_push_times(sid, weekday, 2), ["07:30", "15:00"])
-            self.assertEqual(svc._build_daily_push_times(sid, weekend, 2), ["10:30", "15:45"])
+            self.assertEqual(svc._build_daily_push_times(sid, weekday, 1), [])
+            self.assertEqual(svc._build_daily_push_times(sid, weekday, 2), ["22:30"])
+            self.assertEqual(svc._build_daily_push_times(sid, weekday, 3), ["07:30", "22:30"])
+            self.assertEqual(svc._build_daily_push_times(sid, weekend, 2), ["21:00"])
+        self.assertTrue(svc._is_goodnight_trigger_time(sid, weekday, "22:30"))
+        self.assertFalse(svc._is_goodnight_trigger_time(sid, weekday, "22:29"))
+
+    def test_character_sleep_schedule_uses_next_days_calendar_type(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        session_schema.set_character_value(state, "custom_workday_wake_time", "07:00")
+        session_schema.set_character_value(state, "custom_workday_sleep_time", "22:30")
+        session_schema.set_character_value(state, "custom_weekend_wake_time", "10:00")
+        session_schema.set_character_value(state, "custom_weekend_sleep_time", "00:30")
+
+        friday = datetime(2026, 7, 10, 20, 0, tzinfo=timezone.utc)
+        sunday = datetime(2026, 7, 12, 20, 0, tzinfo=timezone.utc)
+        friday_schedule = svc._character_schedule_minutes(sid, friday)
+        sunday_schedule = svc._character_schedule_minutes(sid, sunday)
+
+        self.assertEqual(friday_schedule["wake_key"], "workday_wake_time")
+        self.assertEqual(friday_schedule["sleep_key"], "weekend_sleep_time")
+        self.assertEqual(friday_schedule["sleep"], 30)
+        self.assertEqual(sunday_schedule["wake_key"], "weekend_wake_time")
+        self.assertEqual(sunday_schedule["sleep_key"], "workday_sleep_time")
+        self.assertEqual(sunday_schedule["sleep"], 22 * 60 + 30)
 
     def test_midnight_sleep_time_does_not_collapse_push_window(self):
         """回归测试: 作息时间 sleep=0:00 不应导致推送窗口塌缩为 0，使所有推送时间相同。
@@ -2608,7 +2682,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         # 推送时间不应全部相同
         times = svc._build_daily_push_times(sid, weekend, 7)
-        self.assertEqual(len(times), 7)
+        self.assertEqual(len(times), 6)
+        self.assertIn("23:59", times)
         self.assertGreater(len(set(times)), 1, f"推送时间不应全部相同: {times}")
 
         # "24:00" 等效写法也应正常
@@ -2616,7 +2691,31 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         start2, end2 = svc._daily_push_window_minutes(sid, weekend)
         self.assertEqual(end2, 23 * 60 + 59)
         times2 = svc._build_daily_push_times(sid, weekend, 4)
+        self.assertEqual(len(times2), 3)
+        self.assertIn("23:59", times2)
         self.assertGreater(len(set(times2)), 1, f"推送时间不应全部相同: {times2}")
+
+    def test_daily_wake_dream_archives_previous_day(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            key = svc._context_character_key(sid)
+            now = datetime(2026, 7, 9, 8, 0, tzinfo=timezone.utc)
+            svc.write_character_checkpoint = lambda *args, **kwargs: "checkpoint.json"
+            svc._write_dream_diary = AsyncMock(return_value="# 2026-07-08 星期三 前一天\n内容")
+            svc._organize_memories_after_dream = AsyncMock(return_value={})
+            svc._generate_character_history_summary = AsyncMock()
+            svc._update_life_plan_after_dream = AsyncMock(return_value={})
+            svc._run_context_checkpoint = AsyncMock()
+
+            await svc._dream_once(sid, key, now, reason="daily-wake")
+
+            self.assertEqual(svc._write_dream_diary.await_args.args[1], "2026-07-08")
+            diary = svc.app_store.get_diary(sid, key, "2026-07-08")
+            self.assertIsNotNone(diary)
+            self.assertIn("前一天", diary["content"])
+
+        asyncio.run(run())
 
     def test_scheduled_push_task_marks_trigger_only_after_success(self):
         async def run():
@@ -7652,6 +7751,14 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertTrue(ss.get_frozen(flat_st))
         flat_st["saved_characters"] = {"A": {"character": "A"}}
         self.assertEqual(ss.get_saved_characters(flat_st)["A"]["character"], "A")
+        flat_st["user_place"] = "mall"
+        flat_st["user_place_label"] = "商场"
+        flat_st["user_place_updated_at"] = 1234.0
+        self.assertEqual(ss.get_user_place(flat_st), "mall")
+        self.assertEqual(ss.get_user_place_label(flat_st), "商场")
+        self.assertEqual(ss.get_user_place_updated_at(flat_st), 1234.0)
+        self.assertEqual(flat_st["session"]["user_place"], "mall")
+        self.assertEqual(flat_st["session"]["user_place_updated_at"], 1234.0)
         # 清空后也能穿透
         flat_st["frozen"] = False
         self.assertFalse(ss.get_frozen(flat_st))
@@ -10121,6 +10228,12 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("长期记忆已经负责稳定事实", src)
         self.assertIn("checkpoint 和当前窗口只负责近期连续性", src)
         self.assertIn("已经过期、解决、被替代", src)
+        self.assertIn("严格去除流水账和低价值细节", src)
+        self.assertIn("同一事实只写一次", src)
+        self.assertIn("直接写结论", src)
+        self.assertIn("目标字数是软目标", src)
+        self.assertIn("按长期影响和后续扮演价值由高到低排列", src)
+        self.assertIn("不要为了接近字数而填充内容", src)
 
     def test_history_summary_uses_long_memory_checkpoint_and_current_window(self):
         async def run():
@@ -10159,6 +10272,62 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("已经过期、解决、被替代", captured["system"])
 
         asyncio.run(run())
+
+    def test_history_summary_keeps_output_within_generous_hard_limit(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = svc._context_character_key(sid)
+            svc.config["character_history_summary_target_chars"] = "400"
+            svc.config["character_history_summary_max_chars"] = "800"
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "chat"
+            generated = "提要开头-" + ("中" * 500) + "-提要结尾"
+            svc._call_llm = AsyncMock(return_value=generated)
+
+            await svc._generate_character_history_summary(
+                sid,
+                key,
+                [{"diary_date": "2026-07-08", "content": "当天日记"}],
+            )
+
+            stored = svc.app_store.get_context_meta(sid, key)["character_history_summary"]
+            self.assertEqual(stored, generated)
+            self.assertTrue(stored.startswith("提要开头"))
+
+        asyncio.run(run())
+
+    def test_history_summary_hard_limit_semantically_compresses_before_truncation(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = svc._context_character_key(sid)
+            svc.config["character_history_summary_target_chars"] = "400"
+            svc.config["character_history_summary_max_chars"] = "800"
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "chat"
+            generated = "关系阶段开头。" + ("这是应被压缩的重复细节。" * 120) + "新一天演绎方向。"
+            compressed = "关系阶段开头。仍有未解承诺。新一天演绎方向。"
+            svc._call_llm = AsyncMock(side_effect=[generated, compressed])
+
+            await svc._generate_character_history_summary(
+                sid,
+                key,
+                [{"diary_date": "2026-07-08", "content": "当天日记"}],
+            )
+
+            stored = svc.app_store.get_context_meta(sid, key)["character_history_summary"]
+            self.assertEqual(stored, compressed)
+            self.assertEqual(svc._call_llm.await_count, 2)
+
+        asyncio.run(run())
+
+    def test_history_summary_mechanical_hard_limit_keeps_head_and_roleplay_tail(self):
+        summary = "关系阶段开头。" + ("重复细节。" * 200) + "新一天演绎方向必须保留。"
+        stored = self.make_service()._truncate_character_history_summary(summary, 800)
+
+        self.assertLessEqual(len(stored), 800)
+        self.assertTrue(stored.startswith("关系阶段开头"))
+        self.assertIn("中间超长内容已省略", stored)
+        self.assertTrue(stored.endswith("新一天演绎方向必须保留。"))
 
     def test_dream_memory_prompt_keeps_time_nodes_until_faded(self):
         """dream 记忆整理应软约束过时时间节点，不是一过期就删。"""

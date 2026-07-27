@@ -79,7 +79,7 @@ const configSections = [
   ]],
   ["推送与本地控制台", [
     ["selfie_frequency", "聊天生图频率", "select:极频繁,频繁,适度,偶尔,关闭"],
-    ["daily_selfie_limit", "每日随机推送", "number"],
+    ["daily_selfie_limit", "每日主动推送总次数", "number"],
     ["post_chat_push_enabled", "对话后续场推送", "bool"],
     ["post_chat_push_delay_min_minutes", "续场最短延迟(分钟)", "number"],
     ["post_chat_push_delay_max_minutes", "续场最长延迟(分钟)", "number"],
@@ -116,6 +116,8 @@ const configSections = [
     ["long_memory_enabled", "启用长期记忆注入", "bool"],
     ["long_memory_extract_enabled", "自动提取长期记忆", "bool"],
     ["long_memory_context_limit", "长期记忆注入条数", "number"],
+    ["character_history_summary_target_chars", "历史提要目标字数", "number"],
+    ["character_history_summary_max_chars", "历史提要硬上限", "number"],
     ["short_context_reset_gap_hours", "短期场景超时小时", "text"],
     ["scene_stale_minutes", "场景断档感知分钟", "number"],
   ]],

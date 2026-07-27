@@ -266,7 +266,7 @@ class SchedulerRuntimeMixin:
             + transition
         )
 
-    async def _llm_write_scene(self, mode, weather, weekday, time_period, recent_chat=None, session_id="", now=None, weather_data=None, push_topic_seed="", push_topic_direction="", push_topic_guides=None):
+    async def _llm_write_scene(self, mode, weather, weekday, time_period, recent_chat=None, session_id="", now=None, weather_data=None, push_topic_seed="", push_topic_direction="", push_topic_guides=None, temporary_system_prompt=""):
         from .image_planning import plan_roleplay_image
         if not self.has_llm_config("image", session_id):
             return None
@@ -276,6 +276,7 @@ class SchedulerRuntimeMixin:
             push_topic_seed=push_topic_seed or "",
             push_topic_direction=push_topic_direction or "",
             push_topic_guides=list(push_topic_guides or []),
+            temporary_system_prompt=temporary_system_prompt or "",
         )
         return plan
 
@@ -1155,9 +1156,12 @@ class SchedulerRuntimeMixin:
 
     def _character_schedule_minutes(self, session_id: str, local_dt: datetime | None = None) -> dict[str, Any]:
         local_dt = local_dt or self._session_now(session_id)
-        weekend = self._is_weekend_schedule_day(local_dt)
-        wake_key = "weekend_wake_time" if weekend else "workday_wake_time"
-        sleep_key = "weekend_sleep_time" if weekend else "workday_sleep_time"
+        wake_weekend = self._is_weekend_schedule_day(local_dt)
+        # 晚上的睡觉时间服务于下一天的起床安排：例如周五晚上应使用周末睡觉时间，
+        # 周日晚上则应使用工作日睡觉时间。节假日/调休同样按下一自然日判断。
+        sleep_weekend = self._is_weekend_schedule_day(local_dt + timedelta(days=1))
+        wake_key = "weekend_wake_time" if wake_weekend else "workday_wake_time"
+        sleep_key = "weekend_sleep_time" if sleep_weekend else "workday_sleep_time"
         wake_default = 8 * 60
         sleep_default = 23 * 60 + 50
         wake = self._parse_schedule_time_minutes(
@@ -1168,7 +1172,14 @@ class SchedulerRuntimeMixin:
             self._get_session_cfg(session_id, sleep_key, self.config.get(sleep_key, "23:50")),
             sleep_default,
         )
-        return {"wake": wake, "sleep": sleep, "is_weekend": weekend, "wake_key": wake_key, "sleep_key": sleep_key}
+        return {
+            "wake": wake,
+            "sleep": sleep,
+            "is_weekend": wake_weekend,
+            "sleep_is_weekend": sleep_weekend,
+            "wake_key": wake_key,
+            "sleep_key": sleep_key,
+        }
 
     def _daily_push_window_minutes(self, session_id: str, local_dt: datetime) -> tuple[int, int]:
         schedule = self._character_schedule_minutes(session_id, local_dt)
@@ -1183,19 +1194,45 @@ class SchedulerRuntimeMixin:
         return start, end
 
     def _build_daily_push_times(self, session_id: str, local_dt: datetime, daily_limit: int) -> list[str]:
-        if daily_limit <= 0:
+        # 每日次数是总配额：第 1 次固定早安；有第 2 次时固定为睡觉时间的晚安；
+        # 只有多出的次数才安排在白天窗口内随机触发。
+        if daily_limit <= 1:
             return []
         start, end = self._daily_push_window_minutes(session_id, local_dt)
-        span = max(1, end - start)
-        slot = span / max(1, daily_limit)
-        times = []
-        for i in range(daily_limit):
+        random_count = max(0, daily_limit - 2)
+        random_end = max(start, end - 1)
+        span = max(1, random_end - start)
+        slot = span / max(1, random_count)
+        times: list[str] = []
+        for i in range(random_count):
             low = int(start + i * slot)
             high = int(start + (i + 1) * slot)
-            high = max(low, min(end, high))
+            high = max(low, min(random_end, high))
             minute = random.randint(low, high)
             times.append(self._format_schedule_minute(minute))
+        times.append(self._format_schedule_minute(end))
         return sorted(times)
+
+    def _is_goodnight_trigger_time(self, session_id: str, local_dt: datetime, trigger_time: str) -> bool:
+        """判断随机点列表中的当前点是否为固定睡觉时间。"""
+        if not trigger_time:
+            return False
+        _, end = self._daily_push_window_minutes(session_id, local_dt)
+        return trigger_time == self._format_schedule_minute(end)
+
+    @staticmethod
+    def _goodnight_push_system_prompt() -> str:
+        """返回只对睡觉时间固定推送生效的临时提示。"""
+        return (
+            "睡觉时间固定推送（仅本次生效）: 保持普通主动推送或 NTR 推送原有的场景、情绪和叙事逻辑，"
+            "在此基础上让画面与 caption 自然带出准备休息、道晚安或祝对方好梦的含义。"
+            "不要解释这是定时任务，不要写成作息播报，也不要强行改变既有关系状态。"
+        )
+
+    @staticmethod
+    def _single_line_push_caption(text: Any) -> str:
+        """Telegram 主动推送 caption 固定为单段单行。"""
+        return re.sub(r"\s+", " ", str(text or "")).strip()
 
     def _is_morning_push_time(self, session_id: str, local_dt: datetime) -> bool:
         wake = int(self._character_schedule_minutes(session_id, local_dt)["wake"])
@@ -1476,7 +1513,11 @@ class SchedulerRuntimeMixin:
         ] if hasattr(self, "_format_store_messages") else [""]
         if not source_chunks:
             source_chunks = [""]
-        diary_date = self._dream_diary_date(local_dt, force_previous_day=(reason == "morning"), session_id=session_id)
+        diary_date = self._dream_diary_date(
+            local_dt,
+            force_previous_day=(reason in {"morning", "daily-wake"}),
+            session_id=session_id,
+        )
         if hasattr(self, "write_character_checkpoint"):
             try:
                 checkpoint_path = self.write_character_checkpoint(
@@ -1993,13 +2034,56 @@ class SchedulerRuntimeMixin:
         self._ulog(session_id, "MEMORY", f"全量重写 {len(editable)}→{added} 条（上限{target_n}） result={json.dumps(result, ensure_ascii=False)}")
         return result
 
+    @staticmethod
+    def _truncate_character_history_summary(summary: str, hard_limit: int) -> str:
+        """在宽松硬上限处按自然边界截断，同时保留关系背景与末尾扮演提示。"""
+        summary = str(summary or "").strip()
+        hard_limit = max(1, int(hard_limit))
+        if len(summary) <= hard_limit:
+            return summary
+        if hard_limit == 1:
+            return "…"
+        marker = "\n…（中间超长内容已省略）…\n"
+        if hard_limit <= len(marker) + 2:
+            return summary[:hard_limit - 1].rstrip() + "…"
+        usable = hard_limit - len(marker)
+        head_budget = max(1, int(usable * 0.62))
+        tail_budget = max(1, usable - head_budget)
+
+        head = summary[:head_budget].rstrip()
+        head_floor = int(head_budget * 0.7)
+        head_cut = max(head.rfind("\n\n"), head.rfind("\n"), head.rfind("。"), head.rfind("；"))
+        if head_cut >= head_floor:
+            if head[head_cut:head_cut + 1] in ("。", "；"):
+                head_cut += 1
+            head = head[:head_cut].rstrip()
+
+        tail = summary[-tail_budget:].lstrip()
+        tail_ceiling = int(tail_budget * 0.3)
+        tail_candidates = [pos for pos in (
+            tail.find("\n\n"), tail.find("\n"), tail.find("。"), tail.find("；")
+        ) if 0 <= pos <= tail_ceiling]
+        if tail_candidates:
+            tail_cut = min(tail_candidates)
+            if tail[tail_cut:tail_cut + 1] in ("。", "；"):
+                tail_cut += 1
+            else:
+                tail_cut += 2 if tail.startswith("\n\n", tail_cut) else 1
+            tail = tail[tail_cut:].lstrip()
+        return (head + marker + tail)[:hard_limit]
+
     async def _generate_character_history_summary(self, session_id: str, character_key: str, diaries: list[dict[str, Any]]):
         if not diaries or not self.has_llm_config("chat", session_id):
             return
         try:
-            limit = max(400, int(self.config.get("character_history_summary_max_chars", "1200") or 1200))
+            hard_limit = min(20000, max(800, int(self.config.get("character_history_summary_max_chars", "6000") or 6000)))
         except (TypeError, ValueError):
-            limit = 1200
+            hard_limit = 6000
+        try:
+            target_limit = max(400, int(self.config.get("character_history_summary_target_chars", "2000") or 2000))
+        except (TypeError, ValueError):
+            target_limit = 2000
+        target_limit = min(target_limit, hard_limit)
         # meta/检查点/记忆的读写一律使用传入的 character_key，不在生成途中现取活动角色，
         # 避免 LLM 等待期间用户切换角色导致旧角色提要写进新角色。
         key = str(character_key or "").strip()
@@ -2056,6 +2140,13 @@ class SchedulerRuntimeMixin:
             "长期记忆已经负责稳定事实、偏好、边界和纠正；角色历史不要把它们改写成第二份记忆列表。"
             "checkpoint 和当前窗口只负责近期连续性；角色历史只提升会改变长期剧情惯性、人物轨迹或后续扮演方向的内容。"
             "已经过期、解决、被替代或只服务当下场景的短期事实必须舍弃，不要因为它们在 checkpoint/current window 里出现就写入历史。"
+            "严格去除流水账和低价值细节：不要逐日复述日记，不要保留不改变长期走向的动作、姿势、服装、饮食、天气、氛围、"
+            "普通地点移动、寒暄、重复对白或短暂情绪；精确时间、地点和原话只有在定位重要承诺、转折或未解事件时才能保留。"
+            "同一事实只写一次；旧提要、日记、长期记忆和 checkpoint 中的重复信息必须合并，不要换一种说法重复。"
+            "直接写结论，不写分析过程、依据说明、铺垫、修辞性评价或面面俱到的概括；没有实质变化的栏目可以写「无」或省略。"
+            "目标字数是软目标：必须优先保留会影响后续角色扮演的高价值信息，不能为了压到目标字数而删除关系阶段、重大转折、"
+            "仍有效的承诺与边界、未解事件、角色心理边界或演绎方向；需要缩短时只删除重复和低价值细节。"
+            "各段内部按长期影响和后续扮演价值由高到低排列，使最关键内容优先出现。"
             "日记是当前 bot 角色的一人称记录；日记里的「我」指角色本人，「用户」「对方」指人类用户。"
             "必须保持角色和用户的视角归属，不要把用户的动作、承诺、情绪写成角色的，也不要反过来。"
             "建议结构为「关系/剧情惯性」「角色心理与心情界定」「未解事件」「新一天演绎提示」四段，内容必须精炼。"
@@ -2063,7 +2154,7 @@ class SchedulerRuntimeMixin:
             "给出顺着既有矛盾和情绪自然延展的扮演方向；不要写死具体台词、地点、日程或剧情分支。"
             "只基于提供的日记、长期记忆、checkpoint 和当前窗口，不要编造、推断或补充来源中没有明确提到的事件、规则、约定或承诺。"
             "如果只能判断情绪倾向，必须写成倾向或可能性，不要包装成已发生事实。"
-            f"字数控制在 {limit} 字以内。只输出中文摘要文本。"
+            f"目标控制在 {target_limit} 字以内，不要为了接近字数而填充内容。只输出中文摘要文本。"
         )
         user = (
             "视角说明: 日记中的第一人称=当前 bot 角色；用户/对方=人类用户。\n\n"
@@ -2081,8 +2172,35 @@ class SchedulerRuntimeMixin:
             summary = (summary or "").strip()
             if not summary:
                 return
-            if len(summary) > limit:
-                summary = summary[-limit:]
+            original_chars = len(summary)
+            if len(summary) > hard_limit:
+                try:
+                    compressed = await self._call_llm(
+                        (
+                            "你是角色历史提要压缩器。将输入压缩到硬上限以内。必须保留关系阶段、重大转折、仍有效的承诺与边界、"
+                            "未解事件、角色心理边界，以及末尾的新一天演绎方向；只删除重复、铺垫、修辞、流水账和低价值细节。"
+                            "不得添加输入中没有的信息，不得改变角色与用户的视角归属。"
+                            f"输出不超过 {hard_limit} 字，只输出压缩后的中文提要。"
+                        ),
+                        summary,
+                        temp=0.1,
+                        tag="history-summary-compress",
+                        purpose="chat",
+                        disable_thinking=True,
+                        session_id=session_id,
+                    )
+                    compressed = str(compressed or "").strip()
+                    if compressed and len(compressed) < len(summary):
+                        summary = compressed
+                except Exception:
+                    logger.warning("history summary value compression failed", exc_info=True)
+            summary = self._truncate_character_history_summary(summary, hard_limit)
+            if len(summary) < original_chars:
+                self._ulog(
+                    session_id,
+                    "HISTORY",
+                    f"角色历史提要触发硬上限 original_chars={original_chars} hard_limit={hard_limit} kept_chars={len(summary)}",
+                )
             self.app_store.upsert_character_history_summary(session_id, key, summary)
             live_key = self._context_character_key(session_id) if hasattr(self, "_context_character_key") else key
             if live_key == key:
@@ -2243,6 +2361,7 @@ class SchedulerRuntimeMixin:
         trigger_time: str = "",
         mark_morning: bool = False,
         skip_active_check: bool = False,
+        temporary_system_prompt: str = "",
     ):
         """启动后台推送任务，并只在实际成功后写完成标记。"""
 
@@ -2253,6 +2372,7 @@ class SchedulerRuntimeMixin:
                     local_dt,
                     mode_override=mode_override,
                     skip_active_check=skip_active_check,
+                    temporary_system_prompt=temporary_system_prompt,
                 )
             except Exception as exc:
                 ok = False
@@ -2307,7 +2427,11 @@ class SchedulerRuntimeMixin:
                         daily_limit = int(str(self._get_session_cfg(session_id, "daily_selfie_limit", "3")).strip())
                     except ValueError:
                         daily_limit = 3
-                    if session_schema.get_daily_trigger_date(state) != today:
+                    expected_trigger_count = max(0, daily_limit - 1)
+                    if (
+                        session_schema.get_daily_trigger_date(state) != today
+                        or len(session_schema.get_daily_trigger_times(state)) != expected_trigger_count
+                    ):
                         times = self._build_daily_push_times(session_id, now, daily_limit)
                         session_schema.set_daily_trigger_times(state, sorted(times))
                         session_schema.set_daily_trigger_date(state, today)
@@ -2341,11 +2465,13 @@ class SchedulerRuntimeMixin:
                             self._ulog(session_id, "PUSH", f"定时推送 {t} 本轮受晚安抑制，窗口内保留重试")
                             continue
                         if session_id not in self._active_pushes:
+                            goodnight = self._is_goodnight_trigger_time(session_id, now, t)
                             self._create_scheduled_push_task(
                                 session_id,
                                 now,
                                 mode_override="normal",
                                 trigger_time=t,
+                                temporary_system_prompt=(self._goodnight_push_system_prompt() if goodnight else ""),
                             )
                             break
 
@@ -2388,6 +2514,7 @@ class SchedulerRuntimeMixin:
         mode_override=None,
         skip_active_check=False,
         character_lock_held: bool = False,
+        temporary_system_prompt: str = "",
     ) -> bool:
         if not session_id:
             return False
@@ -2399,6 +2526,7 @@ class SchedulerRuntimeMixin:
                 mode_override=mode_override,
                 skip_active_check=skip_active_check,
                 character_lock_held=character_lock_held,
+                temporary_system_prompt=temporary_system_prompt,
             )
 
     async def _sched_fire_unlocked(
@@ -2408,6 +2536,7 @@ class SchedulerRuntimeMixin:
         mode_override=None,
         skip_active_check=False,
         character_lock_held: bool = False,
+        temporary_system_prompt: str = "",
     ) -> bool:
         if not session_id or (not skip_active_check and session_id in self._active_pushes):
             return False
@@ -2506,12 +2635,13 @@ class SchedulerRuntimeMixin:
                 push_topic_seed=push_topic_seed,
                 push_topic_direction=topic_direction,
                 push_topic_guides=push_topic_guides,
+                temporary_system_prompt=temporary_system_prompt,
             )
             if not plan or not plan.get("scene"):
                 self._ulog(session_id, "PUSH", f"推送规划为空 mode={mode}")
                 return False
             scene = plan.get("scene") or ""
-            caption = plan.get("caption") or ""
+            caption = self._single_line_push_caption(plan.get("caption") or "")
             new_app = plan.get("new_appearance_tags") or ""
             view = plan.get("view") or ""
             orientation = plan.get("aspect_ratio") or ""

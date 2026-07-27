@@ -653,80 +653,73 @@ def ensure_place_box(state: dict[str, Any]) -> dict[str, Any]:
 # ── 用户位置访问器 ──
 
 def get_user_place(state: dict[str, Any]) -> str:
-    box = ensure_session_box(state)
-    val = box.get("user_place")
+    val = _session_get(state, "user_place")
     # 兼容旧数据：session box 无值时从 place box 迁移（一次性）。
     if not val:
         old_box = state.get("place")
         if isinstance(old_box, dict) and old_box.get("user_place"):
             val = old_box["user_place"]
-            box["user_place"] = val
+            _session_set(state, "user_place", val)
     return (val or "").strip()
 
 def get_user_place_label(state: dict[str, Any]) -> str:
-    box = ensure_session_box(state)
-    val = box.get("user_place_label")
+    val = _session_get(state, "user_place_label")
     if not val:
         old_box = state.get("place")
         if isinstance(old_box, dict) and old_box.get("user_place_label"):
             val = old_box["user_place_label"]
-            box["user_place_label"] = val
+            _session_set(state, "user_place_label", val)
     return val or ""
 
 def get_user_place_text(state: dict[str, Any]) -> str:
-    box = ensure_session_box(state)
-    val = box.get("user_place_text")
+    val = _session_get(state, "user_place_text")
     if not val:
         old_box = state.get("place")
         if isinstance(old_box, dict) and old_box.get("user_place_text"):
             val = old_box["user_place_text"]
-            box["user_place_text"] = val
+            _session_set(state, "user_place_text", val)
     return val or ""
 
 def get_user_place_updated_at(state: dict[str, Any]) -> float:
     try:
-        box = ensure_session_box(state)
-        val = box.get("user_place_updated_at", 0)
+        val = _session_get(state, "user_place_updated_at", coerce=float)
         if not val:
             old_box = state.get("place")
             if isinstance(old_box, dict) and old_box.get("user_place_updated_at"):
                 val = old_box["user_place_updated_at"]
-                box["user_place_updated_at"] = float(val or 0)
+                _session_set(state, "user_place_updated_at", float(val or 0))
         return float(val or 0)
     except (TypeError, ValueError):
         return 0.0
 
 def get_user_place_confidence(state: dict[str, Any]) -> float:
     try:
-        box = ensure_session_box(state)
-        val = box.get("user_place_confidence", 0)
+        val = _session_get(state, "user_place_confidence", coerce=float)
         if not val:
             old_box = state.get("place")
             if isinstance(old_box, dict) and old_box.get("user_place_confidence"):
                 val = old_box["user_place_confidence"]
-                box["user_place_confidence"] = float(val or 0)
+                _session_set(state, "user_place_confidence", float(val or 0))
         return float(val or 0)
     except (TypeError, ValueError):
         return 0.0
 
 def get_user_co_located(state: dict[str, Any]) -> bool:
-    box = ensure_session_box(state)
-    val = box.get("user_co_located")
+    val = _session_get(state, "user_co_located", coerce=bool)
     if not val:
         old_box = state.get("place")
         if isinstance(old_box, dict) and old_box.get("user_co_located"):
             val = old_box["user_co_located"]
-            box["user_co_located"] = bool(val)
+            _session_set(state, "user_co_located", bool(val))
     return bool(val or False)
 
 def get_user_place_source(state: dict[str, Any]) -> str:
-    box = ensure_session_box(state)
-    val = box.get("user_place_source")
+    val = _session_get(state, "user_place_source")
     if not val:
         old_box = state.get("place")
         if isinstance(old_box, dict) and old_box.get("user_place_source"):
             val = old_box["user_place_source"]
-            box["user_place_source"] = val
+            _session_set(state, "user_place_source", val)
     return val or ""
 
 def set_user_place(state: dict[str, Any], *, key="", label="", text="",
@@ -1320,12 +1313,14 @@ def _session_get(state: dict[str, Any], key: str, *, is_list: bool = False, coer
         if flat != box.get(key, ""):
             box[key] = flat
         return flat
-    if isinstance(flat, (int, float)):
-        return coerce(flat)
     if isinstance(flat, bool):
         if flat != box.get(key):
             box[key] = flat
         return flat
+    if isinstance(flat, (int, float)):
+        if flat != box.get(key):
+            box[key] = flat
+        return coerce(flat)
     if flat is not None:
         return flat
     val = box.get(key)

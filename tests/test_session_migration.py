@@ -84,7 +84,8 @@ class SessionStateMigrationTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(loaded["character"]["custom_positive_prefix"], "1girl, red eyes")
         self.assertEqual(loaded["clothing"]["dynamic_appearance"], "blue dress")
         self.assertEqual(loaded["context"]["chat_history"][0]["content"], "旧消息")
-        self.assertEqual(loaded["place"]["user_place"], "home")
+        # 用户位置属于会话全局状态，迁移后进入 session 盒；角色位置才属于 place 盒。
+        self.assertEqual(loaded["session"]["user_place"], "home")
         self.assertEqual(loaded["session"]["saved_characters"]["旧角色"]["character"], "旧角色")
         backups = list(tmp.glob("memory.box-migration-backup-*.sqlite3"))
         self.assertEqual(len(backups), 1)

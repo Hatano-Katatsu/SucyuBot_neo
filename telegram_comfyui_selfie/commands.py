@@ -2007,8 +2007,14 @@ class CommandHandlersMixin:
 
         if not text:
             times = session_schema.get_daily_trigger_times(state)
-            plan = "已关闭随机推送" if cur_limit() == 0 else ("今日推送点: " + "、".join(times) if times else "今日推送点将在下一轮调度生成")
-            await self.send_message(chat_id, f"每日主动推送次数: {cur_limit()} 次/天\n{plan}\n用法: /推送频率 <0~20> 或 /推送频率 默认")
+            limit = cur_limit()
+            if limit == 0:
+                plan = "已关闭主动推送"
+            elif limit == 1:
+                plan = "今日仅固定早安推送"
+            else:
+                plan = "除固定早安外的今日推送点: " + "、".join(times) if times else "今日推送点将在下一轮调度生成"
+            await self.send_message(chat_id, f"每日主动推送次数: {limit} 次/天\n{plan}\n用法: /推送频率 <0~20> 或 /推送频率 默认")
             return
         if text in ("默认", "全局", "reset", "auto"):
             state.pop("custom_daily_selfie_limit", None)
@@ -2026,7 +2032,7 @@ class CommandHandlersMixin:
         state["custom_daily_selfie_limit"] = str(val)
         session_schema.set_daily_trigger_date(state, "")
         self._save_session_state(session_id, state)
-        await self.send_message(chat_id, "已关闭本会话随机推送。" if val == 0 else f"每日主动推送次数已设为 {val} 次/天。")
+        await self.send_message(chat_id, "已关闭本会话主动推送。" if val == 0 else f"每日主动推送次数已设为 {val} 次/天。")
 
     async def cmd_character(self, chat_id, session_id, arg):
         text = arg.strip()
