@@ -2536,7 +2536,6 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             sid = "telegram:123"
             fixed_now = datetime(2026, 7, 9, 9, 0, tzinfo=timezone.utc)
             svc.config["default_purity"] = "6"
-            svc._should_run_dream_before_push = lambda session_id, state: True
             svc._run_dream = AsyncMock()
             svc._decide_push_topic_direction = AsyncMock(return_value={
                 "topic_direction": "life",
@@ -2575,6 +2574,106 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._decide_push_topic_direction.assert_awaited_once_with(
                 sid, "normal", svc._get_session_state(sid), fixed_now,
             )
+
+        asyncio.run(run())
+
+    def test_purity_minus_one_does_not_override_morning(self):
+        """purity=-1 时显式 morning 推送保持 morning 语义（含 dream），不被 NTR 覆盖。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 7, 9, 9, 0, tzinfo=timezone.utc)
+            svc.config["default_purity"] = "-1"
+            svc._run_dream = AsyncMock()
+            svc._decide_push_topic_direction = AsyncMock(return_value={
+                "topic_direction": "life",
+                "topic_guides": ["分享生活片段。"],
+                "topic_seed": "",
+                "search_query": "",
+            })
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22", "code": "113"})
+            svc._llm_write_scene = AsyncMock(return_value={
+                "scene": "window selfie", "caption": "morning 场景", "new_appearance_tags": "",
+                "view": "selfie", "aspect_ratio": "2:3",
+                "is_intimate": False, "partner_in_frame": False, "device_in_frame": False, "clothing_off": "",
+            })
+            svc._translate_to_tags = AsyncMock(return_value="english prompt")
+            svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
+            svc.send_photo = AsyncMock()
+
+            ok = await svc._sched_fire(sid, fixed_now, mode_override="morning", skip_active_check=True)
+
+            self.assertTrue(ok)
+            svc._run_dream.assert_awaited_once_with(sid, fixed_now, reason="morning", force=True)
+            # 仍走 morning 叙事，不是 NTR；morning 固定叙事不混入话题决策。
+            self.assertFalse(svc._do_generate.await_args.kwargs["is_ntr"])
+            svc._decide_push_topic_direction.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_ntr_push_runs_dream_when_not_done_today(self):
+        """purity=-1 的普通推送被覆盖为 NTR 时，今日尚未整理则补跑 dream（非激活角色兜底）。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 7, 9, 9, 0, tzinfo=timezone.utc)
+            svc.config["default_purity"] = "-1"
+            svc._run_dream = AsyncMock()
+            svc._decide_push_topic_direction = AsyncMock(return_value={
+                "topic_direction": "life", "topic_guides": [], "topic_seed": "", "search_query": "",
+            })
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22", "code": "113"})
+            svc._llm_write_scene = AsyncMock(return_value={
+                "scene": "window selfie", "caption": "ntr 场景", "new_appearance_tags": "",
+                "view": "selfie", "aspect_ratio": "2:3",
+                "is_intimate": True, "partner_in_frame": True, "device_in_frame": False, "clothing_off": "",
+            })
+            svc._translate_to_tags = AsyncMock(return_value="english prompt")
+            svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
+            svc.send_photo = AsyncMock()
+
+            ok = await svc._sched_fire(sid, fixed_now, mode_override="normal", skip_active_check=True)
+
+            self.assertTrue(ok)
+            # NTR 覆盖下 dream 仍须执行（reason 保持 morning 语义：归档前一天）。
+            svc._run_dream.assert_awaited_once_with(sid, fixed_now, reason="morning", force=True)
+            # 生成链路按 NTR 叙事走。
+            self.assertTrue(svc._do_generate.await_args.kwargs["is_ntr"])
+
+        asyncio.run(run())
+
+    def test_ntr_push_skips_dream_when_already_done_today(self):
+        """NTR 覆盖下今日已 dream 过时不再重复跑（与 daily-wake 互补去重）。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 7, 9, 9, 0, tzinfo=timezone.utc)
+            svc.config["default_purity"] = "-1"
+            svc._run_dream = AsyncMock()
+            svc._decide_push_topic_direction = AsyncMock(return_value={
+                "topic_direction": "life", "topic_guides": [], "topic_seed": "", "search_query": "",
+            })
+            svc._fetch_weather = AsyncMock(return_value={"desc": "晴", "temp": "22", "code": "113"})
+            svc._llm_write_scene = AsyncMock(return_value={
+                "scene": "window selfie", "caption": "ntr 场景", "new_appearance_tags": "",
+                "view": "selfie", "aspect_ratio": "2:3",
+                "is_intimate": True, "partner_in_frame": True, "device_in_frame": False, "clothing_off": "",
+            })
+            svc._translate_to_tags = AsyncMock(return_value="english prompt")
+            svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
+            svc.send_photo = AsyncMock()
+            key = svc._context_character_key(sid)
+            with patch.object(
+                svc.app_store,
+                "get_context_meta",
+                return_value={"last_dream_at": fixed_now.timestamp()},
+            ):
+                self.assertTrue(svc._dream_done_today(sid, fixed_now))
+                ok = await svc._sched_fire(sid, fixed_now, mode_override="normal", skip_active_check=True)
+
+            self.assertTrue(ok)
+            svc._run_dream.assert_not_awaited()
+            self.assertTrue(svc._do_generate.await_args.kwargs["is_ntr"])
 
         asyncio.run(run())
 
@@ -7264,13 +7363,14 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             {"role": "assistant", "content": "今天的角色回复"},
             {"role": "user", "content": "昨天的消息"},
         ])
-        from datetime import timedelta
-        tz = svc._session_tz(sid)
-        now = svc._session_now(sid)
-        today_date = now.date()
+        from datetime import date, timedelta
+        # 固定基准日期：保留/筛选逻辑与真实日期无关，注入固定日期避免依赖系统时钟
+        # （跨天边界、时区差异导致 flaky，且失败信息随运行日期漂移难复现）。
+        today_date = date(2026, 6, 24)
         yesterday_date = today_date - timedelta(days=1)
         today_str = today_date.isoformat()
         yesterday_str = yesterday_date.isoformat()
+        tz = svc._session_tz(sid)
         today_ts = datetime(today_date.year, today_date.month, today_date.day, 9, tzinfo=tz).timestamp()
         yesterday_ts = datetime(yesterday_date.year, yesterday_date.month, yesterday_date.day, 23, tzinfo=tz).timestamp()
         with closing(svc.app_store._connect()) as conn:

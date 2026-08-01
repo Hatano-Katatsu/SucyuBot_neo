@@ -1274,6 +1274,23 @@ class SchedulerRuntimeMixin:
         except Exception:
             return ""
 
+    def _dream_done_today(self, session_id: str, local_dt: datetime) -> bool:
+        """当前角色今天是否已完成 dream 整理（按 context_meta.last_dream_at 所在日期判断）。"""
+        if not session_id:
+            return False
+        try:
+            key = self._context_character_key(session_id) if hasattr(self, "_context_character_key") else ""
+            meta = self.app_store.get_context_meta(session_id, key)
+            last = float(meta.get("last_dream_at") or 0)
+            if last <= 0:
+                return False
+            return (
+                datetime.fromtimestamp(last, tz=local_dt.tzinfo).strftime("%Y-%m-%d")
+                == local_dt.strftime("%Y-%m-%d")
+            )
+        except Exception:
+            return False
+
     async def _run_dream(self, session_id: str, local_dt: datetime, *, reason: str, force: bool = False):
         if not session_id:
             return
@@ -2566,13 +2583,19 @@ class SchedulerRuntimeMixin:
             last = session_schema.get_last_interaction(state)
             purity = self._get_purity(session_id)
             mode = mode_override or "normal"
-            if purity < 0:
-                mode = "ntr"
-            elif last and time.time() - last > self._compute_ntr_threshold(purity) * 86400:
-                mode = "ntr"
-            if mode == "normal" and purity == 0 and random.random() < 0.4:
-                mode = "ntr"
-            if mode == "morning":
+            if mode != "morning":
+                # NTR/纯洁度覆盖只作用于未显式指定 morning 的推送；用户显式要求 morning 时
+                # 保持 morning 语义（含 dream 每日整理），不被 purity=-1 / 超阈值 / 随机覆盖。
+                if purity < 0:
+                    mode = "ntr"
+                elif last and time.time() - last > self._compute_ntr_threshold(purity) * 86400:
+                    mode = "ntr"
+                if mode == "normal" and purity == 0 and random.random() < 0.4:
+                    mode = "ntr"
+            # dream 是角色每日整理（前一天日记 + 角色背景/历史总结），与推送叙事模式解耦：
+            # morning 语义必然触发；purity=-1 等覆盖产生的 NTR 推送今日尚未整理时也补跑一次，
+            # 避免非激活角色（无 scheduler daily-wake 兜底）的整理链路整体丢失。
+            if mode == "morning" or (mode == "ntr" and not self._dream_done_today(session_id, local_dt)):
                 await self._run_dream(session_id, local_dt, reason="morning", force=True)
             if hasattr(self, "ensure_life_plan_for_today"):
                 try:
