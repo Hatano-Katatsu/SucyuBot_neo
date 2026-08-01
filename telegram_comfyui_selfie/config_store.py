@@ -25,6 +25,7 @@ CONFIG_GROUPS: dict[str, list[str]] = {
     ],
     "models": [
         "default_chat_model_profile", "default_fast_model_profile", "default_vision_model_profile", "global_model_profiles",
+        "chat_thinking_enabled", "fast_thinking_enabled", "vision_thinking_enabled",
         "llm_temperature_scene", "llm_temperature_translate", "llm_temperature_classify",
         "chat_llm_temperature", "chat_llm_max_tokens", "chat_llm_top_p", "chat_llm_frequency_penalty", "chat_llm_presence_penalty",
         "image_llm_temperature_scene", "image_llm_temperature_translate", "image_llm_temperature_classify",

@@ -20,6 +20,7 @@ from .generation import (
     public_outfit_guard_context,
 )
 from .http_limits import read_limited_json, response_limit
+from .llm_runtime import _looks_like_llm_thinking
 from .memory import USER_PROFILE_KIND, format_memory_lines
 from .world_runtime import PLACE_TYPES
 
@@ -1789,7 +1790,9 @@ async def plan_roleplay_image(
             msg = result.get("choices", [{}])[0].get("message", {})
             raw_text = (msg.get("content") or "").strip()
             if not raw_text:
-                raw_text = (msg.get("reasoning_content") or "").strip()
+                # content 为空说明模型只输出了思考（通常 finish_reason=length），
+                # 不能把 reasoning_content 当作规划结果，交给上层兜底。
+                raw_text = ""
         else:
             call_system = system
             if combined_push_dynamic:
@@ -2209,6 +2212,10 @@ async def plan_animatool_slots(
     raw_nltag = next((str(parsed.get(field) or "").strip() for field in ANIMATOOL_NLTAG_FIELDS if str(parsed.get(field) or "").strip()), "")
     if nltag_field:
         nltag_value = raw_nltag or slots.scene or ""
+        if _looks_like_llm_thinking(nltag_value):
+            # LLM 把思考直接写进了 JSON 字段值（如 tags），丢弃并回退场景槽位。
+            logger.warning("animatool slots nltag 疑似思考文本泄漏，回退场景槽位 raw_len=%d", len(nltag_value))
+            nltag_value = slots.scene or ""
         view_for_nltag = prompt_view or _infer_prompt_view(nltag_value)
         nltag_value = _sanitize_nltag_for_view(nltag_value, view_for_nltag)
         if _is_full_nude_appearance(slots.effective_appearance):

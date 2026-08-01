@@ -312,6 +312,11 @@ DEFAULT_CONFIG = {
     "default_chat_model_profile": "deepseek-pro",
     "default_fast_model_profile": "deepseek-flash",
     "default_vision_model_profile": "",
+    # 三模型 thinking 全局默认（三态：空=跟随 profile disable_thinking，true/false=强制）；
+    # 用户级 chat_thinking/fast_thinking/vision_thinking 设置优先于此。
+    "chat_thinking_enabled": "",
+    "fast_thinking_enabled": "",
+    "vision_thinking_enabled": "",
     "photo_caption_wait_seconds": "30",
     "telegram_update_queue_size": "32",
     "telegram_update_max_concurrency": "4",

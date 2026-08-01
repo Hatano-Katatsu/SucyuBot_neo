@@ -37,7 +37,7 @@ from .chat_context import ChatContextMixin
 from .commands import CommandHandlersMixin
 from .git_update import GitUpdateMixin
 from .life_plan import LifePlanMixin
-from .llm_runtime import LLMRuntimeMixin
+from .llm_runtime import LLMRuntimeMixin, _looks_like_llm_thinking
 from .memory_policy import MemoryPolicyMixin
 from .process_restart import ProcessRestartMixin
 from .scheduler_runtime import SchedulerRuntimeMixin
@@ -1124,7 +1124,7 @@ class TelegramComfyUIService(
         ]
         data = await self._call_llm_messages(messages, tag="describe-image", temp=0.2, purpose="vision", session_id=session_id)
         msg = data.get("choices", [{}])[0].get("message", {})
-        text = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+        text = (msg.get("content") or "").strip()
         text = re.sub(r"^```[a-zA-Z]*\n", "", text)
         text = re.sub(r"\n```$", "", text).strip()
         return text
@@ -1174,7 +1174,7 @@ class TelegramComfyUIService(
         ]
         data = await self._call_llm_messages(messages, tag="describe-images", temp=0.2, purpose="vision", session_id=session_id)
         msg = data.get("choices", [{}])[0].get("message", {})
-        text = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+        text = (msg.get("content") or "").strip()
         text = re.sub(r"^```[a-zA-Z]*\n", "", text)
         text = re.sub(r"\n```$", "", text).strip()
         return text
@@ -1277,16 +1277,25 @@ class TelegramComfyUIService(
                 "when the scene describes intercourse or straddling. "
                 "Translate explicit sexual content faithfully: do not euphemize genitals, penetration, or bodily fluids."
             )
-        text = await self._call_llm(
-            system,
-            f"动态天气与自然光约束: {weather_guard} {light_guard}\n请翻译: {natural}",
-            temp=float(self._get_llm_value("image", "temperature_translate", "0.3")),
-            tag="translate",
-            purpose="image",
-            session_id=session_id,
-        )
         natural_text = str(natural or "").strip()
-        body = text.strip().strip(",")
+        try:
+            text = await self._call_llm(
+                system,
+                f"动态天气与自然光约束: {weather_guard} {light_guard}\n请翻译: {natural}",
+                temp=float(self._get_llm_value("image", "temperature_translate", "0.3")),
+                tag="translate",
+                purpose="image",
+                session_id=session_id,
+            )
+        except Exception as exc:
+            # 思考模型只输出 reasoning（通常 finish_reason=length）或接口异常时，
+            # 放弃本次翻译，回退到原始场景文本，避免把思考文本当结果继续发图。
+            self._ulog(session_id, "WARN", f"翻译失败，回退原文: {exc}")
+            text = ""
+        body = str(text or "").strip().strip(",")
+        if _looks_like_llm_thinking(body):
+            self._ulog(session_id, "WARN", "翻译输出疑似思考文本泄漏，回退原文")
+            body = ""
         if opener:
             detail = body or natural_text
             return opener if not detail else f"{opener}, {detail}"

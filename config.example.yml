@@ -47,6 +47,11 @@ models:
   default_fast_model_profile: "deepseek-flash"
   # 留空表示不处理用户图片/引用图片；需要时可指向支持 image_url 的 OpenAI 兼容视觉模型 profile。
   default_vision_model_profile: ""
+  # 三模型 thinking 全局默认（三态：空=跟随 profile disable_thinking，true/false=强制）。
+  # 用户可在 WebUI（全局模型配置 / 角色卡页面）覆盖。
+  chat_thinking_enabled: ""
+  fast_thinking_enabled: ""
+  vision_thinking_enabled: ""
   photo_caption_wait_seconds: "30"
   global_model_profiles:
     deepseek-pro:

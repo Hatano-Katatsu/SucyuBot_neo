@@ -18,6 +18,39 @@ from .model_security import PublicOnlyResolver, validate_public_model_base_url
 logger = logging.getLogger(__name__)
 
 
+# 思考文本泄漏清洗：只处理显式的思考标签 <thinking>/<reasoning>/<analysis>。
+# 不做关键词启发式判断（如 "we need to"），避免误判正常输出。
+_THINKING_TAG_RE = re.compile(
+    r"^\s*<(?P<tag>thinking|reasoning|analysis)>.*?</(?P=tag)>\s*",
+    flags=re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_llm_thinking_prefixes(text: str) -> str:
+    """反复剥离开头由思考标签包裹的块，直到没有更多思考文本或文本过短。"""
+    stripped = str(text or "").strip()
+    for _ in range(8):
+        if not stripped or len(stripped) < 40:
+            break
+        new = _THINKING_TAG_RE.sub("", stripped, count=1).strip()
+        if len(new) >= len(stripped):
+            break
+        stripped = new
+    return stripped
+
+
+def _looks_like_llm_thinking(text: str) -> bool:
+    """判断 LLM 输出是否包含思考标签包裹的块（可能是整段思考或混入思考）。
+
+    只按显式思考标签判断，不依赖关键词启发式。
+    """
+    return bool(re.search(
+        r"<(?:thinking|reasoning|analysis)>.*?</(?:thinking|reasoning|analysis)>",
+        str(text or ""),
+        flags=re.DOTALL | re.IGNORECASE,
+    ))
+
+
 # 日志脱敏：vision 请求会把图片编码成 base64 data_url 放进 messages，
 # 落盘到 llm_debug.jsonl / 用户 ERROR 日志时会污染日志并放大体积。
 # _redact_base64 在序列化前递归扫描，把图片相关内容整体丢弃。
@@ -84,6 +117,7 @@ class LLMRuntimeMixin:
 
         chat 使用 chat_profile_id，image/fast 使用 fast_profile_id，vision 使用 vision_profile_id。
         vision 没有显式配置时保持为空，用于关闭图片理解链路。
+        thinking 优先级：用户显式设置（chat_thinking/fast_thinking/vision_thinking）> profile disable_thinking。
         """
         user_id = self._user_id_for_session(session_id)
         settings = self.app_store.get_user_model_settings(user_id) if user_id else {}
@@ -105,11 +139,40 @@ class LLMRuntimeMixin:
         if not profile and global_profiles:
             profile_id, profile = next(iter(global_profiles.items()))
             profile_scope = "global"
+        thinking = self._profile_thinking(purpose, profile, settings)
+        return str(profile_id or ""), dict(profile or {}), thinking, profile_scope
+
+    def _profile_thinking(self, purpose: str, profile: dict[str, Any], settings: dict[str, Any]) -> bool:
+        """解析当前 purpose 的 thinking 开关。
+
+        优先级（从高到低）：
+        1. 用户显式设置（chat_thinking/fast_thinking/vision_thinking 三态）——前端/角色卡页面可改；
+        2. 全局配置默认（chat_thinking_enabled/fast_thinking_enabled/vision_thinking_enabled）——配置文件可改；
+        3. profile 的 disable_thinking。
+        """
+        if purpose == "chat":
+            key = "chat_thinking"
+            global_key = "chat_thinking_enabled"
+        elif purpose == "vision":
+            key = "vision_thinking"
+            global_key = "vision_thinking_enabled"
+        else:
+            key = "fast_thinking"
+            global_key = "fast_thinking_enabled"
+        user_value = settings.get(key)
+        if user_value is not None:
+            return bool(user_value)
+        global_value = self.config.get(global_key)
+        if isinstance(global_value, str):
+            global_value = global_value.strip()
+        if global_value not in (None, ""):
+            if isinstance(global_value, str):
+                return global_value.lower() in ("true", "1", "yes", "on")
+            return bool(global_value)
         disable = profile.get("disable_thinking", self._get_llm_value(purpose, "disable_thinking", False))
         if isinstance(disable, str):
             disable = disable.lower() in ("true", "1", "yes", "on")
-        thinking = not bool(disable)
-        return str(profile_id or ""), dict(profile or {}), thinking, profile_scope
+        return not bool(disable)
 
     def _resolve_llm_profile(self, purpose: str, session_id: str = "") -> tuple[str, dict[str, Any], bool]:
         """兼容旧调用者的三元组 profile 解析接口。"""
@@ -118,6 +181,9 @@ class LLMRuntimeMixin:
 
     def _resolved_llm_config(self, purpose: str, session_id: str = "", disable_thinking: bool | None = None) -> dict[str, Any]:
         profile_id, profile, thinking, profile_scope = self._resolve_llm_profile_entry(purpose, session_id)
+        if disable_thinking is not None:
+            # 调用方显式要求关思考（如 checkpoint/dream 等结构化任务），覆盖用户设置。
+            thinking = not bool(disable_thinking)
         model, api_base, api_key = self._llm_profile_model_name(profile, thinking)
         if purpose != "vision" and not api_base:
             if profile_scope == "user":
@@ -466,10 +532,12 @@ class LLMRuntimeMixin:
         control = str(resolved.get("thinking_control") or "model_name")
         if control == "param_always":
             body["thinking"] = {"type": "enabled" if thinking else "disabled"}
-        elif control == "param" and not thinking:
-            body["thinking"] = {"type": "disabled"}
-        elif control == "enable_thinking" and not thinking:
-            body["enable_thinking"] = False
+        elif control == "param":
+            # 双向显式控制：用户/配置显式开启或关闭思考都要落实到请求体，
+            # 否则 param 模式在 thinking=True 时不发参数，模型默认行为可能与设置不一致。
+            body["thinking"] = {"type": "enabled" if thinking else "disabled"}
+        elif control == "enable_thinking":
+            body["enable_thinking"] = bool(thinking)
         request_url = f"{api_base}/chat/completions"
         private_profile = resolved.get("profile_scope") == "user"
         if private_profile:
@@ -559,14 +627,12 @@ class LLMRuntimeMixin:
         data = await self._call_llm_messages(messages, tag=tag, temp=temp, purpose=purpose, disable_thinking=disable_thinking, session_id=session_id, max_tokens=max_tokens)
         msg = data.get("choices", [{}])[0].get("message", {})
         text = (msg.get("content") or "").strip()
-        if not text:
-            text = (msg.get("reasoning_content") or "").strip()
-        text = re.sub(r"^\s*<thinking>.*?</thinking>\s*", "", text, flags=re.DOTALL).strip()
-        text = re.sub(r"^\s*<reasoning>.*?</reasoning>\s*", "", text, flags=re.DOTALL).strip()
-        text = re.sub(r"^\s*<analysis>.*?</analysis>\s*", "", text, flags=re.DOTALL).strip()
+        text = _strip_llm_thinking_prefixes(text)
         text = re.sub(r"^```[a-zA-Z]*\n", "", text)
         text = re.sub(r"\n```$", "", text).strip()
         if not text:
+            finish_reason = data.get("choices", [{}])[0].get("finish_reason") or ""
+            reasoning_len = len(str(msg.get("reasoning_content") or ""))
             self._record_llm_error_log(
                 session_id=session_id,
                 purpose=purpose,
@@ -574,7 +640,11 @@ class LLMRuntimeMixin:
                 request_body={"messages": messages},
                 response=data,
                 status=200,
-                error="LLM returned empty content",
+                error=f"LLM returned empty content (finish_reason={finish_reason}, reasoning_len={reasoning_len})",
             )
+            if reasoning_len:
+                # 思考内容不能当作结果返回：思考模型在 max_tokens 内只输出了 reasoning（通常 finish_reason=length），
+                # 静默兜底会把思考文本当成正式结果流入下游（如 translate → animatool tags）。
+                raise RuntimeError("LLM 返回空内容（模型仅输出思考、无正式回答）")
             raise RuntimeError("LLM 返回空内容")
         return text

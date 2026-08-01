@@ -654,16 +654,26 @@ async function loadModels() {
     const configured = item.configured ? "已配置" : "未配置";
     const profile = item.profile_id || "默认";
     const model = item.model || "-";
-    return `${profile} / ${model} / ${configured}`;
+    const thinking = item.thinking === undefined ? "" : (item.thinking ? " · 思考开" : " · 思考关");
+    return `${profile} / ${model} / ${configured}${thinking}`;
   };
   const adminScopeControl = state.auth?.role === "admin"
     ? `<label>保存范围<select name="_scope"><option value="user">当前用户私有</option><option value="global">全局 profile</option></select></label>`
     : "";
+  const thinkingSelect = (name, label) => `
+    <label>${label}<select name="${name}">
+      <option value="">跟随模型</option>
+      <option value="true">开启</option>
+      <option value="false">关闭</option>
+    </select></label>`;
   box.innerHTML = `
     <form id="model-settings-form" class="model-settings-form">
       <label>对话模型<select name="chat_profile_id"><option value="">默认</option>${options}</select></label>
       <label>快速模型<select name="fast_profile_id"><option value="">默认</option>${options}</select></label>
       <label>视觉模型<select name="vision_profile_id"><option value="">关闭</option>${options}</select></label>
+      ${thinkingSelect("chat_thinking", "对话思考")}
+      ${thinkingSelect("fast_thinking", "快速思考")}
+      ${thinkingSelect("vision_thinking", "视觉思考")}
       <button class="primary" type="submit">保存模型选择</button>
     </form>
     <div class="model-current">
@@ -683,12 +693,16 @@ async function loadModels() {
       <label>超时秒数<input name="timeout" type="number" min="1" step="1" inputmode="decimal" placeholder="可选"></label>
       <button type="submit">保存模型 profile</button>
       <button id="delete-model-profile" class="danger" type="button">删除指定 profile</button>
-      <p class="muted">仅填写常用模型字段；api_key 返回时会显示为 ********，保存空值或 ******** 会保留原密钥。Thinking 使用默认策略。</p>
+      <p class="muted">仅填写常用模型字段；api_key 返回时会显示为 ********，保存空值或 ******** 会保留原密钥。思考开关三态：跟随模型（按 profile 默认设置）/ 强制开启 / 强制关闭。</p>
     </form>
   `;
   box.querySelector("[name=chat_profile_id]").value = settings.chat_profile_id || "";
   box.querySelector("[name=fast_profile_id]").value = settings.fast_profile_id || "";
   box.querySelector("[name=vision_profile_id]").value = settings.vision_profile_id || "";
+  ["chat_thinking", "fast_thinking", "vision_thinking"].forEach(key => {
+    const el = box.querySelector(`[name=${key}]`);
+    if (el && settings[key] !== undefined && settings[key] !== null) el.value = String(settings[key]);
+  });
   $("#model-settings-form").onsubmit = async event => {
     event.preventDefault();
     await api(modelApiUrl("/api/models/settings"), { method: "PATCH", body: formValues(event.currentTarget) });

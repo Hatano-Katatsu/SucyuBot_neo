@@ -17,6 +17,20 @@ def _now() -> float:
     return time.time()
 
 
+def _model_thinking_value(raw: Any) -> Any:
+    """SQLite INTEGER 三态 → Python 三态（None=未设置跟随 profile，True/False=显式覆盖）。"""
+    if raw is None:
+        return None
+    return bool(int(raw))
+
+
+def _model_thinking_db(value: Any) -> Any:
+    """Python 三态 → SQLite INTEGER 三态。"""
+    if value is None or value == "":
+        return None
+    return 1 if str(value).lower() in ("true", "1", "yes", "on") else 0
+
+
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -700,6 +714,9 @@ class AppStateStore:
             "chat_profile_id": data.get("chat_profile_id") or "",
             "fast_profile_id": data.get("fast_profile_id") or "",
             "vision_profile_id": data.get("vision_profile_id") or "",
+            "chat_thinking": _model_thinking_value(data.get("chat_thinking")),
+            "fast_thinking": _model_thinking_value(data.get("fast_thinking")),
+            "vision_thinking": _model_thinking_value(data.get("vision_thinking")),
             "updated_at": data.get("updated_at") or 0,
         }
 
@@ -708,20 +725,24 @@ class AppStateStore:
         for key in ("chat_profile_id", "fast_profile_id", "vision_profile_id"):
             if key in values:
                 current[key] = values.get(key) or ""
+        for key in ("chat_thinking", "fast_thinking", "vision_thinking"):
+            if key in values:
+                current[key] = values.get(key)
         with closing(self._connect()) as conn:
             conn.execute(
                 """
                 INSERT INTO user_model_settings(
                     user_id, chat_profile_id, fast_profile_id, vision_profile_id,
-                    chat_thinking, fast_thinking, updated_at
+                    chat_thinking, fast_thinking, vision_thinking, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     chat_profile_id = excluded.chat_profile_id,
                     fast_profile_id = excluded.fast_profile_id,
                     vision_profile_id = excluded.vision_profile_id,
                     chat_thinking = excluded.chat_thinking,
                     fast_thinking = excluded.fast_thinking,
+                    vision_thinking = excluded.vision_thinking,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -729,8 +750,9 @@ class AppStateStore:
                     current.get("chat_profile_id") or "",
                     current.get("fast_profile_id") or "",
                     current.get("vision_profile_id") or "",
-                    None,
-                    None,
+                    _model_thinking_db(current.get("chat_thinking")),
+                    _model_thinking_db(current.get("fast_thinking")),
+                    _model_thinking_db(current.get("vision_thinking")),
                     _now(),
                 ),
             )

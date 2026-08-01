@@ -740,7 +740,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_model_panel_has_no_thinking_controls(self):
+    def test_model_panel_has_thinking_controls(self):
         app_js = (Path(__file__).resolve().parents[1] / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
         model_section = app_js.split("async function loadModels()", 1)[1].split("function worldSessionTitle", 1)[0]
         self.assertIn('name="vision_profile_id"', model_section)
@@ -748,8 +748,14 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn(f'name="{field}"', model_section)
         self.assertNotIn('name="json"', model_section)
         self.assertNotIn("<textarea name=\"json\"", model_section)
-        self.assertNotIn("chat_thinking", model_section)
-        self.assertNotIn("fast_thinking", model_section)
+        # 三个模型各自的 thinking 开关（三态下拉：跟随模型/开启/关闭）
+        self.assertIn('thinkingSelect("chat_thinking"', model_section)
+        self.assertIn('thinkingSelect("fast_thinking"', model_section)
+        self.assertIn('thinkingSelect("vision_thinking"', model_section)
+        self.assertIn('<option value="">跟随模型</option>', model_section)
+        self.assertIn('<option value="true">开启</option>', model_section)
+        self.assertIn('<option value="false">关闭</option>', model_section)
+        # 不暴露 profile 级内部字段
         self.assertNotIn("disable_thinking", model_section)
         self.assertNotIn("thinking_fixed", model_section)
         self.assertNotIn("thinking_control", model_section)
@@ -9040,6 +9046,94 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             ordinary_messages = captured[2][0]
             self.assertEqual([m["role"] for m in ordinary_messages], ["system", "user"])
             self.assertEqual(ordinary_messages[0]["content"], "ordinary system")
+
+        asyncio.run(run())
+
+    def test_call_llm_raises_instead_of_returning_reasoning_when_content_empty(self):
+        """content 为空、仅 reasoning_content 有值时，不得把思考当结果返回。"""
+        async def run():
+            svc = self.make_service()
+
+            async def fake_msgs(messages, **kwargs):
+                return {"choices": [{
+                    "finish_reason": "length",
+                    "message": {"content": "", "reasoning_content": "We need to translate the provided Chinese scene..."},
+                }]}
+
+            svc._call_llm_messages = fake_msgs
+            with self.assertRaises(RuntimeError) as ctx:
+                await svc._call_llm("system", "user", tag="translate", purpose="image")
+            self.assertIn("仅输出思考", str(ctx.exception))
+
+        asyncio.run(run())
+
+    def test_call_llm_strips_unwrapped_thinking_prefix_in_content(self):
+        """content 里直接带思考标签包裹的草稿时，应剥离后再返回。"""
+        async def run():
+            svc = self.make_service()
+
+            async def fake_msgs(messages, **kwargs):
+                return {"choices": [{"message": {
+                    "content": (
+                        "<thinking>We need to translate the provided Chinese scene into concise English "
+                        "image-generation tags. The input is already in English?</thinking>"
+                        "She leans her hip against the kitchen counter in the sunlit corner. dress, demon tail, kitchen"
+                    )
+                }}]}
+
+            svc._call_llm_messages = fake_msgs
+            text = await svc._call_llm("system", "user", tag="translate", purpose="image")
+            self.assertIn("She leans her hip", text)
+            self.assertNotIn("<thinking>", text)
+            self.assertNotIn("We need to translate", text)
+
+        asyncio.run(run())
+
+    def test_looks_like_llm_thinking_only_checks_tags(self):
+        from telegram_comfyui_selfie.llm_runtime import _looks_like_llm_thinking, _strip_llm_thinking_prefixes
+
+        # 只有思考标签才算思考
+        tagged = "<thinking>need to plan scene</thinking>She sits by the window. soft light"
+        self.assertTrue(_looks_like_llm_thinking(tagged))
+        self.assertEqual(_strip_llm_thinking_prefixes(tagged), "She sits by the window. soft light")
+
+        # 无标签的 "we need to" 等关键词不算思考（不启发式判断）
+        keyword_only = (
+            "A selfie of a woman, upper body framing, looking at viewer, "
+            "We need to translate the provided Chinese scene into concise English image-generation tags."
+        )
+        self.assertFalse(_looks_like_llm_thinking(keyword_only))
+
+        clean = "She leans her hip against the kitchen counter in the sunlit corner. dress, demon tail, kitchen"
+        self.assertFalse(_looks_like_llm_thinking(clean))
+        self.assertEqual(_strip_llm_thinking_prefixes(clean), clean)
+
+        # 思考标签出现在中间也应识别（可能混入字段值）
+        mid = "She sits by the window.<reasoning>check camera</reasoning> soft light"
+        self.assertTrue(_looks_like_llm_thinking(mid))
+
+    def test_translate_to_tags_falls_back_on_thinking_leak(self):
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            scene = "她在厨房窗边喝蜂蜜茶，尾巴卷着冰格。"
+            leak = (
+                "<thinking>A selfie of a woman, We need to translate the provided Chinese scene into "
+                "concise English image-generation tags. The input is already in English? Wait.</thinking>"
+                "She stands by the kitchen window. honey tea, ice tray"
+            )
+            svc._call_llm = AsyncMock(return_value=leak)
+
+            result = await svc._translate_to_tags(scene, session_id="telegram:123", view="pov")
+
+            # 思考标签泄漏必须回退原文（带视角前缀），不能把思考文本当结果。
+            self.assertIn("厨房", result)
+            self.assertIn("蜂蜜茶", result)
+            self.assertNotIn("<thinking>", result)
 
         asyncio.run(run())
 

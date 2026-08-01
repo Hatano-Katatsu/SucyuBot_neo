@@ -342,5 +342,15 @@ async def api_update_model_settings(request: web.Request):
     for key in ("chat_profile_id", "fast_profile_id", "vision_profile_id"):
         if key in payload:
             kwargs[key] = str(payload.get(key) or "")
+    # 三模型 thinking 开关：三态（空/None=跟随 profile，true/false=强制）
+    for key in ("chat_thinking", "fast_thinking", "vision_thinking"):
+        if key in payload:
+            raw = payload.get(key)
+            if raw in (None, ""):
+                kwargs[key] = None
+            elif isinstance(raw, bool):
+                kwargs[key] = raw
+            else:
+                kwargs[key] = parse_bool(raw)
     settings = service.app_store.update_user_model_settings(user_id, **kwargs)
     return json_ok({"settings": settings})

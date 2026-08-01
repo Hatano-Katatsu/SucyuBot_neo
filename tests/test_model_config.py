@@ -147,23 +147,49 @@ class ModelProfileTestCase(ServiceFixtureMixin, unittest.TestCase):
         resolved = svc._resolved_llm_config("chat", "telegram:1")
         self.assertEqual(str(resolved.get("max_tokens")), "12000")
 
-    def test_thinking_fixed_ignores_user_settings(self):
+    def test_user_thinking_settings_override_profile(self):
         async def run():
             svc = self.make_service()
-            # 默认 chat=deepseek-pro（固定开）、fast=deepseek-flash（固定关）
+            # 默认 chat=deepseek-pro（profile disable_thinking=false → 思考开）、fast=deepseek-flash（思考关）
+            _, _, chat_thinking = svc._resolve_llm_profile("chat", "telegram:1")
+            _, _, fast_thinking = svc._resolve_llm_profile("image", "telegram:1")
+            self.assertTrue(chat_thinking, "deepseek-pro 默认思考开启")
+            self.assertFalse(fast_thinking, "deepseek-flash 默认思考关闭")
+
+            # 用户显式设置覆盖 profile
             svc.app_store.update_user_model_settings(
                 "1", chat_profile_id="deepseek-pro", chat_thinking=False,
                 fast_profile_id="deepseek-flash", fast_thinking=True,
             )
             _, _, chat_thinking = svc._resolve_llm_profile("chat", "telegram:1")
             _, _, fast_thinking = svc._resolve_llm_profile("image", "telegram:1")
-            self.assertTrue(chat_thinking, "deepseek-pro 思考固定开启，用户设置关闭应被忽略")
-            self.assertFalse(fast_thinking, "deepseek-flash 思考固定关闭，用户设置开启应被忽略")
+            self.assertFalse(chat_thinking, "用户关闭思考应覆盖 deepseek-pro 默认开启")
+            self.assertTrue(fast_thinking, "用户开启思考应覆盖 deepseek-flash 默认关闭")
 
-            # 切到 glm（固定关）
+            # 切到 glm（profile 默认关闭），用户开启应生效
             svc.app_store.update_user_model_settings("1", fast_profile_id="glm", fast_thinking=True)
             _, _, glm_thinking = svc._resolve_llm_profile("image", "telegram:1")
-            self.assertFalse(glm_thinking, "glm 思考固定关闭")
+            self.assertTrue(glm_thinking, "glm profile 默认关闭，但用户开启应生效")
+
+        asyncio.run(run())
+
+    def test_global_thinking_enabled_config_overrides_profile(self):
+        async def run():
+            svc = self.make_service()
+            # 全局配置强制开启 fast thinking，覆盖 deepseek-flash 默认关闭
+            svc.config["fast_thinking_enabled"] = True
+            _, _, fast_thinking = svc._resolve_llm_profile("image", "telegram:1")
+            self.assertTrue(fast_thinking)
+
+            # 全局配置强制关闭 chat thinking，覆盖 deepseek-pro 默认开启
+            svc.config["chat_thinking_enabled"] = "false"
+            _, _, chat_thinking = svc._resolve_llm_profile("chat", "telegram:1")
+            self.assertFalse(chat_thinking)
+
+            # 用户设置优先于全局配置
+            svc.app_store.update_user_model_settings("1", fast_thinking=False)
+            _, _, fast_thinking = svc._resolve_llm_profile("image", "telegram:1")
+            self.assertFalse(fast_thinking)
 
         asyncio.run(run())
 
@@ -174,9 +200,68 @@ class ModelProfileTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "name": "Custom", "base_url": "http://localhost/v1", "api_key": "k",
                 "model": "custom-model", "timeout": 120, "disable_thinking": True,
             })
-            svc.app_store.update_user_model_settings("1", chat_profile_id="custom", chat_thinking=True)
+            svc.app_store.update_user_model_settings("1", chat_profile_id="custom")
             _, _, thinking = svc._resolve_llm_profile("chat", "telegram:1")
-            self.assertFalse(thinking, "用户级 thinking 覆盖已移除，应完全跟随模型 profile")
+            self.assertFalse(thinking, "profile disable_thinking=True 默认关闭思考")
+
+            # 用户显式开启思考应覆盖 profile
+            svc.app_store.update_user_model_settings("1", chat_thinking=True)
+            _, _, thinking = svc._resolve_llm_profile("chat", "telegram:1")
+            self.assertTrue(thinking, "用户显式开启思考应覆盖 profile disable_thinking")
+
+        asyncio.run(run())
+
+    def test_vision_profile_thinking_settings(self):
+        async def run():
+            svc = self.make_service()
+            svc.app_store.upsert_model_profile("1", "vision", {
+                "name": "Vision", "base_url": "http://localhost/v1", "api_key": "vk",
+                "model": "vision-model", "disable_thinking": True,
+            })
+            svc.app_store.update_user_model_settings("1", vision_profile_id="vision")
+            _, _, thinking = svc._resolve_llm_profile("vision", "telegram:1")
+            self.assertFalse(thinking, "vision profile 默认关闭思考")
+
+            # 用户显式开启 vision 思考
+            svc.app_store.update_user_model_settings("1", vision_thinking=True)
+            _, _, thinking = svc._resolve_llm_profile("vision", "telegram:1")
+            self.assertTrue(thinking, "用户显式开启 vision 思考应生效")
+
+            # 用户清除设置回到跟随 profile
+            svc.app_store.update_user_model_settings("1", vision_thinking=None)
+            _, _, thinking = svc._resolve_llm_profile("vision", "telegram:1")
+            self.assertFalse(thinking, "清除用户设置后回到 profile 默认")
+
+        asyncio.run(run())
+
+    def test_model_settings_api_roundtrips_thinking_tri_state(self):
+        from telegram_comfyui_selfie.webui_models import api_update_model_settings
+
+        async def run():
+            svc = self.make_service()
+            # 三态设置：chat=false、fast=true、vision 未设置
+            response = await api_update_model_settings(JsonRequest(svc, {
+                "chat_thinking": False,
+                "fast_thinking": True,
+                "vision_thinking": "",
+            }))
+            data = json.loads(response.text)
+            self.assertTrue(data["ok"])
+            settings = data["settings"]
+            self.assertFalse(settings["chat_thinking"])
+            self.assertTrue(settings["fast_thinking"])
+            self.assertIsNone(settings["vision_thinking"])
+
+            # 清除为跟随 profile
+            response = await api_update_model_settings(JsonRequest(svc, {
+                "chat_thinking": "",
+                "fast_thinking": "false",
+                "vision_thinking": "true",
+            }))
+            data = json.loads(response.text)
+            self.assertIsNone(data["settings"]["chat_thinking"])
+            self.assertFalse(data["settings"]["fast_thinking"])
+            self.assertTrue(data["settings"]["vision_thinking"])
 
         asyncio.run(run())
 

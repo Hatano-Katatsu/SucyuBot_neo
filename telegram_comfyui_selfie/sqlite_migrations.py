@@ -270,12 +270,25 @@ def _migration_v5_telegram_update_inbox(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_v6_model_thinking_settings(conn: sqlite3.Connection) -> None:
+    """用户模型设置增加三个模型的 thinking 开关（chat/fast/vision 三态：NULL=跟随 profile）。"""
+
+    for column in ("chat_thinking", "fast_thinking", "vision_thinking"):
+        _add_column_if_missing(
+            conn,
+            "user_model_settings",
+            column,
+            f"{column} INTEGER",
+        )
+
+
 SCHEMA_MIGRATIONS: tuple[Migration, ...] = (
     (1, "base_schema", _migration_v1_base_schema),
     (2, "character_memories", _migration_v2_character_memories),
     (3, "character_history", _migration_v3_character_history),
     (4, "vision_profile", _migration_v4_vision_profile),
     (5, "telegram_update_inbox", _migration_v5_telegram_update_inbox),
+    (6, "model_thinking_settings", _migration_v6_model_thinking_settings),
 )
 LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS[-1][0]
 
@@ -332,6 +345,10 @@ def _validate_schema(conn: sqlite3.Connection, version: int) -> None:
         missing.append("context_meta:[character_history_summary]")
     if version >= 4 and "vision_profile_id" not in _table_columns(conn, "user_model_settings"):
         missing.append("user_model_settings:[vision_profile_id]")
+    if version >= 6:
+        for column in ("chat_thinking", "fast_thinking", "vision_thinking"):
+            if column not in _table_columns(conn, "user_model_settings"):
+                missing.append(f"user_model_settings:[{column}]")
     if version >= 5:
         expected_v5 = {
             "app_metadata": {"key", "value", "updated_at"},

@@ -75,7 +75,8 @@ telegram_comfyui_selfie/
 - `app_store.py` 管理 session、城市目录、聊天、checkpoint、日记、上下文元数据、生活线、Web 凭据、模型 profile 和用量。
 - `session_schema.py` 是会话字段单一来源。当前仍处于盒子结构与少量旧扁平键双写的兼容期，删除兼容键前必须清点所有读写点并补迁移测试。
 - 模型配置统一走全局/用户 profile；chat、fast、vision 分别选择 profile。视觉 profile 留空时跳过图片理解。
-- thinking 状态由 profile 决定。API 密钥对前端始终掩码，保存空值或 `********` 时保留旧值。
+- thinking 可三处配置，优先级：用户级（`chat_thinking`/`fast_thinking`/`vision_thinking`，WebUI 全局/角色卡页面可改）> 全局配置默认（`chat_thinking_enabled`/`fast_thinking_enabled`/`vision_thinking_enabled`，配置文件可改）> profile 的 `disable_thinking`。`thinking_fixed` 仅是 profile 默认标记，不再硬锁定用户设置。API 密钥对前端始终掩码，保存空值或 `********` 时保留旧值。
+- 思考型模型仅在 content 里输出带 `<thinking>`/`<reasoning>`/`<analysis>` 标签的草稿时，`_call_llm` 才剥离或判为思考泄漏；不做关键词启发式判断。
 - 聊天采样参数只用于真实聊天回复，不传给 checkpoint、dream、memory 等结构化任务。
 - 结构化 LLM JSON 只可对明确位于相邻 token 之间的漏逗号做保守修复；其他损坏必须保持失败并走既有重试/回退。
 
