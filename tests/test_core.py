@@ -4532,8 +4532,10 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("smartphone", neg_tokens)
         self.assertNotIn("holding phone", neg_tokens)
         self.assertIn("two phones", neg_tokens)
-        self.assertIn("extra hands", neg.lower())
-        self.assertIn("poorly drawn hands", neg.lower())
+        # 手型/手指反词由 negative_prompt 提供，build_prompt 不再追加同义变体
+        self.assertNotIn("extra hands", neg.lower())
+        self.assertNotIn("poorly drawn hands", neg.lower())
+        self.assertIn("split screen", neg.lower())
         self.assertIn("foreground person", neg.lower())
 
     def test_roleplay_image_tool_uses_image_planner_context(self):
@@ -6020,8 +6022,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("uncensored", neg)
         self.assertNotIn("no mosaic", neg)
 
+        # 任何场景都不再按安全等级维护性/裸露反词；safe 只剩构图与质量词
         neg_safe = _build_animatool_neg(PromptSlots(safety="safe"), "turbo_v1")
-        self.assertIn("nsfw, explicit", neg_safe)
+        self.assertNotIn("nsfw", neg_safe)
+        self.assertNotIn("nude", neg_safe)
+        self.assertNotIn("sex", neg_safe)
 
     def test_animatool_filename_prefix_uses_session_character_name_for_oc(self):
         """OC 没有视觉 identity：文件名角色名回退到会话内角色名，而不是全局默认 bot_name（蕾伊）。"""
@@ -6638,9 +6643,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         payload = _build_animatool_turbo_payload(svc, slots, "positive prompt", "bad anatomy, bad hands", 123, schema)
 
         self.assertIn("neg", payload)
-        # neg 按 schema 格式构造，不直接复制槽位 negative；safe 时追加 nsfw, explicit
+        # neg 按 schema 格式构造，不直接复制槽位 negative；任何场景都不加性/裸露反词
         self.assertIn("bad anatomy, bad hands, bad feet, extra fingers, missing fingers, text, watermark, logo", payload["neg"])
-        self.assertIn("nsfw, explicit", payload["neg"])
+        self.assertNotIn("nsfw, explicit", payload["neg"])
         # 不应包含槽位里的场景特定反词
         self.assertNotIn("no panties", payload["neg"])
         self.assertNotIn("2girls", payload["neg"])
@@ -8236,16 +8241,37 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("配饰/随身物: large black bow", context)
         self.assertNotIn("配饰/随身物: black g-string", context)
 
-    def test_build_prompt_suppresses_accidental_no_panties_by_default(self):
+    def test_build_prompt_never_adds_exposure_negatives_outside_public_guard(self):
+        """非公开场景不追加 no panties/bottomless 等裸露反词；走光防护只走公开场景最小集。"""
         svc = self.make_service()
         sid = "telegram:1"
         state = svc._get_session_state(sid)
         session_schema.set_outfit(state, "white blouse, dark blue micro pleated skirt")
         _, neg = svc._build_prompt("standing by the kitchen counter", session_id=sid)
         neg_lower = neg.lower()
-        self.assertIn("no panties", neg_lower)
-        self.assertIn("no underwear", neg_lower)
-        self.assertIn("bottomless", neg_lower)
+        self.assertNotIn("no panties", neg_lower)
+        self.assertNotIn("no underwear", neg_lower)
+        self.assertNotIn("bottomless", neg_lower)
+        self.assertNotIn("crotchless", neg_lower)
+        self.assertNotIn("nude", neg_lower)
+        self.assertNotIn("nsfw", neg_lower)
+
+    def test_build_prompt_intimate_scene_does_not_suppress_bottom_exposure(self):
+        """亲密/性爱场景不应保留 no panties/bottomless 等反词，避免模型用被子遮挡 intended 半脱。"""
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        session_schema.set_outfit(state, "white blouse, dark blue micro pleated skirt")
+        _, neg = svc._build_prompt(
+            "on the bed, dress hiked up, partial male hand visible",
+            session_id=sid,
+            is_intimate=True,
+        )
+        neg_lower = neg.lower()
+        self.assertNotIn("no panties", neg_lower)
+        self.assertNotIn("no underwear", neg_lower)
+        self.assertNotIn("bottomless", neg_lower)
+        self.assertNotIn("crotchless", neg_lower)
 
     def test_build_prompt_public_context_replaces_private_sleepwear_outfit(self):
         svc = self.make_service()
@@ -9814,7 +9840,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         for term in ["selfie", "holding phone", "phone", "arm extended", "third-person perspective"]:
             self.assertIn(term, neg_lower, f"negative should suppress {term}")
         self.assertNotIn("pov", neg_lower)
-        self.assertIn("male", neg_lower)
+        self.assertIn("boy", neg_lower)
 
     def test_build_prompt_intimate_flag_equivalent_to_english_keywords(self):
         svc = self.make_service()
@@ -9836,7 +9862,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("off-frame partner", pos_lower)
         neg_lower = neg.lower()
         self.assertNotIn("pov", neg_lower)
-        self.assertIn("male", neg_lower)
+        self.assertIn("boy", neg_lower)
 
     def test_build_prompt_partner_flag_routes_to_everyday_partner_path(self):
         # 日常 partner_in_frame=True：去掉 solo 冲突，但不要误走性爱/亲密特写路径。
@@ -10014,8 +10040,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         self.assertNotIn("nipples", positive.lower())
         self.assertNotIn("half-removed black lace bra", positive.lower())
-        self.assertIn("nipples", negative.lower())
-        self.assertIn("revealing clothes", negative.lower())
+        # 公开场景 + 纯良度护栏：只保留最精简防走光反词（nude/topless/bottomless），无同义重复
+        self.assertIn("nude", negative.lower())
+        self.assertIn("bottomless", negative.lower())
+        self.assertNotIn("no panties", negative.lower())
+        self.assertNotIn("revealing clothes", negative.lower())
 
     def test_phase2_purity_two_disables_public_exposure_guard(self):
         svc = self.make_service()

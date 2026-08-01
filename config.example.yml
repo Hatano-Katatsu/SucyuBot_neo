@@ -130,7 +130,7 @@ role_defaults:
   positive_prefix: "masterpiece, best quality, absurdres, anime coloring, clean lineart, soft cel shading, detailed illustration, black long flowing hair, purple eyes"
   default_hair: "black long flowing hair"
   default_eyes: "purple eyes"
-  negative_prompt: "extra fingers, fused fingers, too many fingers, mutated hands, bad hands, bad anatomy, deformed, disfigured, extra limbs, missing limbs, worst quality, low quality, photorealistic, 3d, child, loli, male, clothes, clothing, censor bar, mosaic, pixelated"
+  negative_prompt: "extra fingers, bad hands, bad anatomy, deformed, disfigured, extra limbs, missing limbs, worst quality, low quality, photorealistic, 3d, censor bar, mosaic"
   dynamic_appearance: ""
   default_purity: ""
   outfit_keywords: |

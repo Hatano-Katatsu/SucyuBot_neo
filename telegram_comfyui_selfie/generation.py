@@ -36,10 +36,9 @@ ORIGINAL_SERIES_MARKERS = {"oc", "original", "original character", "原创", "�
 NON_LATIN_IDENTITY_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 EMPTY_IDENTITY_MARKERS = {"", "unknown", "none", "n/a", "na", "null", "-"}
 VISIBLE_PHONE_NEGATIVES = (
-    "holding phone", "visible phone", "smartphone",
+    "holding phone", "visible phone",
     "viewfinder", "phone screen", "camera UI", "shutter button",
 )
-BOTTOM_EXPOSURE_NEGATIVES = ("no panties", "no underwear", "bottomless", "crotchless")
 ANIMATOOL_NLTAG_FIELDS = ("nltag", "nl_tag", "nl_tags", "tags")
 ANIMATOOL_NEGATIVE_FIELDS = ("neg", "negative", "negative_prompt")
 VALID_VIEWS = {"selfie", "mirror", "pov", "third", "portrait"}
@@ -525,11 +524,10 @@ PUBLIC_PRIVATE_OUTFIT_TERMS = (
     "babydoll", "chemise", "slip dress",
 )
 PUBLIC_SWIMWEAR_TERMS = ("bikini", "swimsuit", "school swimsuit")
-PUBLIC_EXPOSURE_NEGATIVE_GUARDS = (
-    "lingerie", "underwear", "nightgown", "nightdress", "negligee", "sleepwear",
-    "revealing clothes", "cleavage", "underboob", "sideboob", "see-through clothing",
-    "nipples", "pussy", "nude", "naked", "topless", "bottomless",
-)
+# 公开场景 + 纯良度护栏用的最精简防走光反词：只在公开场合且 purity>2 时追加，
+# 其余任何场景都不维护性/裸露类反词（避免走光不再依赖反词）。
+# 三个词各表一种裸露程度，无同义重复（naked 并入 nude、no panties/no underwear/crotchless 并入 bottomless）。
+PUBLIC_EXPOSURE_MINIMAL_NEGATIVES = ("nude", "topless", "bottomless")
 PUBLIC_SCENE_ANCHOR_RE = re.compile(
     r"\b("
     r"school|campus|university|classroom|library|office|workplace|company|meeting room|"
@@ -732,7 +730,7 @@ def _guard_public_outfit(
     if not _appearance_has_public_body_cover(service, combined):
         fallback_outfit = _ensure_public_fallback_outfit(service, state, session_id)
         effective_clean = _dedupe_prompt_modules([effective_clean, fallback_outfit])
-    negative = _append_negatives(negative, *removed, *PUBLIC_EXPOSURE_NEGATIVE_GUARDS, "revealing public outfit")
+    negative = _append_negatives(negative, *removed, *PUBLIC_EXPOSURE_MINIMAL_NEGATIVES)
     return effective_clean, one_shot_clean, negative, removed
 
 
@@ -934,8 +932,6 @@ def _apply_clothing_off(service: Any, clothing_off: str, effective_appearance: s
     appearance = normalize_appearance_text(appearance)
     # 这张图既然要露，负向别再压制裸体（仅去裸体相关词，不动评级词，避免和评级系统打架）
     neg = _remove_negatives(neg, "nude", "naked", "nudity", "topless", "bottomless", "completely nude", "revealing clothes")
-    if _FULL_NUDE_RE.search(raw) or any(word in raw_lower for word in _BOTTOM_CLOTHING_OFF_WORDS):
-        neg = _remove_negatives(neg, *BOTTOM_EXPOSURE_NEGATIVES)
     return appearance, neg
 
 
@@ -1046,8 +1042,6 @@ def _free_wardrobe_state_exposure_negatives(neg: str, exposure_tags: list[str], 
     if not exposure_tags:
         return neg
     neg = _remove_negatives(neg, *_WARDROBE_EXPOSURE_NEGATIVES)
-    if any(tag in {"pussy", "nude"} for tag in exposure_tags):
-        neg = _remove_negatives(neg, *BOTTOM_EXPOSURE_NEGATIVES)
     return neg
 
 
@@ -1563,9 +1557,9 @@ def build_prompt(
     style_general = current_style if current_style and not current_style.startswith("@") else ""
 
     neg = service.config.get("negative_prompt", DEFAULT_CONFIG["negative_prompt"])
-    neg = _append_negatives(neg, "extra hands", "poorly drawn hands", "extra digits",
-                            "split screen", "grid", "multiple panels", "collage",
-                            *BOTTOM_EXPOSURE_NEGATIVES)
+    neg = _append_negatives(neg, "split screen", "grid", "multiple panels", "collage")
+    # 手型/手指反词由 negative_prompt 提供（bad hands / extra fingers），这里不再追加同义变体；
+    # 性/裸露类反词只在「公开场景 + 纯良度护栏」路径由 _guard_public_outfit 按最小集追加。
     if state.get("custom_positive_prefix"):
         strip = {"clothes", "clothing"}
         if male:
@@ -1583,8 +1577,9 @@ def build_prompt(
         neg = ", ".join(kept)
     if is_ntr:
         neg = ", ".join(t for t in [x.strip() for x in neg.split(",")] if t.lower() not in {"male", "boy", "man", "1boy"})
-    elif not male and "male" not in neg.lower():
-        neg += ", male, boy, man"
+    elif not male and "boy" not in neg.lower() and "man" not in neg.lower():
+        # 男性反词只用 boy/man（年龄维度），不再维护 male 泛称
+        neg += ", boy, man"
 
     prompt_view = (view or "").strip().lower()
     if prompt_view not in VALID_VIEWS:
@@ -1621,7 +1616,7 @@ def build_prompt(
                 *VISIBLE_PHONE_NEGATIVES,
             )
         else:
-            neg = _append_negatives(neg, "holding phone", "phone", "cellphone", "mobile phone", "smartphone")
+            neg = _append_negatives(neg, "holding phone", "phone")
     elif is_sex_scene or is_partner_scene:
         if not device_present:
             # 伴侣/性爱/日常同框画面不能是单人自拍取景：先清掉自拍/对镜的相机取景措辞，
@@ -1725,9 +1720,9 @@ def build_prompt(
             )
         elif partner_behind:
             # 退回第三人称双人：压手机/自拍，但绝不压 “third-person perspective”（那正是这里要的机位）。
-            neg = _append_negatives(neg, "selfie", "holding phone", "phone", "cellphone", "mobile phone", "smartphone", "arm extended")
+            neg = _append_negatives(neg, "selfie", "holding phone", "phone", "arm extended")
         else:
-            neg = _append_negatives(neg, "selfie", "holding phone", "phone", "cellphone", "mobile phone", "smartphone", "arm extended", "third-person perspective")
+            neg = _append_negatives(neg, "selfie", "holding phone", "phone", "arm extended", "third-person perspective")
     else:
         has_phone = _contains_any(scene_desc, PHONE_TERMS)
         has_mirror = _contains_any(scene_desc, MIRROR_TERMS)
@@ -1759,14 +1754,7 @@ def build_prompt(
         if missing_sex_tags:
             scene_desc += ", " + ", ".join(missing_sex_tags)
 
-    effective = safety.get("level", purity)
-    if purity <= 7:
-        if effective > 5 and not is_sex_scene:
-            neg += ", nsfw, explicit, naked, nude, sex"
-    elif purity <= 9:
-        neg += ", nsfw, explicit, naked, nude, sex, suggestive, lewd, ecchi, revealing clothes"
-    else:
-        neg += ", nsfw, explicit, naked, nude, sex, suggestive, lewd, ecchi, cleavage, bikini, lingerie, underwear"
+    # 非公开场景不再按纯度追加任何性/裸露反词（走光防护只走公开场景最小集护栏）。
 
     appearance_override = _explicit_appearance_override(service, state)
     identity = ", ".join(part for part in (character, series) if part)
@@ -1817,8 +1805,8 @@ def build_prompt(
         # 最终兜底：scene 是 AnimaTool 的 tags 来源之一，不能与全裸 appearance 冲突。
         scene_desc = _strip_nude_scene_clothing(service, scene_desc, worn_tags)
     if public_ctx:
-        # 公开场景不能因为半脱状态放开裸体负向；被门控剥离的暴露词继续由安全护栏压制。
-        neg = _append_negatives(neg, *wardrobe_state_removed_tags, *PUBLIC_EXPOSURE_NEGATIVE_GUARDS)
+        # 公开场景 + 纯良度护栏：只追加最精简防走光反词；其余场景一律不加。
+        neg = _append_negatives(neg, *wardrobe_state_removed_tags, *PUBLIC_EXPOSURE_MINIMAL_NEGATIVES)
     else:
         neg = _free_wardrobe_state_exposure_negatives(neg, wardrobe_state_exposure_tags, wardrobe_state_removed_tags)
     slots = PromptSlots(
@@ -2036,10 +2024,7 @@ def _build_animatool_guard_contract(slots: PromptSlots | None) -> AnimaToolGuard
         mirror=_guard_terms_from_negative(negative, ANIMATOOL_MIRROR_GUARD_TERMS),
         extra_people=_guard_terms_from_negative(negative, ANIMATOOL_EXTRA_PERSON_GUARD_TERMS),
         panels=_guard_terms_from_negative(negative, ANIMATOOL_PANEL_GUARD_TERMS),
-        public_exposure=_guard_terms_from_negative(
-            negative,
-            (*PUBLIC_EXPOSURE_NEGATIVE_GUARDS, *BOTTOM_EXPOSURE_NEGATIVES, "revealing public outfit"),
-        ),
+        public_exposure=_guard_terms_from_negative(negative, PUBLIC_EXPOSURE_MINIMAL_NEGATIVES),
     )
 
 
@@ -2199,18 +2184,16 @@ def _build_animatool_neg(slots: PromptSlots | None, workflow: str) -> str:
     safety = _animatool_safety_tag(slots)
     common_neg = "bad anatomy, bad hands, bad feet, extra fingers, missing fingers, text, watermark, logo"
     base_extra = "worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, extra toes"
-    if safety == "safe":
-        safety_neg = "nsfw, explicit, sensitive, naked, nude, sex"
-    elif safety == "sensitive":
-        safety_neg = "nsfw, explicit, naked, nude, sex"
-    elif safety == "nsfw":
-        safety_neg = "safe, sensitive, censored, mosaic"
-    else:  # explicit
+    # 性/裸露反词不再按安全等级维护：safe/sensitive 不加任何性相关反词，
+    # nsfw/explicit 只加反打码词（防止 censor/mosaic），不维护防走光反词。
+    if safety in ("safe", "sensitive"):
+        safety_neg = ""
+    else:  # nsfw / explicit
         safety_neg = "safe, sensitive, censored, mosaic"
     if workflow == "base":
-        negative = f"{base_extra}, {common_neg}, {safety_neg}"
+        negative = f"{base_extra}, {common_neg}, {safety_neg}".strip(", ")
     else:
-        negative = f"{common_neg}, {safety_neg}"
+        negative = f"{common_neg}, {safety_neg}".strip(", ")
     return _append_negatives(
         negative,
         *_build_animatool_guard_contract(slots).negative_terms(),

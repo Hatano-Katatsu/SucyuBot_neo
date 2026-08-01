@@ -127,6 +127,7 @@ telegram_comfyui_selfie/
 - 日常局部同框与性爱伴侣场景分开处理。性爱场景保留 `your <body>` 归属，并在明确提及时补充相应视觉 tag。
 - 场景衣物冲突采用精确删除，不生成 `the current outfit` 等不可渲染占位语，也不能误删人物动作。
 - 画幅只允许 2:3 或 3:2；负向提示词压制 split screen、grid、multiple panels、collage。
+- 任何场景都不自动追加性/裸露类反词（`no panties`、`bottomless`、`nsfw`、`nude` 等）；只有「公开场景且 purity>2」的护栏路径按最精简集追加防走光反词（`nude, topless, bottomless`，各表一种裸露程度、无同义重复），其余场景完全靠正向提示控制。
 - AnimaTool 工作流与 schema 由 `ANIMATOOL_WORKFLOWS` 管理。quality、neg、count 必须按实时 schema 构造，不能直接复制项目内部槽位全文。
 
 ## 调度与世界状态
