@@ -17,9 +17,10 @@ from telegram_comfyui_selfie.image_planning import plan_animatool_slots
 
 
 class AnimaToolGuardContractTestCase(unittest.TestCase):
+    # 与反词策略定稿一致：性/裸露类反词只保留最小集（nude），不再维护 nipples 等词。
     GUARDED_NEGATIVE = (
         "bad hands, holding phone, mirror, unrelated extra person, "
-        "split screen, nipples"
+        "split screen, nude"
     )
 
     @staticmethod
@@ -82,7 +83,7 @@ class AnimaToolGuardContractTestCase(unittest.TestCase):
                         "mirror",
                         "unrelated extra person",
                         "split screen",
-                        "nipples",
+                        "nude",
                     ):
                         self.assertIn(term, negative)
                 else:
@@ -111,7 +112,7 @@ class AnimaToolGuardContractTestCase(unittest.TestCase):
         self.assertIn("holding phone", negative)
         self.assertIn("unrelated extra person", negative)
         self.assertIn("split screen", negative)
-        self.assertIn("nipples", negative)
+        self.assertIn("nude", negative)
 
     def test_slots_planner_applies_guards_after_llm_output(self):
         async def run():
