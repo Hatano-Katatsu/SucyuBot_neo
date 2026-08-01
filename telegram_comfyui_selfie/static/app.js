@@ -314,13 +314,14 @@ async function loadAll() {
   });
 
   // 管理员才请求 /api/config（非 admin 调用会 403）
-  const sessionListPath = "/api/sessions";
-  const tasks = [api("/api/status"), api(sessionListPath)];
+  // 模型 profile 列表与上面三个请求并行发起，避免串行等待拖慢首屏渲染。
+  const tasks = [api("/api/status"), api("/api/sessions"), api(modelApiUrl())];
   if (isAdmin) tasks.push(api("/api/config"));
   const results = await Promise.all(tasks);
   const status = results[0];
   const sessions = results[1];
-  const config = results[2];
+  const modelData = results[2];
+  const config = isAdmin ? results[3] : null;
   state.status = status.status;
   if (config && config.config) {
     state.config = config.config.values;
@@ -328,6 +329,9 @@ async function loadAll() {
   } else {
     state.config = state.config || {};
     state.secretPresent = state.secretPresent || {};
+  }
+  if (modelData) {
+    state.profiles = { ...(modelData.global_profiles || {}), ...(modelData.user_profiles || {}) };
   }
   state.sessions = (sessions && sessions.sessions) || [];
   // 普通用户固定为自己的会话；若后端尚无该会话，也占位显示
@@ -340,13 +344,6 @@ async function loadAll() {
   renderChatIdOptions();
   renderSessionSelector();
   loadFeedbackBoard();
-  // 获取模型 profile 列表供配置页下拉框使用
-  try {
-    const modelData = await api(modelApiUrl());
-    state.profiles = { ...(modelData.global_profiles || {}), ...(modelData.user_profiles || {}) };
-  } catch (err) {
-    state.profiles = state.profiles || {};
-  }
   renderStatus();
   if (isAdmin) renderConfig();
   renderWorldSessionList();

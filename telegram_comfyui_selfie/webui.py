@@ -123,13 +123,17 @@ def _auth_from_request(request: web.Request) -> dict[str, Any] | None:
         or request.cookies.get("web_session")
         or ""
     ).strip()
-    if token:
-        user_id = service.app_store.user_for_token(token)
-        if user_id:
-            return {"role": "user", "user_id": user_id, "token": token}
-        sessions = getattr(service, "_web_admin_sessions", set())
-        if token in sessions:
-            return {"role": "admin", "user_id": "admin", "token": token}
+    if not token:
+        return None
+    # 管理员 token 走内存集合快速路径：管理员打开控制台时会并发触发多个 API 请求，
+    # 每个都查数据库既无必要又会在写锁竞争时阻塞事件循环。
+    admin_sessions = getattr(service, "_web_admin_sessions", set())
+    if token in admin_sessions:
+        return {"role": "admin", "user_id": "admin", "token": token}
+    # 普通用户 token 查数据库
+    user_id = service.app_store.user_for_token(token)
+    if user_id:
+        return {"role": "user", "user_id": user_id, "token": token}
     return None
 
 

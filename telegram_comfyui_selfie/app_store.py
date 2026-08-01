@@ -77,6 +77,13 @@ class AppStateStore:
             conn.execute("PRAGMA journal_mode=MEMORY")
             conn.execute("PRAGMA synchronous=OFF")
             conn.execute("PRAGMA temp_store=MEMORY")
+        else:
+            # WAL 模式：读写可并发，避免后台写操作（LLM 用量、会话状态、长期记忆）
+            # 持 EXCLUSIVE 锁阻塞 WebUI 读请求导致页面加载不出。WAL 是数据库级
+            # 持久化设置，首次设置后跨连接生效；每次连接重复设是幂等的。
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
     def _init_schema(self) -> SchemaMigrationResult:

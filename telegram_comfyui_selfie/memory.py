@@ -106,6 +106,12 @@ class LongTermMemoryStore:
             conn.execute("PRAGMA journal_mode=MEMORY")
             conn.execute("PRAGMA synchronous=OFF")
             conn.execute("PRAGMA temp_store=MEMORY")
+        else:
+            # 与 app_store 共用同一数据库文件，同样启用 WAL 避免长期记忆写入
+            # 阻塞 WebUI 读请求。
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
     def _init_schema(self) -> SchemaMigrationResult:
