@@ -312,7 +312,9 @@ DEFAULT_CONFIG = {
     "default_chat_model_profile": "deepseek-pro",
     "default_fast_model_profile": "deepseek-flash",
     "default_vision_model_profile": "",
-    # 三模型 thinking 全局默认（三态：空=跟随 profile disable_thinking，true/false=强制）；
+    # 关闭时让 provider 使用自身采样默认值，不下发 temperature/top_p/惩罚参数。
+    "llm_sampling_params_enabled": True,
+    # 三模型 thinking 全局默认（单字段：空=跟随 profile，true/false=旧开关，也可填 reasoning effort）；
     # 用户级 chat_thinking/fast_thinking/vision_thinking 设置优先于此。
     "chat_thinking_enabled": "",
     "fast_thinking_enabled": "",

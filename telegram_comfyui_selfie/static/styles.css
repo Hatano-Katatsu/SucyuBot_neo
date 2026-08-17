@@ -651,6 +651,35 @@ select {
   gap: 12px 14px;
 }
 
+.sampling-detail-panel {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.sampling-detail-panel[hidden] {
+  display: none;
+}
+
+.sampling-detail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.sampling-detail-head strong {
+  font-size: 14px;
+  color: var(--text);
+}
+
+.sampling-detail-head span {
+  font-size: 12px;
+  color: var(--muted);
+  text-align: right;
+}
+
 /* Session list */
 .session-list {
   display: flex;

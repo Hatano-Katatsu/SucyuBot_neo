@@ -300,7 +300,14 @@ class ChatContextMixin:
         })
         return recovered
 
-    async def handle_chat(self, chat_id: int | str, session_id: str, text: str):
+    async def handle_chat(
+        self,
+        chat_id: int | str,
+        session_id: str,
+        text: str,
+        *,
+        user_content: list[dict[str, Any]] | None = None,
+    ):
         sent_reply = ""
         reply = ""
         try:
@@ -339,7 +346,15 @@ class ChatContextMixin:
                 return
 
             await self.send_action(chat_id, "typing")
-            reply = await self.run_roleplay_chat(chat_id, session_id, text)
+            if user_content is not None:
+                reply = await self.run_roleplay_chat(
+                    chat_id,
+                    session_id,
+                    text,
+                    user_content=user_content,
+                )
+            else:
+                reply = await self.run_roleplay_chat(chat_id, session_id, text)
             if reply:
                 self._ulog(session_id, "BOT", reply)
                 split = str(self.config.get("chat_split_paragraphs", "true")).lower() in ("true", "1", "yes")
@@ -375,6 +390,7 @@ class ChatContextMixin:
         *,
         extra_system_prompt: str = "",
         history_user_text: str | None = None,
+        user_content: list[dict[str, Any]] | None = None,
     ) -> str:
         state = self._get_session_state(session_id)
         if hasattr(self, "_ensure_life_profile"):
@@ -385,7 +401,14 @@ class ChatContextMixin:
                 logger.debug("ensure life profile failed", exc_info=True)
         if hasattr(self, "_record_external_wardrobe_change_before_user"):
             self._record_external_wardrobe_change_before_user(session_id)
-        messages = self._build_chat_messages(session_id, user_text)
+        if user_content is not None:
+            messages = self._build_chat_messages(
+                session_id,
+                user_text,
+                user_content=user_content,
+            )
+        else:
+            messages = self._build_chat_messages(session_id, user_text)
         extra_system_prompt = str(extra_system_prompt or "").strip()
         if extra_system_prompt:
             messages.insert(max(0, len(messages) - 1), {"role": "system", "content": extra_system_prompt})
@@ -722,6 +745,7 @@ class ChatContextMixin:
         *,
         include_history: bool = True,
         include_dynamic_tail: bool = True,
+        user_content: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         state = self._get_session_state(session_id)
         now = self._session_now(session_id)
@@ -914,7 +938,10 @@ class ChatContextMixin:
             messages.extend(history)
         if include_dynamic_tail:
             messages.append({"role": "system", "content": system_dynamic})
-        messages.append({"role": "user", "content": user_text})
+        final_user_content: str | list[dict[str, Any]] = user_text
+        if isinstance(user_content, list) and user_content:
+            final_user_content = copy.deepcopy(user_content)
+        messages.append({"role": "user", "content": final_user_content})
         self._log_prefix_slot_signatures(
             session_id,
             static=f"{system_static}\n\n{system_persona}",

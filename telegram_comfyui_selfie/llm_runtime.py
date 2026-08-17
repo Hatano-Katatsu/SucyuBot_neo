@@ -8,14 +8,52 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 
 from .http_limits import read_limited_json, read_limited_text, response_limit
 from .model_security import PublicOnlyResolver, validate_public_model_base_url
+from .model_thinking import resolve_thinking_setting
 
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_openai_api_base(value: Any) -> str:
+    """把 OpenAI-compatible Base URL 或完整 chat/completions URL 归一为 API Base。"""
+    raw = str(value or "").strip().rstrip("/")
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    path = parsed.path.rstrip("/")
+    suffix = "/chat/completions"
+    if path.lower().endswith(suffix):
+        path = path[:-len(suffix)].rstrip("/")
+    return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment)).rstrip("/")
+
+
+def _openai_chat_completions_url(value: Any) -> str:
+    base = _normalize_openai_api_base(value)
+    if not base:
+        return ""
+    parsed = urlsplit(base)
+    path = f"{parsed.path.rstrip('/')}/chat/completions"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
+
+
+def _openai_models_url(value: Any) -> str:
+    """从 Base URL 或完整 chat/completions URL 推导标准 models 目录地址。"""
+    raw = str(value or "").strip().rstrip("/")
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    if parsed.path.rstrip("/").lower().endswith("/models"):
+        return raw
+    base = _normalize_openai_api_base(raw)
+    parsed = urlsplit(base)
+    path = f"{parsed.path.rstrip('/')}/models"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
 
 
 # 思考文本泄漏清洗：只处理显式的思考标签 <thinking>/<reasoning>/<analysis>。
@@ -108,16 +146,155 @@ class LLMRuntimeMixin:
         profiles = self.config.get("global_model_profiles") or {}
         return profiles if isinstance(profiles, dict) else {}
 
-    def _resolve_llm_profile_entry(
+    @staticmethod
+    def _extract_model_catalog_ids(payload: Any) -> list[str]:
+        """兼容 OpenAI data 数组以及常见 models 数组响应。"""
+        if isinstance(payload, dict):
+            items = payload.get("data")
+            if not isinstance(items, list):
+                items = payload.get("models")
+        else:
+            items = payload
+        if not isinstance(items, list):
+            return []
+        model_ids: set[str] = set()
+        for item in items[:5000]:
+            if isinstance(item, str):
+                model_id = item.strip()
+            elif isinstance(item, dict):
+                model_id = str(item.get("id") or item.get("model") or item.get("name") or "").strip()
+            else:
+                model_id = ""
+            if model_id and len(model_id) <= 512:
+                model_ids.add(model_id)
+        return sorted(model_ids, key=str.casefold)
+
+    async def _fetch_global_model_catalog_source(
+        self,
+        session: aiohttp.ClientSession,
+        source: dict[str, Any],
+    ) -> list[str]:
+        headers = {"Accept": "application/json", "Authorization": f"Bearer {source['api_key']}"}
+        async with session.get(
+            source["models_url"],
+            headers=headers,
+            allow_redirects=False,
+        ) as resp:
+            if resp.status != 200:
+                detail = await read_limited_text(
+                    resp,
+                    response_limit(self.config, "error_text"),
+                    label="模型目录错误响应",
+                )
+                raise RuntimeError(f"HTTP {resp.status}: {detail[:300]}")
+            payload = await read_limited_json(
+                resp,
+                response_limit(self.config, "llm_json"),
+                label="模型目录响应",
+            )
+        return self._extract_model_catalog_ids(payload)
+
+    def global_model_catalog(self) -> list[dict[str, Any]]:
+        """返回启动期发现的全局模型目录副本，禁止暴露任何密钥。"""
+        return [
+            {
+                **dict(item),
+                "source_profile_ids": list(item.get("source_profile_ids") or []),
+            }
+            for item in (getattr(self, "_global_model_catalog", None) or [])
+        ]
+
+    async def load_global_model_catalog_once(self) -> list[dict[str, Any]]:
+        """服务启动时从已配置的全局 OpenAI-compatible 端点拉取一次模型目录。"""
+        if getattr(self, "_global_model_catalog_loaded", False):
+            return self.global_model_catalog()
+        self._global_model_catalog_loaded = True
+        self._global_model_catalog = []
+
+        sources: dict[tuple[str, str], dict[str, Any]] = {}
+        for profile_id, raw_profile in self._global_model_profiles().items():
+            profile = raw_profile if isinstance(raw_profile, dict) else {}
+            branches = (
+                (profile.get("base_url"), profile.get("api_key")),
+                (
+                    profile.get("base_url_no_think"),
+                    profile.get("api_key_no_think") or profile.get("api_key"),
+                ),
+            )
+            for raw_base, api_key in branches:
+                api_base = _normalize_openai_api_base(raw_base)
+                if not api_base or not api_key:
+                    continue
+                models_url = _openai_models_url(raw_base)
+                source_key = (models_url, str(api_key))
+                source = sources.setdefault(source_key, {
+                    "models_url": models_url,
+                    "api_base": api_base,
+                    "api_key": str(api_key),
+                    "source_profile_ids": [],
+                })
+                if str(profile_id) not in source["source_profile_ids"]:
+                    source["source_profile_ids"].append(str(profile_id))
+
+        if not sources:
+            return []
+
+        source_list = list(sources.values())
+        timeout = aiohttp.ClientTimeout(total=12)
+        try:
+            async with aiohttp.ClientSession(
+                timeout=timeout,
+                headers={"Accept-Encoding": "gzip, deflate"},
+            ) as session:
+                results = await asyncio.gather(
+                    *(self._fetch_global_model_catalog_source(session, source) for source in source_list),
+                    return_exceptions=True,
+                )
+        except Exception as exc:
+            logger.warning("启动期模型目录加载失败：%s", exc)
+            return []
+
+        catalog_sources: dict[tuple[str, str], set[str]] = {}
+        for source, result in zip(source_list, results):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, Exception):
+                logger.warning(
+                    "无法从全局模型端点 %s 拉取模型列表（profiles=%s）：%s",
+                    source["models_url"],
+                    ",".join(source["source_profile_ids"]),
+                    result,
+                )
+                continue
+            for model_id in result:
+                key = (model_id, source["api_base"])
+                catalog_sources.setdefault(key, set()).update(source["source_profile_ids"])
+
+        self._global_model_catalog = [
+            {
+                "id": model_id,
+                "api_base": api_base,
+                "source_profile_id": sorted(profile_ids)[0],
+                "source_profile_ids": sorted(profile_ids),
+            }
+            for (model_id, api_base), profile_ids in sorted(
+                catalog_sources.items(),
+                key=lambda item: (item[0][0].casefold(), item[0][1]),
+            )
+        ]
+        logger.info("启动期模型目录加载完成：%s 个可用模型", len(self._global_model_catalog))
+        return self.global_model_catalog()
+
+    def _resolve_llm_profile_entry_details(
         self,
         purpose: str,
         session_id: str = "",
-    ) -> tuple[str, dict[str, Any], bool, str]:
+    ) -> tuple[str, dict[str, Any], bool, str, str]:
         """解析当前会话实际使用的 LLM profile。
 
         chat 使用 chat_profile_id，image/fast 使用 fast_profile_id，vision 使用 vision_profile_id。
         vision 没有显式配置时保持为空，用于关闭图片理解链路。
-        thinking 优先级：用户显式设置（chat_thinking/fast_thinking/vision_thinking）> profile disable_thinking。
+        thinking 优先级：用户显式设置 > 全局默认 > profile disable_thinking；设置可为布尔或 effort。
         """
         user_id = self._user_id_for_session(session_id)
         settings = self.app_store.get_user_model_settings(user_id) if user_id else {}
@@ -135,21 +312,32 @@ class LLMRuntimeMixin:
             profile = global_profiles.get(profile_id) or {}
             profile_scope = "global" if profile else ""
         if purpose == "vision" and not profile:
-            return str(profile_id or ""), {}, False, ""
+            return str(profile_id or ""), {}, False, "", ""
         if not profile and global_profiles:
             profile_id, profile = next(iter(global_profiles.items()))
             profile_scope = "global"
-        thinking = self._profile_thinking(purpose, profile, settings)
-        return str(profile_id or ""), dict(profile or {}), thinking, profile_scope
+        thinking, thinking_effort = self._profile_thinking_resolution(purpose, profile, settings)
+        return str(profile_id or ""), dict(profile or {}), thinking, thinking_effort, profile_scope
 
-    def _profile_thinking(self, purpose: str, profile: dict[str, Any], settings: dict[str, Any]) -> bool:
-        """解析当前 purpose 的 thinking 开关。
+    def _resolve_llm_profile_entry(
+        self,
+        purpose: str,
+        session_id: str = "",
+    ) -> tuple[str, dict[str, Any], bool, str]:
+        """兼容既有四元组接口；effort 由详细解析接口供请求层使用。"""
+        profile_id, profile, thinking, _, profile_scope = self._resolve_llm_profile_entry_details(
+            purpose,
+            session_id,
+        )
+        return profile_id, profile, thinking, profile_scope
 
-        优先级（从高到低）：
-        1. 用户显式设置（chat_thinking/fast_thinking/vision_thinking 三态）——前端/角色卡页面可改；
-        2. 全局配置默认（chat_thinking_enabled/fast_thinking_enabled/vision_thinking_enabled）——配置文件可改；
-        3. profile 的 disable_thinking。
-        """
+    def _profile_thinking_resolution(
+        self,
+        purpose: str,
+        profile: dict[str, Any],
+        settings: dict[str, Any],
+    ) -> tuple[bool, str]:
+        """解析 thinking 开关和 reasoning effort，保留旧开/关配置语义。"""
         if purpose == "chat":
             key = "chat_thinking"
             global_key = "chat_thinking_enabled"
@@ -159,20 +347,31 @@ class LLMRuntimeMixin:
         else:
             key = "fast_thinking"
             global_key = "fast_thinking_enabled"
+
+        disable = profile.get("disable_thinking", self._get_llm_value(purpose, "disable_thinking", False))
+        if isinstance(disable, str):
+            disable = disable.strip().lower() in ("true", "1", "yes", "on")
+        fallback = not bool(disable)
+
         user_value = settings.get(key)
         if user_value is not None:
-            return bool(user_value)
+            return resolve_thinking_setting(user_value, fallback=fallback)
         global_value = self.config.get(global_key)
         if isinstance(global_value, str):
             global_value = global_value.strip()
         if global_value not in (None, ""):
-            if isinstance(global_value, str):
-                return global_value.lower() in ("true", "1", "yes", "on")
-            return bool(global_value)
-        disable = profile.get("disable_thinking", self._get_llm_value(purpose, "disable_thinking", False))
-        if isinstance(disable, str):
-            disable = disable.lower() in ("true", "1", "yes", "on")
-        return not bool(disable)
+            return resolve_thinking_setting(global_value, fallback=fallback)
+        return fallback, ""
+
+    def _profile_thinking(self, purpose: str, profile: dict[str, Any], settings: dict[str, Any]) -> bool:
+        """解析当前 purpose 的 thinking 开关。
+
+        优先级（从高到低）：
+        1. 用户显式设置（chat_thinking/fast_thinking/vision_thinking 三态）——前端/角色卡页面可改；
+        2. 全局配置默认（chat_thinking_enabled/fast_thinking_enabled/vision_thinking_enabled）——配置文件可改；
+        3. profile 的 disable_thinking。
+        """
+        return self._profile_thinking_resolution(purpose, profile, settings)[0]
 
     def _resolve_llm_profile(self, purpose: str, session_id: str = "") -> tuple[str, dict[str, Any], bool]:
         """兼容旧调用者的三元组 profile 解析接口。"""
@@ -180,10 +379,14 @@ class LLMRuntimeMixin:
         return profile_id, profile, thinking
 
     def _resolved_llm_config(self, purpose: str, session_id: str = "", disable_thinking: bool | None = None) -> dict[str, Any]:
-        profile_id, profile, thinking, profile_scope = self._resolve_llm_profile_entry(purpose, session_id)
+        profile_id, profile, thinking, thinking_effort, profile_scope = self._resolve_llm_profile_entry_details(
+            purpose,
+            session_id,
+        )
         if disable_thinking is not None:
             # 调用方显式要求关思考（如 checkpoint/dream 等结构化任务），覆盖用户设置。
             thinking = not bool(disable_thinking)
+            thinking_effort = ""
         model, api_base, api_key = self._llm_profile_model_name(profile, thinking)
         if purpose != "vision" and not api_base:
             if profile_scope == "user":
@@ -199,7 +402,8 @@ class LLMRuntimeMixin:
             "profile_scope": profile_scope,
             "profile": profile,
             "thinking": thinking,
-            "api_base": str(api_base).rstrip("/"),
+            "thinking_effort": thinking_effort,
+            "api_base": _normalize_openai_api_base(api_base),
             "api_key": api_key,
             "model": model,
             "max_tokens": profile.get("max_tokens") or self._get_llm_value(purpose, "max_tokens", "4096") or "4096",
@@ -476,11 +680,75 @@ class LLMRuntimeMixin:
                 return legacy_value
         return default
 
+    def _llm_sampling_params_enabled(self) -> bool:
+        """是否下发温度、top_p 与重复/存在惩罚等可选采样参数。"""
+        value = self.config.get("llm_sampling_params_enabled", True)
+        if isinstance(value, str):
+            return value.strip().lower() in ("true", "1", "yes", "on", "开启", "启用")
+        return bool(value)
+
     def has_llm_config(self, purpose: str, session_id: str = "") -> bool:
         resolved = self._resolved_llm_config(purpose, session_id)
         if purpose == "vision":
             return bool(resolved.get("api_key") and resolved.get("api_base") and resolved.get("model"))
         return bool(resolved.get("api_key"))
+
+    @staticmethod
+    def _resolved_models_match(first: dict[str, Any], second: dict[str, Any]) -> bool:
+        if not (
+            first.get("api_key")
+            and first.get("api_base")
+            and first.get("model")
+            and second.get("api_key")
+            and second.get("api_base")
+            and second.get("model")
+        ):
+            return False
+        return (
+            str(first.get("api_base") or "").strip(),
+            str(first.get("model") or "").strip(),
+        ) == (
+            str(second.get("api_base") or "").strip(),
+            str(second.get("model") or "").strip(),
+        )
+
+    def _chat_uses_native_multimodal(self, session_id: str = "") -> bool:
+        """chat 与 vision 指向同一实际模型时，让 chat 直接读取用户图片。"""
+        chat = self._resolved_llm_config("chat", session_id)
+        vision = self._resolved_llm_config("vision", session_id)
+        return self._resolved_models_match(chat, vision)
+
+    @staticmethod
+    def _strip_image_content_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """移除多模态图片 part，供不支持图片的辅助模型安全复用消息。"""
+        cleaned_messages: list[dict[str, Any]] = []
+        for message in messages:
+            cleaned = dict(message)
+            content = cleaned.get("content")
+            if isinstance(content, list):
+                kept_parts: list[Any] = []
+                removed = False
+                for part in content:
+                    is_image = isinstance(part, dict) and (
+                        str(part.get("type") or "").strip().lower() in {"image", "image_url", "input_image"}
+                        or "image_url" in part
+                    )
+                    if is_image:
+                        removed = True
+                        continue
+                    kept_parts.append(part)
+                if removed and not kept_parts:
+                    kept_parts.append({"type": "text", "text": "[图片内容已从辅助模型上下文移除]"})
+                cleaned["content"] = kept_parts
+            elif isinstance(content, dict):
+                is_image = (
+                    str(content.get("type") or "").strip().lower() in {"image", "image_url", "input_image"}
+                    or "image_url" in content
+                )
+                if is_image:
+                    cleaned["content"] = "[图片内容已从辅助模型上下文移除]"
+            cleaned_messages.append(cleaned)
+        return cleaned_messages
 
     async def _call_llm_messages(
         self,
@@ -509,12 +777,18 @@ class LLMRuntimeMixin:
         body = {
             "model": resolved["model"],
             "max_tokens": max_tokens_int,
-            "temperature": float(self._get_llm_value(purpose, "temperature", "0.95")) if temp is None else temp,
         }
+        sampling_params_enabled = self._llm_sampling_params_enabled()
+        if sampling_params_enabled:
+            body["temperature"] = (
+                float(self._get_llm_value(purpose, "temperature", "0.95"))
+                if temp is None
+                else temp
+            )
         # 采样参数（top_p / 重复惩罚）：仅真实聊天回复链路显式开启。
         # 聊天默认带 top_p（核采样砍掉低概率胡话尾巴）+ frequency_penalty（抗车轱辘复读），
         # 摆脱「温度调高说胡话 / 调低复读」的两难；checkpoint/dream/memory 等结构化低温任务不带。
-        if sampling:
+        if sampling_params_enabled and sampling:
             for _sample_key in ("top_p", "frequency_penalty", "presence_penalty"):
                 _sample_raw = self._get_llm_value(purpose, _sample_key, "")
                 if _sample_raw in ("", None):
@@ -527,10 +801,19 @@ class LLMRuntimeMixin:
             body["tools"] = tools
         if tool_choice is not None:
             body["tool_choice"] = tool_choice
-        body["messages"] = messages
+        request_messages = messages
+        if purpose not in {"chat", "vision"}:
+            vision_resolved = self._resolved_llm_config("vision", session_id)
+            if not self._resolved_models_match(resolved, vision_resolved):
+                request_messages = self._strip_image_content_from_messages(messages)
+        body["messages"] = request_messages
         thinking = bool(resolved.get("thinking"))
+        thinking_effort = str(resolved.get("thinking_effort") or "").strip().lower()
         control = str(resolved.get("thinking_control") or "model_name")
-        if control == "param_always":
+        if thinking_effort:
+            # effort 与旧开关共用设置字段；选中 effort 时使用标准 OpenAI-compatible 参数。
+            body["reasoning_effort"] = thinking_effort
+        elif control == "param_always":
             body["thinking"] = {"type": "enabled" if thinking else "disabled"}
         elif control == "param":
             # 双向显式控制：用户/配置显式开启或关闭思考都要落实到请求体，
@@ -538,7 +821,7 @@ class LLMRuntimeMixin:
             body["thinking"] = {"type": "enabled" if thinking else "disabled"}
         elif control == "enable_thinking":
             body["enable_thinking"] = bool(thinking)
-        request_url = f"{api_base}/chat/completions"
+        request_url = _openai_chat_completions_url(api_base)
         private_profile = resolved.get("profile_scope") == "user"
         if private_profile:
             try:

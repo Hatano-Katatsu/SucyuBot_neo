@@ -31,6 +31,7 @@ node --check telegram_comfyui_selfie\static\app.js
 telegram_comfyui_selfie/
 ├── service.py               # 服务初始化与 mixin 组合
 ├── llm_runtime.py           # 模型 profile、LLM HTTP 调用、用量与调试日志
+├── model_thinking.py        # thinking 旧布尔值与 reasoning effort 的单字段规范化
 ├── state_runtime.py         # 配置、状态迁移、会话访问与活动日志
 ├── task_runtime.py          # 后台任务 registry、作用域取消、停机排空与失败退避
 ├── deletion_runtime.py      # 角色/会话统一删除事务、文件隔离回滚与缓存清理
@@ -75,7 +76,9 @@ telegram_comfyui_selfie/
 - `app_store.py` 管理 session、城市目录、聊天、checkpoint、日记、上下文元数据、生活线、Web 凭据、模型 profile 和用量。
 - `session_schema.py` 是会话字段单一来源。当前仍处于盒子结构与少量旧扁平键双写的兼容期，删除兼容键前必须清点所有读写点并补迁移测试。
 - 模型配置统一走全局/用户 profile；chat、fast、vision 分别选择 profile。视觉 profile 留空时跳过图片理解。
-- thinking 可三处配置，优先级：用户级（`chat_thinking`/`fast_thinking`/`vision_thinking`，WebUI 全局/角色卡页面可改）> 全局配置默认（`chat_thinking_enabled`/`fast_thinking_enabled`/`vision_thinking_enabled`，配置文件可改）> profile 的 `disable_thinking`。`thinking_fixed` 仅是 profile 默认标记，不再硬锁定用户设置。API 密钥对前端始终掩码，保存空值或 `********` 时保留旧值。
+- thinking 可三处配置，优先级：用户级（`chat_thinking`/`fast_thinking`/`vision_thinking`，WebUI 全局/角色卡页面可改）> 全局配置默认（`chat_thinking_enabled`/`fast_thinking_enabled`/`vision_thinking_enabled`，配置文件可改）> profile 的 `disable_thinking`。同一字段兼容空值、旧 `true/false` 开关和 `none/minimal/low/medium/high/xhigh/max` effort；选择 effort 时下发 `reasoning_effort`，结构化任务显式关闭 thinking 时同时清除 effort。`thinking_fixed` 仅是 profile 默认标记，不再硬锁定用户设置。API 密钥对前端始终掩码，保存空值或 `********` 时保留旧值。
+- `llm_sampling_params_enabled` 是模型采样细节总开关；关闭时所有 LLM 请求省略 temperature、top_p、frequency_penalty 和 presence_penalty，并保留配置值供再次开启，max_tokens、thinking 和工具参数不受影响。WebUI 根据该开关折叠或展开采样参数详情。
+- OpenAI-compatible profile 的 `base_url` 同时接受 API Base 和完整 `/chat/completions` URL，运行时统一规范化。服务启动时仅对带密钥的全局端点并发拉取一次 `/models` 目录并保存在内存中，失败不阻止启动；目录只向管理员 WebUI 暴露，供全局 profile 选型与复用同端点密钥。
 - 思考型模型仅在 content 里输出带 `<thinking>`/`<reasoning>`/`<analysis>` 标签的草稿时，`_call_llm` 才剥离或判为思考泄漏；不做关键词启发式判断。
 - 聊天采样参数只用于真实聊天回复，不传给 checkpoint、dream、memory 等结构化任务。
 - 结构化 LLM JSON 只可对明确位于相邻 token 之间的漏逗号做保守修复；其他损坏必须保持失败并走既有重试/回退。
@@ -152,7 +155,7 @@ telegram_comfyui_selfie/
 
 ## Telegram 与 WebUI
 
-- Telegram 图片、引用图片先由 vision 模型转换为文本描述；chat 模型只接收文本。未配置 vision profile 时跳过图片理解。
+- Telegram 用户图片、相册及显式回复/外部引用中的图片，在 chat 与 vision 解析到同一 `api_base + model` 时直接作为原生多模态 user content 进入 chat；两者不同时仍先由 vision 转为文本描述。bot 已发送图片继续只以照片历史文字摘要进入上下文；未配置 vision profile 时跳过图片理解。辅助模型复用消息时，若其与 vision 不是同一实际模型，必须在统一 LLM 请求出口移除图片 part、保留文字内容。
 - Telegram update 必须先与确认 offset 一起写入 SQLite inbox，再进入按会话有序的有界 worker；跨会话受全局并发上限控制，停机先停止拉取并排空，超时待办由下次启动恢复。
 - 同会话新消息可取消旧文字生成，但已进入生图/发图阶段的受保护任务不能被取消。
 - Web API 错误优先返回 JSON；前端也必须兼容非 JSON 错误体、401 跳转与可读错误摘要。

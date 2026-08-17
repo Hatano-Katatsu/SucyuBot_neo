@@ -25,6 +25,7 @@
   "default_chat_model_profile": "deepseek-pro",
   "default_fast_model_profile": "deepseek-flash",
   "default_vision_model_profile": "",
+  "llm_sampling_params_enabled": true,
   "photo_caption_wait_seconds": "30",
   "telegram_update_queue_size": "32",
   "telegram_update_max_concurrency": "4",

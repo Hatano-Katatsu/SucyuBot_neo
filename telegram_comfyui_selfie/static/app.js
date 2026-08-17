@@ -46,17 +46,18 @@ const configSections = [
     ["default_vision_model_profile", "默认视觉模型 profile", "model_select"],
     ["photo_caption_wait_seconds", "纯图片等待配文秒数", "number"],
     ["chat_reply_length", "回复长度", "select:,简短,适中,详细"],
-    ["chat_llm_temperature", "回复温度", "text"],
     ["chat_llm_max_tokens", "回复 max_tokens（含思考输出上限）", "text"],
-    ["chat_llm_top_p", "回复 top_p（核采样，砍胡话尾巴，留空不下发）", "text"],
-    ["chat_llm_frequency_penalty", "回复频率惩罚（抗复读/车轱辘话，留空不下发）", "text"],
-    ["chat_llm_presence_penalty", "回复存在惩罚（推话题发散，默认空=关）", "text"],
-    ["image_llm_temperature_scene", "推送场景温度", "text"],
-    ["image_llm_temperature_translate", "Tags 翻译温度", "text"],
-    ["image_llm_temperature_classify", "角色分析温度", "text"],
-    ["llm_temperature_scene", "默认场景温度", "text"],
-    ["llm_temperature_translate", "默认翻译温度", "text"],
-    ["llm_temperature_classify", "默认分析温度", "text"],
+    ["llm_sampling_params_enabled", "自定义模型采样参数", "bool"],
+    ["chat_llm_temperature", "回复温度", "text", "sampling-detail"],
+    ["chat_llm_top_p", "回复 top_p（核采样，砍胡话尾巴，留空不下发）", "text", "sampling-detail"],
+    ["chat_llm_frequency_penalty", "回复频率惩罚（抗复读/车轱辘话，留空不下发）", "text", "sampling-detail"],
+    ["chat_llm_presence_penalty", "回复存在惩罚（推话题发散，默认空=关）", "text", "sampling-detail"],
+    ["image_llm_temperature_scene", "推送场景温度", "text", "sampling-detail"],
+    ["image_llm_temperature_translate", "Tags 翻译温度", "text", "sampling-detail"],
+    ["image_llm_temperature_classify", "角色分析温度", "text", "sampling-detail"],
+    ["llm_temperature_scene", "默认场景温度", "text", "sampling-detail"],
+    ["llm_temperature_translate", "默认翻译温度", "text", "sampling-detail"],
+    ["llm_temperature_classify", "默认分析温度", "text", "sampling-detail"],
   ]],
   ["生图", [
     ["negative_prompt", "Negative Prompt", "textarea"],
@@ -584,10 +585,41 @@ function renderConfig() {
     fs.innerHTML = `<legend>${title}</legend>`;
     const grid = document.createElement("div");
     grid.className = "field-grid";
-    fields.forEach(field => grid.appendChild(inputFor(field, state.config || {})));
+    const samplingGrid = document.createElement("div");
+    samplingGrid.className = "field-grid sampling-detail-grid";
+    fields.forEach(field => {
+      const layouts = String(field[3] || "").split(/\s+/).filter(Boolean);
+      const target = layouts.includes("sampling-detail") ? samplingGrid : grid;
+      target.appendChild(inputFor(field, state.config || {}));
+    });
     fs.appendChild(grid);
+    if (samplingGrid.children.length) {
+      const panel = document.createElement("div");
+      panel.id = "model-sampling-details";
+      panel.className = "sampling-detail-panel";
+      panel.dataset.configDetails = "sampling";
+      panel.innerHTML = `
+        <div class="sampling-detail-head">
+          <strong>采样参数详情</strong>
+          <span>关闭总开关时保留当前配置值，但请求模型时不会下发这些参数。</span>
+        </div>`;
+      panel.appendChild(samplingGrid);
+      fs.appendChild(panel);
+    }
     form.appendChild(fs);
   }
+  const samplingToggle = form.elements.namedItem("llm_sampling_params_enabled");
+  const samplingPanel = form.querySelector('[data-config-details="sampling"]');
+  const syncSamplingDetails = () => {
+    const expanded = samplingToggle?.value === "true";
+    if (samplingPanel) samplingPanel.hidden = !expanded;
+    if (samplingToggle) samplingToggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+  };
+  if (samplingToggle) {
+    samplingToggle.setAttribute("aria-controls", "model-sampling-details");
+    samplingToggle.addEventListener("change", syncSamplingDetails);
+  }
+  syncSamplingDetails();
   const actions = document.createElement("div");
   actions.className = "form-actions";
   actions.innerHTML = `<button type="button" id="reload-config">撤销未保存</button><button class="primary" type="submit">保存设置</button>`;
@@ -635,6 +667,7 @@ async function loadModels() {
   const globalProfiles = data.global_profiles || {};
   const userProfiles = data.user_profiles || {};
   const allProfiles = { ...globalProfiles, ...userProfiles };
+  const availableGlobalModels = Array.isArray(data.available_global_models) ? data.available_global_models : [];
   const ids = Object.keys(allProfiles);
   const settings = data.settings || {};
   const chatProfileId = settings.chat_profile_id || data.default_chat_model_profile || "";
@@ -651,17 +684,38 @@ async function loadModels() {
     const configured = item.configured ? "已配置" : "未配置";
     const profile = item.profile_id || "默认";
     const model = item.model || "-";
-    const thinking = item.thinking === undefined ? "" : (item.thinking ? " · 思考开" : " · 思考关");
+    const thinking = item.thinking_effort
+      ? ` · effort=${item.thinking_effort}`
+      : (item.thinking === undefined ? "" : (item.thinking ? " · 思考开" : " · 思考关"));
     return `${profile} / ${model} / ${configured}${thinking}`;
   };
+  const globalProfileLoader = state.auth?.role === "admin"
+    ? `<label>载入全局 profile<select id="global-model-profile-loader"><option value="">新建 / 手动填写</option>${Object.keys(globalProfiles).map(id => `<option value="${escapeHtml(id)}">${escapeHtml(id)} · ${escapeHtml(globalProfiles[id]?.name || globalProfiles[id]?.model || "")}</option>`).join("")}</select></label>`
+    : "";
   const adminScopeControl = state.auth?.role === "admin"
     ? `<label>保存范围<select name="_scope"><option value="user">当前用户私有</option><option value="global">全局 profile</option></select></label>`
     : "";
+  const modelCatalogId = "available-global-model-list";
+  const modelCatalogOptions = availableGlobalModels.map(item => {
+    const source = item.source_profile_id ? `来源 ${item.source_profile_id}` : "启动时发现";
+    return `<option value="${escapeHtml(item.id || "")}" label="${escapeHtml(`${source} · ${item.api_base || ""}`)}"></option>`;
+  }).join("");
+  const modelCatalogList = state.auth?.role === "admin" && modelCatalogOptions
+    ? `<datalist id="${modelCatalogId}">${modelCatalogOptions}</datalist>`
+    : "";
+  const modelCatalogAttr = modelCatalogList ? ` list="${modelCatalogId}"` : "";
   const thinkingSelect = (name, label) => `
     <label>${label}<select name="${name}">
       <option value="">跟随模型</option>
       <option value="true">开启</option>
       <option value="false">关闭</option>
+      <option value="none">Effort · none</option>
+      <option value="minimal">Effort · minimal</option>
+      <option value="low">Effort · low</option>
+      <option value="medium">Effort · medium</option>
+      <option value="high">Effort · high</option>
+      <option value="xhigh">Effort · xhigh</option>
+      <option value="max">Effort · max</option>
     </select></label>`;
   box.innerHTML = `
     <form id="model-settings-form" class="model-settings-form">
@@ -680,17 +734,19 @@ async function loadModels() {
       <div>视觉: ${escapeHtml(resolvedText("vision"))}</div>
     </div>
     <form id="model-profile-form" class="inline-manager-form">
+      ${globalProfileLoader}
       ${adminScopeControl}
       <label>Profile ID<input name="profile_id" placeholder="deepseek-v4-pro" autocomplete="off"></label>
       <label>显示名称<input name="name" placeholder="DeepSeek V4 Pro" autocomplete="off"></label>
       <label>Base URL<input name="base_url" placeholder="https://api.example.com/v1" autocomplete="off"></label>
       <label>API Key<input name="api_key" type="password" placeholder="留空保留旧密钥" autocomplete="new-password"></label>
-      <label>模型名<input name="model" placeholder="deepseek-chat" autocomplete="off"></label>
+      <label>模型名<input name="model"${modelCatalogAttr} placeholder="deepseek-chat" autocomplete="off"></label>
+      ${modelCatalogList}
       <label>最大 tokens<input name="max_tokens" type="number" min="1" step="1" inputmode="decimal" placeholder="可选"></label>
       <label>超时秒数<input name="timeout" type="number" min="1" step="1" inputmode="decimal" placeholder="可选"></label>
       <button type="submit">保存模型 profile</button>
       <button id="delete-model-profile" class="danger" type="button">删除指定 profile</button>
-      <p class="muted">仅填写常用模型字段；api_key 返回时会显示为 ********，保存空值或 ******** 会保留原密钥。思考开关三态：跟随模型（按 profile 默认设置）/ 强制开启 / 强制关闭。</p>
+      <p class="muted">仅填写常用模型字段；api_key 返回时会显示为 ********，保存空值或 ******** 会保留原密钥。思考下拉框兼容原有开启/关闭，也可直接选择 reasoning effort。管理员可从服务启动时发现的 ${availableGlobalModels.length} 个模型中选择；选中新模型会带入来源 Base URL，并可安全复用同端点全局 profile 的密钥。对话与视觉选择解析到同一 API Base 和模型名时，用户发送或显式引用的图片会直接进入对话模型；否则先由视觉模型转成文字描述。</p>
     </form>
   `;
   box.querySelector("[name=chat_profile_id]").value = settings.chat_profile_id || "";
@@ -700,6 +756,33 @@ async function loadModels() {
     const el = box.querySelector(`[name=${key}]`);
     if (el && settings[key] !== undefined && settings[key] !== null) el.value = String(settings[key]);
   });
+  const profileForm = $("#model-profile-form");
+  const profileLoader = $("#global-model-profile-loader");
+  if (profileLoader) {
+    profileLoader.onchange = () => {
+      const profileId = profileLoader.value;
+      const profile = globalProfiles[profileId];
+      if (!profile) return;
+      profileForm.elements._scope.value = "global";
+      profileForm.elements.profile_id.value = profileId;
+      ["name", "base_url", "api_key", "model", "max_tokens", "timeout"].forEach(key => {
+        profileForm.elements[key].value = profile[key] ?? "";
+      });
+      profileForm.dataset.catalogSourceProfileId = profileId;
+    };
+  }
+  const catalogModelInput = profileForm.elements.model;
+  catalogModelInput.onchange = () => {
+    const entry = availableGlobalModels.find(item => item.id === catalogModelInput.value.trim());
+    if (!entry) {
+      delete profileForm.dataset.catalogSourceProfileId;
+      return;
+    }
+    profileForm.dataset.catalogSourceProfileId = entry.source_profile_id || "";
+    if (!profileForm.elements.base_url.value.trim()) profileForm.elements.base_url.value = entry.api_base || "";
+    if (!profileForm.elements.profile_id.value.trim()) profileForm.elements.profile_id.value = entry.id || "";
+    if (!profileForm.elements.name.value.trim()) profileForm.elements.name.value = entry.id || "";
+  };
   $("#model-settings-form").onsubmit = async event => {
     event.preventDefault();
     await api(modelApiUrl("/api/models/settings"), { method: "PATCH", body: formValues(event.currentTarget) });
@@ -720,6 +803,9 @@ async function loadModels() {
       if (value) body[key] = value;
     });
     if (values._scope) body._scope = values._scope;
+    if (values._scope === "global" && event.currentTarget.dataset.catalogSourceProfileId) {
+      body._catalog_source_profile_id = event.currentTarget.dataset.catalogSourceProfileId;
+    }
     await api(modelApiUrl(`/api/models/${encodeURIComponent(profileId)}`), { method: "POST", body });
     await loadModels();
     toast("模型 profile 已保存");

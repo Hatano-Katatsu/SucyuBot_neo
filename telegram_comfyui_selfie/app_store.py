@@ -10,6 +10,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
+from .model_thinking import normalize_thinking_setting
 from .sqlite_migrations import SchemaMigrationResult, migrate_database
 
 
@@ -18,17 +19,18 @@ def _now() -> float:
 
 
 def _model_thinking_value(raw: Any) -> Any:
-    """SQLite INTEGER 三态 → Python 三态（None=未设置跟随 profile，True/False=显式覆盖）。"""
-    if raw is None:
-        return None
-    return bool(int(raw))
+    """SQLite 动态值 → 未设置、旧布尔开关或 reasoning effort。"""
+    return normalize_thinking_setting(raw)
 
 
 def _model_thinking_db(value: Any) -> Any:
-    """Python 三态 → SQLite INTEGER 三态。"""
-    if value is None or value == "":
+    """thinking 单字段 → SQLite；布尔沿用 0/1，effort 使用 TEXT。"""
+    normalized = normalize_thinking_setting(value)
+    if normalized is None:
         return None
-    return 1 if str(value).lower() in ("true", "1", "yes", "on") else 0
+    if isinstance(normalized, bool):
+        return 1 if normalized else 0
+    return normalized
 
 
 def _json_dumps(value: Any) -> str:

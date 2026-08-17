@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import mimetypes
 from typing import Any
@@ -258,11 +259,27 @@ class TelegramIOMixin:
                 self._ulog(session_id, "USER", text)
                 return
             else:
-                augmented_text = await self._augment_chat_text_from_message(session_id, text, msg)
+                augmented_text = ""
+                native_content = None
+                if (
+                    self._message_has_photo_context(msg)
+                    and hasattr(self, "_chat_uses_native_multimodal")
+                    and self._chat_uses_native_multimodal(session_id)
+                ):
+                    augmented_text, native_content = await self._build_native_chat_input_from_message(
+                        session_id,
+                        text,
+                        msg,
+                    )
+                if native_content is None:
+                    augmented_text = await self._augment_chat_text_from_message(session_id, text, msg)
                 if not augmented_text:
                     return
                 self._ulog(session_id, "USER", augmented_text)
-                await self.handle_chat(chat_id, session_id, augmented_text)
+                if native_content is not None:
+                    await self.handle_chat(chat_id, session_id, augmented_text, user_content=native_content)
+                else:
+                    await self.handle_chat(chat_id, session_id, augmented_text)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -606,6 +623,17 @@ class TelegramIOMixin:
             return {}
         return max(candidates, key=lambda p: int(p.get("file_size") or 0) or int(p.get("width") or 0) * int(p.get("height") or 0))
 
+    @staticmethod
+    def _message_has_photo_context(msg: dict[str, Any]) -> bool:
+        if msg.get("photo") or msg.get("_grouped_photos"):
+            return True
+        reply = msg.get("reply_to_message") or {}
+        external = msg.get("external_reply") or {}
+        return bool(
+            (isinstance(reply, dict) and reply.get("photo"))
+            or (isinstance(external, dict) and external.get("photo"))
+        )
+
     async def _download_telegram_file(self, file_id: str) -> tuple[bytes, str]:
         if self.http is None:
             raise RuntimeError("HTTP session not initialized")
@@ -702,13 +730,92 @@ class TelegramIOMixin:
             nearby_text=nearby_text,
         )
 
+    @staticmethod
+    def _native_image_url_part(image_bytes: bytes, mime_type: str) -> dict[str, Any]:
+        mime_type = (mime_type or "image/jpeg").strip() or "image/jpeg"
+        data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+        return {"type": "image_url", "image_url": {"url": data_url}}
+
+    async def _build_native_chat_input_from_message(
+        self,
+        session_id: str,
+        text: str,
+        msg: dict[str, Any],
+    ) -> tuple[str, list[dict[str, Any]] | None]:
+        """下载本轮用户及显式引用的图片，构造 chat 原生多模态 user content。"""
+        text = (text or "").strip()
+        reply_context = self._format_telegram_reply_context(msg)
+        attachments: list[tuple[str, dict[str, Any]]] = []
+        current_count = 0
+
+        grouped = msg.get("_grouped_photos")
+        current_groups = grouped[:5] if isinstance(grouped, list) and grouped else []
+        if not current_groups and msg.get("photo"):
+            current_groups = [msg.get("photo")]
+        for index, photo_sizes in enumerate(current_groups, start=1):
+            downloaded = await self._download_telegram_photo_sizes(photo_sizes)
+            if not downloaded:
+                continue
+            image_bytes, mime_type = downloaded
+            current_count += 1
+            label = "用户发送的图片" if len(current_groups) == 1 else f"用户发送的第 {index} 张图片"
+            attachments.append((label, self._native_image_url_part(image_bytes, mime_type)))
+
+        reply = msg.get("reply_to_message") or {}
+        reply_image_count = 0
+        if isinstance(reply, dict) and reply.get("photo"):
+            downloaded = await self._download_telegram_photo_sizes(reply.get("photo"))
+            if downloaded:
+                image_bytes, mime_type = downloaded
+                reply_image_count = 1
+                attachments.append(("被回复消息里的图片", self._native_image_url_part(image_bytes, mime_type)))
+
+        external = msg.get("external_reply") or {}
+        external_image_count = 0
+        if isinstance(external, dict) and external.get("photo"):
+            downloaded = await self._download_telegram_photo_sizes(external.get("photo"))
+            if downloaded:
+                image_bytes, mime_type = downloaded
+                external_image_count = 1
+                attachments.append(("外部引用消息里的图片", self._native_image_url_part(image_bytes, mime_type)))
+
+        if not attachments:
+            return "", None
+
+        blocks: list[str] = []
+        if reply_context:
+            blocks.append("【引用内容】\n" + reply_context)
+        attachment_lines: list[str] = []
+        if current_count:
+            attachment_lines.append(f"用户发送的图片：{current_count} 张")
+        if reply_image_count:
+            attachment_lines.append("被回复消息里的图片：1 张")
+        if external_image_count:
+            attachment_lines.append("外部引用消息里的图片：1 张")
+        blocks.append("【图片附件】\n" + "\n".join(attachment_lines))
+        if text:
+            blocks.append("【用户当前输入】\n" + text)
+        elif current_count:
+            fallback = "用户发送了多张图片。" if current_count > 1 else "用户发送了一张图片。"
+            blocks.append("【用户当前输入】\n" + fallback)
+        else:
+            blocks.append("【用户当前输入】\n用户正在回复或引用一条带图片的消息。")
+        augmented_text = "\n\n".join(blocks).strip()
+
+        content: list[dict[str, Any]] = [{"type": "text", "text": augmented_text}]
+        for label, image_part in attachments:
+            content.append({"type": "text", "text": label + "："})
+            content.append(image_part)
+        return augmented_text, content
+
     async def _augment_chat_text_from_message(self, session_id: str, text: str, msg: dict[str, Any]) -> str:
-        """把 Telegram 图片/引用整理成纯文本输入；chat 模型不接收多模态 payload。"""
+        """chat/vision 不同模型时，把 Telegram 图片与引用降级为纯文本描述。"""
         text = (text or "").strip()
         reply_context = self._format_telegram_reply_context(msg)
         nearby = "\n".join(part for part in (reply_context, text) if part).strip()
         image_blocks: list[str] = []
         grouped = msg.get("_grouped_photos")
+        current_desc = ""
         if grouped:
             count = int(msg.get("_media_group_message_count") or len(grouped) or 0)
             current_desc = await self._describe_telegram_photo_groups_for_chat(
@@ -717,7 +824,7 @@ class TelegramIOMixin:
                 source_label=f"用户发送的{count}张图片",
                 nearby_text=nearby,
             )
-        else:
+        elif msg.get("photo"):
             current_desc = await self._describe_telegram_photo_sizes_for_chat(
                 session_id,
                 msg.get("photo"),
@@ -728,7 +835,7 @@ class TelegramIOMixin:
             label = "用户发送的多张图片" if grouped else "用户发送的图片"
             image_blocks.append(f"{label}: {current_desc}")
         reply = msg.get("reply_to_message") or {}
-        if isinstance(reply, dict):
+        if isinstance(reply, dict) and reply.get("photo"):
             reply_desc = await self._describe_telegram_photo_sizes_for_chat(
                 session_id,
                 reply.get("photo"),
@@ -738,7 +845,7 @@ class TelegramIOMixin:
             if reply_desc:
                 image_blocks.append(f"被回复消息里的图片: {reply_desc}")
         external = msg.get("external_reply") or {}
-        if isinstance(external, dict):
+        if isinstance(external, dict) and external.get("photo"):
             external_desc = await self._describe_telegram_photo_sizes_for_chat(
                 session_id,
                 external.get("photo"),

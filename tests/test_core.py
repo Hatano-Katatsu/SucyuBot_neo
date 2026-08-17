@@ -198,6 +198,133 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_same_chat_and_vision_model_sends_user_and_replied_images_natively(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            profile = {
+                "name": "Native multimodal",
+                "base_url": "https://multimodal.example/v1",
+                "api_key": "k",
+                "model": "multimodal-model",
+                "disable_thinking": True,
+            }
+            svc.app_store.upsert_model_profile("123", "multimodal", profile)
+            svc.app_store.update_user_model_settings(
+                "123",
+                chat_profile_id="multimodal",
+                vision_profile_id="multimodal",
+            )
+            svc.handle_chat = AsyncMock()
+            svc._describe_telegram_photo_sizes_for_chat = AsyncMock(return_value="不应调用")
+            svc._describe_telegram_photo_groups_for_chat = AsyncMock(return_value="不应调用")
+
+            async def fake_download(photo_sizes):
+                file_id = photo_sizes[-1]["file_id"]
+                return file_id.encode("utf-8"), "image/png"
+
+            svc._download_telegram_photo_sizes = AsyncMock(side_effect=fake_download)
+            await svc.handle_update({
+                "message": {
+                    "chat": PRIVATE_CHAT,
+                    "from": PRIVATE_SENDER,
+                    "caption": "看看这组，也对比我回复的那张",
+                    "photo": [{"file_id": "current-1", "width": 100, "height": 100}],
+                    "_grouped_photos": [
+                        [{"file_id": "current-1", "width": 100, "height": 100}],
+                        [{"file_id": "current-2", "width": 100, "height": 100}],
+                    ],
+                    "_media_group_message_count": 2,
+                    "reply_to_message": {
+                        "from": {"id": 999, "is_bot": True},
+                        "caption": "机器人之前发的图",
+                        "photo": [{"file_id": "reply", "width": 100, "height": 100}],
+                    },
+                }
+            })
+
+            svc.handle_chat.assert_awaited_once()
+            call = svc.handle_chat.await_args
+            self.assertEqual(call.args[:2], (123, sid))
+            self.assertIn("【引用内容】", call.args[2])
+            self.assertIn("机器人之前发的图", call.args[2])
+            self.assertIn("用户发送的图片：2 张", call.args[2])
+            self.assertIn("被回复消息里的图片：1 张", call.args[2])
+            content = call.kwargs["user_content"]
+            image_parts = [part for part in content if part.get("type") == "image_url"]
+            self.assertEqual(len(image_parts), 3)
+            self.assertEqual(
+                [part["image_url"]["url"] for part in image_parts],
+                [
+                    "data:image/png;base64,Y3VycmVudC0x",
+                    "data:image/png;base64,Y3VycmVudC0y",
+                    "data:image/png;base64,cmVwbHk=",
+                ],
+            )
+            text_parts = [part.get("text", "") for part in content if part.get("type") == "text"]
+            self.assertTrue(any("被回复消息里的图片" in part for part in text_parts))
+            svc._describe_telegram_photo_sizes_for_chat.assert_not_awaited()
+            svc._describe_telegram_photo_groups_for_chat.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_different_chat_and_vision_models_keep_text_description_fallback(self):
+        async def run():
+            svc = self.make_service()
+            for profile_id, model in (("chat", "chat-model"), ("vision", "vision-model")):
+                svc.app_store.upsert_model_profile("123", profile_id, {
+                    "name": profile_id,
+                    "base_url": "https://models.example/v1",
+                    "api_key": "k",
+                    "model": model,
+                    "disable_thinking": True,
+                })
+            svc.app_store.update_user_model_settings(
+                "123",
+                chat_profile_id="chat",
+                vision_profile_id="vision",
+            )
+            svc.handle_chat = AsyncMock()
+            svc._describe_telegram_photo_sizes_for_chat = AsyncMock(return_value="图片的文字描述。")
+
+            await svc.handle_update({
+                "message": {
+                    "chat": PRIVATE_CHAT,
+                    "from": PRIVATE_SENDER,
+                    "caption": "看这个",
+                    "photo": [{"file_id": "p1", "width": 100, "height": 100}],
+                }
+            })
+
+            svc.handle_chat.assert_awaited_once()
+            call = svc.handle_chat.await_args
+            self.assertEqual(call.kwargs, {})
+            self.assertIn("【图片描述】", call.args[2])
+            self.assertIn("图片的文字描述。", call.args[2])
+            self.assertGreaterEqual(svc._describe_telegram_photo_sizes_for_chat.await_count, 1)
+            self.assertEqual(
+                svc._describe_telegram_photo_sizes_for_chat.await_args_list[0].args[1][-1]["file_id"],
+                "p1",
+            )
+
+        asyncio.run(run())
+
+    def test_chat_message_builder_accepts_native_multimodal_user_content(self):
+        svc = self.make_service()
+        native_content = [
+            {"type": "text", "text": "看这张图"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ]
+
+        messages = svc._build_chat_messages(
+            "telegram:123",
+            "看这张图",
+            user_content=native_content,
+        )
+
+        self.assertEqual(messages[-1], {"role": "user", "content": native_content})
+        self.assertIsNot(messages[-1]["content"], native_content)
+
     def test_photo_only_waits_for_followup_caption_before_vision(self):
         async def run():
             svc = self.make_service()
@@ -748,13 +875,19 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn(f'name="{field}"', model_section)
         self.assertNotIn('name="json"', model_section)
         self.assertNotIn("<textarea name=\"json\"", model_section)
-        # 三个模型各自的 thinking 开关（三态下拉：跟随模型/开启/关闭）
+        # 三个模型共用原 thinking 字段：旧开关与 reasoning effort 同一下拉框。
         self.assertIn('thinkingSelect("chat_thinking"', model_section)
         self.assertIn('thinkingSelect("fast_thinking"', model_section)
         self.assertIn('thinkingSelect("vision_thinking"', model_section)
         self.assertIn('<option value="">跟随模型</option>', model_section)
         self.assertIn('<option value="true">开启</option>', model_section)
         self.assertIn('<option value="false">关闭</option>', model_section)
+        for effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+            self.assertIn(f'<option value="{effort}">Effort · {effort}</option>', model_section)
+        self.assertIn('const modelCatalogId = "available-global-model-list"', model_section)
+        self.assertIn('<datalist id="${modelCatalogId}">', model_section)
+        self.assertIn('id="global-model-profile-loader"', model_section)
+        self.assertIn("available_global_models", model_section)
         # 不暴露 profile 级内部字段
         self.assertNotIn("disable_thinking", model_section)
         self.assertNotIn("thinking_fixed", model_section)
@@ -762,6 +895,23 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("api_key_no_think", model_section)
         self.assertNotIn("model_no_think", model_section)
         self.assertNotIn("model_think", model_section)
+        self.assertIn("同一 API Base 和模型名", model_section)
+
+    def test_config_sampling_params_switch_controls_detail_panel(self):
+        app_js = (Path(__file__).resolve().parents[1] / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('["llm_sampling_params_enabled", "自定义模型采样参数", "bool"]', app_js)
+        for key in (
+            "chat_llm_temperature",
+            "chat_llm_top_p",
+            "chat_llm_frequency_penalty",
+            "chat_llm_presence_penalty",
+            "image_llm_temperature_scene",
+            "llm_temperature_scene",
+        ):
+            self.assertRegex(app_js, rf'\["{key}"[^\n]+"sampling-detail"\]')
+        self.assertIn('panel.dataset.configDetails = "sampling"', app_js)
+        self.assertIn("samplingPanel.hidden = !expanded", app_js)
+        self.assertIn('samplingToggle.addEventListener("change", syncSamplingDetails)', app_js)
 
     def test_create_oc_help_includes_template(self):
         async def run():
@@ -9057,6 +9207,80 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_auxiliary_model_strips_images_unless_it_matches_vision_model(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["global_model_profiles"] = {
+                "aux": {
+                    "name": "Aux",
+                    "base_url": "https://aux.example/v1",
+                    "api_key": "aux-key",
+                    "model": "aux-model",
+                    "disable_thinking": True,
+                },
+                "vision": {
+                    "name": "Vision",
+                    "base_url": "https://vision.example/v1",
+                    "api_key": "vision-key",
+                    "model": "vision-model",
+                    "disable_thinking": True,
+                },
+            }
+            svc.config["default_fast_model_profile"] = "aux"
+            svc.config["default_vision_model_profile"] = "vision"
+            captured = []
+
+            class FakeResponse:
+                status = 200
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                async def json(self):
+                    return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+
+                async def text(self):
+                    return ""
+
+            class FakeSession:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                def post(self, *args, **kwargs):
+                    captured.append(copy.deepcopy(kwargs["json"]))
+                    return FakeResponse()
+
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "用户发送了一张图片"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+                    {"type": "text", "text": "请理解上下文"},
+                ],
+            }]
+            with patch("telegram_comfyui_selfie.service.aiohttp.ClientSession", FakeSession):
+                await svc._call_llm_messages(messages, purpose="image", session_id="telegram:1")
+                svc.config["default_fast_model_profile"] = "vision"
+                await svc._call_llm_messages(messages, purpose="image", session_id="telegram:1")
+
+            stripped_parts = captured[0]["messages"][0]["content"]
+            self.assertEqual([part["type"] for part in stripped_parts], ["text", "text"])
+            self.assertNotIn("image_url", json.dumps(captured[0], ensure_ascii=False))
+            retained_parts = captured[1]["messages"][0]["content"]
+            self.assertEqual([part["type"] for part in retained_parts], ["text", "image_url", "text"])
+            self.assertEqual(messages[0]["content"][1]["type"], "image_url")
+
+        asyncio.run(run())
+
     def test_call_llm_messages_records_finish_reason_and_completion_tokens(self):
         async def run():
             svc = self.make_service()
@@ -9313,13 +9537,27 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                     temp=0.1,
                     session_id="telegram:1",
                 )
+                svc.config["llm_sampling_params_enabled"] = False
+                await svc._call_llm_messages(
+                    [{"role": "user", "content": "provider defaults"}],
+                    purpose="chat",
+                    tag="chat-provider-defaults",
+                    temp=0.2,
+                    session_id="telegram:1",
+                    sampling=True,
+                )
 
-            reply_body, internal_body = captured
+            reply_body, internal_body, provider_default_body = captured
+            self.assertEqual(reply_body["temperature"], 0.9)
             self.assertEqual(reply_body["top_p"], 0.92)
             self.assertEqual(reply_body["frequency_penalty"], 0.4)
             self.assertNotIn("presence_penalty", reply_body)
+            self.assertEqual(internal_body["temperature"], 0.1)
             for key in ("top_p", "frequency_penalty", "presence_penalty"):
                 self.assertNotIn(key, internal_body)
+            for key in ("temperature", "top_p", "frequency_penalty", "presence_penalty"):
+                self.assertNotIn(key, provider_default_body)
+            self.assertEqual(provider_default_body["max_tokens"], 12000)
 
         asyncio.run(run())
 

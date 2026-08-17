@@ -6,14 +6,22 @@ import json
 import os
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from tests.support import ServiceFixtureMixin, make_project_temp_dir
 
 
 class JsonRequest(dict):
-    def __init__(self, service, payload: dict, *, match_info: dict | None = None, query: dict | None = None):
-        super().__init__(web_auth={"role": "admin", "user_id": "admin", "token": "test"})
+    def __init__(
+        self,
+        service,
+        payload: dict,
+        *,
+        match_info: dict | None = None,
+        query: dict | None = None,
+        web_auth: dict | None = None,
+    ):
+        super().__init__(web_auth=web_auth or {"role": "admin", "user_id": "admin", "token": "test"})
         self.app = {"service": service}
         self.match_info = match_info or {}
         self.query = query or {}
@@ -282,6 +290,285 @@ class ModelProfileTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertFalse(thinking)
 
         asyncio.run(run())
+
+    def test_model_settings_roundtrip_reasoning_effort_in_same_field(self):
+        from telegram_comfyui_selfie.webui_models import api_update_model_settings
+
+        async def run():
+            svc = self.make_service()
+            response = await api_update_model_settings(JsonRequest(svc, {
+                "chat_thinking": "high",
+                "fast_thinking": "minimal",
+                "vision_thinking": "none",
+            }))
+            data = json.loads(response.text)
+
+            self.assertTrue(data["ok"])
+            self.assertEqual(data["settings"]["chat_thinking"], "high")
+            self.assertEqual(data["settings"]["fast_thinking"], "minimal")
+            self.assertEqual(data["settings"]["vision_thinking"], "none")
+            stored = svc.app_store.get_user_model_settings("admin")
+            self.assertEqual(stored["chat_thinking"], "high")
+
+            response = await api_update_model_settings(JsonRequest(svc, {"chat_thinking": "turbo"}))
+            self.assertEqual(response.status, 400)
+            self.assertIn("effort", json.loads(response.text)["error"])
+
+        asyncio.run(run())
+
+    def test_reasoning_effort_request_and_full_chat_endpoint_are_supported(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["global_model_profiles"] = {
+                "effort": {
+                    "name": "Effort",
+                    "base_url": "https://opencode.example/zen/go/v1/chat/completions",
+                    "api_key": "secret",
+                    "model": "gpt-effort",
+                    "disable_thinking": True,
+                    "thinking_control": "param_always",
+                },
+            }
+            svc.config["default_chat_model_profile"] = "effort"
+            svc.app_store.update_user_model_settings("1", chat_thinking="high")
+            effort_resolved = svc._resolved_llm_config("chat", "telegram:1")
+            self.assertTrue(effort_resolved["thinking"])
+            self.assertEqual(effort_resolved["thinking_effort"], "high")
+            forced_off = svc._resolved_llm_config("chat", "telegram:1", disable_thinking=True)
+            self.assertFalse(forced_off["thinking"])
+            self.assertEqual(forced_off["thinking_effort"], "")
+            captured: list[tuple[str, dict]] = []
+
+            class FakeResponse:
+                status = 200
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                async def json(self):
+                    return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+
+            class FakeSession:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                def post(self, url, **kwargs):
+                    captured.append((url, copy.deepcopy(kwargs["json"])))
+                    return FakeResponse()
+
+            with patch("telegram_comfyui_selfie.llm_runtime.aiohttp.ClientSession", FakeSession):
+                await svc._call_llm_messages(
+                    [{"role": "user", "content": "hello"}],
+                    purpose="chat",
+                    session_id="telegram:1",
+                )
+                svc.app_store.update_user_model_settings("1", chat_thinking=False)
+                await svc._call_llm_messages(
+                    [{"role": "user", "content": "hello"}],
+                    purpose="chat",
+                    session_id="telegram:1",
+                )
+
+            self.assertEqual(captured[0][0], "https://opencode.example/zen/go/v1/chat/completions")
+            self.assertEqual(captured[0][1]["reasoning_effort"], "high")
+            self.assertNotIn("thinking", captured[0][1])
+            self.assertNotIn("reasoning_effort", captured[1][1])
+            self.assertEqual(captured[1][1]["thinking"], {"type": "disabled"})
+            resolved = svc._resolved_llm_config("chat", "telegram:1")
+            self.assertEqual(resolved["api_base"], "https://opencode.example/zen/go/v1")
+
+        asyncio.run(run())
+
+    def test_global_model_catalog_loads_once_and_deduplicates_sources(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["global_model_profiles"] = {
+                "source-a": {
+                    "base_url": "https://catalog.example/v1/chat/completions",
+                    "api_key": "shared-key",
+                    "model": "old-a",
+                },
+                "source-b": {
+                    "base_url": "https://catalog.example/v1",
+                    "api_key": "shared-key",
+                    "model": "old-b",
+                },
+                "broken": {
+                    "base_url": "https://broken.example/v1/chat/completions",
+                    "api_key": "broken-key",
+                    "model": "old-c",
+                },
+            }
+            svc._global_model_catalog_loaded = False
+            calls: list[tuple[str, dict]] = []
+
+            class FakeResponse:
+                def __init__(self, status, payload=None, text=""):
+                    self.status = status
+                    self._payload = payload
+                    self._text = text
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                async def json(self):
+                    return copy.deepcopy(self._payload)
+
+                async def text(self):
+                    return self._text
+
+            class FakeSession:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                def get(self, url, **kwargs):
+                    calls.append((url, dict(kwargs.get("headers") or {})))
+                    if "broken.example" in url:
+                        return FakeResponse(503, text="unavailable")
+                    return FakeResponse(200, {
+                        "data": [
+                            {"id": "gpt-5"},
+                            {"id": "gpt-5-mini"},
+                            {"id": "gpt-5"},
+                        ],
+                    })
+
+            with patch("telegram_comfyui_selfie.llm_runtime.aiohttp.ClientSession", FakeSession):
+                first = await svc.load_global_model_catalog_once()
+                second = await svc.load_global_model_catalog_once()
+
+            self.assertEqual(len(calls), 2, "同 URL 与密钥的 profile 应合并为一次请求")
+            self.assertIn(("https://catalog.example/v1/models", "Bearer shared-key"), {
+                (url, headers.get("Authorization")) for url, headers in calls
+            })
+            self.assertEqual([item["id"] for item in first], ["gpt-5", "gpt-5-mini"])
+            self.assertEqual(first[0]["source_profile_ids"], ["source-a", "source-b"])
+            self.assertEqual(second, first)
+
+        asyncio.run(run())
+
+    def test_model_catalog_is_admin_only_and_can_reuse_source_secret(self):
+        from telegram_comfyui_selfie.webui_models import api_model_profiles, api_save_model_profile
+
+        async def run():
+            svc = self.make_service()
+            svc.config["global_model_profiles"] = {
+                "source": {
+                    "name": "Source",
+                    "base_url": "https://catalog.example/v1/chat/completions",
+                    "api_key": "source-secret",
+                    "model": "old-model",
+                },
+            }
+            svc._global_model_catalog = [{
+                "id": "new-model",
+                "api_base": "https://catalog.example/v1",
+                "source_profile_id": "source",
+                "source_profile_ids": ["source"],
+            }]
+
+            admin_response = await api_model_profiles(JsonRequest(svc, {}))
+            admin_data = json.loads(admin_response.text)
+            self.assertEqual(admin_data["available_global_models"][0]["id"], "new-model")
+
+            user_request = JsonRequest(
+                svc,
+                {},
+                web_auth={"role": "user", "user_id": "1", "token": "test"},
+            )
+            user_data = json.loads((await api_model_profiles(user_request)).text)
+            self.assertEqual(user_data["available_global_models"], [])
+
+            save_response = await api_save_model_profile(JsonRequest(
+                svc,
+                {
+                    "_scope": "global",
+                    "_catalog_source_profile_id": "source",
+                    "name": "New",
+                    "base_url": "https://catalog.example/v1",
+                    "model": "new-model",
+                },
+                match_info={"profile_id": "new"},
+            ))
+            self.assertTrue(json.loads(save_response.text)["ok"])
+            self.assertEqual(svc.config["global_model_profiles"]["new"]["api_key"], "source-secret")
+            self.assertEqual(
+                json.loads(save_response.text)["global_profiles"]["new"]["api_key"],
+                "********",
+            )
+
+        asyncio.run(run())
+
+    def test_service_loads_model_catalog_before_web_console(self):
+        async def run():
+            svc = self.make_service()
+            svc.config["web_enabled"] = True
+            svc.config["telegram_bot_token"] = ""
+            svc.load_global_model_catalog_once = AsyncMock(return_value=[])
+
+            async def start_web():
+                svc.load_global_model_catalog_once.assert_awaited_once()
+                svc._stop_event.set()
+
+            svc.start_web_console = AsyncMock(side_effect=start_web)
+            svc.stop_bot = AsyncMock()
+            svc.stop_web_console = AsyncMock()
+            svc.close = AsyncMock()
+
+            await svc.run()
+
+            svc.start_web_console.assert_awaited_once()
+
+        asyncio.run(run())
+
+    def test_native_multimodal_matches_resolved_endpoint_and_model(self):
+        svc = self.make_service()
+        for profile_id in ("chat-copy", "vision-copy"):
+            svc.app_store.upsert_model_profile("1", profile_id, {
+                "name": profile_id,
+                "base_url": (
+                    "https://multimodal.example/v1/chat/completions"
+                    if profile_id == "vision-copy"
+                    else "https://multimodal.example/v1/"
+                ),
+                "api_key": f"key-{profile_id}",
+                "model": "same-multimodal-model",
+                "disable_thinking": True,
+            })
+        svc.app_store.update_user_model_settings(
+            "1",
+            chat_profile_id="chat-copy",
+            vision_profile_id="vision-copy",
+        )
+
+        self.assertTrue(svc._chat_uses_native_multimodal("telegram:1"))
+
+        svc.app_store.upsert_model_profile("1", "vision-copy", {
+            "name": "vision-copy",
+            "base_url": "https://multimodal.example/v1/",
+            "api_key": "key-vision-copy",
+            "model": "different-model",
+            "disable_thinking": True,
+        })
+        self.assertFalse(svc._chat_uses_native_multimodal("telegram:1"))
 
     def test_resolved_config_honors_fixed_thinking_for_glm(self):
         async def run():

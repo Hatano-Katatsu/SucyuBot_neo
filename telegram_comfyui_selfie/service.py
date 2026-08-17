@@ -152,6 +152,8 @@ class TelegramComfyUIService(
         self._protected_image_tasks: set[asyncio.Task] = set()
         self._llm_debug_buffer: list[dict[str, Any]] = []
         self._llm_debug_flush_threshold = 10
+        self._global_model_catalog: list[dict[str, Any]] = []
+        self._global_model_catalog_loaded = False
         self._web_runner: Any = None
         self._stop_event: asyncio.Event | None = None
         self.process_started_at = time.time()
@@ -162,6 +164,7 @@ class TelegramComfyUIService(
     # ---------------------------------------------------------------------
     async def run(self):
         self._stop_event = asyncio.Event()
+        await self.load_global_model_catalog_once()
         if self.config.get("web_enabled", True):
             await self.start_web_console()
 

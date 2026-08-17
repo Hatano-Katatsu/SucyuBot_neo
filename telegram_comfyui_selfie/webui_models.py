@@ -8,7 +8,9 @@ from typing import Any
 from aiohttp import web
 
 from . import session_schema
+from .llm_runtime import _normalize_openai_api_base
 from .model_security import validate_public_model_base_url
+from .model_thinking import normalize_thinking_setting
 from .webui_common import (
     is_admin,
     json_error,
@@ -91,13 +93,13 @@ def merge_model_profile_secrets(new_profile: dict[str, Any], old_profile: dict[s
 
 
 def resolved_model_summary(service, purpose: str, session_id: str) -> dict[str, Any]:
-    profile_id, profile, thinking = service._resolve_llm_profile(purpose, session_id)
-    model, api_base, _ = service._llm_profile_model_name(profile, thinking)
+    resolved = service._resolved_llm_config(purpose, session_id)
     return {
-        "profile_id": profile_id,
-        "model": model,
-        "api_base": api_base,
-        "thinking": thinking,
+        "profile_id": resolved.get("profile_id") or "",
+        "model": resolved.get("model") or "",
+        "api_base": resolved.get("api_base") or "",
+        "thinking": bool(resolved.get("thinking")),
+        "thinking_effort": resolved.get("thinking_effort") or "",
         "configured": service.has_llm_config(purpose, session_id),
     }
 
@@ -250,6 +252,7 @@ async def api_model_profiles(request: web.Request):
         "default_chat_model_profile": service.config.get("default_chat_model_profile", ""),
         "default_fast_model_profile": service.config.get("default_fast_model_profile", ""),
         "default_vision_model_profile": service.config.get("default_vision_model_profile", ""),
+        "available_global_models": service.global_model_catalog() if is_admin(request) else [],
         "resolved": {
             "chat": resolved_model_summary(service, "chat", session_id),
             "image": resolved_model_summary(service, "image", session_id),
@@ -269,6 +272,7 @@ async def api_save_model_profile(request: web.Request):
     payload = await request.json()
     if not isinstance(payload, dict):
         return json_error("模型配置必须是 JSON 对象")
+    catalog_source_profile_id = str(payload.pop("_catalog_source_profile_id", "") or "").strip()
     scope_value = payload.pop("_scope", None)
     if scope_value is None:
         scope_value = payload.pop("scope", None)
@@ -282,6 +286,20 @@ async def api_save_model_profile(request: web.Request):
         async with config_operation_lock(service):
             profiles = copy.deepcopy(service._global_model_profiles())
             payload = merge_model_profile_secrets(payload, profiles.get(profile_id) or {})
+            if not payload.get("api_key") and catalog_source_profile_id:
+                source_profile = profiles.get(catalog_source_profile_id) or {}
+                requested_base = _normalize_openai_api_base(payload.get("base_url"))
+                for base_key, secret_key in (
+                    ("base_url", "api_key"),
+                    ("base_url_no_think", "api_key_no_think"),
+                ):
+                    if (
+                        requested_base
+                        and requested_base == _normalize_openai_api_base(source_profile.get(base_key))
+                        and source_profile.get(secret_key)
+                    ):
+                        payload["api_key"] = source_profile[secret_key]
+                        break
             profiles[profile_id] = payload
             candidate = copy.deepcopy(service.config)
             candidate["global_model_profiles"] = profiles
@@ -342,15 +360,12 @@ async def api_update_model_settings(request: web.Request):
     for key in ("chat_profile_id", "fast_profile_id", "vision_profile_id"):
         if key in payload:
             kwargs[key] = str(payload.get(key) or "")
-    # 三模型 thinking 开关：三态（空/None=跟随 profile，true/false=强制）
+    # 三模型 thinking 共用单字段：空=跟随 profile，true/false=旧开关，字符串=effort。
     for key in ("chat_thinking", "fast_thinking", "vision_thinking"):
         if key in payload:
-            raw = payload.get(key)
-            if raw in (None, ""):
-                kwargs[key] = None
-            elif isinstance(raw, bool):
-                kwargs[key] = raw
-            else:
-                kwargs[key] = parse_bool(raw)
+            try:
+                kwargs[key] = normalize_thinking_setting(payload.get(key))
+            except ValueError as exc:
+                return json_error(f"{key} 无效：{exc}")
     settings = service.app_store.update_user_model_settings(user_id, **kwargs)
     return json_ok({"settings": settings})
