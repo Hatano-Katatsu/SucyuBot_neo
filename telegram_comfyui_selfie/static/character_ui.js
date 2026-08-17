@@ -917,6 +917,7 @@ async function loadMemories() {
         </div>
         <button data-memory-save="${mem.id}" type="button">保存</button>
         <button class="danger" data-memory-delete="${mem.id}" type="button">删除</button>
+        ${mem.source ? `<div class="memory-source" title="${escapeHtml(String(mem.source))}">来源：${escapeHtml(String(mem.source))}</div>` : ""}
       </div>
     `).join("");
     box.innerHTML = `

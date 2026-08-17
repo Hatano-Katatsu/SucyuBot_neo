@@ -1206,3 +1206,46 @@ class WebUICharacterTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(svc._last_generated_nltag, "old-global-nltag")
 
         asyncio.run(run())
+
+
+class WebUIMemorySourceTestCase(ServiceFixtureMixin, unittest.TestCase):
+    """记忆 source 展示回归：API 返回 source，前端转义渲染，admin_logs 不留未转义拼接。"""
+
+    def test_memories_api_includes_source(self):
+        async def run():
+            from aiohttp import web
+            from aiohttp.test_utils import make_mocked_request
+            from telegram_comfyui_selfie.webui import api_memories
+
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.memory.add_memory(sid, "preference", "喜欢草莓", character="角色A", source="chat")
+            app = web.Application()
+            app["service"] = svc
+            req = make_mocked_request(
+                "GET",
+                f"/api/sessions/{sid}/memories?character_key=角色A&limit=80",
+                app=app,
+                match_info={"session_id": sid},
+            )
+            req["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+
+            data = json.loads((await api_memories(req)).text)
+
+            self.assertTrue(data["ok"])
+            self.assertEqual(data["memories"][0]["source"], "chat")
+
+        asyncio.run(run())
+
+    def test_memory_source_rendering_is_escaped(self):
+        root = Path(__file__).resolve().parents[1]
+        character_js = (root / "telegram_comfyui_selfie" / "static" / "character_ui.js").read_text(encoding="utf-8")
+        self.assertIn('来源：${escapeHtml(String(mem.source))}', character_js)
+        # 未转义的 source 直接拼 innerHTML 属于存储型 XSS，禁止回退
+        self.assertNotIn('来源：${mem.source}', character_js)
+
+    def test_admin_logs_session_title_is_escaped(self):
+        root = Path(__file__).resolve().parents[1]
+        admin_logs_js = (root / "telegram_comfyui_selfie" / "static" / "admin_logs.js").read_text(encoding="utf-8")
+        self.assertIn('escapeHtml(String(item.character || item.chat_id))', admin_logs_js)
+        self.assertNotIn('<div class="session-title">${item.character || item.chat_id}</div>', admin_logs_js)

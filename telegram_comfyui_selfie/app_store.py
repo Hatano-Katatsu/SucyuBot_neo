@@ -474,6 +474,7 @@ class AppStateStore:
                 "last_checkpoint_at": 0,
                 "last_checkpoint_message_id": 0,
                 "character_history_summary": "",
+                "last_memory_organize_watermark": 0,
             }
         else:
             result = dict(row)
@@ -509,6 +510,21 @@ class AppStateStore:
                     character_history_summary = excluded.character_history_summary
                 """,
                 (session_id, character_key or "", summary or ""),
+            )
+            conn.commit()
+        self._read_cache.pop(f"meta:{session_id}:{character_key or ''}", None)
+
+    def mark_memory_organize_watermark(self, session_id: str, character_key: str, watermark: float) -> None:
+        """记录记忆整理完成时记忆表的最大 updated_at，供事件驱动跳过判断。"""
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO context_meta(session_id, character_key, last_memory_organize_watermark)
+                VALUES (?, ?, ?)
+                ON CONFLICT(session_id, character_key) DO UPDATE SET
+                    last_memory_organize_watermark = excluded.last_memory_organize_watermark
+                """,
+                (session_id, character_key or "", float(watermark or 0)),
             )
             conn.commit()
         self._read_cache.pop(f"meta:{session_id}:{character_key or ''}", None)

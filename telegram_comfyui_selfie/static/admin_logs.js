@@ -165,7 +165,7 @@ function renderLogList(meta) {
     const btn = document.createElement("button");
     btn.className = "session-item";
     btn.dataset.chat = item.chat_id;
-    btn.innerHTML = `<div class="session-title">${item.character || item.chat_id}</div><div class="session-meta">${item.chat_id} · ${item.mtime_ago} · ${formatBytes(item.size)}</div>`;
+    btn.innerHTML = `<div class="session-title">${escapeHtml(String(item.character || item.chat_id))}</div><div class="session-meta">${escapeHtml(String(item.chat_id))} · ${item.mtime_ago} · ${formatBytes(item.size)}</div>`;
     btn.onclick = () => selectLog(item.chat_id);
     list.appendChild(btn);
   });

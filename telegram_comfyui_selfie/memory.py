@@ -372,7 +372,7 @@ class LongTermMemoryStore:
                 f"""
                 SELECT * FROM memories
                 WHERE {scope} {status_sql}
-                ORDER BY CASE WHEN kind = ? THEN 0 ELSE 1 END, importance DESC, updated_at DESC
+                ORDER BY CASE WHEN kind = ? THEN 0 ELSE 1 END, importance DESC, COALESCE(last_used_at, updated_at) DESC
                 LIMIT ?
                 """,
                 (*params, USER_PROFILE_KIND, int(limit)),
@@ -482,6 +482,51 @@ class LongTermMemoryStore:
         result = self.list_memories(session_id, character=character, limit=limit)
         self._mem_cache[cache_key] = result
         return result
+
+    def touch_memories(self, session_id: str, ids: Any, *, character: str | None = None) -> int:
+        """批量更新 last_used_at；只动使用时间戳，内容未变，不失效记忆读缓存。"""
+        if isinstance(ids, (str, bytes)):
+            return 0
+        try:
+            raw_ids = list(ids)
+        except TypeError:
+            return 0
+        normalized: list[int] = []
+        for value in raw_ids:
+            if isinstance(value, bool):
+                continue
+            try:
+                memory_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if memory_id > 0 and memory_id not in normalized:
+                normalized.append(memory_id)
+        if not normalized:
+            return 0
+        scope, params = self._scope_clause(session_id, character)
+        now = time.time()
+        updated = 0
+        with closing(self._connect()) as conn:
+            for offset in range(0, len(normalized), 500):
+                chunk = normalized[offset:offset + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                cur = conn.execute(
+                    f"UPDATE memories SET last_used_at = ? WHERE {scope} AND id IN ({placeholders})",
+                    (now, *params, *chunk),
+                )
+                updated += int(cur.rowcount or 0)
+            conn.commit()
+        return updated
+
+    def max_updated_at(self, session_id: str, *, character: str | None = None) -> float:
+        """该范围（含已停用）记忆的最大 updated_at，用于判断上次整理后是否有写入。"""
+        scope, params = self._scope_clause(session_id, character)
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                f"SELECT MAX(updated_at) AS m FROM memories WHERE {scope}",
+                tuple(params),
+            ).fetchone()
+        return float(row["m"] or 0) if row else 0.0
 
     def _evict_mem_cache(self, session_id: str, character: str = "") -> None:
         prefix = f"{session_id}:{character or ''}:"

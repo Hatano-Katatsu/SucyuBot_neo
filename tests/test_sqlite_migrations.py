@@ -155,6 +155,7 @@ class SQLiteMigrationTestCase(unittest.TestCase):
                 self.assertEqual(_user_version(path), LATEST_SCHEMA_VERSION)
                 self.assertIn("character", _columns(path, "memories"))
                 self.assertIn("character_history_summary", _columns(path, "context_meta"))
+                self.assertIn("last_memory_organize_watermark", _columns(path, "context_meta"))
                 self.assertIn("vision_profile_id", _columns(path, "user_model_settings"))
                 self.assertIn("payload", _columns(path, "telegram_update_inbox"))
                 settings = app_store.get_user_model_settings(f"v{historical_version}")
@@ -168,6 +169,8 @@ class SQLiteMigrationTestCase(unittest.TestCase):
                     self.assertNotIn("character", _columns(backup, "memories"))
                 if historical_version < 3:
                     self.assertNotIn("character_history_summary", _columns(backup, "context_meta"))
+                if historical_version < 7:
+                    self.assertNotIn("last_memory_organize_watermark", _columns(backup, "context_meta"))
                 if historical_version < 4:
                     self.assertNotIn("vision_profile_id", _columns(backup, "user_model_settings"))
                 if historical_version < 5:

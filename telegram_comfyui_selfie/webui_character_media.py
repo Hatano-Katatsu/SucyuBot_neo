@@ -144,9 +144,17 @@ async def _generate_character_avatar_locked(service, sid: str, character_id: str
         service._ulog(sid, "ERROR", f"CHARACTER_AVATAR_SAVE_FAILED character={character_id} error={exc}")
         return json_error(f"头像保存失败: {exc}", status=500)
     marker = _avatar_public_marker(service, sid, character_id)
-    updated_at = time.time()
     saved = session_schema.get_saved_characters(state)
     stored = dict(saved.get(character_id) or character)
+    updated_at = time.time()
+    # Windows 下 time.time() 分辨率受系统计时器 tick 限制（约 15ms），
+    # 连续两次生成可能拿到相同值；前端以它做缓存戳，必须保证单调递增。
+    try:
+        previous_updated_at = float(stored.get("avatar_updated_at") or 0)
+    except (TypeError, ValueError):
+        previous_updated_at = 0.0
+    if updated_at <= previous_updated_at:
+        updated_at = previous_updated_at + 0.001
     stored["avatar_path"] = marker
     stored["avatar_updated_at"] = updated_at
     saved[character_id] = stored

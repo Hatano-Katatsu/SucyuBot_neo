@@ -105,6 +105,8 @@ telegram_comfyui_selfie/
 - 角色历史提要以软目标字数引导精炼，排除流水账、重复事实和不改变长期走向的细节，但不得为满足目标而牺牲关系阶段、未解事件、心理边界与后续演绎方向。另设宽松硬字符上限作为模型失控兜底；超限先进行价值压缩，最终机械截断必须兼顾开头关系背景和末尾扮演提示，并优先落在自然文本边界。
 - 手动记忆不可被自动整理删除。自动提取可通过配置关闭，但角色历史总结与 dream 仍可独立工作。
 - 增量整理允许只调整重要性；只有记忆显著超限才执行全量重写。重写失败时不得先删除旧记忆。
+- dream 后整理按事件驱动：上次整理完成时的记忆最大 `updated_at` 记录在 `context_meta.last_memory_organize_watermark`，之后零写入则跳过；首次运行（无水位）不跳过。重要性 1-5 打分锚点在提取/增量整理/全量重写 prompt 中保持同一口径。
+- `last_used_at` 只在记忆注入 prompt 时由 `touch_memories` 刷新，不改 `updated_at` 也不失效记忆读缓存；`list_memories` 同重要性时按 `COALESCE(last_used_at, updated_at)` 排序。
 - `character_card.py` 是角色卡字段单一来源。角色切换必须保存并恢复该角色的上下文、衣柜、地点和照片历史。
 - `/角色 clearup` 级联清空长期记忆、日记、检查点和检查点目录；删除角色统一走 `delete_character()`。WebUI 会话隐藏/彻底删除入口已废弃，不再为其保留前端静态回归测试；遗留会话清理代码如被内部调用，仍须通过 `delete_session()` 停稳作用域任务，再以单事务清库并清理检查点、头像和缓存。
 - checkpoint、context_meta、长期记忆查询有会话级读缓存；写入操作（upsert_checkpoint、add_memory 等）失效对应缓存键。

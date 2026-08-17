@@ -282,6 +282,17 @@ def _migration_v6_model_thinking_settings(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migration_v7_memory_organize_watermark(conn: sqlite3.Connection) -> None:
+    """上下文元数据增加记忆整理水位：记录上次整理完成时记忆表的最大 updated_at。"""
+
+    _add_column_if_missing(
+        conn,
+        "context_meta",
+        "last_memory_organize_watermark",
+        "last_memory_organize_watermark REAL NOT NULL DEFAULT 0",
+    )
+
+
 SCHEMA_MIGRATIONS: tuple[Migration, ...] = (
     (1, "base_schema", _migration_v1_base_schema),
     (2, "character_memories", _migration_v2_character_memories),
@@ -289,6 +300,7 @@ SCHEMA_MIGRATIONS: tuple[Migration, ...] = (
     (4, "vision_profile", _migration_v4_vision_profile),
     (5, "telegram_update_inbox", _migration_v5_telegram_update_inbox),
     (6, "model_thinking_settings", _migration_v6_model_thinking_settings),
+    (7, "memory_organize_watermark", _migration_v7_memory_organize_watermark),
 )
 LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS[-1][0]
 
@@ -343,6 +355,8 @@ def _validate_schema(conn: sqlite3.Connection, version: int) -> None:
         missing.append("memories:[character]")
     if version >= 3 and "character_history_summary" not in _table_columns(conn, "context_meta"):
         missing.append("context_meta:[character_history_summary]")
+    if version >= 7 and "last_memory_organize_watermark" not in _table_columns(conn, "context_meta"):
+        missing.append("context_meta:[last_memory_organize_watermark]")
     if version >= 4 and "vision_profile_id" not in _table_columns(conn, "user_model_settings"):
         missing.append("user_model_settings:[vision_profile_id]")
     if version >= 6:

@@ -26,6 +26,23 @@ from .http_limits import read_limited_json, response_limit
 
 logger = logging.getLogger(__name__)
 
+# 记忆 source 字段的入库上限，与 memory.py 的截断口径保持一致
+_MEMORY_SOURCE_LIMIT = 800
+
+
+def compose_organize_source(existing_source: Any, reason: Any, *, date_str: str) -> str:
+    """把增量整理的 reason 追加到记忆 source；超长时保留头部原始来源与尾部最新整理记录。"""
+    entry = f"整理@{date_str}: {str(reason or '').strip()[:300]}"
+    existing = str(existing_source or "").strip()
+    combined = f"{existing}；{entry}" if existing else entry
+    if len(combined) <= _MEMORY_SOURCE_LIMIT:
+        return combined
+    head_budget = _MEMORY_SOURCE_LIMIT - len(entry) - 2  # 2 = "…；" 分隔符
+    if head_budget < 80:
+        # 整理记录本身已接近上限时只保留尾部最新记录
+        return ("…；" + entry)[-_MEMORY_SOURCE_LIMIT:]
+    return f"{existing[:head_budget]}…；{entry}"
+
 
 class SchedulerRuntimeMixin:
     _PUSH_SCENE_END_RE = re.compile(
@@ -1773,6 +1790,27 @@ class SchedulerRuntimeMixin:
             result = {"status": "skipped", "reason": "no_chat_or_fast_llm", "character": character_key}
             self._ulog(session_id, "MEMORY", f"整理跳过 {json.dumps(result, ensure_ascii=False)}")
             return result
+        # 事件驱动跳过：上次整理完成后该角色记忆零写入（add/update/delete/重写）时不重复整理，
+        # 避免空跑 LLM 与无谓的语义漂移；首次运行（无水位记录）不跳过。
+        try:
+            watermark = float(
+                self.app_store.get_context_meta(session_id, character_key).get("last_memory_organize_watermark") or 0
+            )
+        except Exception:
+            logger.debug("读取记忆整理水位失败", exc_info=True)
+            watermark = 0.0
+        current_max = self.memory.max_updated_at(session_id, character=character_key)
+        if watermark > 0 and current_max <= watermark:
+            result = {
+                "status": "skipped",
+                "reason": "no_memory_changes",
+                "character": character_key,
+                "watermark": watermark,
+                "max_updated_at": current_max,
+            }
+            logger.debug("记忆整理跳过：%s/%s 自上次整理后无写入", session_id, character_key)
+            self._ulog(session_id, "MEMORY", f"整理跳过 {json.dumps(result, ensure_ascii=False)}")
+            return result
         try:
             scan_limit = max(120, int(self.config.get("long_memory_organize_scan_limit", "1000") or 1000))
         except Exception:
@@ -1805,6 +1843,16 @@ class SchedulerRuntimeMixin:
                     self._ulog(session_id, "MEMORY", f"用户画像合并 {json.dumps(merge_result, ensure_ascii=False)}")
             except Exception:
                 logger.debug("merge user profile memories failed", exc_info=True)
+        # 整理成功（含 no_op）后刷新水位；失败不刷新，留给下次 dream 重试。
+        if result.get("status") in ("ok", "no_op"):
+            try:
+                self.app_store.mark_memory_organize_watermark(
+                    session_id,
+                    character_key,
+                    self.memory.max_updated_at(session_id, character=character_key),
+                )
+            except Exception:
+                logger.debug("更新记忆整理水位失败", exc_info=True)
         return result
 
     async def _incremental_organize_memories(
@@ -1846,11 +1894,30 @@ class SchedulerRuntimeMixin:
             "resolved, canceled, superseded, or has fully faded from recent diaries, checkpoint, and current window. "
             "Use kind=user_profile for durable facts about the human user: hobbies, behavior style, appearance, self-description, long-term preferences, and boundaries. "
             "User_profile is character-scoped; if there are multiple user_profile memories, merge them instead of keeping duplicates. "
-            "Return strict JSON: {\"ops\":[{\"op\":\"add|update|delete\",\"id\":123,\"kind\":\"user_profile|profile|preference|relationship|setting|boundary|visual|event|correction\",\"summary\":\"...\",\"importance\":1-5,\"tags\":[\"...\"]}]}"
+            "Importance scoring anchors (1-5, apply this scale consistently when adding or updating; do not default everything to 3): "
+            "1=fleeting daily detail (e.g. what was eaten at one meal); 2=mild preference; 3=clear preference, habit, or stable fact; "
+            "4=major relationship progress, strong like/dislike, or explicit promise; 5=boundary, correction, major event, or safety-related content. "
+            "Each editable memory is annotated with unused_days: days since it was last surfaced to the chat context ('never' means it has never been used). "
+            "Low-importance memories that have stayed unused for a long time are deletion candidates; "
+            "boundary/correction memories must be kept even when long unused. "
+            "Every update or delete op must include a \"reason\" field: one short Chinese sentence citing the evidence "
+            "(which memory, which diary entry, or which event justifies the change); add ops may optionally include it as a source note. "
+            "Return strict JSON: {\"ops\":[{\"op\":\"add|update|delete\",\"id\":123,\"kind\":\"user_profile|profile|preference|relationship|setting|boundary|visual|event|correction\",\"summary\":\"...\",\"importance\":1-5,\"tags\":[\"...\"],\"reason\":\"依据...\"}]}"
         )
         diary_text = "\n\n".join(f"[{d.get('diary_date')}]\n{d.get('content','')}" for d in (diaries or []))
+        now_ts = time.time()
+
+        def _unused_days(memory: dict[str, Any]) -> str:
+            try:
+                last_used = float(memory.get("last_used_at") or 0)
+            except (TypeError, ValueError):
+                last_used = 0.0
+            if last_used <= 0:
+                return "never"
+            return str(max(0, int((now_ts - last_used) // 86400)))
+
         mem_text = "\n".join(
-            f"{m['id']}. [{m.get('kind')}/importance={m.get('importance', 3)}/tags={','.join(m.get('tags') or [])}] {m.get('summary')}"
+            f"{m['id']}. [{m.get('kind')}/importance={m.get('importance', 3)}/unused_days={_unused_days(m)}/tags={','.join(m.get('tags') or [])}] {m.get('summary')}"
             for m in editable
         )
         user = f"Recent diaries:\n{diary_text}\n\nCheckpoint:\n{checkpoint or 'none'}\n\nCurrent dialogue role legend:\n{role_legend}\n\nCurrent window:\n{current or 'none'}\n\nEditable memories:\n{mem_text or 'none'}"
@@ -1884,44 +1951,66 @@ class SchedulerRuntimeMixin:
         applied = 0
         failed = 0
         details: list[dict[str, Any]] = []
+        organize_date = time.strftime("%Y-%m-%d")
+        source_by_id = {int(m["id"]): m.get("source") for m in editable}
         for op in ops[:30]:
-            if not isinstance(op, dict):
+            # 单条 op 失败隔离：脏数据（如非数字 id）只记入 failed，不中止整个 dream 整理。
+            try:
+                if not isinstance(op, dict):
+                    failed += 1
+                    detail = {"op": "invalid", "ok": False, "request": op, "result": "op is not object"}
+                    details.append(detail)
+                    self._record_memory_operation_failure(session_id, "dream-memory-op", op, detail)
+                    continue
+                action = str(op.get("op") or "").lower()
+                reason = str(op.get("reason") or "").strip()
+                ok = False
+                result_detail: dict[str, Any] = {"op": action or "unknown", "id": op.get("id"), "ok": False}
+                if reason:
+                    result_detail["reason"] = reason[:200]
+                if action == "add" and op.get("summary"):
+                    add_source = compose_organize_source("dream", reason, date_str=organize_date) if reason else "dream"
+                    mid = self.memory.add_memory(session_id, op.get("kind", "event"), op.get("summary", ""), character=character_key, importance=op.get("importance", 3), tags=op.get("tags") or [], source=add_source)
+                    ok = mid is not None
+                    result_detail.update({"id": mid, "ok": ok, "summary": self._log_excerpt(op.get("summary"), 160)})
+                elif action == "update" and op.get("id") and any(key in op for key in ("summary", "kind", "importance", "tags")):
+                    memory_id = int(op.get("id"))
+                    # 有 reason 时把整理依据追加进 source（保留原有来源）；无 reason 不拒绝，仅跳过 source 更新。
+                    update_source = (
+                        compose_organize_source(source_by_id.get(memory_id) or "", reason, date_str=organize_date)
+                        if reason else None
+                    )
+                    ok = self.memory.update_memory(
+                        session_id,
+                        memory_id,
+                        character=character_key,
+                        summary=op.get("summary") if "summary" in op else None,
+                        kind=op.get("kind") if "kind" in op else None,
+                        importance=op.get("importance") if "importance" in op else None,
+                        tags=op.get("tags") if "tags" in op else None,
+                        source=update_source,
+                    )
+                    result_detail.update({"ok": ok, "summary": self._log_excerpt(op.get("summary"), 160)})
+                elif action == "delete" and op.get("id"):
+                    ok = self.memory.deactivate_non_manual_memory(session_id, int(op.get("id")), character=character_key)
+                    result_detail.update({"ok": ok})
+                else:
+                    result_detail.update({"ok": False, "error": "invalid op or missing required fields"})
+                if ok:
+                    applied += 1
+                    # delete 等无源可写的 op 的 reason 通过这条 ulog 留痕
+                    self._ulog(session_id, "MEMORY", f"增量整理 op={action} result={json.dumps(result_detail, ensure_ascii=False, default=str)}")
+                else:
+                    failed += 1
+                    self._record_memory_operation_failure(session_id, "dream-memory-op", op, result_detail)
+                details.append(result_detail)
+            except Exception as exc:
                 failed += 1
-                detail = {"op": "invalid", "ok": False, "request": op, "result": "op is not object"}
+                logger.warning("dream memory op 执行失败，跳过后续处理: %s", exc, exc_info=True)
+                detail = {"op": str(op.get("op") or "unknown") if isinstance(op, dict) else "invalid", "id": op.get("id") if isinstance(op, dict) else None, "ok": False, "error": str(exc)}
                 details.append(detail)
                 self._record_memory_operation_failure(session_id, "dream-memory-op", op, detail)
                 continue
-            action = str(op.get("op") or "").lower()
-            ok = False
-            result_detail: dict[str, Any] = {"op": action or "unknown", "id": op.get("id"), "ok": False}
-            if action == "add" and op.get("summary"):
-                mid = self.memory.add_memory(session_id, op.get("kind", "event"), op.get("summary", ""), character=character_key, importance=op.get("importance", 3), tags=op.get("tags") or [], source="dream")
-                ok = mid is not None
-                result_detail.update({"id": mid, "ok": ok, "summary": self._log_excerpt(op.get("summary"), 160)})
-            elif action == "update" and op.get("id") and any(key in op for key in ("summary", "kind", "importance", "tags")):
-                ok = self.memory.update_memory(
-                    session_id,
-                    int(op.get("id")),
-                    character=character_key,
-                    summary=op.get("summary") if "summary" in op else None,
-                    kind=op.get("kind") if "kind" in op else None,
-                    importance=op.get("importance") if "importance" in op else None,
-                    tags=op.get("tags") if "tags" in op else None,
-                    source="dream",
-                )
-                result_detail.update({"ok": ok, "summary": self._log_excerpt(op.get("summary"), 160)})
-            elif action == "delete" and op.get("id"):
-                ok = self.memory.deactivate_non_manual_memory(session_id, int(op.get("id")), character=character_key)
-                result_detail.update({"ok": ok})
-            else:
-                result_detail.update({"ok": False, "error": "invalid op or missing required fields"})
-            if ok:
-                applied += 1
-                self._ulog(session_id, "MEMORY", f"增量整理 op={action} result={json.dumps(result_detail, ensure_ascii=False, default=str)}")
-            else:
-                failed += 1
-                self._record_memory_operation_failure(session_id, "dream-memory-op", op, result_detail)
-            details.append(result_detail)
         status = "ok" if failed == 0 else ("partial_failed" if applied else "failed")
         result = {
             "status": status,
@@ -1957,6 +2046,9 @@ class SchedulerRuntimeMixin:
             "or has fully faded from recent diaries and checkpoint. "
             "Each memory should be self-contained and cover a broader theme rather than a single fact. "
             "Never include manual memories. "
+            "Importance scoring anchors (1-5, apply this scale consistently; do not default everything to 3): "
+            "1=fleeting daily detail; 2=mild preference; 3=clear preference, habit, or stable fact; "
+            "4=major relationship progress, strong like/dislike, or explicit promise; 5=boundary, correction, major event, or safety-related content. "
             "Use kind=user_profile for durable facts about the human user: hobbies, behavior style, appearance, self-description, long-term preferences, and boundaries. "
             "There must be at most one user_profile memory in the output for this character; merge all user-profile details into that one item. "
             f"Return strict JSON: {{\"memories\":[{{\"kind\":\"user_profile|profile|preference|relationship|setting|boundary|visual|event|correction\","

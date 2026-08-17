@@ -51,11 +51,18 @@ class MemoryPolicyMixin:
     def _long_term_memory_context(self, session_id: str, limit: int | None = None) -> str:
         if not session_id or not self._long_memory_enabled():
             return ""
+        character = self._memory_character(session_id)
         memories = self.memory.context_memories(
-            session_id, character=self._memory_character(session_id), limit=limit or self._long_memory_limit()
+            session_id, character=character, limit=limit or self._long_memory_limit()
         )
         if not memories:
             return ""
+        # 在「注入 prompt」这一层记录使用：缓存命中也算被想起；touch 只写 last_used_at，
+        # 不改内容，因此不失效 context_memories 读缓存。
+        try:
+            self.memory.touch_memories(session_id, [m.get("id") for m in memories], character=character)
+        except Exception:
+            logger.debug("touch memory last_used_at failed", exc_info=True)
         return format_memory_lines(memories, with_ids=False)
 
     def _long_memory_structured_fields(self, session_id: str, character: str | None = None) -> list[tuple[str, Any]]:
@@ -188,7 +195,11 @@ class MemoryPolicyMixin:
             "例如：用户说「我迟到了」→ 不要推断出「迟到要请吃东西」；用户说「送你一个发卡」→ 不要推断出「发卡是某种约定的象征」。\n"
             "如果已有相关记忆已经覆盖，不要重复输出。\n"
             "必须输出严格 JSON: {\"memories\":[{\"kind\":\"user_profile|profile|preference|relationship|setting|boundary|visual|event|correction\","
-            "\"summary\":\"一句中文记忆摘要\",\"importance\":1-5,\"tags\":[\"标签\"]}]}。没有值得保存的内容时 memories 为空数组。"
+            "\"summary\":\"一句中文记忆摘要\",\"importance\":1-5,\"tags\":[\"标签\"]}]}。没有值得保存的内容时 memories 为空数组。\n"
+            "importance 打分锚点（严格按此口径区分，不要默认都打 3）: "
+            "1=转瞬即逝的日常细节（某顿吃了什么、某天穿了什么）；2=轻微偏好或顺带一提的爱好；"
+            "3=明确的偏好、习惯或稳定事实；4=重要的关系进展、强烈好恶、明确约定；"
+            "5=边界、纠正、重大事件或安全相关内容。"
         )
         if assistant_text:
             source_block = f"本轮对话:\n用户/User: {user_text}\n角色/Assistant: {assistant_text or '（无文字回复）'}"
