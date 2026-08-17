@@ -517,6 +517,56 @@ class ModelProfileTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_global_model_profile_update_preserves_hidden_fields_and_delete_works(self):
+        from telegram_comfyui_selfie.webui_models import api_delete_model_profile, api_save_model_profile
+
+        async def run():
+            svc = self.make_service()
+            svc.config["global_model_profiles"] = {
+                "editable": {
+                    "name": "Before",
+                    "base_url": "https://models.example/v1",
+                    "api_key": "keep-secret",
+                    "model": "old-model",
+                    "disable_thinking": True,
+                    "thinking_fixed": True,
+                    "thinking_control": "param_always",
+                },
+            }
+
+            save_response = await api_save_model_profile(JsonRequest(
+                svc,
+                {
+                    "_scope": "global",
+                    "name": "After",
+                    "base_url": "https://models.example/v1/chat/completions",
+                    "model": "new-model",
+                    "max_tokens": "8192",
+                    "timeout": "120",
+                },
+                match_info={"profile_id": "editable"},
+            ))
+
+            self.assertTrue(json.loads(save_response.text)["ok"])
+            updated = svc.config["global_model_profiles"]["editable"]
+            self.assertEqual(updated["name"], "After")
+            self.assertEqual(updated["model"], "new-model")
+            self.assertEqual(updated["api_key"], "keep-secret")
+            self.assertTrue(updated["disable_thinking"])
+            self.assertTrue(updated["thinking_fixed"])
+            self.assertEqual(updated["thinking_control"], "param_always")
+
+            delete_response = await api_delete_model_profile(JsonRequest(
+                svc,
+                {},
+                match_info={"profile_id": "editable"},
+                query={"scope": "global"},
+            ))
+            self.assertTrue(json.loads(delete_response.text)["ok"])
+            self.assertNotIn("editable", svc.config["global_model_profiles"])
+
+        asyncio.run(run())
+
     def test_service_loads_model_catalog_before_web_console(self):
         async def run():
             svc = self.make_service()

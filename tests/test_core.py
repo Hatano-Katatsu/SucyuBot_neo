@@ -884,10 +884,6 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn('<option value="false">关闭</option>', model_section)
         for effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
             self.assertIn(f'<option value="{effort}">Effort · {effort}</option>', model_section)
-        self.assertIn('const modelCatalogId = "available-global-model-list"', model_section)
-        self.assertIn('<datalist id="${modelCatalogId}">', model_section)
-        self.assertIn('id="global-model-profile-loader"', model_section)
-        self.assertIn("available_global_models", model_section)
         # 不暴露 profile 级内部字段
         self.assertNotIn("disable_thinking", model_section)
         self.assertNotIn("thinking_fixed", model_section)
@@ -896,6 +892,25 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("model_no_think", model_section)
         self.assertNotIn("model_think", model_section)
         self.assertIn("同一 API Base 和模型名", model_section)
+        self.assertIn("这里只管理当前用户的私有 profile", model_section)
+        self.assertNotIn('name="_scope"', model_section)
+
+    def test_settings_has_dedicated_admin_global_model_crud_panel(self):
+        root = Path(__file__).resolve().parents[1]
+        app_js = (root / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
+        index_html = (root / "telegram_comfyui_selfie" / "static" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="global-model-manager"', index_html)
+        self.assertIn("全局模型配置", index_html)
+        global_section = app_js.split("async function loadGlobalModels", 1)[1].split("async function loadModels", 1)[0]
+        self.assertIn("available_global_models", global_section)
+        self.assertIn('id="global-model-profile-select"', global_section)
+        self.assertIn('id="global-model-new"', global_section)
+        self.assertIn('id="global-model-save"', global_section)
+        self.assertIn('id="global-model-delete"', global_section)
+        self.assertIn('const body = { _scope: "global" }', global_section)
+        self.assertIn('method: "POST"', global_section)
+        self.assertIn('?scope=global`, { method: "DELETE" }', global_section)
+        self.assertIn('if (name === "settings" && state.auth?.role === "admin") loadGlobalModels()', app_js)
 
     def test_config_sampling_params_switch_controls_detail_panel(self):
         app_js = (Path(__file__).resolve().parents[1] / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")

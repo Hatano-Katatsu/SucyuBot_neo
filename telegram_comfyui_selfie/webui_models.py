@@ -285,7 +285,10 @@ async def api_save_model_profile(request: web.Request):
         require_admin(request)
         async with config_operation_lock(service):
             profiles = copy.deepcopy(service._global_model_profiles())
-            payload = merge_model_profile_secrets(payload, profiles.get(profile_id) or {})
+            current_profile = profiles.get(profile_id) or {}
+            merged_payload = copy.deepcopy(current_profile)
+            merged_payload.update(payload)
+            payload = merge_model_profile_secrets(merged_payload, current_profile)
             if not payload.get("api_key") and catalog_source_profile_id:
                 source_profile = profiles.get(catalog_source_profile_id) or {}
                 requested_base = _normalize_openai_api_base(payload.get("base_url"))

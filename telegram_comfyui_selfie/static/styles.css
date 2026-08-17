@@ -626,6 +626,45 @@ select {
   gap: 16px;
 }
 
+.global-model-config-panel {
+  margin: 0 0 16px;
+}
+
+.global-model-toolbar {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.global-model-toolbar label {
+  flex: 1 1 320px;
+}
+
+.global-model-toolbar > .muted {
+  margin-left: auto;
+  padding-bottom: 9px;
+}
+
+.global-model-form {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-subtle);
+}
+
+.global-model-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 12px 14px;
+}
+
+.global-model-actions {
+  margin-top: 2px;
+}
+
 .form-section {
   padding: 16px;
 }
@@ -1724,7 +1763,7 @@ select {
 
 /* Mobile / responsive */
 @media (max-width: 1100px) {
-  .field-grid, .slot-edit-grid, .effective-grid, .prompt-slot-preview, .runtime-clothing-layout {
+  .field-grid, .slot-edit-grid, .effective-grid, .prompt-slot-preview, .runtime-clothing-layout, .global-model-form-grid {
     grid-template-columns: 1fr;
   }
 

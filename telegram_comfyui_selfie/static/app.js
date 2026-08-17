@@ -294,6 +294,7 @@ function switchView(name) {
   if (name === "logs") loadLogs();
   if (name === "usage") loadUsage();
   if (name === "characters") loadCharacterPage();
+  if (name === "settings" && state.auth?.role === "admin") loadGlobalModels();
 }
 
 async function loadAll() {
@@ -332,6 +333,8 @@ async function loadAll() {
     state.secretPresent = state.secretPresent || {};
   }
   if (modelData) {
+    state.globalProfiles = modelData.global_profiles || {};
+    state.userProfiles = modelData.user_profiles || {};
     state.profiles = { ...(modelData.global_profiles || {}), ...(modelData.user_profiles || {}) };
   }
   state.sessions = (sessions && sessions.sessions) || [];
@@ -346,7 +349,10 @@ async function loadAll() {
   renderSessionSelector();
   loadFeedbackBoard();
   renderStatus();
-  if (isAdmin) renderConfig();
+  if (isAdmin) {
+    renderConfig();
+    await loadGlobalModels({ data: modelData });
+  }
   renderWorldSessionList();
   if (document.querySelector('.nav[data-view="characters"].active')) {
     loadCharacterPage();
@@ -553,10 +559,11 @@ function inputFor([key, label, type, layout], values) {
     extraNodes.push(hint);
   } else if (type === "model_select") {
     input = document.createElement("select");
-    const profileIds = Object.keys(state.profiles || {});
+    const profiles = state.globalProfiles || state.profiles || {};
+    const profileIds = Object.keys(profiles);
     const opts = ['<option value="">默认</option>'];
     profileIds.forEach(id => {
-      const p = state.profiles[id];
+      const p = profiles[id];
       const lbl = `${escapeHtml(id)} · ${escapeHtml(p?.name || p?.model || "")}`;
       opts.push(`<option value="${escapeHtml(id)}">${lbl}</option>`);
     });
@@ -660,6 +667,179 @@ function modelApiUrl(path = "/api/models") {
 
 // 角色管理异步操作实现在 character_ui.js。
 
+function syncConfigGlobalProfileSelects() {
+  const profiles = state.globalProfiles || {};
+  const options = Object.keys(profiles).sort((a, b) => a.localeCompare(b)).map(id => {
+    const profile = profiles[id] || {};
+    return `<option value="${escapeHtml(id)}">${escapeHtml(id)} · ${escapeHtml(profile.name || profile.model || "")}</option>`;
+  }).join("");
+  for (const key of ["default_chat_model_profile", "default_fast_model_profile", "default_vision_model_profile"]) {
+    const select = document.querySelector(`#config-form select[name="${key}"]`);
+    if (!select) continue;
+    const currentValue = select.value;
+    const missingOption = currentValue && !profiles[currentValue]
+      ? `<option value="${escapeHtml(currentValue)}">${escapeHtml(currentValue)} · 已不存在</option>`
+      : "";
+    select.innerHTML = `<option value="">默认</option>${options}${missingOption}`;
+    select.value = currentValue;
+  }
+}
+
+async function loadGlobalModels({ selectedProfileId = "", data = null } = {}) {
+  const box = $("#global-model-manager");
+  if (!box || state.auth?.role !== "admin") return;
+  const modelData = data || await api("/api/models");
+  const globalProfiles = modelData.global_profiles || {};
+  const availableGlobalModels = Array.isArray(modelData.available_global_models)
+    ? modelData.available_global_models
+    : [];
+  state.globalProfiles = globalProfiles;
+  state.profiles = { ...globalProfiles, ...(state.userProfiles || {}) };
+  syncConfigGlobalProfileSelects();
+
+  const profileOptions = Object.keys(globalProfiles).sort((a, b) => a.localeCompare(b)).map(id => {
+    const profile = globalProfiles[id] || {};
+    return `<option value="${escapeHtml(id)}">${escapeHtml(id)} · ${escapeHtml(profile.name || profile.model || "")}</option>`;
+  }).join("");
+  const modelCatalogId = "available-global-model-list";
+  const modelCatalogOptions = availableGlobalModels.map(item => {
+    const source = item.source_profile_id ? `来源 ${item.source_profile_id}` : "启动时发现";
+    return `<option value="${escapeHtml(item.id || "")}" label="${escapeHtml(`${source} · ${item.api_base || ""}`)}"></option>`;
+  }).join("");
+
+  box.innerHTML = `
+    <div class="global-model-toolbar">
+      <label>选择已有全局 profile
+        <select id="global-model-profile-select">
+          <option value="">新建全局 profile</option>
+          ${profileOptions}
+        </select>
+      </label>
+      <button id="global-model-new" type="button">新建全局 profile</button>
+      <span class="muted">已配置 ${Object.keys(globalProfiles).length} 个；启动时发现 ${availableGlobalModels.length} 个可用模型</span>
+    </div>
+    <form id="global-model-profile-form" class="global-model-form">
+      <div class="global-model-form-grid">
+        <label>Profile ID<input name="profile_id" placeholder="opencode-kimi" autocomplete="off" required></label>
+        <label>显示名称<input name="name" placeholder="OpenCode Kimi" autocomplete="off"></label>
+        <label>Base URL<input name="base_url" placeholder="https://api.example.com/v1 或完整 /chat/completions URL" autocomplete="off" required></label>
+        <label>API Key<input name="api_key" type="password" placeholder="填写新密钥；编辑时留空保留" autocomplete="new-password"></label>
+        <label>模型名<input name="model" list="${modelCatalogId}" placeholder="kimi-k2.5" autocomplete="off" required></label>
+        <label>最大 tokens<input name="max_tokens" type="number" min="1" step="1" inputmode="numeric" placeholder="可选"></label>
+        <label>超时秒数<input name="timeout" type="number" min="1" step="1" inputmode="numeric" placeholder="可选"></label>
+      </div>
+      <datalist id="${modelCatalogId}">${modelCatalogOptions}</datalist>
+      <div class="form-actions global-model-actions">
+        <button id="global-model-save" class="primary" type="submit">添加全局模型</button>
+        <button id="global-model-delete" class="danger" type="button" disabled>删除全局模型</button>
+      </div>
+      <p class="muted">从“模型名”的候选列表选择启动时发现的模型，可自动带入来源 Base URL，并安全复用同端点已有全局 profile 的密钥。API Key 永远不会回显；编辑时留空即可保留。</p>
+    </form>
+  `;
+
+  const form = $("#global-model-profile-form");
+  const profileSelect = $("#global-model-profile-select");
+  const profileIdInput = form.elements.profile_id;
+  const modelInput = form.elements.model;
+  const saveButton = $("#global-model-save");
+  const deleteButton = $("#global-model-delete");
+
+  const showProfile = profileId => {
+    form.reset();
+    delete form.dataset.catalogSourceProfileId;
+    delete form.dataset.editingProfileId;
+    profileIdInput.readOnly = false;
+    form.elements.api_key.placeholder = "填写新密钥；同端点候选可复用已有密钥";
+    saveButton.textContent = "添加全局模型";
+    deleteButton.disabled = true;
+    const profile = globalProfiles[profileId];
+    if (!profile) return;
+    form.dataset.editingProfileId = profileId;
+    profileIdInput.value = profileId;
+    profileIdInput.readOnly = true;
+    for (const key of ["name", "base_url", "model", "max_tokens", "timeout"]) {
+      form.elements[key].value = profile[key] ?? "";
+    }
+    form.elements.api_key.value = "";
+    form.elements.api_key.placeholder = profile.api_key
+      ? "已配置；留空保留原密钥"
+      : "尚未配置 API Key";
+    saveButton.textContent = "保存全局模型修改";
+    deleteButton.disabled = false;
+  };
+
+  profileSelect.onchange = () => showProfile(profileSelect.value);
+  $("#global-model-new").onclick = () => {
+    profileSelect.value = "";
+    showProfile("");
+    profileIdInput.focus();
+  };
+  modelInput.onchange = () => {
+    const entry = availableGlobalModels.find(item => item.id === modelInput.value.trim());
+    if (!entry) {
+      delete form.dataset.catalogSourceProfileId;
+      return;
+    }
+    form.dataset.catalogSourceProfileId = entry.source_profile_id || "";
+    form.elements.base_url.value = entry.api_base || form.elements.base_url.value;
+    if (!form.dataset.editingProfileId) {
+      if (!profileIdInput.value.trim()) profileIdInput.value = entry.id || "";
+      if (!form.elements.name.value.trim()) form.elements.name.value = entry.id || "";
+    }
+  };
+  form.onsubmit = async event => {
+    event.preventDefault();
+    const values = formValues(form);
+    const profileId = (values.profile_id || "").trim();
+    if (!profileId) return toast("请填写全局 Profile ID", "error");
+    const wasEditing = Boolean(form.dataset.editingProfileId);
+    if (!wasEditing && globalProfiles[profileId]) {
+      return toast("该全局 Profile ID 已存在，请先从上方下拉框选择后再修改", "error");
+    }
+    const body = { _scope: "global" };
+    for (const key of ["name", "base_url", "model", "max_tokens", "timeout"]) {
+      body[key] = (values[key] || "").trim();
+    }
+    const apiKey = (values.api_key || "").trim();
+    if (apiKey) body.api_key = apiKey;
+    if (form.dataset.catalogSourceProfileId) {
+      body._catalog_source_profile_id = form.dataset.catalogSourceProfileId;
+    }
+    setBusy(saveButton, true);
+    try {
+      await api(`/api/models/${encodeURIComponent(profileId)}`, { method: "POST", body });
+      await loadGlobalModels({ selectedProfileId: profileId });
+      toast(wasEditing ? "全局模型配置已更新" : "全局模型配置已添加");
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(saveButton, false);
+    }
+  };
+  deleteButton.onclick = async () => {
+    const profileId = form.dataset.editingProfileId || "";
+    if (!profileId) return;
+    if (!window.confirm(`确认删除全局 profile「${profileId}」？所有用户将无法再选择它。`)) return;
+    setBusy(deleteButton, true);
+    try {
+      await api(`/api/models/${encodeURIComponent(profileId)}?scope=global`, { method: "DELETE" });
+      await loadGlobalModels();
+      toast("全局模型配置已删除");
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(deleteButton, false);
+    }
+  };
+
+  if (selectedProfileId && globalProfiles[selectedProfileId]) {
+    profileSelect.value = selectedProfileId;
+    showProfile(selectedProfileId);
+  } else {
+    showProfile("");
+  }
+}
+
 async function loadModels() {
   const box = $("#model-manager");
   if (!box) return;
@@ -667,7 +847,6 @@ async function loadModels() {
   const globalProfiles = data.global_profiles || {};
   const userProfiles = data.user_profiles || {};
   const allProfiles = { ...globalProfiles, ...userProfiles };
-  const availableGlobalModels = Array.isArray(data.available_global_models) ? data.available_global_models : [];
   const ids = Object.keys(allProfiles);
   const settings = data.settings || {};
   const chatProfileId = settings.chat_profile_id || data.default_chat_model_profile || "";
@@ -689,21 +868,6 @@ async function loadModels() {
       : (item.thinking === undefined ? "" : (item.thinking ? " · 思考开" : " · 思考关"));
     return `${profile} / ${model} / ${configured}${thinking}`;
   };
-  const globalProfileLoader = state.auth?.role === "admin"
-    ? `<label>载入全局 profile<select id="global-model-profile-loader"><option value="">新建 / 手动填写</option>${Object.keys(globalProfiles).map(id => `<option value="${escapeHtml(id)}">${escapeHtml(id)} · ${escapeHtml(globalProfiles[id]?.name || globalProfiles[id]?.model || "")}</option>`).join("")}</select></label>`
-    : "";
-  const adminScopeControl = state.auth?.role === "admin"
-    ? `<label>保存范围<select name="_scope"><option value="user">当前用户私有</option><option value="global">全局 profile</option></select></label>`
-    : "";
-  const modelCatalogId = "available-global-model-list";
-  const modelCatalogOptions = availableGlobalModels.map(item => {
-    const source = item.source_profile_id ? `来源 ${item.source_profile_id}` : "启动时发现";
-    return `<option value="${escapeHtml(item.id || "")}" label="${escapeHtml(`${source} · ${item.api_base || ""}`)}"></option>`;
-  }).join("");
-  const modelCatalogList = state.auth?.role === "admin" && modelCatalogOptions
-    ? `<datalist id="${modelCatalogId}">${modelCatalogOptions}</datalist>`
-    : "";
-  const modelCatalogAttr = modelCatalogList ? ` list="${modelCatalogId}"` : "";
   const thinkingSelect = (name, label) => `
     <label>${label}<select name="${name}">
       <option value="">跟随模型</option>
@@ -734,19 +898,16 @@ async function loadModels() {
       <div>视觉: ${escapeHtml(resolvedText("vision"))}</div>
     </div>
     <form id="model-profile-form" class="inline-manager-form">
-      ${globalProfileLoader}
-      ${adminScopeControl}
-      <label>Profile ID<input name="profile_id" placeholder="deepseek-v4-pro" autocomplete="off"></label>
+      <label>私有 Profile ID<input name="profile_id" placeholder="my-chat-model" autocomplete="off"></label>
       <label>显示名称<input name="name" placeholder="DeepSeek V4 Pro" autocomplete="off"></label>
       <label>Base URL<input name="base_url" placeholder="https://api.example.com/v1" autocomplete="off"></label>
       <label>API Key<input name="api_key" type="password" placeholder="留空保留旧密钥" autocomplete="new-password"></label>
-      <label>模型名<input name="model"${modelCatalogAttr} placeholder="deepseek-chat" autocomplete="off"></label>
-      ${modelCatalogList}
+      <label>模型名<input name="model" placeholder="deepseek-chat" autocomplete="off"></label>
       <label>最大 tokens<input name="max_tokens" type="number" min="1" step="1" inputmode="decimal" placeholder="可选"></label>
       <label>超时秒数<input name="timeout" type="number" min="1" step="1" inputmode="decimal" placeholder="可选"></label>
-      <button type="submit">保存模型 profile</button>
-      <button id="delete-model-profile" class="danger" type="button">删除指定 profile</button>
-      <p class="muted">仅填写常用模型字段；api_key 返回时会显示为 ********，保存空值或 ******** 会保留原密钥。思考下拉框兼容原有开启/关闭，也可直接选择 reasoning effort。管理员可从服务启动时发现的 ${availableGlobalModels.length} 个模型中选择；选中新模型会带入来源 Base URL，并可安全复用同端点全局 profile 的密钥。对话与视觉选择解析到同一 API Base 和模型名时，用户发送或显式引用的图片会直接进入对话模型；否则先由视觉模型转成文字描述。</p>
+      <button type="submit">保存私有模型 profile</button>
+      <button id="delete-model-profile" class="danger" type="button">删除私有 profile</button>
+      <p class="muted">这里只管理当前用户的私有 profile；管理员请到“设置 → 全局模型配置”维护全局 profile。API Key 保存空值或 ******** 时会保留旧密钥。对话与视觉选择解析到同一 API Base 和模型名时，用户发送或显式引用的图片会直接进入对话模型；否则先由视觉模型转成文字描述。</p>
     </form>
   `;
   box.querySelector("[name=chat_profile_id]").value = settings.chat_profile_id || "";
@@ -756,33 +917,6 @@ async function loadModels() {
     const el = box.querySelector(`[name=${key}]`);
     if (el && settings[key] !== undefined && settings[key] !== null) el.value = String(settings[key]);
   });
-  const profileForm = $("#model-profile-form");
-  const profileLoader = $("#global-model-profile-loader");
-  if (profileLoader) {
-    profileLoader.onchange = () => {
-      const profileId = profileLoader.value;
-      const profile = globalProfiles[profileId];
-      if (!profile) return;
-      profileForm.elements._scope.value = "global";
-      profileForm.elements.profile_id.value = profileId;
-      ["name", "base_url", "api_key", "model", "max_tokens", "timeout"].forEach(key => {
-        profileForm.elements[key].value = profile[key] ?? "";
-      });
-      profileForm.dataset.catalogSourceProfileId = profileId;
-    };
-  }
-  const catalogModelInput = profileForm.elements.model;
-  catalogModelInput.onchange = () => {
-    const entry = availableGlobalModels.find(item => item.id === catalogModelInput.value.trim());
-    if (!entry) {
-      delete profileForm.dataset.catalogSourceProfileId;
-      return;
-    }
-    profileForm.dataset.catalogSourceProfileId = entry.source_profile_id || "";
-    if (!profileForm.elements.base_url.value.trim()) profileForm.elements.base_url.value = entry.api_base || "";
-    if (!profileForm.elements.profile_id.value.trim()) profileForm.elements.profile_id.value = entry.id || "";
-    if (!profileForm.elements.name.value.trim()) profileForm.elements.name.value = entry.id || "";
-  };
   $("#model-settings-form").onsubmit = async event => {
     event.preventDefault();
     await api(modelApiUrl("/api/models/settings"), { method: "PATCH", body: formValues(event.currentTarget) });
@@ -802,10 +936,6 @@ async function loadModels() {
       const value = (values[key] || "").trim();
       if (value) body[key] = value;
     });
-    if (values._scope) body._scope = values._scope;
-    if (values._scope === "global" && event.currentTarget.dataset.catalogSourceProfileId) {
-      body._catalog_source_profile_id = event.currentTarget.dataset.catalogSourceProfileId;
-    }
     await api(modelApiUrl(`/api/models/${encodeURIComponent(profileId)}`), { method: "POST", body });
     await loadModels();
     toast("模型 profile 已保存");
@@ -814,11 +944,8 @@ async function loadModels() {
     const form = event.currentTarget.closest("form");
     const profileId = (form.elements.profile_id.value || "").trim();
     if (!profileId) return toast("请先填写要删除的 profile id", "error");
-    const scope = form.elements._scope?.value || "user";
-    if (!window.confirm(`确认删除 ${scope === "global" ? "全局" : "私有"} profile「${profileId}」？`)) return;
-    const base = modelApiUrl(`/api/models/${encodeURIComponent(profileId)}`);
-    const sep = base.includes("?") ? "&" : "?";
-    await api(`${base}${sep}scope=${encodeURIComponent(scope)}`, { method: "DELETE" });
+    if (!window.confirm(`确认删除私有 profile「${profileId}」？`)) return;
+    await api(modelApiUrl(`/api/models/${encodeURIComponent(profileId)}`), { method: "DELETE" });
     await loadModels();
     toast("模型 profile 已删除");
   };
@@ -1200,6 +1327,18 @@ async function initEvents() {
     try {
       await loadModels();
       toast("模型配置已刷新");
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+    }
+  };
+  $("#global-model-refresh").onclick = async (event) => {
+    const btn = event.currentTarget;
+    setBusy(btn, true);
+    try {
+      await loadGlobalModels();
+      toast("全局模型配置已刷新");
     } catch (err) {
       toast(err.message, "error");
     } finally {
