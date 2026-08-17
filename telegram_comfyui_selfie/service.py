@@ -29,6 +29,7 @@ from .appearance_runtime import (
 from .character_checkpoint import CharacterCheckpointMixin
 from .defaults import DEFAULT_CONFIG
 from .deletion_runtime import DeletionRuntimeMixin
+from .encounter_runtime import EncounterRuntimeMixin
 from .image_planning import VALID_VIEWS, plan_roleplay_image
 from .image_state_runtime import ImageStateRuntimeMixin
 from .http_limits import response_limit
@@ -107,6 +108,7 @@ class TelegramComfyUIService(
     LifePlanMixin,
     SchedulerRuntimeMixin,
     WorldRuntimeMixin,
+    EncounterRuntimeMixin,
     GitUpdateMixin,
 ):
     def __init__(self, config_path: str | Path = "data/config.json", state_path: str | Path = "data/state.json"):
@@ -696,6 +698,37 @@ class TelegramComfyUIService(
             logger.warning("photo history sqlite append failed", exc_info=True)
         if hasattr(self, "_apply_history_trim"):
             self._apply_history_trim(state, self._history_storage_cap())
+
+    def _append_encounter_system_message(
+        self,
+        session_id: str,
+        *,
+        city: str,
+        venue: str,
+        other: str,
+        pov: str,
+        relationship: str,
+        when: str,
+        role: str,
+    ) -> None:
+        """注入一条跨会话邂逅事件的 system 历史（内存 + SQLite），模式同照片历史。
+
+        与照片历史的「低权重、不要主动复述」措辞相反：邂逅是重磅关系事件，
+        用户紧接的对话很可能涉及此事，应可自然承接。视角约束必须写死：
+        对方角色是 NPC 式的第三方，不是本会话的用户。
+        """
+        if not session_id:
+            return
+        lines = [
+            "邂逅事件（系统记录，跨会话角色互动编排；这是真实发生过的事，用户紧接的对话可能涉及此事，可自然承接）:",
+            f"time: {when}（{city}）",
+            f"venue: {venue}",
+            f"with: {other}（{role}；{other}是另一个角色，不是你正在对话的用户，不要把用户当成{other}）",
+            f"event: {pov}",
+        ]
+        if relationship:
+            lines.append(f"relationship: {relationship}")
+        self._append_photo_history_message(session_id, {"role": "system", "content": "\n".join(lines)})
 
     @staticmethod
     def _identity_key(value: Any) -> str:

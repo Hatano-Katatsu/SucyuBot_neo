@@ -206,5 +206,53 @@ class SQLiteMigrationTestCase(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT marker FROM memories WHERE id = 1").fetchone()[0], "keep-me")
 
 
+class EncountersMigrationTestCase(unittest.TestCase):
+    """v8 encounters 表：新库建立、v7 存量库升级。"""
+
+    EXPECTED_COLUMNS = {
+        "id", "pair_key", "session_id_a", "character_a", "session_id_b", "character_b",
+        "ts", "type", "city", "venue", "summary", "pov_a", "pov_b", "relationship",
+    }
+
+    def test_fresh_database_has_encounters_table(self):
+        root = make_project_temp_dir("encounters_fresh")
+        path = root / "memory.sqlite3"
+        app_store = AppStateStore(path)
+        self.assertTrue(self.EXPECTED_COLUMNS <= _columns(path, "encounters"))
+
+        encounter_id = app_store.record_encounter(
+            pair_key="telegram:1:甲|telegram:2:乙",
+            session_id_a="telegram:1", character_a="甲",
+            session_id_b="telegram:2", character_b="乙",
+            ts=100.0, city="上海", venue="咖啡店",
+            summary="初遇", pov_a="A视角", pov_b="B视角", relationship="初识",
+        )
+        self.assertGreater(encounter_id, 0)
+        app_store.record_encounter(
+            pair_key="telegram:1:甲|telegram:2:乙",
+            session_id_a="telegram:2", character_a="乙",
+            session_id_b="telegram:1", character_b="甲",
+            ts=200.0, summary="重逢",
+        )
+        rows = app_store.list_encounters_for_pair("telegram:1:甲|telegram:2:乙")
+        self.assertEqual([row["ts"] for row in rows], [200.0, 100.0])
+        self.assertEqual(rows[1]["pov_a"], "A视角")
+        self.assertEqual(rows[1]["type"], "meeting")
+        self.assertEqual(app_store.last_encounter_ts_for_pair("telegram:1:甲|telegram:2:乙"), 200.0)
+        self.assertEqual(app_store.last_encounter_ts_for_pair("telegram:9:无"), 0.0)
+
+    def test_v7_database_upgrades_to_encounters(self):
+        root = make_project_temp_dir("encounters_v7_upgrade")
+        path = root / "memory.sqlite3"
+        migrate_database(path, target_version=7)
+        self.assertEqual(_columns(path, "encounters"), set())
+
+        app_store = AppStateStore(path)
+        self.assertEqual(app_store.schema_migration.previous_version, 7)
+        self.assertEqual(app_store.schema_migration.applied_versions, (8,))
+        self.assertTrue(self.EXPECTED_COLUMNS <= _columns(path, "encounters"))
+        self.assertEqual(_user_version(path), LATEST_SCHEMA_VERSION)
+
+
 if __name__ == "__main__":
     unittest.main()

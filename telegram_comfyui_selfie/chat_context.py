@@ -1300,7 +1300,7 @@ class ChatContextMixin:
         cached = getattr(self, "_weather_caches", {}).get(session_id or "__default__")
         if isinstance(cached, dict):
             weather = cached.get("data")
-        city = self._get_session_cfg(session_id, "location", self.config.get("location", "上海"))
+        city = self._session_city(session_id)
         day = self._day_type(now).get("label", "工作日") if hasattr(self, "_day_type") else ""
         weather_desc = str((weather or {}).get("desc") or "未知").strip() if isinstance(weather, dict) else str(weather or "未知")
         try:

@@ -205,6 +205,9 @@ STATE_SCHEMA: dict[str, Field] = {
         "character_place_confidence": 0,
         "character_place_history": [],
         "rounds_since_location": 0,
+        # 跨会话邂逅旅行覆盖：{"city": 目的城市, "until": 过期时间戳, "home_city": 原城市}；
+        # 存在且未过期时城市读取点返回旅行城市，到期由 dream 结算清除。
+        "travel_override": {},
     }, reset_preserved=False),
     # —— 角色短期态：对话上下文（context box）——
     # 聊天历史 / checkpoint / dream / 照片 / 短期场景边界 / 配图节奏 全部收进 state["context"] 子字典。
@@ -627,6 +630,7 @@ _PLACE_DEFAULT: dict[str, Any] = {
     "character_place_confidence": 0,
     "character_place_history": [],
     "rounds_since_location": 0,
+    "travel_override": {},
 }
 _LEGACY_PLACE_FLAT_KEYS = (
     "character_place", "character_place_label", "character_place_text", "character_place_name",
@@ -827,6 +831,26 @@ def set_rounds_since_location(state: dict[str, Any], value: int):
 def increment_rounds_since_location(state: dict[str, Any]):
     box = ensure_place_box(state)
     box["rounds_since_location"] = int(box.get("rounds_since_location", 0) or 0) + 1
+
+
+# ── 旅行覆盖（跨会话角色邂逅：角色暂居另一城市，当天有效）──
+
+def get_travel_override(state: dict[str, Any]) -> dict[str, Any]:
+    """读取旅行覆盖 {city, until, home_city}；无覆盖时返回 {}。不做过期判断。"""
+    value = ensure_place_box(state).get("travel_override")
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def set_travel_override(state: dict[str, Any], *, city: str, until: float, home_city: str = "") -> None:
+    ensure_place_box(state)["travel_override"] = {
+        "city": str(city or "").strip(),
+        "until": float(until or 0),
+        "home_city": str(home_city or "").strip(),
+    }
+
+
+def clear_travel_override(state: dict[str, Any]) -> None:
+    ensure_place_box(state)["travel_override"] = {}
 
 
 # ──────────────────────────────────────────────────────────────────────────

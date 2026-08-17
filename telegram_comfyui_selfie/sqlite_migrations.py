@@ -293,6 +293,40 @@ def _migration_v7_memory_organize_watermark(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_v8_encounters(conn: sqlite3.Connection) -> None:
+    """跨会话角色邂逅事件表：完整关系史（含双方视角文本），供下次编排承接与冷却判断。
+
+    type 一期恒为 "meeting"，为后续互发消息（message）预留。
+    pair_key 是两侧 (session_id, character) 排序后的规范化键，查询/冷却不区分方向。
+    """
+
+    _execute(
+        conn,
+        (
+            """
+            CREATE TABLE IF NOT EXISTS encounters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pair_key TEXT NOT NULL DEFAULT '',
+                session_id_a TEXT NOT NULL,
+                character_a TEXT NOT NULL DEFAULT '',
+                session_id_b TEXT NOT NULL,
+                character_b TEXT NOT NULL DEFAULT '',
+                ts REAL NOT NULL,
+                type TEXT NOT NULL DEFAULT 'meeting',
+                city TEXT NOT NULL DEFAULT '',
+                venue TEXT NOT NULL DEFAULT '',
+                summary TEXT NOT NULL DEFAULT '',
+                pov_a TEXT NOT NULL DEFAULT '',
+                pov_b TEXT NOT NULL DEFAULT '',
+                relationship TEXT NOT NULL DEFAULT ''
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_encounters_pair "
+            "ON encounters(pair_key, ts)",
+        ),
+    )
+
+
 SCHEMA_MIGRATIONS: tuple[Migration, ...] = (
     (1, "base_schema", _migration_v1_base_schema),
     (2, "character_memories", _migration_v2_character_memories),
@@ -301,6 +335,7 @@ SCHEMA_MIGRATIONS: tuple[Migration, ...] = (
     (5, "telegram_update_inbox", _migration_v5_telegram_update_inbox),
     (6, "model_thinking_settings", _migration_v6_model_thinking_settings),
     (7, "memory_organize_watermark", _migration_v7_memory_organize_watermark),
+    (8, "encounters", _migration_v8_encounters),
 )
 LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS[-1][0]
 
@@ -378,6 +413,18 @@ def _validate_schema(conn: sqlite3.Connection, version: int) -> None:
                 missing.append(f"table:{table}")
             elif absent:
                 missing.append(f"{table}:[{','.join(sorted(absent))}]")
+    if version >= 8:
+        # encounters 是 v8 新增表，不进入 _BASE_EXPECTED_COLUMNS（那会拖垮历史版本校验）。
+        expected_v8 = {
+            "id", "pair_key", "session_id_a", "character_a", "session_id_b", "character_b",
+            "ts", "type", "city", "venue", "summary", "pov_a", "pov_b", "relationship",
+        }
+        columns = _table_columns(conn, "encounters")
+        absent = expected_v8 - columns
+        if not columns:
+            missing.append("table:encounters")
+        elif absent:
+            missing.append(f"encounters:[{','.join(sorted(absent))}]")
     if missing:
         raise SchemaMigrationError("SQLite schema 校验失败：" + "; ".join(missing))
 

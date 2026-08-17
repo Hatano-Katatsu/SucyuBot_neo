@@ -417,6 +417,14 @@ DEFAULT_CONFIG = {
     "world_location_llm_extract": True,
     "world_holiday_dates": "",
     "world_workday_dates": "",
+    # —— 跨会话角色邂逅（一期：同世界观互访）——
+    # cross_world_pairs 仅在配置文件编辑（结构复杂不进 WebUI 可编辑清单），格式：
+    # [{"a": {"chat_id": 123456, "character": "角色名A"}, "b": {"chat_id": 654321, "character": "角色名B"}}]
+    # 配对即声明两侧角色同世界观并授权邂逅编排；编排 LLM 调用用地主侧（b 被访时记 b 侧）会话的 fast profile。
+    "cross_world_enabled": False,
+    "cross_world_pairs": [],
+    "cross_world_encounter_cooldown_days": "7",
+    "cross_world_encounter_chance": "0.5",
     # 角色生活档案的显式覆盖（留空则由人设自动推断）：
     # character_age_stage: minor / adult
     # character_day_anchor(职业/白天去向): company / school / factory / farm / construction /

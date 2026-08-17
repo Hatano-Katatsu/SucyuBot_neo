@@ -49,6 +49,7 @@ telegram_comfyui_selfie/
 ├── memory_policy.py         # 记忆提取与整理策略
 ├── scheduler_runtime.py     # 推送、dream、续场
 ├── world_runtime.py         # 地点、天气、城市 POI
+├── encounter_runtime.py     # 跨会话角色邂逅编排器（一期：同世界观互访）
 ├── telegram_io.py           # Telegram 收发与图片输入
 ├── webui.py                 # WebUI 与 REST API
 ├── app_store.py             # 应用状态数据库
@@ -154,6 +155,14 @@ telegram_comfyui_selfie/
 - 天气缓存必须绑定城市；城市变化不能复用旧城市数据。外部天气请求复用统一代理配置。
 - 地点匹配优先识别路线、街道等动线提示，再匹配普通地点标签。
 - 用户位置（user_place）是会话级字段，不与角色地点一起随角色切换冻结/恢复；同处状态读取必须遵守 TTL。checkpoint 地点推断有内存缓存，切角色/更新位置时失效。
+
+## 跨会话角色邂逅（一期）
+
+- `cross_world_enabled` + `cross_world_pairs`（仅配置文件）声明配对；配对即声明同世界观并授权编排，一期无逐次 consent。配对角色须为两侧会话当前活动角色，否则跳过。
+- 邂逅由 `encounter_runtime.py` 编排：访客 A 当天旅行到地主 B 城（place box 的 `travel_override` 只覆盖 `_session_city` 读取层，不污染 `custom_location`；到期由 dream 结算 `_settle_travel_override` 清除），一次 LLM 调用编排整个场景。
+- 编排调用用地主侧会话的 fast profile 并记其用量（`session_id=地主`）；JSON 走 `_parse_llm_json` 保守修复，summary/pov_a/pov_b 缺一即整体中止，不写半成品。
+- 持双方 `character_operation_lock`（按 session_id 字典序取锁防死锁）内原子落库：encounters 表（关系史，供下次编排承接重逢）、双方各一条 system 历史事件（`_append_encounter_system_message`，措辞允许自然承接且不自我降权）、记忆建议过 `_is_long_memory_in_scope` 后落 kind=event/source=encounter:<id>、life_plan today.events + npcs[]。双人记忆互不共享。
+- 一期不做：双人同框生图、实时接力对话、互发消息、专门的用户通知推送——角色在后续对话/推送中自然提起。调度入口在 scheduler_loop 每轮 `_maybe_schedule_encounters`：冷却（encounters 表 max ts）+ 概率门 + 双方空闲/清醒检查，单对失败隔离不影响调度循环。
 
 ## Telegram 与 WebUI
 

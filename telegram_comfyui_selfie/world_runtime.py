@@ -413,6 +413,25 @@ class WorldRuntimeMixin:
     def _world_runtime_enabled(self) -> bool:
         return self._bool_config("world_runtime_enabled", True)
 
+    def _session_city(self, session_id: str) -> str:
+        """角色当前生效城市：存在未过期旅行覆盖（跨会话邂逅）时返回旅行城市。
+
+        custom_location 是角色级配置，永不被旅行污染；覆盖只发生在读取层，
+        到期由 dream 结算清除（见 encounter_runtime._settle_travel_override）。
+        """
+        base = self._get_session_cfg(session_id, "location", self.config.get("location", "上海"))
+        if not session_id:
+            return base
+        try:
+            override = session_schema.get_travel_override(self._get_session_state(session_id))
+            city = str(override.get("city") or "").strip()
+            until = float(override.get("until") or 0)
+            if city and until > time.time():
+                return city
+        except Exception:
+            logger.debug("travel override read failed", exc_info=True)
+        return base
+
     def _world_city_places_enabled(self) -> bool:
         return self._bool_config("world_city_places_enabled", True)
 
@@ -1231,7 +1250,7 @@ class WorldRuntimeMixin:
             return {}
         state = self._get_session_state(session_id) if session_id else {}
         now = now or self._session_now(session_id)
-        city = self._get_session_cfg(session_id, "location", self.config.get("location", "上海"))
+        city = self._session_city(session_id)
         time_context = self._get_time_context(session_id, now=now, weather=weather)
         profile = self._life_profile(session_id)
         day = self._day_type(now)

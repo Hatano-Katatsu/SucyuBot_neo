@@ -1002,7 +1002,7 @@ class SchedulerRuntimeMixin:
             return cached_retry.get("data") if isinstance(cached_retry, dict) else None
         if not location:
             now = time.time()
-            loc = self._get_session_cfg(session_id, "location", self.config.get("location", "上海"))
+            loc = self._session_city(session_id)
             key = session_id or "__default__"
             cached = self._weather_caches.get(key)
             if cached and cached.get("city") == loc and now - cached["ts"] < 1800:
@@ -1648,6 +1648,12 @@ class SchedulerRuntimeMixin:
                 max(session_schema.get_last_dream_message_id(state), to_id),
             )
             self._save_session_state(session_id, state)
+        # dream 结算：清除活动角色已到期的旅行覆盖（邂逅当天旅行到此为止）。
+        if hasattr(self, "_settle_travel_override"):
+            try:
+                self._settle_travel_override(session_id, character_key)
+            except Exception:
+                logger.debug("travel override settle failed", exc_info=True)
         self._ulog(
             session_id,
             "DREAM",
@@ -2585,6 +2591,13 @@ class SchedulerRuntimeMixin:
                             break
 
                     await self._check_ntr_stage(session_id, state)
+                # 跨会话角色邂逅检查：全局配对驱动，不属于单个会话循环；
+                # 内部逐对隔离失败，这里再兜一层保证不影响调度循环其余任务。
+                if hasattr(self, "_maybe_schedule_encounters"):
+                    try:
+                        await self._maybe_schedule_encounters()
+                    except Exception:
+                        logger.warning("encounter schedule tick failed", exc_info=True)
                 self._flush_sessions(force=True)
             except asyncio.CancelledError:
                 raise

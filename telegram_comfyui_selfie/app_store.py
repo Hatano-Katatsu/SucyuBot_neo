@@ -634,6 +634,71 @@ class AppStateStore:
             conn.commit()
             return int(cur.rowcount or 0)
 
+    # ------------------------------------------------------------------
+    # Encounters（跨会话角色邂逅事件；关系史供下次编排承接）
+    # ------------------------------------------------------------------
+
+    def record_encounter(
+        self,
+        *,
+        pair_key: str,
+        session_id_a: str,
+        character_a: str,
+        session_id_b: str,
+        character_b: str,
+        ts: float,
+        type: str = "meeting",
+        city: str = "",
+        venue: str = "",
+        summary: str = "",
+        pov_a: str = "",
+        pov_b: str = "",
+        relationship: str = "",
+    ) -> int:
+        """落一条邂逅事件，返回自增 id。"""
+        with closing(self._connect()) as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO encounters(
+                    pair_key, session_id_a, character_a, session_id_b, character_b,
+                    ts, type, city, venue, summary, pov_a, pov_b, relationship
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(pair_key or ""),
+                    str(session_id_a or ""), str(character_a or ""),
+                    str(session_id_b or ""), str(character_b or ""),
+                    float(ts or 0), str(type or "meeting"),
+                    str(city or ""), str(venue or ""), str(summary or ""),
+                    str(pov_a or ""), str(pov_b or ""), str(relationship or ""),
+                ),
+            )
+            conn.commit()
+        return int(cur.lastrowid)
+
+    def list_encounters_for_pair(self, pair_key: str, *, limit: int = 5) -> list[dict[str, Any]]:
+        """按角色对查询邂逅史（新的在前），供编排 prompt 当关系史输入。"""
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM encounters
+                WHERE pair_key = ?
+                ORDER BY ts DESC, id DESC
+                LIMIT ?
+                """,
+                (str(pair_key or ""), max(1, int(limit))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def last_encounter_ts_for_pair(self, pair_key: str) -> float:
+        """角色对最近一次邂逅时间戳，供冷却判断；无记录返回 0。"""
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT MAX(ts) AS ts FROM encounters WHERE pair_key = ?",
+                (str(pair_key or ""),),
+            ).fetchone()
+        return float(row["ts"] or 0) if row else 0.0
+
     def set_web_password(self, user_id: str, password: str) -> dict[str, str]:
         token = self.get_or_create_web_token(user_id)
         encoded = hash_password(password)
