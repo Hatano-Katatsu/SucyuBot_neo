@@ -54,11 +54,15 @@ class EncounterRuntimeMixin:
     def _cross_world_pairs(self) -> list[dict[str, Any]]:
         """归一化 cross_world_pairs 配置；非法条目跳过并告警。
 
-        配置格式（仅配置文件编辑）：
+        配置文件格式（列表）：
         [{"a": {"chat_id": 123456, "character": "角色名A"},
           "b": {"chat_id": 654321, "character": "角色名B"}}]
+        WebUI 文本格式（字符串）：每行一对 `chat_id:角色名 = chat_id:角色名`，
+        兼容全角标点，# 开头为注释行。
         """
         raw = self.config.get("cross_world_pairs") or []
+        if isinstance(raw, str):
+            raw = self._parse_cross_world_pair_lines(raw)
         if not isinstance(raw, list):
             logger.warning("cross_world_pairs 必须是列表，已忽略")
             return []
@@ -94,6 +98,33 @@ class EncounterRuntimeMixin:
             )
             pairs.append(pair)
         return pairs
+
+    @staticmethod
+    def _parse_cross_world_pair_lines(text: str) -> list[dict[str, Any]]:
+        """解析 WebUI 文本格式的配对：每行 `chat_id:角色名 = chat_id:角色名`。
+
+        全角冒号/等号先归一为半角；空行与 # 注释行跳过；格式不符的行跳过并告警。
+        """
+        items: list[dict[str, Any]] = []
+        for raw_line in str(text or "").splitlines():
+            line = raw_line.strip().replace("：", ":").replace("＝", "=")
+            if not line or line.startswith("#"):
+                continue
+            left, sep, right = line.partition("=")
+            if not sep:
+                logger.warning("cross_world_pairs 行缺少 = 分隔符，已跳过: %r", raw_line)
+                continue
+            sides: dict[str, dict[str, str]] = {}
+            for side, part in (("a", left), ("b", right)):
+                chat_id, colon, character = part.strip().partition(":")
+                if not colon or not chat_id.strip() or not character.strip():
+                    break
+                sides[side] = {"chat_id": chat_id.strip(), "character": character.strip()}
+            if len(sides) != 2:
+                logger.warning("cross_world_pairs 行格式应为 chat_id:角色名 = chat_id:角色名，已跳过: %r", raw_line)
+                continue
+            items.append({"a": sides["a"], "b": sides["b"]})
+        return items
 
     def _encounter_cooldown_days(self) -> float:
         try:

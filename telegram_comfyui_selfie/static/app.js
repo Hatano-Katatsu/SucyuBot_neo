@@ -121,6 +121,10 @@ const configSections = [
     ["character_history_summary_max_chars", "历史提要硬上限", "number"],
     ["short_context_reset_gap_hours", "短期场景超时小时", "text"],
     ["scene_stale_minutes", "场景断档感知分钟", "number"],
+    ["cross_world_enabled", "启用跨会话角色邂逅", "bool"],
+    ["cross_world_pairs", "邂逅配对(每行: chatID:角色名=chatID:角色名)", "textarea"],
+    ["cross_world_encounter_cooldown_days", "邂逅冷却天数", "number"],
+    ["cross_world_encounter_chance", "邂逅每轮触发概率", "number"],
   ]],
 ];
 
@@ -512,6 +516,10 @@ async function loadFeedbackBoard() {
   }
 }
 
+function configTextareaValue(value) {
+  return frontendCore.configTextareaValue(value);
+}
+
 function inputFor([key, label, type, layout], values) {
   const fieldId = "field-" + key;
   const wrap = document.createElement("div");
@@ -527,7 +535,7 @@ function inputFor([key, label, type, layout], values) {
   if (type === "textarea" || type === "list") {
     input = document.createElement("textarea");
     input.rows = layoutClasses.includes("field-tall") ? 8 : (type === "list" ? 3 : 4);
-    input.value = Array.isArray(value) ? value.join("\n") : (value ?? "");
+    input.value = configTextareaValue(value);
   } else if (type === "bool") {
     input = document.createElement("select");
     input.innerHTML = `<option value="true">开启</option><option value="false">关闭</option>`;

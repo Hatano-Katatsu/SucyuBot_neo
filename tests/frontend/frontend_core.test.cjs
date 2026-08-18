@@ -95,3 +95,17 @@ test("会话选择对普通用户固定身份，对管理员清理失效选择",
   assert.equal(core.resolveSelectedSession(sessions, "deleted", { role: "admin" }), "telegram:100");
   assert.equal(core.resolveSelectedSession([], "deleted", { role: "admin" }), "");
 });
+
+test("配置 textarea 把邂逅配对对象数组渲染为行文本", () => {
+  assert.equal(
+    core.configTextareaValue([
+      { a: { chat_id: 1001, character: "小艾" }, b: { chat_id: 2002, character: "铃音" } },
+    ]),
+    "1001:小艾 = 2002:铃音",
+  );
+  // 字符串数组保持按行拼接；非数组原样返回
+  assert.equal(core.configTextareaValue(["a", "b"]), "a\nb");
+  assert.equal(core.configTextareaValue("1001:小艾 = 2002:铃音"), "1001:小艾 = 2002:铃音");
+  assert.equal(core.configTextareaValue(null), "");
+  assert.equal(core.configTextareaValue(undefined), "");
+});

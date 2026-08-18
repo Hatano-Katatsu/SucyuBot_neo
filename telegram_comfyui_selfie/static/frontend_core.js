@@ -108,10 +108,23 @@
     return selected && ids.includes(selected) ? selected : (ids[0] || "");
   }
 
+  function configTextareaValue(value) {
+    if (!Array.isArray(value)) return value ?? "";
+    // 对象数组成员（目前只有邂逅配对 {a:{chat_id,character},b:{...}}）渲染为行文本，避免 [object Object]
+    return value.map(item => {
+      if (item && typeof item === "object" && item.a && item.b) {
+        const side = s => `${s?.chat_id ?? ""}:${s?.character ?? ""}`;
+        return `${side(item.a)} = ${side(item.b)}`;
+      }
+      return String(item);
+    }).join("\n");
+  }
+
   return Object.freeze({
     ApiError,
     authenticatedSessionId,
     buildRequestOptions,
+    configTextareaValue,
     firstInvalidNumberField,
     isFiniteNumberInput,
     parseApiResponse,

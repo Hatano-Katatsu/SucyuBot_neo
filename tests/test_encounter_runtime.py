@@ -91,6 +91,26 @@ class EncounterTestCase(ServiceFixtureMixin, unittest.TestCase):
         svc.config["cross_world_encounter_cooldown_days"] = "-3"
         self.assertEqual(svc._encounter_cooldown_days(), 0.0)
 
+    def test_pair_config_webui_text_format(self):
+        # WebUI 文本格式：每行 chat_id:角色名 = chat_id:角色名，兼容全角标点与注释行。
+        svc = self.make_encounter_service(pairs=(
+            "# 注释行\n"
+            "\n"
+            "1001:小艾 = 2002:铃音\n"
+            "3003：阿澄 ＝ 4004：阿哲\n"
+            "没有分隔符的行\n"
+            "5005:只有一侧 =\n"
+        ))
+        pairs = svc._cross_world_pairs()
+        self.assertEqual(len(pairs), 2)
+        self.assertEqual(pairs[0]["a"]["session_id"], "telegram:1001")
+        self.assertEqual(pairs[0]["b"]["character"], "铃音")
+        self.assertEqual(pairs[1]["a"]["character"], "阿澄")
+        self.assertEqual(pairs[1]["b"]["session_id"], "telegram:4004")
+        # 角色名含等号/冒号之外的文本不受影响；空串视为未配置
+        svc.config["cross_world_pairs"] = ""
+        self.assertEqual(svc._cross_world_pairs(), [])
+
     # ------------------------------------------------------------------
     # travel override
     # ------------------------------------------------------------------

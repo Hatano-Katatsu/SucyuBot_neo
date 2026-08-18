@@ -158,7 +158,7 @@ telegram_comfyui_selfie/
 
 ## 跨会话角色邂逅（一期）
 
-- `cross_world_enabled` + `cross_world_pairs`（仅配置文件）声明配对；配对即声明同世界观并授权编排，一期无逐次 consent。配对角色须为两侧会话当前活动角色，否则跳过。
+- `cross_world_enabled` + `cross_world_pairs` 声明配对；配对即声明同世界观并授权编排，一期无逐次 consent。配对角色须为两侧会话当前活动角色，否则跳过。pairs 在配置文件里为对象列表，WebUI 设置页为文本格式（每行 `chat_id:角色名 = chat_id:角色名`），`_cross_world_pairs` 统一归一化。
 - 邂逅由 `encounter_runtime.py` 编排：访客 A 当天旅行到地主 B 城（place box 的 `travel_override` 只覆盖 `_session_city` 读取层，不污染 `custom_location`；到期由 dream 结算 `_settle_travel_override` 清除），一次 LLM 调用编排整个场景。
 - 编排调用用地主侧会话的 fast profile 并记其用量（`session_id=地主`）；JSON 走 `_parse_llm_json` 保守修复，summary/pov_a/pov_b 缺一即整体中止，不写半成品。
 - 持双方 `character_operation_lock`（按 session_id 字典序取锁防死锁）内原子落库：encounters 表（关系史，供下次编排承接重逢）、双方各一条 system 历史事件（`_append_encounter_system_message`，措辞允许自然承接且不自我降权）、记忆建议过 `_is_long_memory_in_scope` 后落 kind=event/source=encounter:<id>、life_plan today.events + npcs[]。双人记忆互不共享。
