@@ -78,7 +78,7 @@ telegram_comfyui_selfie/
 - `app_store.py` 管理 session、城市目录、聊天、checkpoint、日记、上下文元数据、生活线、Web 凭据、模型 profile 和用量。
 - `session_schema.py` 是会话字段单一来源。当前仍处于盒子结构与少量旧扁平键双写的兼容期，删除兼容键前必须清点所有读写点并补迁移测试。
 - 模型配置统一走全局/用户 profile；chat、fast、vision 分别选择 profile。视觉 profile 留空时跳过图片理解。
-- thinking 可三处配置，优先级：用户级（`chat_thinking`/`fast_thinking`/`vision_thinking`，WebUI 全局/角色卡页面可改）> 全局配置默认（`chat_thinking_enabled`/`fast_thinking_enabled`/`vision_thinking_enabled`，配置文件可改）> profile 的 `disable_thinking`。同一字段兼容空值、旧 `true/false` 开关和 `none/minimal/low/medium/high/xhigh/max` effort；选择 effort 时下发 `reasoning_effort`，结构化任务显式关闭 thinking 时同时清除 effort。`thinking_fixed` 仅是 profile 默认标记，不再硬锁定用户设置。API 密钥对前端始终掩码，保存空值或 `********` 时保留旧值。
+- thinking 优先级：用户级（`chat_thinking`/`fast_thinking`/`vision_thinking`）> 全局配置默认（`chat_thinking_enabled`/`fast_thinking_enabled`/`vision_thinking_enabled`）> 模型 profile 的 `thinking_effort` > profile 的 `disable_thinking`。用户/全局字段兼容空值、旧 `true/false` 开关和 `none/minimal/low/medium/high/xhigh/max` effort；管理员可在全局模型 Profile 表单配置每个模型的默认 effort。选择 effort 时下发 `reasoning_effort`，结构化任务显式关闭 thinking 时同时清除 effort。`thinking_fixed` 仅是 profile 默认标记，不再硬锁定用户设置。API 密钥对前端始终掩码，保存空值或 `********` 时保留旧值。
 - `llm_sampling_params_enabled` 是模型采样细节总开关；关闭时所有 LLM 请求省略 temperature、top_p、frequency_penalty 和 presence_penalty，并保留配置值供再次开启，max_tokens、thinking 和工具参数不受影响。WebUI 根据该开关折叠或展开采样参数详情。
 - OpenAI-compatible profile 的 `base_url` 同时接受 API Base 和完整 `/chat/completions` URL，运行时统一规范化。服务启动时仅对带密钥的全局端点并发拉取一次 `/models` 目录并保存在内存中，失败不阻止启动；目录只向管理员 WebUI 暴露，供全局 profile 选型与复用同端点密钥。
 - 思考型模型仅在 content 里输出带 `<thinking>`/`<reasoning>`/`<analysis>` 标签的草稿时，`_call_llm` 才剥离或判为思考泄漏；不做关键词启发式判断。
@@ -177,6 +177,7 @@ telegram_comfyui_selfie/
 - Telegram update 必须先与确认 offset 一起写入 SQLite inbox，再进入按会话有序的有界 worker；跨会话受全局并发上限控制，停机先停止拉取并排空，超时待办由下次启动恢复。
 - 同会话新消息可取消旧文字生成，但已进入生图/发图阶段的受保护任务不能被取消。
 - Web API 错误优先返回 JSON；前端也必须兼容非 JSON 错误体、401 跳转与可读错误摘要。
+- 首页模型测试直接读取原始 Chat Completions message，按 Unicode 字符数分别展示显式 `reasoning_content`/`reasoning`/`analysis`（以及 content 开头显式思考标签）与清理后正式回复的长度，同时显示实际 profile、模型和 effort。
 - 日志分为 INFO 与 DEBUG：INFO 沿用 `data/logs/telegram_<chat_id>.log`、`errors.log` 及既有分片命名，长期保留完整用户输入、实际发送给用户的 Bot 文本/图片说明、业务行为、行动逻辑和判断依据；既有历史文件不迁移，均视为 INFO。DEBUG 使用 `llm_debug.jsonl` 保存完整 LLM 请求/返回，仅保留当前块和最新一个历史分片。新的 LLM 失败在 INFO 只写状态、用途、错误与短响应摘要，禁止再复制完整 prompt；管理员可在 WebUI 日志页切换 INFO/DEBUG。
 - 普通用户不可查看系统日志项或其他用户的数据；管理员才能维护全局模型和运维配置。
 - 管理员在 WebUI 设置页的独立面板维护全局模型 profile；角色页模型面板只管理当前用户私有 profile 和三类模型选择，避免混淆保存范围。

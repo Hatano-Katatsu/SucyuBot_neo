@@ -36,6 +36,17 @@ def normalize_thinking_setting(value: Any) -> bool | str | None:
     raise ValueError(f"thinking 只支持空值、true/false 或 effort：{choices}")
 
 
+def normalize_profile_thinking_effort(value: Any) -> str:
+    """规范化模型 profile 的默认 reasoning effort；空值表示沿用旧思考开关。"""
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    if text in THINKING_EFFORTS:
+        return text
+    choices = ", ".join(THINKING_EFFORTS)
+    raise ValueError(f"模型默认 effort 只支持空值或：{choices}")
+
+
 def resolve_thinking_setting(value: Any, *, fallback: bool) -> tuple[bool, str]:
     """把单字段设置拆成运行时开关与可选 effort；none effort 仍需原样下发。"""
     normalized = normalize_thinking_setting(value)

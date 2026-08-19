@@ -908,6 +908,10 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn('id="global-model-save"', global_section)
         self.assertIn('id="global-model-delete"', global_section)
         self.assertIn('const body = { _scope: "global" }', global_section)
+        self.assertIn('name="thinking_effort"', global_section)
+        self.assertIn('"timeout", "thinking_effort"', global_section)
+        for effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+            self.assertIn(f'<option value="{effort}">{effort}</option>', global_section)
         self.assertIn('method: "POST"', global_section)
         self.assertIn('?scope=global`, { method: "DELETE" }', global_section)
         self.assertIn('if (name === "settings" && state.auth?.role === "admin") loadGlobalModels()', app_js)

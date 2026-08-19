@@ -901,13 +901,23 @@ async function loadGlobalModels({ selectedProfileId = "", data = null } = {}) {
         <label>模型名<input name="model" list="${modelCatalogId}" placeholder="kimi-k2.5" autocomplete="off" required></label>
         <label>最大 tokens<input name="max_tokens" type="number" min="1" step="1" inputmode="numeric" placeholder="可选"></label>
         <label>超时秒数<input name="timeout" type="number" min="1" step="1" inputmode="numeric" placeholder="可选"></label>
+        <label>默认思考 Effort<select name="thinking_effort">
+          <option value="">不指定（沿用模型开关）</option>
+          <option value="none">none</option>
+          <option value="minimal">minimal</option>
+          <option value="low">low</option>
+          <option value="medium">medium</option>
+          <option value="high">high</option>
+          <option value="xhigh">xhigh</option>
+          <option value="max">max</option>
+        </select></label>
       </div>
       <datalist id="${modelCatalogId}">${modelCatalogOptions}</datalist>
       <div class="form-actions global-model-actions">
         <button id="global-model-save" class="primary" type="submit">添加全局模型</button>
         <button id="global-model-delete" class="danger" type="button" disabled>删除全局模型</button>
       </div>
-      <p class="muted">从“模型名”的候选列表选择启动时发现的模型，可自动带入来源 Base URL，并安全复用同端点已有全局 profile 的密钥。API Key 永远不会回显；编辑时留空即可保留。</p>
+      <p class="muted">从“模型名”的候选列表选择启动时发现的模型，可自动带入来源 Base URL，并安全复用同端点已有全局 profile 的密钥。默认思考 Effort 会随该 profile 生效，但用户级思考设置仍有更高优先级。API Key 永远不会回显；编辑时留空即可保留。</p>
     </form>
   `;
 
@@ -931,7 +941,7 @@ async function loadGlobalModels({ selectedProfileId = "", data = null } = {}) {
     form.dataset.editingProfileId = profileId;
     profileIdInput.value = profileId;
     profileIdInput.readOnly = true;
-    for (const key of ["name", "base_url", "model", "max_tokens", "timeout"]) {
+    for (const key of ["name", "base_url", "model", "max_tokens", "timeout", "thinking_effort"]) {
       form.elements[key].value = profile[key] ?? "";
     }
     form.elements.api_key.value = "";
@@ -971,7 +981,7 @@ async function loadGlobalModels({ selectedProfileId = "", data = null } = {}) {
       return toast("该全局 Profile ID 已存在，请先从上方下拉框选择后再修改", "error");
     }
     const body = { _scope: "global" };
-    for (const key of ["name", "base_url", "model", "max_tokens", "timeout"]) {
+    for (const key of ["name", "base_url", "model", "max_tokens", "timeout", "thinking_effort"]) {
       body[key] = (values[key] || "").trim();
     }
     const apiKey = (values.api_key || "").trim();
@@ -1667,7 +1677,20 @@ async function runTest(path, body = undefined) {
   out.textContent = "Running...";
   try {
     const data = await api(path, { method: "POST", body });
-    out.textContent = JSON.stringify(data, null, 2);
+    if (Object.prototype.hasOwnProperty.call(data, "thinking_length") && Object.prototype.hasOwnProperty.call(data, "reply_length")) {
+      const effort = data.thinking_effort ? ` · effort=${data.thinking_effort}` : "";
+      out.textContent = [
+        `Profile: ${data.profile_id || "-"}`,
+        `模型: ${data.model || "-"}`,
+        `思考配置: ${data.thinking ? "开启" : "关闭"}${effort}`,
+        `返回思考长度: ${data.thinking_length} 字符`,
+        `返回回复长度: ${data.reply_length} 字符`,
+        `finish_reason: ${data.finish_reason ?? "-"}`,
+        `回复:\n${data.reply || "（空）"}`,
+      ].join("\n");
+    } else {
+      out.textContent = JSON.stringify(data, null, 2);
+    }
   } catch (err) {
     out.textContent = err.message;
   }

@@ -17,7 +17,7 @@ from .animaflow_runtime import (
 from .encounter_runtime import normalize_cross_world_encounter_strength
 from .llm_runtime import _normalize_openai_api_base
 from .model_security import validate_public_model_base_url
-from .model_thinking import normalize_thinking_setting
+from .model_thinking import normalize_profile_thinking_effort, normalize_thinking_setting
 from .webui_common import (
     is_admin,
     json_error,
@@ -351,6 +351,11 @@ async def api_save_model_profile(request: web.Request):
     payload = await request.json()
     if not isinstance(payload, dict):
         return json_error("模型配置必须是 JSON 对象")
+    if "thinking_effort" in payload:
+        try:
+            payload["thinking_effort"] = normalize_profile_thinking_effort(payload.get("thinking_effort"))
+        except ValueError as exc:
+            return json_error(str(exc))
     catalog_source_profile_id = str(payload.pop("_catalog_source_profile_id", "") or "").strip()
     scope_value = payload.pop("_scope", None)
     if scope_value is None:

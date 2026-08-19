@@ -6,7 +6,7 @@ import json
 import os
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from tests.support import ServiceFixtureMixin, make_project_temp_dir
 
@@ -313,6 +313,141 @@ class ModelProfileTestCase(ServiceFixtureMixin, unittest.TestCase):
             response = await api_update_model_settings(JsonRequest(svc, {"chat_thinking": "turbo"}))
             self.assertEqual(response.status, 400)
             self.assertIn("effort", json.loads(response.text)["error"])
+
+        asyncio.run(run())
+
+    def test_global_profile_reasoning_effort_is_validated_saved_and_resolved(self):
+        from telegram_comfyui_selfie.webui_models import api_save_model_profile
+
+        async def run():
+            svc = self.make_service()
+            svc.config["default_chat_model_profile"] = "effort-model"
+            response = await api_save_model_profile(JsonRequest(
+                svc,
+                {
+                    "_scope": "global",
+                    "name": "Effort Model",
+                    "base_url": "https://models.example/v1",
+                    "api_key": "secret",
+                    "model": "reasoning-model",
+                    "thinking_effort": "high",
+                },
+                match_info={"profile_id": "effort-model"},
+            ))
+
+            self.assertTrue(json.loads(response.text)["ok"])
+            profile = svc.config["global_model_profiles"]["effort-model"]
+            self.assertEqual(profile["thinking_effort"], "high")
+            resolved = svc._resolved_llm_config("chat", "")
+            self.assertTrue(resolved["thinking"])
+            self.assertEqual(resolved["thinking_effort"], "high")
+
+            svc.config["chat_thinking_enabled"] = "low"
+            resolved = svc._resolved_llm_config("chat", "telegram:1")
+            self.assertEqual(resolved["thinking_effort"], "low")
+            svc.app_store.update_user_model_settings("1", chat_thinking="max")
+            resolved = svc._resolved_llm_config("chat", "telegram:1")
+            self.assertEqual(resolved["thinking_effort"], "max")
+
+            invalid = await api_save_model_profile(JsonRequest(
+                svc,
+                {
+                    "_scope": "global",
+                    "name": "Invalid",
+                    "base_url": "https://models.example/v1",
+                    "model": "invalid-model",
+                    "thinking_effort": "turbo",
+                },
+                match_info={"profile_id": "invalid-effort"},
+            ))
+            self.assertEqual(invalid.status, 400)
+            self.assertIn("effort", json.loads(invalid.text)["error"])
+            self.assertNotIn("invalid-effort", svc.config["global_model_profiles"])
+
+        asyncio.run(run())
+
+    def test_llm_message_metrics_count_explicit_and_tagged_thinking(self):
+        from telegram_comfyui_selfie.llm_runtime import llm_message_text_metrics
+
+        explicit = llm_message_text_metrics({
+            "reasoning_content": "逐步分析",
+            "content": "OK",
+        })
+        self.assertEqual(explicit["thinking_length"], len("逐步分析"))
+        self.assertEqual(explicit["reply_length"], len("OK"))
+        self.assertEqual(explicit["reply"], "OK")
+        self.assertEqual(explicit["length_unit"], "characters")
+
+        tagged = llm_message_text_metrics({
+            "content": "<thinking>先观察</thinking><analysis>再确认</analysis>红色",
+        })
+        self.assertEqual(tagged["thinking_length"], len("先观察\n再确认"))
+        self.assertEqual(tagged["reply_length"], len("红色"))
+        self.assertEqual(tagged["reply"], "红色")
+
+    def test_model_test_api_reports_thinking_and_reply_lengths(self):
+        from telegram_comfyui_selfie.webui import api_test_llm
+
+        async def run():
+            svc = self.make_service()
+            svc._resolved_llm_config = Mock(return_value={
+                "profile_id": "reasoning",
+                "model": "reasoning-model",
+                "thinking": True,
+                "thinking_effort": "medium",
+            })
+            svc._call_llm_messages = AsyncMock(return_value={
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {
+                        "reasoning_content": "先分析再作答",
+                        "content": "OK",
+                    },
+                }],
+            })
+
+            response = await api_test_llm(JsonRequest(svc, {"purpose": "chat"}))
+            data = json.loads(response.text)
+
+            self.assertTrue(data["ok"])
+            self.assertEqual(data["thinking_length"], len("先分析再作答"))
+            self.assertEqual(data["reply_length"], len("OK"))
+            self.assertEqual(data["reply"], "OK")
+            self.assertEqual(data["profile_id"], "reasoning")
+            self.assertEqual(data["model"], "reasoning-model")
+            self.assertEqual(data["thinking_effort"], "medium")
+            self.assertEqual(data["finish_reason"], "stop")
+            call = svc._call_llm_messages.await_args
+            self.assertEqual(call.kwargs["purpose"], "chat")
+            self.assertEqual(call.kwargs["tag"], "gui-test-chat")
+
+        asyncio.run(run())
+
+    def test_vision_model_test_uses_multimodal_request_and_reports_lengths(self):
+        from telegram_comfyui_selfie.webui import api_test_llm
+
+        async def run():
+            svc = self.make_service()
+            svc._resolved_llm_config = Mock(return_value={
+                "profile_id": "vision",
+                "model": "vision-model",
+                "thinking": False,
+                "thinking_effort": "none",
+            })
+            svc._call_llm_messages = AsyncMock(return_value={
+                "choices": [{"finish_reason": "stop", "message": {"content": "红色"}}],
+            })
+
+            response = await api_test_llm(JsonRequest(svc, {"purpose": "vision"}))
+            data = json.loads(response.text)
+
+            self.assertEqual(data["thinking_length"], 0)
+            self.assertEqual(data["reply_length"], len("红色"))
+            call = svc._call_llm_messages.await_args
+            self.assertEqual(call.kwargs["purpose"], "vision")
+            content = call.args[0][1]["content"]
+            self.assertEqual(content[1]["type"], "image_url")
+            self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
 
         asyncio.run(run())
 

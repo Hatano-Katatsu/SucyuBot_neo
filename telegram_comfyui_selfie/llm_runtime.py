@@ -14,7 +14,7 @@ import aiohttp
 
 from .http_limits import read_limited_json, read_limited_text, response_limit
 from .model_security import PublicOnlyResolver, validate_public_model_base_url
-from .model_thinking import resolve_thinking_setting
+from .model_thinking import normalize_profile_thinking_effort, resolve_thinking_setting
 
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ def _openai_models_url(value: Any) -> str:
 # 思考文本泄漏清洗：只处理显式的思考标签 <thinking>/<reasoning>/<analysis>。
 # 不做关键词启发式判断（如 "we need to"），避免误判正常输出。
 _THINKING_TAG_RE = re.compile(
-    r"^\s*<(?P<tag>thinking|reasoning|analysis)>.*?</(?P=tag)>\s*",
+    r"^\s*<(?P<tag>thinking|reasoning|analysis)>(?P<body>.*?)</(?P=tag)>\s*",
     flags=re.DOTALL | re.IGNORECASE,
 )
 
@@ -87,6 +87,47 @@ def _looks_like_llm_thinking(text: str) -> bool:
         str(text or ""),
         flags=re.DOTALL | re.IGNORECASE,
     ))
+
+
+def _llm_text_value(value: Any) -> str:
+    """从常见 OpenAI-compatible 文本 part 中提取可计数字符串。"""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(part for item in value if (part := _llm_text_value(item)))
+    if isinstance(value, dict):
+        for key in ("text", "content", "summary"):
+            if key in value:
+                return _llm_text_value(value.get(key))
+    return ""
+
+
+def llm_message_text_metrics(message: dict[str, Any] | None) -> dict[str, Any]:
+    """拆分模型 message 的思考与正式回复，并按 Unicode 字符数统计长度。"""
+    message = message if isinstance(message, dict) else {}
+    content = _llm_text_value(message.get("content")).strip()
+    remaining = content
+    thinking_parts: list[str] = []
+    for key in ("reasoning_content", "reasoning", "analysis"):
+        text = _llm_text_value(message.get(key)).strip()
+        if text and text not in thinking_parts:
+            thinking_parts.append(text)
+    # 部分兼容端点把思考块直接放在 content 开头；只认显式标签，不做关键词猜测。
+    for _ in range(8):
+        match = _THINKING_TAG_RE.match(remaining)
+        if not match:
+            break
+        text = str(match.group("body") or "").strip()
+        if text and text not in thinking_parts:
+            thinking_parts.append(text)
+        remaining = remaining[match.end():].strip()
+    thinking_text = "\n".join(thinking_parts)
+    return {
+        "reply": remaining,
+        "thinking_length": len(thinking_text),
+        "reply_length": len(remaining),
+        "length_unit": "characters",
+    }
 
 
 # 日志脱敏：vision 请求会把图片编码成 base64 data_url 放进 messages，
@@ -294,7 +335,8 @@ class LLMRuntimeMixin:
 
         chat 使用 chat_profile_id，image/fast 使用 fast_profile_id，vision 使用 vision_profile_id。
         vision 没有显式配置时保持为空，用于关闭图片理解链路。
-        thinking 优先级：用户显式设置 > 全局默认 > profile disable_thinking；设置可为布尔或 effort。
+        thinking 优先级：用户显式设置 > 全局默认 > profile thinking_effort > profile disable_thinking；
+        用户/全局设置可为布尔或 effort。
         """
         user_id = self._user_id_for_session(session_id)
         settings = self.app_store.get_user_model_settings(user_id) if user_id else {}
@@ -361,6 +403,9 @@ class LLMRuntimeMixin:
             global_value = global_value.strip()
         if global_value not in (None, ""):
             return resolve_thinking_setting(global_value, fallback=fallback)
+        profile_effort = normalize_profile_thinking_effort(profile.get("thinking_effort"))
+        if profile_effort:
+            return resolve_thinking_setting(profile_effort, fallback=fallback)
         return fallback, ""
 
     def _profile_thinking(self, purpose: str, profile: dict[str, Any], settings: dict[str, Any]) -> bool:
@@ -369,7 +414,8 @@ class LLMRuntimeMixin:
         优先级（从高到低）：
         1. 用户显式设置（chat_thinking/fast_thinking/vision_thinking 三态）——前端/角色卡页面可改；
         2. 全局配置默认（chat_thinking_enabled/fast_thinking_enabled/vision_thinking_enabled）——配置文件可改；
-        3. profile 的 disable_thinking。
+        3. profile 的 thinking_effort；
+        4. profile 的 disable_thinking。
         """
         return self._profile_thinking_resolution(purpose, profile, settings)[0]
 

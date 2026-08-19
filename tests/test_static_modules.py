@@ -183,5 +183,13 @@ class StaticModuleBoundaryTestCase(unittest.TestCase):
         self.assertIn('完整返回:\\n${prettyJson(entry.response)', admin_logs)
         self.assertIn("box.scrollTop = 0", admin_logs)
 
+    def test_home_model_test_renders_thinking_and_reply_lengths(self):
+        app = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('Object.prototype.hasOwnProperty.call(data, "thinking_length")', app)
+        self.assertIn("返回思考长度:", app)
+        self.assertIn("返回回复长度:", app)
+        self.assertIn("thinking_effort", app)
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import copy
 import secrets
 import os
@@ -19,6 +18,7 @@ from .deletion_runtime import (
     DeletionNotFoundError,
 )
 from .http_limits import read_limited_json, response_limit
+from .llm_runtime import llm_message_text_metrics
 from .webui_characters import (
     PUBLIC_FALLBACK_CLOSET_PREFIX,
     SESSION_CUSTOM_RESET_KEYS,
@@ -1963,17 +1963,43 @@ async def api_test_llm(request: web.Request):
     if purpose not in ("chat", "image", "vision"):
         return json_error("purpose 必须是 chat、image 或 vision")
     try:
+        resolved = service._resolved_llm_config(purpose, "")
         if purpose == "vision":
             # 32x32 红色 PNG，用于测试视觉模型是否可用。
             # 部分视觉模型（如 qwen-vl）要求图片宽高均 > 10px，1x1 占位图会被 provider 拒绝。
             image_b64 = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAANUlEQVR4nO3NMQEAMAjEwKe68K8CMZUQFracgKSmO5feaT0OFhwgB8gBcoAcIAfIAXKAHIR8qZcBlCKtHn4AAAAASUVORK5CYII="
-            image_bytes = base64.b64decode(image_b64)
-            description = await service._describe_image_for_chat(
-                "", image_bytes, "image/png", source_label="测试图片"
-            )
-            return json_ok({"reply": description})
-        text = await service._call_llm("只输出 OK 两个字母。", "ping", temp=0.0, tag=f"gui-test-{purpose}", purpose=purpose)
-        return json_ok({"reply": text})
+            messages = [
+                {"role": "system", "content": "识别测试图片，只输出它的主色名称。"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "这张图片的主色是什么？"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+                    ],
+                },
+            ]
+        else:
+            messages = [
+                {"role": "system", "content": "只输出 OK 两个字母。"},
+                {"role": "user", "content": "ping"},
+            ]
+        data = await service._call_llm_messages(
+            messages,
+            temp=0.0,
+            tag=f"gui-test-{purpose}",
+            purpose=purpose,
+        )
+        choice = (data.get("choices") or [{}])[0] if isinstance(data, dict) else {}
+        message = choice.get("message") if isinstance(choice, dict) else {}
+        result = llm_message_text_metrics(message)
+        result.update({
+            "profile_id": resolved.get("profile_id") or "",
+            "model": resolved.get("model") or "",
+            "thinking": bool(resolved.get("thinking")),
+            "thinking_effort": resolved.get("thinking_effort") or "",
+            "finish_reason": choice.get("finish_reason") if isinstance(choice, dict) else None,
+        })
+        return json_ok(result)
     except Exception as exc:
         return json_error(str(exc), status=502)
 
