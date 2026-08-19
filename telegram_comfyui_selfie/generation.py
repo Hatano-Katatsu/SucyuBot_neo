@@ -2278,6 +2278,7 @@ def _build_animaflow_payload(
     schema: dict[str, Any],
     *,
     workflow: str = "",
+    orientation: str = "",
 ) -> dict[str, Any]:
     """严格根据 AnimaFlow 实时 schema 构建请求体。"""
     workflow = workflow or _get_animaflow_workflow(service)
@@ -2316,20 +2317,9 @@ def _build_animaflow_payload(
     if cfg_value is not None:
         payload["cfg"] = cfg_value
 
-    aspect = _aspect_ratio_from_dimensions(service)
-    if aspect:
-        payload["aspect_ratio"] = aspect
-
-    if "width" in properties:
-        try:
-            payload["width"] = int(service.config.get("width", "1024") or 1024)
-        except Exception:
-            pass
-    if "height" in properties:
-        try:
-            payload["height"] = int(service.config.get("height", "1024") or 1024)
-        except Exception:
-            pass
+    # 只发送画幅，让 AnimaFlow 按自身 target_megapixels（默认约 1MP）计算并对齐尺寸。
+    # 显式 width/height 会覆盖 aspect_ratio，也会绕过 AnimaFlow 的统一像素预算。
+    payload["aspect_ratio"] = _animaflow_aspect_ratio(orientation)
     if "batch_size" in properties:
         try:
             payload["batch_size"] = max(1, int(service.config.get("batch_size", "1") or 1))
@@ -2483,14 +2473,14 @@ async def _do_generate_animaflow(
             llm_payload["steps"] = steps_value
         if cfg_value is not None:
             llm_payload["cfg"] = cfg_value
-        aspect = _aspect_ratio_from_dimensions(service, orientation)
-        if aspect:
-            llm_payload["aspect_ratio"] = aspect
+        llm_payload["aspect_ratio"] = _animaflow_aspect_ratio(orientation)
+        llm_payload.pop("width", None)
+        llm_payload.pop("height", None)
         properties = _schema_properties(schema)
         if properties:
             hyper_keys = {
                 "workflow", "seed", "filename_prefix", "steps", "cfg", "aspect_ratio",
-                "width", "height", "batch_size",
+                "batch_size",
             }
             llm_payload = {key: value for key, value in llm_payload.items() if key in properties or key in hyper_keys}
         llm_payload = _apply_animatool_guard_contract(llm_payload, schema, slots, workflow, cfg=cfg_value)
@@ -2520,6 +2510,7 @@ async def _do_generate_animaflow(
         workflow=workflow,
         schema=schema,
         meta=meta,
+        orientation=orientation,
     )
 
 
@@ -2602,6 +2593,7 @@ async def submit_animaflow(
     workflow: str = "",
     schema: dict[str, Any] | None = None,
     meta: dict[str, Any] | None = None,
+    orientation: str = "",
 ) -> tuple[bool, list[bytes], str]:
     """LLM 规划失败时仍严格按实时 schema 构造 AnimaFlow 请求。"""
     slots = getattr(service, "_last_prompt_slots", None)
@@ -2620,6 +2612,7 @@ async def submit_animaflow(
         seed,
         schema,
         workflow=workflow,
+        orientation=orientation,
     )
     session_id = getattr(slots, "session_id", "") if isinstance(slots, PromptSlots) else ""
     _remember_generated_nltag(service, session_id, _payload_nltag(payload))
@@ -2674,20 +2667,10 @@ async def submit_animatool_turbo(service: Any, positive: str, negative: str, see
     return await submit_animaflow(service, positive, negative, seed)
 
 
-def _aspect_ratio_from_dimensions(service: Any, orientation: str = "") -> str:
-    """从全局 width/height 推算画幅比例。
+def _animaflow_aspect_ratio(orientation: str = "") -> str:
+    """规范化规划器给出的 AnimaFlow 画幅；缺省使用竖版。"""
+    return orientation if orientation in ("2:3", "3:2") else "2:3"
 
-    只允许 2:3（竖版）和 3:2（横版），模拟真实相机画幅。
-    orientation 可传入 "2:3" 或 "3:2" 直接指定，跳过 width/height 推算。
-    """
-    if orientation in ("2:3", "3:2"):
-        return orientation
-    try:
-        w = int(service.config.get("width", "832") or 832)
-        h = int(service.config.get("height", "1216") or 1216)
-    except Exception:
-        return "2:3"
-    return "3:2" if w > h else "2:3"
 
 def ensure_comfy_session(service: Any):
     if service.comfy_session is None or service.comfy_session.closed:

@@ -2346,6 +2346,9 @@ class SchedulerRuntimeMixin:
         except Exception as exc:
             self._ulog(session_id, "ERROR", f"HISTORY_FAILED: {exc}")
             logger.warning("character history summary generation failed", exc_info=True)
+            # 历史提要属于 dream 提交链的一部分。这里不能吞错后继续 mark_dream，
+            # 否则 503 等上游故障会永久推进游标，后续也没有机会重试本页。
+            raise
 
     def _mark_daily_triggered_time(self, session_id: str, trigger_time: str, *, reason: str = "sent"):
         """标记一个随机推送点已经处理完成。"""
@@ -2359,6 +2362,85 @@ class SchedulerRuntimeMixin:
             session_schema.set_daily_triggered_times(state, sorted(triggered))
             self._save_session_state(session_id, state)
         self._ulog(session_id, "PUSH", f"随机推送点 {trigger_time} 已处理 reason={reason}")
+
+    @staticmethod
+    def _scheduled_push_retry_token(local_dt: datetime, trigger_time: str) -> str:
+        """生成普通定时推送的单日重试键，避免同一时刻跨日串状态。"""
+        return f"{local_dt.strftime('%Y-%m-%d')}|{str(trigger_time or '').strip()}"
+
+    def _scheduled_push_retry_info(
+        self,
+        session_id: str,
+        local_dt: datetime,
+        trigger_time: str,
+    ) -> dict[str, Any]:
+        return self._background_retry_info(
+            "scheduled-push-retry",
+            session_id,
+            self._scheduled_push_retry_token(local_dt, trigger_time),
+        )
+
+    def _mark_scheduled_push_attempt_started(
+        self,
+        session_id: str,
+        local_dt: datetime,
+        trigger_time: str,
+    ) -> None:
+        token = self._scheduled_push_retry_token(local_dt, trigger_time)
+        key = self._background_key("scheduled-push-retry", session_id, token)
+        previous = dict(getattr(self, "_background_retry_state", {}).get(key) or {})
+        previous["in_flight"] = True
+        previous["next_retry"] = float("inf")
+        self._background_retry_state[key] = previous
+
+    def _record_scheduled_push_failure(
+        self,
+        session_id: str,
+        local_dt: datetime,
+        trigger_time: str,
+        error: Any = "",
+    ) -> dict[str, Any]:
+        try:
+            base = max(1.0, float(self.config.get("scheduled_push_retry_base_seconds", 60) or 60))
+        except (TypeError, ValueError):
+            base = 60.0
+        try:
+            maximum = max(base, float(self.config.get("scheduled_push_retry_max_seconds", 1800) or 1800))
+        except (TypeError, ValueError):
+            maximum = 1800.0
+        return self._record_background_retry_failure(
+            "scheduled-push-retry",
+            session_id,
+            self._scheduled_push_retry_token(local_dt, trigger_time),
+            error=error,
+            base_seconds=base,
+            max_seconds=maximum,
+        )
+
+    def _clear_scheduled_push_retry(
+        self,
+        session_id: str,
+        local_dt: datetime,
+        trigger_time: str,
+    ) -> None:
+        self._clear_background_retry(
+            "scheduled-push-retry",
+            session_id,
+            self._scheduled_push_retry_token(local_dt, trigger_time),
+        )
+
+    def _clear_stale_scheduled_push_retries(
+        self,
+        session_id: str,
+        local_dt: datetime,
+        trigger_times: list[str],
+    ) -> None:
+        valid = {self._scheduled_push_retry_token(local_dt, item) for item in trigger_times}
+        retries = getattr(self, "_background_retry_state", {})
+        for key in list(retries):
+            scope, retry_session, token = key
+            if scope == "scheduled-push-retry" and retry_session == session_id and token not in valid:
+                retries.pop(key, None)
 
     def _mark_morning_greet_sent(self, session_id: str, local_dt: datetime, *, reason: str = "sent"):
         """标记今日早安推送已经处理完成。"""
@@ -2500,6 +2582,9 @@ class SchedulerRuntimeMixin:
         """启动后台推送任务，并只在实际成功后写完成标记。"""
 
         async def runner():
+            if trigger_time:
+                self._mark_scheduled_push_attempt_started(session_id, local_dt, trigger_time)
+            failure_error = ""
             try:
                 ok = await self._sched_fire(
                     session_id,
@@ -2508,17 +2593,34 @@ class SchedulerRuntimeMixin:
                     skip_active_check=skip_active_check,
                     temporary_system_prompt=temporary_system_prompt,
                 )
+            except asyncio.CancelledError:
+                if trigger_time:
+                    self._clear_scheduled_push_retry(session_id, local_dt, trigger_time)
+                raise
             except Exception as exc:
                 ok = False
+                failure_error = str(exc)
                 self._ulog(session_id, "PUSH", f"后台推送任务异常 mode={mode_override}: {exc}")
                 logger.error("scheduled push task failed: %s", exc, exc_info=True)
             if ok:
                 if trigger_time:
+                    self._clear_scheduled_push_retry(session_id, local_dt, trigger_time)
                     self._mark_daily_triggered_time(session_id, trigger_time, reason="sent")
                 if mark_morning:
                     self._mark_morning_greet_sent(session_id, local_dt, reason="sent")
             elif trigger_time:
-                self._ulog(session_id, "PUSH", f"随机推送点 {trigger_time} 本次未完成，窗口内等待重试")
+                retry = self._record_scheduled_push_failure(
+                    session_id,
+                    local_dt,
+                    trigger_time,
+                    failure_error or "push returned false",
+                )
+                self._ulog(
+                    session_id,
+                    "PUSH",
+                    f"随机推送点 {trigger_time} 本次未完成，{retry['delay']:.0f} 秒后重试 "
+                    f"attempt={retry['attempts']}",
+                )
             elif mark_morning:
                 self._ulog(session_id, "PUSH", "早安推送本次未完成，窗口内等待重试")
             return ok
@@ -2567,6 +2669,45 @@ class SchedulerRuntimeMixin:
                 mark_morning=True,
             )
 
+    def _handle_daily_push_tick(
+        self,
+        session_id: str,
+        state: dict[str, Any],
+        local_dt: datetime,
+    ) -> None:
+        """处理普通随机推送点；已实际失败的点越过原窗口后仍按退避状态重试。"""
+        if session_id in self._active_pushes:
+            return
+        time_str = local_dt.strftime("%H:%M")
+        now_minute = local_dt.hour * 60 + local_dt.minute
+        triggered = session_schema.get_daily_triggered_times(state)
+        for trigger_time in session_schema.get_daily_trigger_times(state):
+            if trigger_time > time_str or trigger_time in triggered:
+                continue
+            retry = self._scheduled_push_retry_info(session_id, local_dt, trigger_time)
+            if retry.get("in_flight"):
+                continue
+            trigger_minute = int(trigger_time.split(":")[0]) * 60 + int(trigger_time.split(":")[1])
+            if now_minute - trigger_minute > 5 and not retry:
+                # 从未开始过的旧时间点仍按过期处理，避免服务恢复后一次补发多张；
+                # 只有实际尝试失败的时间点才获得跨窗口退避重试。
+                self._mark_daily_triggered_time(session_id, trigger_time, reason="missed-window")
+                continue
+            if retry and float(retry.get("next_retry") or 0) > local_dt.timestamp():
+                continue
+            if self._check_goodnight_inhibition(state):
+                self._ulog(session_id, "PUSH", f"定时推送 {trigger_time} 本轮受晚安抑制，保留重试")
+                continue
+            goodnight = self._is_goodnight_trigger_time(session_id, local_dt, trigger_time)
+            self._create_scheduled_push_task(
+                session_id,
+                local_dt,
+                mode_override="normal",
+                trigger_time=trigger_time,
+                temporary_system_prompt=(self._goodnight_push_system_prompt() if goodnight else ""),
+            )
+            break
+
     async def scheduler_loop(self):
         await asyncio.sleep(10)
         while True:
@@ -2579,7 +2720,6 @@ class SchedulerRuntimeMixin:
                         continue
                     now = self._session_now(session_id)
                     today = now.strftime("%Y-%m-%d")
-                    time_str = now.strftime("%H:%M")
                     schedule = self._character_schedule_minutes(session_id, now)
                     now_minute = now.hour * 60 + now.minute
                     key = self._context_character_key(session_id)
@@ -2605,6 +2745,7 @@ class SchedulerRuntimeMixin:
                         session_schema.set_daily_trigger_times(state, sorted(times))
                         session_schema.set_daily_trigger_date(state, today)
                         session_schema.set_daily_triggered_times(state, [])
+                        self._clear_stale_scheduled_push_retries(session_id, now, sorted(times))
                         self._mark_dirty(session_id)
 
                     # 推送关闭(每日次数=0)时，早安推送也不发——否则“关闭推送”每天早上又冒出来（用户报的“只持续一天”）。
@@ -2616,28 +2757,7 @@ class SchedulerRuntimeMixin:
                         wake_minute=int(schedule["wake"]),
                     )
 
-                    triggered = session_schema.get_daily_triggered_times(state)
-                    for t in session_schema.get_daily_trigger_times(state):
-                        if t > time_str or t in triggered:
-                            continue
-                        t_min = int(t.split(":")[0]) * 60 + int(t.split(":")[1])
-                        now_min = now.hour * 60 + now.minute
-                        if now_min - t_min > 5:
-                            self._mark_daily_triggered_time(session_id, t, reason="missed-window")
-                            continue
-                        if self._check_goodnight_inhibition(state):
-                            self._ulog(session_id, "PUSH", f"定时推送 {t} 本轮受晚安抑制，窗口内保留重试")
-                            continue
-                        if session_id not in self._active_pushes:
-                            goodnight = self._is_goodnight_trigger_time(session_id, now, t)
-                            self._create_scheduled_push_task(
-                                session_id,
-                                now,
-                                mode_override="normal",
-                                trigger_time=t,
-                                temporary_system_prompt=(self._goodnight_push_system_prompt() if goodnight else ""),
-                            )
-                            break
+                    self._handle_daily_push_tick(session_id, state, now)
 
                     await self._check_ntr_stage(session_id, state)
                 # 跨会话角色邂逅检查：全局配对驱动，不属于单个会话循环；
@@ -2686,6 +2806,7 @@ class SchedulerRuntimeMixin:
         skip_active_check=False,
         character_lock_held: bool = False,
         temporary_system_prompt: str = "",
+        fail_fast: bool = False,
     ) -> bool:
         if not session_id:
             return False
@@ -2698,6 +2819,7 @@ class SchedulerRuntimeMixin:
                 skip_active_check=skip_active_check,
                 character_lock_held=character_lock_held,
                 temporary_system_prompt=temporary_system_prompt,
+                fail_fast=fail_fast,
             )
 
     async def _sched_fire_unlocked(
@@ -2708,6 +2830,7 @@ class SchedulerRuntimeMixin:
         skip_active_check=False,
         character_lock_held: bool = False,
         temporary_system_prompt: str = "",
+        fail_fast: bool = False,
     ) -> bool:
         if not session_id or (not skip_active_check and session_id in self._active_pushes):
             return False
@@ -2753,8 +2876,15 @@ class SchedulerRuntimeMixin:
                 await self._run_dream(session_id, local_dt, reason="morning", force=True)
             if hasattr(self, "ensure_life_plan_for_today"):
                 try:
-                    await self.ensure_life_plan_for_today(session_id, force=False, reason=f"push-{mode}")
+                    await self.ensure_life_plan_for_today(
+                        session_id,
+                        force=False,
+                        reason=f"push-{mode}",
+                        fail_fast=fail_fast,
+                    )
                 except Exception:
+                    if fail_fast:
+                        raise
                     logger.debug("life plan ensure failed for scheduler push", exc_info=True)
             self._ulog(session_id, "PUSH", f"触发 mode={mode}")
             w = await self._fetch_weather(session_id=session_id)
@@ -2944,6 +3074,8 @@ class SchedulerRuntimeMixin:
         except Exception as exc:
             self._ulog(session_id, "PUSH", f"推送异常 mode={mode_override or 'normal'}: {exc}")
             logger.error("scheduled push failed: %s", exc, exc_info=True)
+            if fail_fast:
+                raise
             return False
         finally:
             self._active_pushes.discard(session_id)

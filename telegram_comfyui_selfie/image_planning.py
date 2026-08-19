@@ -2091,7 +2091,8 @@ async def plan_animaflow_slots(
     system = (
         f"你是 AnimaFlow {wf_label} 的专用提示词工程师。\n"
         f"用户给你已计算好的提示词槽位，你需要把它们映射到 AnimaFlow {workflow} API 的 JSON 字段中。\n"
-        "steps/cfg/width/height/batch_size/filename_prefix/seed/aspect_ratio 由系统注入，不要输出。\n\n"
+        "steps/cfg/batch_size/filename_prefix/seed/aspect_ratio 由系统注入；"
+        "width/height 由 AnimaFlow 按目标像素数计算，均不要输出。\n\n"
         f"## Knowledge\n{knowledge_text}\n\n"
         f"## Schema 内容字段\n{schema_text}\n\n"
         f"## 必填字段: {', '.join(content_required) if content_required else '（未指定）'}\n\n"

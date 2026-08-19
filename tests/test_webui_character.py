@@ -658,12 +658,20 @@ class WebUICharacterTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._bot_tasks = [keepalive]
             observed = {}
 
-            async def fake_sched(session_id, local_dt, mode_override=None, skip_active_check=False, character_lock_held=False):
+            async def fake_sched(
+                session_id,
+                local_dt,
+                mode_override=None,
+                skip_active_check=False,
+                character_lock_held=False,
+                fail_fast=False,
+            ):
                 active_state = svc._get_session_state(session_id)
                 observed["character"] = session_schema.get_character_value(active_state, "custom_character", "")
                 observed["mode"] = mode_override
                 observed["skip_active_check"] = skip_active_check
                 observed["character_lock_held"] = character_lock_held
+                observed["fail_fast"] = fail_fast
                 svc._record_sent_photo(
                     session_id,
                     "B push scene",
@@ -698,6 +706,7 @@ class WebUICharacterTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "mode": "morning",
                 "skip_active_check": True,
                 "character_lock_held": True,
+                "fail_fast": True,
             })
 
             after = svc._get_session_state(sid)
@@ -715,6 +724,72 @@ class WebUICharacterTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("B final nltag", b_history_text)
             active_history_text = "\n".join(m.get("content", "") for m in session_schema.get_chat_history(after))
             self.assertNotIn("B final nltag", active_history_text)
+
+        asyncio.run(run())
+
+    def test_webui_manual_push_returns_upstream_error_and_restores_character(self):
+        async def run():
+            class DummyHttp:
+                closed = False
+
+            class JsonRequest(dict):
+                def __init__(self, app, match_info, payload=None):
+                    super().__init__()
+                    self.app = app
+                    self.match_info = match_info
+                    self.query = {}
+                    self._payload = payload or {}
+                    self["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+
+                async def json(self):
+                    return self._payload
+
+            svc = self.make_service()
+            sid = "telegram:manual-push-error"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "角色A")
+            session_schema.set_chat_history(state, [{"role": "user", "content": "A current chat"}])
+            session_schema.get_saved_characters(state).update({
+                "角色A": {"character": "角色A", "persona": "A persona"},
+                "角色B": {"character": "角色B", "persona": "B persona"},
+            })
+            svc._save_session_state(sid, state)
+            observed = {}
+
+            async def fake_sched(*args, **kwargs):
+                observed.update(kwargs)
+                raise RuntimeError(
+                    'LLM request failed: 503 {"error":{"message":"Endpoint is unavailable."}}'
+                )
+
+            keepalive = asyncio.create_task(asyncio.sleep(60))
+            svc.http = DummyHttp()
+            svc._bot_tasks = [keepalive]
+            svc._sched_fire = fake_sched
+            app = web.Application()
+            app["service"] = svc
+            req = JsonRequest(
+                app,
+                {"session_id": sid},
+                payload={"character_key": "角色B", "mode": "normal"},
+            )
+            try:
+                resp = await asyncio.wait_for(api_test_push_selected_character(req), timeout=0.2)
+            finally:
+                keepalive.cancel()
+                try:
+                    await keepalive
+                except asyncio.CancelledError:
+                    pass
+
+            data = json.loads(resp.text)
+            self.assertEqual(resp.status, 502)
+            self.assertFalse(data["ok"])
+            self.assertIn("503", data["error"])
+            self.assertTrue(observed["fail_fast"])
+            after = svc._get_session_state(sid)
+            self.assertEqual(session_schema.get_character_value(after, "custom_character", ""), "角色A")
+            self.assertEqual(session_schema.get_chat_history(after), [{"role": "user", "content": "A current chat"}])
 
         asyncio.run(run())
 
@@ -772,7 +847,14 @@ class WebUICharacterTestCase(ServiceFixtureMixin, unittest.TestCase):
                 await enter("avatar")
                 return True, [b"a-avatar"], ""
 
-            async def fake_sched(session_id, local_dt, mode_override=None, skip_active_check=False, character_lock_held=False):
+            async def fake_sched(
+                session_id,
+                local_dt,
+                mode_override=None,
+                skip_active_check=False,
+                character_lock_held=False,
+                fail_fast=False,
+            ):
                 await enter("push")
                 svc._record_sent_photo(
                     session_id,
@@ -1127,10 +1209,12 @@ class WebUICharacterTestCase(ServiceFixtureMixin, unittest.TestCase):
                 mode_override=None,
                 skip_active_check=False,
                 character_lock_held=False,
+                fail_fast=False,
             ):
                 active = svc._get_session_state(session_id)
                 observed["character"] = session_schema.get_character_value(active, "custom_character", "")
                 observed["lock_held"] = character_lock_held
+                observed["fail_fast"] = fail_fast
                 return True
 
             keepalive = asyncio.create_task(asyncio.sleep(60))
@@ -1154,7 +1238,7 @@ class WebUICharacterTestCase(ServiceFixtureMixin, unittest.TestCase):
                     pass
             self.assertTrue(data["ok"])
             self.assertTrue(data["triggered"])
-            self.assertEqual(observed, {"character": "", "lock_held": True})
+            self.assertEqual(observed, {"character": "", "lock_held": True, "fail_fast": True})
             after = svc._get_session_state(sid)
             self.assertEqual(session_schema.get_character_value(after, "custom_character", ""), "角色A")
             self.assertEqual(session_schema.get_character_value(after, "custom_scheduled_persona", ""), "A 人格")

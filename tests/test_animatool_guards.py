@@ -9,8 +9,10 @@ from unittest.mock import AsyncMock, patch
 from telegram_comfyui_selfie.generation import (
     PromptSlots,
     _apply_animatool_guard_contract,
+    _build_animaflow_payload,
     _build_animatool_guard_contract,
     _build_animatool_turbo_payload,
+    _do_generate_animaflow,
     _prepare_animaflow_generate_payload,
 )
 from telegram_comfyui_selfie.image_planning import plan_animaflow_slots, plan_animatool_slots
@@ -62,6 +64,104 @@ class AnimaFlowGuardContractTestCase(unittest.TestCase):
             effective_appearance="plain white t-shirt, dark blue jeans",
             negative=negative if negative is not None else self.GUARDED_NEGATIVE,
         )
+
+    def test_animaflow_uses_planned_ratio_and_leaves_dimensions_to_server(self):
+        schema = self._schema(supports_neg=False)
+        schema["parameters"]["properties"].update({
+            "aspect_ratio": {"type": "string"},
+            "width": {"type": "integer"},
+            "height": {"type": "integer"},
+        })
+        service = self._service("anima29_turbo")
+        service.config.update({"width": "2048", "height": "512"})
+
+        payload = _build_animaflow_payload(
+            service,
+            self._slots(),
+            "positive prompt",
+            self.GUARDED_NEGATIVE,
+            7,
+            schema,
+            orientation="2:3",
+        )
+
+        self.assertEqual(payload["aspect_ratio"], "2:3")
+        self.assertNotIn("width", payload)
+        self.assertNotIn("height", payload)
+
+    def test_animaflow_generation_never_restores_llm_dimensions(self):
+        async def run():
+            service = self._service("anima29_turbo")
+            service._last_prompt_slots = self._slots()
+            schema = self._schema(supports_neg=False)
+            schema["parameters"]["properties"].update({
+                "aspect_ratio": {"type": "string"},
+                "width": {"type": "integer"},
+                "height": {"type": "integer"},
+            })
+            meta = {"endpoints": {"generate": "/anima/generate"}}
+            planner = AsyncMock(return_value={
+                "tags": "A quiet library portrait.",
+                "width": 512,
+                "height": 2048,
+            })
+            poster = AsyncMock(return_value=(True, [b"image"], ""))
+
+            with (
+                patch("telegram_comfyui_selfie.image_planning.plan_animaflow_slots", new=planner),
+                patch(
+                    "telegram_comfyui_selfie.generation.load_animaflow_workflow_resources",
+                    new=AsyncMock(return_value=("anima29_turbo", meta, {}, schema, {})),
+                ),
+                patch("telegram_comfyui_selfie.generation._post_animaflow", new=poster),
+            ):
+                result = await _do_generate_animaflow(
+                    service,
+                    "unused scene",
+                    "telegram:123",
+                    7,
+                    orientation="3:2",
+                )
+
+            self.assertTrue(result[0])
+            payload = poster.await_args.args[4]
+            self.assertEqual(payload["aspect_ratio"], "3:2")
+            self.assertNotIn("width", payload)
+            self.assertNotIn("height", payload)
+
+        asyncio.run(run())
+
+    def test_animaflow_schema_fallback_keeps_planned_ratio(self):
+        async def run():
+            service = self._service("anima29_turbo")
+            service._last_prompt_slots = self._slots()
+            schema = self._schema(supports_neg=False)
+            meta = {"endpoints": {"generate": "/anima/generate"}}
+            submitter = AsyncMock(return_value=(True, [b"image"], ""))
+
+            with (
+                patch(
+                    "telegram_comfyui_selfie.image_planning.plan_animaflow_slots",
+                    new=AsyncMock(return_value=None),
+                ),
+                patch(
+                    "telegram_comfyui_selfie.generation.load_animaflow_workflow_resources",
+                    new=AsyncMock(return_value=("anima29_turbo", meta, {}, schema, {})),
+                ),
+                patch("telegram_comfyui_selfie.generation.submit_animaflow", new=submitter),
+            ):
+                result = await _do_generate_animaflow(
+                    service,
+                    "unused scene",
+                    "telegram:123",
+                    7,
+                    orientation="3:2",
+                )
+
+            self.assertTrue(result[0])
+            self.assertEqual(submitter.await_args.kwargs["orientation"], "3:2")
+
+        asyncio.run(run())
 
     def test_cfg_one_ignores_schema_neg_and_preserves_guards_as_positive_text(self):
         payload = _build_animatool_turbo_payload(

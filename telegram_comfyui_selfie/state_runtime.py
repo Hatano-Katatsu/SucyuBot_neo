@@ -18,6 +18,7 @@ from . import character_card
 from . import session_schema
 from .config_store import dump_simple_yaml, flatten_config, load_simple_yaml
 from .defaults import DEFAULT_CONFIG
+from .encounter_runtime import normalize_cross_world_encounter_strength
 
 
 logger = logging.getLogger(__name__)
@@ -127,6 +128,15 @@ class ServiceStateMixin:
                             cfg.pop(old_key, None)
                         if legacy_backend == "animatool":
                             cfg["image_backend"] = "animaflow"
+                        # 旧版用 0-1 随机概率；新版保留其大致倾向并交给 LLM 做语义判断。
+                        old_strength_key = "cross_world_encounter_chance"
+                        new_strength_key = "cross_world_encounter_trigger_strength"
+                        if new_strength_key not in loaded and old_strength_key in loaded:
+                            cfg[new_strength_key] = loaded[old_strength_key]
+                        cfg.pop(old_strength_key, None)
+                        cfg[new_strength_key] = normalize_cross_world_encounter_strength(
+                            cfg.get(new_strength_key)
+                        )
                 except Exception as exc:
                     raise RuntimeError(f"配置文件读取失败: {self.config_path}: {exc}") from exc
             else:

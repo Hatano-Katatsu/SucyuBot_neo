@@ -134,6 +134,7 @@ telegram_comfyui_selfie/
 - 日常局部同框与性爱伴侣场景分开处理。性爱场景保留 `your <body>` 归属，并在明确提及时补充相应视觉 tag。
 - 场景衣物冲突采用精确删除，不生成 `the current outfit` 等不可渲染占位语，也不能误删人物动作。
 - 画幅只允许 2:3 或 3:2；负向提示词压制 split screen、grid、multiple panels、collage。
+- AnimaFlow 请求只发送规划器选出的 `aspect_ratio`，不发送 `width`/`height`；实际尺寸由 AnimaFlow 按服务端 `target_megapixels`（默认约 1MP）换算并对齐。WebUI 的宽高只属于原生 ComfyUI 后端，启用 AnimaFlow 时折叠。
 - 任何场景都不自动追加性/裸露类反词（`no panties`、`bottomless`、`nsfw`、`nude` 等）；只有「公开场景且 purity>2」的护栏路径按最精简集追加防走光反词（`nude, topless, bottomless`，各表一种裸露程度、无同义重复），其余场景完全靠正向提示控制。
 - AnimaFlow 源码不随 Bot 仓库分发；运行时以 `/anima/workflows` 为工作流单一来源，再按目录动态加载选中工作流的 schema、knowledge 与 generate 端点，禁止维护本地工作流清单。管理员开关默认关闭；每次开启都重新发现目录，切换工作流时用其动态默认值重置 cfg/steps。发现目录或工作流资源失败时，只通过外部 HTTP 接口回退到旧 `turbo_v1` 协议，不重新内置插件源码。cfg=1 时不构造任何负面字段，仅在 nsfw/explicit 的正面 tags 末尾追加 `no mosaic, uncensored`。
 
@@ -144,6 +145,8 @@ telegram_comfyui_selfie/
 - dream 从最旧未处理消息开始按完整轮次和字符预算分页，日记、记忆链全部成功后只推进本页真实消息边界，剩余积压留给下一次继续。
 - 业务后台协程统一通过 `_spawn_background()` 登记作用域与停机策略；完成回调必须消费异常并清理兼容 task map，停机在关闭 HTTP 前取消或排空。
 - 同一会话的推送使用 `asyncio.Lock` 串行化，避免 morning/daily/continuity 并发重复发图。
+- WebUI 手动测试推送使用 fail-fast：生活线或后续推送链路遇到上游异常时立即返回 JSON 错误并恢复临时角色上下文；后台定时推送仍按原有容错与模型回退策略运行。
+- 普通定时推送只有在从未开始且确实错过窗口时才记 `missed-window`；已实际尝试失败的时间点使用指数退避跨窗口重试，成功后才扣除该时间点。dream 的角色历史提要失败必须让整页 dream 失败并保留游标，由 dream 退避机制重试。
 - 多阶段 NTR/连续推送按阶段顺序 await；单阶段失败要隔离并记录，不阻塞后续调度循环。
 - 同一会话角色互动推送默认关闭（每日上限 0）；用户在动线页选择参与角色并设置每日上限。它只作为普通每日推送的话题方向，当前活动角色必须在参与列表中，目标从已选择且清醒的非活动角色中随机抽取。
 - 同会话角色互动抽中目标后，必须先按目标角色键建立其当日生活线/动线，禁止通过临时切换角色借用 live 上下文。编排结果在图片成功发送后才扣每日额度，并分别写入双方冻结/活动历史、SQLite 消息、长期记忆、生活线事件/NPC 与 encounters 关系史；生图仍保持单活动角色入画，另一角色位于画外。
@@ -161,11 +164,11 @@ telegram_comfyui_selfie/
 
 ## 跨会话角色邂逅（一期）
 
-- `cross_world_enabled` + `cross_world_pairs` 声明配对；配对即声明同世界观并授权编排，一期无逐次 consent。配对角色须为两侧会话当前活动角色，否则跳过。pairs 在配置文件里为对象列表，WebUI 设置页为文本格式（每行 `chat_id:角色名 = chat_id:角色名`），`_cross_world_pairs` 统一归一化。
+- `cross_world_enabled`、`cross_world_pairs`、跨会话冷却与触发倾向只控制跨会话邂逅，不影响用户在动线页配置的同会话角色互动。配对即声明同世界观并授权编排，一期无逐次 consent。配对角色须为两侧会话当前活动角色，否则跳过。pairs 在配置文件里为对象列表，WebUI 设置页为文本格式（每行 `chat_id:角色名 = chat_id:角色名`），`_cross_world_pairs` 统一归一化。
 - 邂逅由 `encounter_runtime.py` 编排：访客 A 当天旅行到地主 B 城（place box 的 `travel_override` 只覆盖 `_session_city` 读取层，不污染 `custom_location`；到期由 dream 结算 `_settle_travel_override` 清除），一次 LLM 调用编排整个场景。
-- 编排调用用地主侧会话的 fast profile 并记其用量（`session_id=地主`）；JSON 走 `_parse_llm_json` 保守修复，summary/pov_a/pov_b 缺一即整体中止，不写半成品。
+- 触发决策与编排调用优先用对应会话的 fast profile、未配置时回退 image profile；编排用量记地主侧（`session_id=地主`）。JSON 走 `_parse_llm_json` 保守修复，summary/pov_a/pov_b 缺一即整体中止，不写半成品。
 - 持双方 `character_operation_lock`（按 session_id 字典序取锁防死锁）内原子落库：encounters 表（关系史，供下次编排承接重逢）、双方各一条 system 历史事件（`_append_encounter_system_message`，措辞允许自然承接且不自我降权）、记忆建议过 `_is_long_memory_in_scope` 后落 kind=event/source=encounter:<id>、life_plan today.events + npcs[]。双人记忆互不共享。
-- 一期不做：双人同框生图、实时接力对话、互发消息、专门的用户通知推送——角色在后续对话/推送中自然提起。调度入口在 scheduler_loop 每轮 `_maybe_schedule_encounters`：冷却（encounters 表 max ts）+ 概率门 + 双方空闲/清醒检查，单对失败隔离不影响调度循环。
+- 一期不做：双人同框生图、实时接力对话、互发消息、专门的用户通知推送——角色在后续对话/推送中自然提起。调度入口在 scheduler_loop 每轮 `_maybe_schedule_encounters`：先检查冷却（encounters 表 max ts）与双方空闲/清醒，再由 LLM 结合双方人设、城市/地点、今日生活线、既往关系和低/中/高软倾向判断是否触发；不再使用随机概率门，否决与异常判定需节流，单对失败隔离不影响调度循环。
 
 ## Telegram 与 WebUI
 

@@ -125,6 +125,20 @@ class StaticModuleBoundaryTestCase(unittest.TestCase):
         self.assertIn("当前活动角色也必须在所选列表中", world_ui)
         self.assertIn('document.addEventListener("click", handleCharacterInteractionAction)', app)
 
+    def test_cross_world_encounter_settings_fold_and_use_llm_strength(self):
+        app = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('"cross_world_encounter_trigger_strength"', app)
+        self.assertNotIn('"cross_world_encounter_chance"', app)
+        self.assertIn('"encounter_strength", "cross-world-detail"', app)
+        self.assertIn('form.querySelectorAll(".field-cross-world-detail")', app)
+        self.assertIn("wrap.hidden = !enabled", app)
+        self.assertIn("control.disabled = !enabled", app)
+        self.assertIn("仅作为模型判断的软倾向，不对应固定概率", app)
+        self.assertIn('<option value="low">低</option>', app)
+        self.assertIn('<option value="medium">中</option>', app)
+        self.assertIn('<option value="high">高</option>', app)
+
     def test_admin_animaflow_ui_discovers_workflows_and_surfaces_legacy_fallback(self):
         app = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
 
@@ -133,6 +147,18 @@ class StaticModuleBoundaryTestCase(unittest.TestCase):
         self.assertIn("data.legacy_fallback", app)
         self.assertIn("已回退 turbo_v1", app)
         self.assertNotIn('<option value="turbo_v1"', app)
+
+    def test_animaflow_toggle_folds_only_native_image_backend_fields(self):
+        app = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+
+        for key in ("width", "height", "sampler", "scheduler", "turbo_mode", "turbo_strength"):
+            self.assertRegex(app, rf'\["{key}",[^\n]+"native-image-detail"\]')
+        for key in ("current_style",):
+            field_line = next(line for line in app.splitlines() if line.strip().startswith(f'["{key}",'))
+            self.assertNotIn("native-image-detail", field_line)
+        self.assertIn('form.querySelectorAll(".field-native-image-detail")', app)
+        self.assertIn("wrap.hidden = enabled", app)
+        self.assertIn("control.disabled = enabled", app)
 
     def test_llm_debug_ui_uses_cursor_pagination(self):
         index = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")

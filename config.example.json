@@ -153,7 +153,7 @@
     {"a": {"chat_id": 123456789, "character": "角色名A"}, "b": {"chat_id": 987654321, "character": "角色名B"}}
   ],
   "cross_world_encounter_cooldown_days": "7",
-  "cross_world_encounter_chance": "0.5",
+  "cross_world_encounter_trigger_strength": "medium",
   "character_age_stage": "",
   "character_day_anchor": "",
   "user_gender": "",

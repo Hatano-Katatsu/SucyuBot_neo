@@ -14,6 +14,7 @@ from .animaflow_runtime import (
     configured_animaflow_workflow,
     inspect_animaflow_workflow,
 )
+from .encounter_runtime import normalize_cross_world_encounter_strength
 from .llm_runtime import _normalize_openai_api_base
 from .model_security import validate_public_model_base_url
 from .model_thinking import normalize_thinking_setting
@@ -111,6 +112,11 @@ def resolved_model_summary(service, purpose: str, session_id: str) -> dict[str, 
 
 
 def cast_config_value(key: str, value, old_value):
+    if key == "cross_world_encounter_trigger_strength":
+        return normalize_cross_world_encounter_strength(value)
+    if key == "cross_world_pairs":
+        # WebUI 使用每行一对的文本协议；运行时 `_cross_world_pairs` 统一解析。
+        return "" if value is None else str(value)
     if key == "allowed_chat_ids":
         if isinstance(value, list):
             return [str(item).strip() for item in value if str(item).strip()]
@@ -129,6 +135,8 @@ def cast_config_value(key: str, value, old_value):
 
 
 def _is_numeric_config_key(key: str) -> bool:
+    if key == "cross_world_encounter_trigger_strength":
+        return False
     return (
         key in NUMERIC_CONFIG_KEYS
         or "_temperature_" in key
@@ -251,6 +259,13 @@ async def api_save_config(request: web.Request):
         "daily_selfie_limit",
     }
     schedule_changed = bool(global_schedule_keys.intersection(values))
+    encounter_gate_keys = {
+        "cross_world_enabled",
+        "cross_world_pairs",
+        "cross_world_encounter_cooldown_days",
+        "cross_world_encounter_trigger_strength",
+    }
+    encounter_gate_changed = False
     async with config_operation_lock(service):
         old_enabled = animaflow_enabled(service.config)
         old_workflow = configured_animaflow_workflow(service.config)
@@ -258,6 +273,10 @@ async def api_save_config(request: web.Request):
             candidate = prepare_config_candidate(service.config, values)
         except (TypeError, ValueError) as exc:
             return json_error(str(exc))
+        encounter_gate_changed = any(
+            candidate.get(key) != service.config.get(key)
+            for key in encounter_gate_keys
+        )
         new_enabled = animaflow_enabled(candidate)
         requested_workflow = configured_animaflow_workflow(candidate)
         workflow_changed = requested_workflow != old_workflow
@@ -284,6 +303,8 @@ async def api_save_config(request: web.Request):
             await _replace_config(service, candidate)
         except Exception as exc:
             return json_error(f"配置保存失败: {exc}", status=500)
+        if encounter_gate_changed:
+            service._encounter_trigger_next_checks = {}
     if schedule_changed:
         for sid in list(service.sessions.keys()):
             try:

@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock
 
 from telegram_comfyui_selfie import session_schema
+from telegram_comfyui_selfie.encounter_runtime import normalize_cross_world_encounter_strength
 from tests.support import ServiceFixtureMixin
 
 
@@ -36,12 +37,12 @@ LOCAL_ORCHESTRATION_PAYLOAD = {
 
 
 class EncounterTestCase(ServiceFixtureMixin, unittest.TestCase):
-    def make_encounter_service(self, *, pairs=None, enabled=True):
+    def make_encounter_service(self, *, pairs=None, enabled=True, mock_trigger=True):
         svc = self.make_service()
         svc.config["cross_world_enabled"] = enabled
         svc.config["cross_world_pairs"] = PAIR_CONFIG if pairs is None else pairs
         svc.config["location"] = "上海"
-        svc.config["cross_world_encounter_chance"] = "1"
+        svc.config["cross_world_encounter_trigger_strength"] = "high"
         svc.config["cross_world_encounter_cooldown_days"] = "7"
         svc.config["user_log_enabled"] = False
         # 两侧会话：各有一个活动角色，且都不在近期活跃窗口内。
@@ -56,6 +57,8 @@ class EncounterTestCase(ServiceFixtureMixin, unittest.TestCase):
         svc._character_schedule_minutes = Mock(return_value={"wake": 0, "sleep": 1439})
         # 邂逅编排前的天气查询走外部 HTTP，测试中隔离。
         svc._fetch_weather = AsyncMock(return_value=None)
+        if mock_trigger:
+            svc._decide_cross_world_encounter_trigger = AsyncMock(return_value=True)
         return svc
 
     def _orchestration_mock(self, svc, payload=None):
@@ -117,23 +120,27 @@ class EncounterTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._encounter_pair_key("telegram:2002", "铃音", "telegram:1001", "小艾"),
         )
 
-    def test_numeric_config_validation(self):
+    def test_trigger_strength_normalizes_labels_and_legacy_probability(self):
         svc = self.make_encounter_service()
-        svc.config["cross_world_encounter_chance"] = "not-a-number"
-        self.assertEqual(svc._encounter_chance(), 0.5)
-        svc.config["cross_world_encounter_chance"] = float("nan")
-        self.assertEqual(svc._encounter_chance(), 0.5)
-        svc.config["cross_world_encounter_chance"] = "5"
-        self.assertEqual(svc._encounter_chance(), 1.0)
-        svc.config["cross_world_encounter_chance"] = "-1"
-        self.assertEqual(svc._encounter_chance(), 0.0)
+        cases = {
+            "low": "low", "低": "low", "0": "low",
+            "medium": "medium", "中": "medium", "0.5": "medium",
+            "high": "high", "高": "high", "1": "high",
+            "not-a-strength": "medium", float("nan"): "medium",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(normalize_cross_world_encounter_strength(raw), expected)
+        svc.config["cross_world_encounter_trigger_strength"] = "低"
+        self.assertEqual(svc._encounter_trigger_strength(), "low")
         svc.config["cross_world_encounter_cooldown_days"] = float("inf")
         self.assertEqual(svc._encounter_cooldown_days(), 7.0)
         svc.config["cross_world_encounter_cooldown_days"] = "-3"
         self.assertEqual(svc._encounter_cooldown_days(), 0.0)
 
     def test_local_interaction_settings_default_off_and_require_two_roles(self):
-        svc = self.make_encounter_service()
+        # 跨会话总开关关闭，不影响动线页单独配置的同会话角色互动。
+        svc = self.make_encounter_service(enabled=False)
         sid = svc.session_id_for_chat(1001)
         self._add_local_inactive_character(svc, sid)
         fixed_now = svc._session_now(sid).replace(hour=12, minute=0, second=0, microsecond=0)
@@ -489,6 +496,7 @@ class EncounterTestCase(ServiceFixtureMixin, unittest.TestCase):
             await svc._maybe_schedule_encounters()
             self.assertEqual(spawned, [])
             self.assertEqual(svc._run_encounter.await_count, 0)
+            svc._decide_cross_world_encounter_trigger.assert_not_awaited()
 
         asyncio.run(main())
 
@@ -507,26 +515,59 @@ class EncounterTestCase(ServiceFixtureMixin, unittest.TestCase):
             spawned = self._collect_spawns(svc)
             await svc._maybe_schedule_encounters()
             self.assertEqual(spawned, [])
+            svc._decide_cross_world_encounter_trigger.assert_not_awaited()
             # 冷却结束后放行。
             svc.config["cross_world_encounter_cooldown_days"] = "0"
             await svc._maybe_schedule_encounters()
             self.assertEqual(len(spawned), 1)
+            svc._decide_cross_world_encounter_trigger.assert_awaited_once()
             await self._drain(svc, spawned)
             self.assertEqual(svc._run_encounter.await_count, 1)
 
         asyncio.run(main())
 
-    def test_scheduler_gate_chance_zero_blocks(self):
+    def test_scheduler_gate_llm_rejection_blocks(self):
         svc = self.make_encounter_service()
-        svc.config["cross_world_encounter_chance"] = "0"
+        svc._decide_cross_world_encounter_trigger = AsyncMock(return_value=False)
         svc._run_encounter = AsyncMock(return_value=True)
 
         async def main():
             spawned = self._collect_spawns(svc)
             await svc._maybe_schedule_encounters()
             self.assertEqual(spawned, [])
+            svc._decide_cross_world_encounter_trigger.assert_awaited_once()
 
         asyncio.run(main())
+
+    def test_llm_trigger_decision_uses_strength_daily_context_and_throttle(self):
+        svc = self.make_encounter_service(mock_trigger=False)
+        svc.config["cross_world_encounter_trigger_strength"] = "low"
+        svc.has_llm_config = Mock(return_value=True)
+        svc._call_llm = AsyncMock(return_value=json.dumps({
+            "trigger": False,
+            "reason": "双方今天的动线没有形成足够强的交点",
+        }, ensure_ascii=False))
+        pair = svc._cross_world_pairs()[0]
+        for side in ("a", "b"):
+            sid = pair[side]["session_id"]
+            character = pair[side]["character"]
+            today = svc._life_today_date(sid, svc._session_now(sid))
+            self._save_current_local_plan(svc, sid, character, today)
+
+        async def main():
+            self.assertFalse(await svc._decide_cross_world_encounter_trigger(pair))
+            self.assertFalse(await svc._decide_cross_world_encounter_trigger(pair))
+
+        asyncio.run(main())
+
+        svc._call_llm.assert_awaited_once()
+        system, user = svc._call_llm.await_args.args[:2]
+        self.assertIn("触发倾向是软参考，不是固定概率", system)
+        self.assertIn("低：只有双方动线", system)
+        self.assertIn("角色A", user)
+        self.assertIn("角色B", user)
+        self.assertIn("今日生活线", user)
+        self.assertEqual(svc._call_llm.await_args.kwargs["purpose"], "fast")
 
     def test_scheduler_failure_isolated(self):
         svc = self.make_encounter_service()

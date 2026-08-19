@@ -425,7 +425,7 @@ DEFAULT_CONFIG = {
     "cross_world_enabled": False,
     "cross_world_pairs": [],
     "cross_world_encounter_cooldown_days": "7",
-    "cross_world_encounter_chance": "0.5",
+    "cross_world_encounter_trigger_strength": "medium",
     # 角色生活档案的显式覆盖（留空则由人设自动推断）：
     # character_age_stage: minor / adult
     # character_day_anchor(职业/白天去向): company / school / factory / farm / construction /

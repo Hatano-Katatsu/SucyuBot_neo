@@ -1860,6 +1860,7 @@ async def _test_push_selected_character_locked(service, sid: str, char: str, mod
             mode_override=mode,
             skip_active_check=True,
             character_lock_held=True,
+            fail_fast=True,
         )
         if not already_active:
             target_state = service._get_session_state(sid)

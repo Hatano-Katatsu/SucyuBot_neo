@@ -762,6 +762,42 @@ class ConfigTransactionTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(svc.config["animaflow_filename_prefix"], "legacy")
         self.assertFalse(any(key.startswith("animatool_") for key in svc.config))
 
+    def test_legacy_encounter_probability_migrates_to_trigger_strength(self):
+        from telegram_comfyui_selfie import TelegramComfyUIService
+
+        root = make_project_temp_dir("encounter_strength_config_migration")
+        config_path = root / "config.json"
+        config_path.write_text(json.dumps({
+            "cross_world_encounter_chance": "0.8",
+        }), encoding="utf-8")
+
+        svc = TelegramComfyUIService(config_path, root / "state.json")
+
+        self.assertEqual(svc.config["cross_world_encounter_trigger_strength"], "high")
+        self.assertEqual(svc._encounter_trigger_strength(), "high")
+        self.assertNotIn("cross_world_encounter_chance", svc.config)
+
+    def test_web_save_normalizes_encounter_strength_and_clears_decision_throttle(self):
+        from telegram_comfyui_selfie.webui_models import api_save_config
+
+        async def run():
+            svc = self.make_service()
+            svc._encounter_trigger_next_checks = {"pair": 9999999999.0}
+            response = await api_save_config(JsonRequest(svc, {
+                "values": {
+                    "cross_world_encounter_trigger_strength": "高",
+                    "cross_world_pairs": "1001:小艾 = 2002:铃音",
+                },
+            }))
+
+            self.assertEqual(response.status, 200)
+            self.assertEqual(svc.config["cross_world_encounter_trigger_strength"], "high")
+            self.assertIsInstance(svc.config["cross_world_pairs"], str)
+            self.assertEqual(svc._cross_world_pairs()[0]["b"]["character"], "铃音")
+            self.assertEqual(svc._encounter_trigger_next_checks, {})
+
+        asyncio.run(run())
+
     def test_late_cast_failure_does_not_apply_earlier_fields(self):
         from telegram_comfyui_selfie.webui_models import api_save_config
 

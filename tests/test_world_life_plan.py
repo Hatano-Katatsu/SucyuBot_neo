@@ -1111,6 +1111,79 @@ class WorldLifePlanTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_life_plan_fail_fast_stops_after_upstream_request_error(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.has_llm_config = lambda purpose, session_id="": purpose in {"chat", "image"}
+            svc._call_llm = AsyncMock(side_effect=[
+                RuntimeError('LLM request failed: 503 {"error":{"message":"Endpoint is unavailable."}}'),
+                '{"should_not":"run"}',
+            ])
+            logs = []
+            svc._ulog = lambda session_id, kind, text: logs.append((kind, text))
+
+            with self.assertRaisesRegex(RuntimeError, "503"):
+                await svc._call_life_plan_json(
+                    sid,
+                    "system",
+                    "user",
+                    tag="life-plan",
+                    fail_fast=True,
+                )
+
+            self.assertEqual(svc._call_llm.await_count, 1)
+            self.assertTrue(any("LIFE_PLAN_REQUEST_FAILED" in text for _, text in logs))
+            self.assertFalse(any("LIFE_PLAN_JSON_RETRY" in text for _, text in logs))
+
+        asyncio.run(run())
+
+    def test_life_plan_background_path_keeps_fast_model_fallback(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.has_llm_config = lambda purpose, session_id="": purpose in {"chat", "image"}
+            svc._call_llm = AsyncMock(side_effect=[
+                RuntimeError("LLM request failed: 503 upstream unavailable"),
+                '{"ops":[],"today_events":[]}',
+            ])
+            logs = []
+            svc._ulog = lambda session_id, kind, text: logs.append((kind, text))
+
+            parsed = await svc._call_life_plan_json(sid, "system", "user", tag="life-plan")
+
+            self.assertEqual(parsed, {"ops": [], "today_events": []})
+            self.assertEqual(svc._call_llm.await_count, 2)
+            self.assertEqual(svc._call_llm.await_args.kwargs["purpose"], "image")
+            self.assertTrue(any("LIFE_PLAN_REQUEST_FAILED" in text for _, text in logs))
+
+        asyncio.run(run())
+
+    def test_scheduler_fail_fast_propagates_life_plan_error_and_cleans_active_marker(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            now = datetime(2026, 8, 19, 15, 19, tzinfo=timezone.utc)
+            svc.config["default_purity"] = "6"
+            session_schema.set_last_interaction(svc._get_session_state(sid), 0)
+            svc.ensure_life_plan_for_today = AsyncMock(
+                side_effect=RuntimeError("LLM request failed: 503 upstream unavailable")
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "503"):
+                await svc._sched_fire(
+                    sid,
+                    now,
+                    mode_override="normal",
+                    skip_active_check=True,
+                    fail_fast=True,
+                )
+
+            self.assertNotIn(sid, svc._active_pushes)
+            self.assertTrue(svc.ensure_life_plan_for_today.await_args.kwargs["fail_fast"])
+
+        asyncio.run(run())
+
     def test_life_plan_prompt_requires_self_inferred_core_drive_not_hollow_relationship(self):
         async def run():
             svc = self.make_service()

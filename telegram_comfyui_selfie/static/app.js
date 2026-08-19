@@ -70,12 +70,12 @@ const configSections = [
     ["dynamic_appearance", "默认初始穿搭", "textarea"],
     ["style_pool", "画风池", "textarea"],
     ["current_style", "全局当前画风", "text"],
-    ["width", "宽度", "number"],
-    ["height", "高度", "number"],
-    ["sampler", "Sampler", "text"],
-    ["scheduler", "Scheduler", "text"],
-    ["turbo_mode", "Turbo", "bool"],
-    ["turbo_strength", "Turbo 强度", "text"],
+    ["width", "宽度", "number", "native-image-detail"],
+    ["height", "高度", "number", "native-image-detail"],
+    ["sampler", "Sampler", "text", "native-image-detail"],
+    ["scheduler", "Scheduler", "text", "native-image-detail"],
+    ["turbo_mode", "Turbo", "bool", "native-image-detail"],
+    ["turbo_strength", "Turbo 强度", "text", "native-image-detail"],
   ]],
   ["联网搜索", [
     ["tavily_api_key", "Tavily API Key", "secret"],
@@ -126,10 +126,10 @@ const configSections = [
     ["character_history_summary_max_chars", "历史提要硬上限", "number"],
     ["short_context_reset_gap_hours", "短期场景超时小时", "text"],
     ["scene_stale_minutes", "场景断档感知分钟", "number"],
-    ["cross_world_enabled", "启用跨会话角色邂逅", "bool"],
-    ["cross_world_pairs", "邂逅配对(每行: chatID:角色名=chatID:角色名)", "textarea"],
-    ["cross_world_encounter_cooldown_days", "邂逅冷却天数", "number"],
-    ["cross_world_encounter_chance", "邂逅每轮触发概率", "number"],
+    ["cross_world_enabled", "启用跨会话角色邂逅（仅跨会话）", "bool"],
+    ["cross_world_pairs", "跨会话邂逅配对(每行: chatID:角色名=chatID:角色名)", "textarea", "cross-world-detail"],
+    ["cross_world_encounter_cooldown_days", "跨会话邂逅冷却天数", "number", "cross-world-detail"],
+    ["cross_world_encounter_trigger_strength", "跨会话邂逅触发倾向", "encounter_strength", "cross-world-detail"],
   ]],
 ];
 
@@ -550,6 +550,21 @@ function inputFor([key, label, type, layout], values) {
     input = document.createElement("select");
     input.innerHTML = `<option value="">跟随全局</option><option value="true">开启</option><option value="false">关闭</option>`;
     input.value = value === true || value === "true" ? "true" : (value === false || value === "false" ? "false" : "");
+  } else if (type === "encounter_strength") {
+    input = document.createElement("select");
+    input.innerHTML = `<option value="low">低</option><option value="medium">中</option><option value="high">高</option>`;
+    const text = String(value ?? "").trim().toLowerCase();
+    const aliases = { low: "low", "低": "low", medium: "medium", mid: "medium", "中": "medium", high: "high", "高": "high" };
+    let normalized = aliases[text];
+    if (!normalized && text !== "") {
+      const legacyChance = Number(text);
+      if (Number.isFinite(legacyChance)) normalized = legacyChance <= (1 / 3) ? "low" : (legacyChance >= (2 / 3) ? "high" : "medium");
+    }
+    input.value = normalized || "medium";
+    const hint = document.createElement("p");
+    hint.className = "field-hint";
+    hint.textContent = "仅作为模型判断的软倾向，不对应固定概率；模型仍会结合双方动线、关系和既往邂逅决定。";
+    extraNodes.push(hint);
   } else if (type.startsWith("select:")) {
     input = document.createElement("select");
     const options = type.slice(7).split(",");
@@ -668,12 +683,18 @@ function wireAnimaflowConfig(form) {
   const toggle = form.elements.namedItem("animaflow_enabled");
   const workflow = form.elements.namedItem("animaflow_workflow");
   const detailWraps = [...form.querySelectorAll(".field-animaflow-detail")];
+  const nativeDetailWraps = [...form.querySelectorAll(".field-native-image-detail")];
   const sync = () => {
     const enabled = toggle?.value === "true";
     detailWraps.forEach(wrap => {
       wrap.hidden = !enabled;
       const control = wrap.querySelector("input, select, textarea");
       if (control) control.disabled = !enabled;
+    });
+    nativeDetailWraps.forEach(wrap => {
+      wrap.hidden = enabled;
+      const control = wrap.querySelector("input, select, textarea");
+      if (control) control.disabled = enabled;
     });
     if (toggle) toggle.setAttribute("aria-expanded", enabled ? "true" : "false");
   };
@@ -710,6 +731,25 @@ function wireAnimaflowConfig(form) {
         workflow.disabled = false;
       }
     });
+  }
+  sync();
+}
+
+function wireCrossWorldConfig(form) {
+  const toggle = form.elements.namedItem("cross_world_enabled");
+  const detailWraps = [...form.querySelectorAll(".field-cross-world-detail")];
+  const sync = () => {
+    const enabled = toggle?.value === "true";
+    detailWraps.forEach(wrap => {
+      wrap.hidden = !enabled;
+      const control = wrap.querySelector("input, select, textarea");
+      if (control) control.disabled = !enabled;
+    });
+    if (toggle) toggle.setAttribute("aria-expanded", enabled ? "true" : "false");
+  };
+  if (toggle) {
+    toggle.setAttribute("aria-controls", detailWraps.map(wrap => wrap.querySelector("input, select, textarea")?.id).filter(Boolean).join(" "));
+    toggle.addEventListener("change", sync);
   }
   sync();
 }
@@ -759,6 +799,7 @@ function renderConfig() {
   }
   syncSamplingDetails();
   wireAnimaflowConfig(form);
+  wireCrossWorldConfig(form);
   const actions = document.createElement("div");
   actions.className = "form-actions";
   actions.innerHTML = `<button type="button" id="reload-config">撤销未保存</button><button class="primary" type="submit">保存设置</button>`;

@@ -813,7 +813,16 @@ class LifePlanMixin:
             f"High-importance memories:\n{chr(10).join(memory_lines) or 'none'}"
         )
 
-    async def _call_life_plan_json(self, session_id: str, system: str, user: str, *, tag: str, temp: float = 0.2) -> Any:
+    async def _call_life_plan_json(
+        self,
+        session_id: str,
+        system: str,
+        user: str,
+        *,
+        tag: str,
+        temp: float = 0.2,
+        fail_fast: bool = False,
+    ) -> Any:
         purposes: list[str] = []
         if self.has_llm_config("chat", session_id):
             purposes.append("chat")
@@ -823,7 +832,6 @@ class LifePlanMixin:
             raise RuntimeError("chat/fast model API Key is not configured")
         last_exc: Exception | None = None
         for purpose in purposes:
-            raw = ""
             try:
                 raw = await self._call_llm(
                     system,
@@ -835,11 +843,20 @@ class LifePlanMixin:
                     session_id=session_id,
                     max_tokens=6144,
                 )
+            except Exception as exc:
+                last_exc = exc
+                self._ulog(session_id, "WARN", f"LIFE_PLAN_REQUEST_FAILED tag={tag} purpose={purpose} error={exc}")
+                if fail_fast:
+                    raise
+                continue
+            try:
                 parser = self._parse_llm_json if hasattr(self, "_parse_llm_json") else json.loads
                 return parser(raw)
             except Exception as exc:
                 last_exc = exc
                 self._ulog(session_id, "WARN", f"LIFE_PLAN_JSON_RETRY tag={tag} purpose={purpose} error={exc}")
+                if fail_fast:
+                    raise
         raise RuntimeError(str(last_exc or "life plan json failed"))
 
     async def _generate_life_plan_update(
@@ -855,6 +872,7 @@ class LifePlanMixin:
         goal_instruction: str = "",
         rewrite_goals: bool = False,
         character_snapshot: dict[str, Any] | None = None,
+        fail_fast: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         materials = self._life_plan_materials(
             session_id,
@@ -922,7 +940,14 @@ class LifePlanMixin:
             f"{json.dumps(previous or {}, ensure_ascii=False, indent=2)}\n\n"
             f"Evidence and character materials:\n{self._format_life_plan_materials(materials)}"
         )
-        parsed = await self._call_life_plan_json(session_id, system, user, tag="life-plan", temp=0.2)
+        parsed = await self._call_life_plan_json(
+            session_id,
+            system,
+            user,
+            tag="life-plan",
+            temp=0.2,
+            fail_fast=fail_fast,
+        )
         if not isinstance(parsed, dict):
             raise ValueError("life-plan output must be JSON object")
         if rewrite_goals and not (isinstance(parsed.get("long_goals"), list) and isinstance(parsed.get("mid_goals"), list)):
@@ -962,7 +987,15 @@ class LifePlanMixin:
         place = PLACE_TYPES.get(event.get("place_key") or "", {}).get("label", "外面")
         return f"她刚从{place}那边缓过来，身上还留着一点日常琐事的余温。"
 
-    async def _render_life_plan_texture(self, session_id: str, character_key: str, plan: dict[str, Any], *, today_date: str) -> dict[str, Any]:
+    async def _render_life_plan_texture(
+        self,
+        session_id: str,
+        character_key: str,
+        plan: dict[str, Any],
+        *,
+        today_date: str,
+        fail_fast: bool = False,
+    ) -> dict[str, Any]:
         plan = self._normalize_life_plan_payload(plan, today_date=today_date, session_id=session_id)
         selected = self._select_life_texture_mid_goals(plan, today_date=today_date, session_id=session_id)
         events = (plan.get("today") or {}).get("events") or []
@@ -986,7 +1019,14 @@ class LifePlanMixin:
                 if attempt:
                     user += "\n\nPrevious output used forbidden purposeful wording. Rewrite softer and vaguer."
                 try:
-                    parsed = await self._call_life_plan_json(session_id, system, user, tag="life-texture", temp=0.7)
+                    parsed = await self._call_life_plan_json(
+                        session_id,
+                        system,
+                        user,
+                        tag="life-texture",
+                        temp=0.7,
+                        fail_fast=fail_fast,
+                    )
                     if isinstance(parsed, dict):
                         candidate = str(parsed.get("texture") or "").strip()
                         if candidate and not self._life_text_has_purpose_words(candidate):
@@ -1001,6 +1041,8 @@ class LifePlanMixin:
                         self._ulog(session_id, "WARN", f"LIFE_PLAN_TEXTURE_PURPOSE_WORDS attempt={attempt + 1}")
                 except Exception as exc:
                     self._ulog(session_id, "WARN", f"LIFE_PLAN_TEXTURE_FAILED attempt={attempt + 1} error={exc}")
+                    if fail_fast:
+                        raise
                     break
         if not texture:
             fallback = self._fallback_life_texture(plan)
@@ -1027,6 +1069,7 @@ class LifePlanMixin:
         goal_instruction: str = "",
         rewrite_goals: bool = False,
         character_snapshot: dict[str, Any] | None = None,
+        fail_fast: bool = False,
     ) -> dict[str, Any]:
         if not self._life_plan_enabled(session_id):
             return {"status": "skipped", "reason": "disabled"}
@@ -1051,8 +1094,15 @@ class LifePlanMixin:
                 goal_instruction=goal_instruction,
                 rewrite_goals=rewrite_goals,
                 character_snapshot=character_snapshot,
+                fail_fast=fail_fast,
             )
-            plan = await self._render_life_plan_texture(session_id, character_key, plan, today_date=today_date)
+            plan = await self._render_life_plan_texture(
+                session_id,
+                character_key,
+                plan,
+                today_date=today_date,
+                fail_fast=fail_fast,
+            )
             if not self._life_plan_snapshot_is_current(session_id, character_key, character_snapshot):
                 self._ulog(session_id, "LIFE", f"生活线丢弃陈旧结果 character={character_key}")
                 return {"status": "stale", "reason": "character_changed", "character": character_key}
@@ -1070,6 +1120,8 @@ class LifePlanMixin:
         except Exception as exc:
             self._ulog(session_id, "ERROR", f"LIFE_PLAN_FAILED date={today_date} reason={reason} error={exc}")
             logger.warning("life plan update failed", exc_info=True)
+            if fail_fast:
+                raise
             return {"status": "failed", "date": today_date, "error": str(exc)}
 
     async def ensure_life_plan_for_today(
@@ -1079,6 +1131,7 @@ class LifePlanMixin:
         force: bool = False,
         reason: str = "manual",
         character_key: str | None = None,
+        fail_fast: bool = False,
     ) -> dict[str, Any]:
         """保证指定角色存在今日生活线；未指定时保持活动角色的旧行为。"""
         local_dt = self._session_now(session_id)
@@ -1104,6 +1157,7 @@ class LifePlanMixin:
             reason=reason,
             force=True,
             character_snapshot=snapshot,
+            fail_fast=fail_fast,
         )
         row = self._load_life_plan_row(session_id, key)
         return {"status": result.get("status"), "result": result, "life_plan": row}

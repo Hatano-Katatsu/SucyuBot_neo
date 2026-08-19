@@ -2994,18 +2994,125 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             state = svc._get_session_state(sid)
             fixed_now = datetime(2026, 6, 18, 10, 30, tzinfo=timezone.utc)
             svc._ulog = lambda session_id, kind, text: None
+            svc.config["scheduled_push_retry_base_seconds"] = "5"
+            svc.config["scheduled_push_retry_max_seconds"] = "60"
 
             svc._sched_fire = AsyncMock(return_value=False)
             task = svc._create_scheduled_push_task(sid, fixed_now, mode_override="normal", trigger_time="10:30")
             await task
             self.assertNotIn("10:30", session_schema.get_daily_triggered_times(state))
+            retry = svc._scheduled_push_retry_info(sid, fixed_now, "10:30")
+            self.assertEqual(retry["attempts"], 1)
+            self.assertEqual(retry["delay"], 5)
 
             svc._sched_fire = AsyncMock(return_value=True)
             task = svc._create_scheduled_push_task(sid, fixed_now, mode_override="normal", trigger_time="10:30")
             await task
             self.assertIn("10:30", session_schema.get_daily_triggered_times(state))
+            self.assertEqual(svc._scheduled_push_retry_info(sid, fixed_now, "10:30"), {})
 
         asyncio.run(run())
+
+    def test_dream_history_failure_does_not_advance_dream_cursor(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            key = svc._context_character_key(sid)
+            now = datetime(2026, 8, 19, 8, 0, tzinfo=timezone.utc)
+            svc.config["long_memory_extract_enabled"] = False
+            svc.app_store.append_messages(sid, key, [
+                {"role": "user", "content": "昨晚发生了一件重要的事。"},
+                {"role": "assistant", "content": "我会把这件事记下来。"},
+            ])
+            svc.write_character_checkpoint = lambda *args, **kwargs: Path("checkpoint.json")
+            svc._write_dream_diary = AsyncMock(return_value="# 2026-08-18 星期二 昨日\n重要内容")
+            svc._organize_memories_after_dream = AsyncMock(return_value={"status": "ok"})
+            svc._update_life_plan_after_dream = AsyncMock(return_value={"status": "ok"})
+            svc._generate_character_history_summary = AsyncMock(
+                side_effect=RuntimeError("LLM request failed: 503 upstream unavailable")
+            )
+            svc._run_context_checkpoint = AsyncMock()
+
+            with self.assertRaisesRegex(RuntimeError, "503"):
+                await svc._dream_once(sid, key, now, reason="daily-wake")
+
+            meta = svc.app_store.get_context_meta(sid, key)
+            self.assertEqual(meta["last_dream_message_id"], 0)
+            self.assertEqual(meta["last_dream_at"], 0)
+            svc._run_context_checkpoint.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_failed_scheduled_push_retries_after_original_window(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            trigger_dt = datetime(2026, 8, 19, 10, 30, tzinfo=timezone.utc)
+            retry_dt = trigger_dt.replace(hour=11, minute=15)
+            session_schema.set_daily_trigger_times(state, ["10:30"])
+            session_schema.set_daily_triggered_times(state, [])
+            svc._ulog = lambda session_id, kind, text: None
+            svc._sched_fire = AsyncMock(return_value=False)
+
+            task = svc._create_scheduled_push_task(
+                sid,
+                trigger_dt,
+                mode_override="normal",
+                trigger_time="10:30",
+            )
+            await task
+            retry_key = svc._background_key(
+                "scheduled-push-retry",
+                sid,
+                svc._scheduled_push_retry_token(trigger_dt, "10:30"),
+            )
+            svc._background_retry_state[retry_key]["next_retry"] = 0
+            svc._create_scheduled_push_task = Mock()
+
+            svc._handle_daily_push_tick(sid, state, retry_dt)
+
+            self.assertNotIn("10:30", session_schema.get_daily_triggered_times(state))
+            svc._create_scheduled_push_task.assert_called_once()
+            self.assertEqual(svc._create_scheduled_push_task.call_args.kwargs["trigger_time"], "10:30")
+
+        asyncio.run(run())
+
+    def test_never_attempted_overdue_push_is_marked_missed_once(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        session_schema.set_daily_trigger_times(state, ["10:30"])
+        session_schema.set_daily_triggered_times(state, [])
+        logs = []
+        svc._ulog = lambda session_id, kind, text: logs.append((kind, text))
+        svc._create_scheduled_push_task = Mock()
+        now = datetime(2026, 8, 19, 11, 15, tzinfo=timezone.utc)
+
+        svc._handle_daily_push_tick(sid, state, now)
+        svc._handle_daily_push_tick(sid, state, now.replace(minute=16))
+
+        self.assertEqual(session_schema.get_daily_triggered_times(state), ["10:30"])
+        self.assertEqual(logs, [("PUSH", "随机推送点 10:30 已处理 reason=missed-window")])
+        svc._create_scheduled_push_task.assert_not_called()
+
+    def test_running_scheduled_push_is_not_consumed_as_missed(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        session_schema.set_daily_trigger_times(state, ["10:30"])
+        session_schema.set_daily_triggered_times(state, [])
+        svc._active_pushes.add(sid)
+        svc._create_scheduled_push_task = Mock()
+
+        svc._handle_daily_push_tick(
+            sid,
+            state,
+            datetime(2026, 8, 19, 11, 15, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(session_schema.get_daily_triggered_times(state), [])
+        svc._create_scheduled_push_task.assert_not_called()
 
     def test_missed_morning_window_is_marked_once_without_late_push(self):
         svc = self.make_service()
@@ -10970,6 +11077,29 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("目标字数是软目标", src)
         self.assertIn("按长期影响和后续扮演价值由高到低排列", src)
         self.assertIn("不要为了接近字数而填充内容", src)
+
+    def test_history_summary_upstream_failure_propagates_for_dream_retry(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = svc._context_character_key(sid)
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "chat"
+            svc._call_llm = AsyncMock(
+                side_effect=RuntimeError("LLM request failed: 503 upstream unavailable")
+            )
+            logs = []
+            svc._ulog = lambda session_id, kind, text: logs.append((kind, text))
+
+            with self.assertRaisesRegex(RuntimeError, "503"):
+                await svc._generate_character_history_summary(
+                    sid,
+                    key,
+                    [{"diary_date": "2026-08-18", "content": "今天发生了一件重要的事。"}],
+                )
+
+            self.assertTrue(any(kind == "ERROR" and "HISTORY_FAILED" in text for kind, text in logs))
+
+        asyncio.run(run())
 
     def test_history_summary_uses_long_memory_checkpoint_and_current_window(self):
         async def run():
