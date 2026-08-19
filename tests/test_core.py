@@ -3731,14 +3731,18 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc = self.make_service()
             sid = "telegram:123"
             svc.config.update({"web_search_enabled": True, "tavily_api_key": "tavily-key"})
+            logs = []
+            svc._ulog = lambda session_id, kind, text: logs.append((kind, text))
             state = svc._get_session_state(sid)
             now = datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc)
             with patch.object(web_search, "tavily_search", new=AsyncMock(return_value=[
-                {"title": "市场摘要", "content": "财报公布后市场出现新变化", "url": ""},
+                {"title": "综合摘要", "content": "财报公布后市场出现新变化", "url": ""},
+                {"title": "市场动态", "content": "公司公布最新财报", "url": "https://example.com"},
             ])) as mock_search:
                 digest = await svc._fetch_push_topic_seed(sid, state, "公司最新财报", now, "finance")
 
-            self.assertIn("市场摘要", digest)
+            self.assertIn("综合摘要", digest)
+            self.assertTrue(any("返回 1 条结果 + 1 条综合摘要" in text for _, text in logs))
             kwargs = mock_search.await_args.kwargs
             self.assertEqual(kwargs["search_depth"], "basic")
             self.assertEqual(kwargs["max_results"], 10)
@@ -4127,6 +4131,74 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertTrue(any("主题曲" in guide for guide in guides))
             user_prompt = svc._call_llm.await_args.args[1]
             self.assertIn("最近已经用于推送的话题", user_prompt)
+        asyncio.run(run())
+
+    def test_web_topic_curation_retries_malformed_json_once(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            now = datetime(2026, 8, 19, 12, 13, tzinfo=timezone.utc)
+            svc._ulog = Mock()
+            svc._call_llm = AsyncMock(side_effect=[
+                '{"topics":[{"guide":"包含"未转义"引号","source":"search"}]}',
+                json.dumps({"topics": [
+                    {"guide": "从新公开的海边舞台切入，聊角色最想先逛的街区。", "source": "search"},
+                    {"guide": "结合水彩背景制作访谈，聊傍晚光影的观感。", "source": "search"},
+                    {"guide": "从主题曲的新编曲切入，聊最抓耳的乐器层次。", "source": "search"},
+                    {"guide": "围绕展会互动装置，聊最适合拍照的新玩法。", "source": "search"},
+                ]}, ensure_ascii=False),
+            ])
+
+            guides = await svc._curate_push_web_topic_pool(
+                sid,
+                state,
+                "新作预告",
+                "general",
+                "- 海边舞台\n- 水彩背景\n- 新主题曲\n- 展会互动装置",
+                now,
+                "image",
+            )
+
+            self.assertEqual(len(guides), 4)
+            self.assertEqual(svc._call_llm.await_count, 2)
+            first_call, retry_call = svc._call_llm.await_args_list
+            self.assertTrue(first_call.kwargs["disable_thinking"])
+            self.assertEqual(first_call.kwargs["max_tokens"], 1400)
+            self.assertEqual(retry_call.kwargs["tag"], "push_web_topic_pool_json_retry")
+            self.assertEqual(retry_call.kwargs["temp"], 0.1)
+            self.assertIn("上一次回答不是有效 JSON", retry_call.args[1])
+            log_messages = [str(call.args[2]) for call in svc._ulog.call_args_list]
+            self.assertTrue(any("JSON 格式异常，正在重试" in text for text in log_messages))
+            self.assertFalse(any("使用摘要兜底" in text for text in log_messages))
+
+        asyncio.run(run())
+
+    def test_web_topic_curation_falls_back_after_single_json_retry(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            now = datetime(2026, 8, 19, 12, 13, tzinfo=timezone.utc)
+            svc._ulog = Mock()
+            malformed = '{"topics":[{"guide":"包含"未转义"引号","source":"search"}]}'
+            svc._call_llm = AsyncMock(side_effect=[malformed, malformed])
+
+            guides = await svc._curate_push_web_topic_pool(
+                sid,
+                state,
+                "新作预告",
+                "general",
+                "- 海边舞台公开\n- 水彩背景访谈\n- 主题曲阵容公布\n- 展会互动装置上线",
+                now,
+                "image",
+            )
+
+            self.assertGreaterEqual(len(guides), 4)
+            self.assertEqual(svc._call_llm.await_count, 2)
+            log_messages = [str(call.args[2]) for call in svc._ulog.call_args_list]
+            self.assertEqual(sum("使用摘要兜底" in text for text in log_messages), 1)
+
         asyncio.run(run())
 
     def test_independent_decision_can_mix_life_and_web_after_search_quota(self):
