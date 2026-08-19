@@ -1356,7 +1356,11 @@ class CommandHandlersMixin:
             history_user_text=last_user,
         )
         if reply:
-            self._ulog(session_id, source, reply)
+            self._ulog(
+                session_id,
+                source,
+                "重答已生成" + (f" instruction={instruction}" if instruction else ""),
+            )
             split = str(self.config.get("chat_split_paragraphs", "true")).lower() in ("true", "1", "yes")
             await self.send_message(chat_id, reply, split_paragraphs=split)
 

@@ -13,6 +13,7 @@ const state = {
   logs: [],
   selectedLog: null,
   selectedLogType: null,
+  logLevel: "info",
   selectedLogChunk: "",
   logRawContent: "",
   logTail: 1000,
@@ -1279,8 +1280,32 @@ async function initEvents() {
       setBusy(btn, false);
     }
   };
-  $("#reload-logs").onclick = () => loadLogs().then(() => toast("日志列表已刷新"));
+  $("#reload-logs").onclick = async () => {
+    await loadLogs();
+    if (state.selectedLog) await selectLog(state.selectedLog);
+    else if (state.selectedLogType) await selectSystemLog(state.selectedLogType);
+    toast("日志已刷新");
+  };
   $("#log-filter").oninput = () => renderFilteredLog(state.logRawContent);
+  $("#log-level").onchange = async event => {
+    state.logLevel = event.currentTarget.value === "debug" ? "debug" : "info";
+    state.selectedLog = null;
+    state.selectedLogType = null;
+    hideLogChunkSelector();
+    hideLogPageControls();
+    await loadLogs();
+    if (state.logLevel === "debug" && state.auth?.role === "admin") {
+      await selectSystemLog("llm-debug");
+    } else if (state.logLevel === "debug") {
+      $("#log-title").textContent = "DEBUG 日志";
+      renderFilteredLog("需要管理员权限查看 DEBUG 日志。");
+      $("#log-clear").disabled = true;
+    } else {
+      $("#log-title").textContent = "INFO 日志内容";
+      renderFilteredLog("选择左侧会话或错误日志查看内容。");
+      $("#log-clear").disabled = true;
+    }
+  };
   $("#log-tail").onchange = event => {
     state.logTail = Number(event.currentTarget.value) || 1000;
     if (state.selectedLog) selectLog(state.selectedLog);

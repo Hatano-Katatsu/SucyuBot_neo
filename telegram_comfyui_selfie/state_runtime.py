@@ -449,28 +449,44 @@ class ServiceStateMixin:
     def _error_log_all_paths(self) -> list[Path]:
         return self._log_all_paths(self._error_log_path())
 
-    def _rotate_log_file_if_needed(self, path: Path) -> None:
+    def _prune_log_archives(self, path: Path, max_archives: int) -> None:
+        """只保留指定数量的最新历史分片；当前日志文件永不在这里删除。"""
+        try:
+            keep = max(0, int(max_archives))
+        except (TypeError, ValueError):
+            return
+        archives = self._log_archive_paths(path)
+        for archive in archives[keep:]:
+            try:
+                archive.unlink()
+            except OSError:
+                logger.debug("log archive prune failed path=%s", archive, exc_info=True)
+
+    def _rotate_log_file_if_needed(self, path: Path, *, max_archives: int | None = None) -> None:
         """日志按完整行滚动分块；只有写入下一条前才切块，不拆当前条目。"""
         try:
             limit = int(self.config.get("user_log_rotate_bytes", 6 * 1024 * 1024) or 6 * 1024 * 1024)
         except Exception:
             limit = 6 * 1024 * 1024
         if limit <= 0:
+            if max_archives is not None:
+                self._prune_log_archives(path, max_archives)
             return
         try:
-            if not path.exists() or path.stat().st_size < limit:
-                return
-            archive_dir = path.parent / "chunks"
-            archive_dir.mkdir(parents=True, exist_ok=True)
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            target = archive_dir / f"{path.stem}.{stamp}{path.suffix}"
-            index = 1
-            while target.exists():
-                target = archive_dir / f"{path.stem}.{stamp}.{index}{path.suffix}"
-                index += 1
-            path.replace(target)
+            if path.exists() and path.stat().st_size >= limit:
+                archive_dir = path.parent / "chunks"
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                target = archive_dir / f"{path.stem}.{stamp}{path.suffix}"
+                index = 1
+                while target.exists():
+                    target = archive_dir / f"{path.stem}.{stamp}.{index}{path.suffix}"
+                    index += 1
+                path.replace(target)
         except Exception:
             logger.debug("user log rotate failed", exc_info=True)
+        if max_archives is not None:
+            self._prune_log_archives(path, max_archives)
 
     def _ulog(self, session_id: str, tag: str, message: str = ""):
         """按用户追加一行活动日志。事件级，纯同步，事件循环内原子完成。"""

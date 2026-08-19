@@ -101,11 +101,18 @@ class TelegramIOMixin:
             paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
         else:
             paragraphs = [text]
-        for i, para in enumerate(paragraphs):
-            if i > 0:
-                await asyncio.sleep(1)
-            for chunk in self._split_text(para, 3900):
-                await self.tg_api("sendMessage", {"chat_id": str(chat_id), "text": chunk})
+        sent_messages: list[str] = []
+        try:
+            for i, para in enumerate(paragraphs):
+                if i > 0:
+                    await asyncio.sleep(1)
+                for chunk in self._split_text(para, 3900):
+                    await self.tg_api("sendMessage", {"chat_id": str(chat_id), "text": chunk})
+                    sent_messages.append(chunk)
+        finally:
+            if sent_messages and hasattr(self, "_ulog"):
+                session_id = self.session_id_for_chat(chat_id)
+                self._ulog(session_id, "BOT", "\n\n".join(sent_messages))
 
     async def send_photo(self, chat_id: int | str, image_bytes: bytes, caption: str = ""):
         if self.http is None:
@@ -129,6 +136,14 @@ class TelegramIOMixin:
             )
             if not payload.get("ok"):
                 raise RuntimeError(f"Telegram sendPhoto failed: {payload}")
+        if hasattr(self, "_ulog"):
+            session_id = self.session_id_for_chat(chat_id)
+            sent_caption = str(caption or "")[:1024]
+            self._ulog(
+                session_id,
+                "BOT_PHOTO",
+                f"bytes={len(image_bytes)}" + (f" caption={sent_caption}" if sent_caption else ""),
+            )
 
     async def send_action(self, chat_id: int | str, action: str):
         try:

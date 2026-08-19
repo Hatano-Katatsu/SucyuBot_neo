@@ -527,11 +527,33 @@ class LLMRuntimeMixin:
     def _llm_debug_legacy_log_path(self) -> Path:
         return self._user_log_dir() / "llm_debug.json"
 
+    def _remove_llm_debug_legacy_backups(self) -> None:
+        """清理旧版迁移备份，避免它们绕过 DEBUG 单历史分片的保留上限。"""
+        log_dir = self._user_log_dir()
+        try:
+            candidates = list(log_dir.glob("llm_debug.legacy*.json"))
+        except OSError:
+            return
+        for path in candidates:
+            try:
+                path.unlink()
+            except OSError:
+                logger.debug("remove legacy llm debug backup failed path=%s", path, exc_info=True)
+
     def _migrate_legacy_llm_debug_log(self) -> None:
-        """把旧版分组 JSON 日志一次性迁为按行 JSON，并保留原文件备份。"""
+        """把旧版分组 JSON 日志一次性迁为按行 JSON，不额外保留重复副本。"""
         path = self._llm_debug_log_path()
         legacy = self._llm_debug_legacy_log_path()
-        if path.exists() or not legacy.exists():
+        if path.exists():
+            if legacy.exists():
+                try:
+                    legacy.unlink()
+                except OSError:
+                    logger.debug("remove superseded legacy llm debug log failed", exc_info=True)
+            self._remove_llm_debug_legacy_backups()
+            return
+        if not legacy.exists():
+            self._remove_llm_debug_legacy_backups()
             return
         try:
             data = json.loads(legacy.read_text(encoding="utf-8"))
@@ -548,13 +570,8 @@ class LLMRuntimeMixin:
                 for entry in entries:
                     handle.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
             temp.replace(path)
-
-            backup = legacy.with_name("llm_debug.legacy.json")
-            index = 1
-            while backup.exists():
-                backup = legacy.with_name(f"llm_debug.legacy.{index}.json")
-                index += 1
-            legacy.replace(backup)
+            legacy.unlink()
+            self._remove_llm_debug_legacy_backups()
         except Exception as exc:
             logger.debug("migrate legacy llm debug log failed: %s", exc)
 
@@ -570,7 +587,9 @@ class LLMRuntimeMixin:
             path = self._llm_debug_log_path()
             path.parent.mkdir(parents=True, exist_ok=True)
             self._migrate_legacy_llm_debug_log()
-            self._rotate_log_file_if_needed(path)
+            self._remove_llm_debug_legacy_backups()
+            # DEBUG 只保留当前块和一个历史分片；INFO 的 telegram_*.log 不受此限制。
+            self._rotate_log_file_if_needed(path, max_archives=1)
             with path.open("a", encoding="utf-8", newline="\n") as handle:
                 for entry in batch:
                     handle.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -633,29 +652,33 @@ class LLMRuntimeMixin:
         status: int | None = None,
         error: str = "",
     ) -> None:
-        """把失败时的完整 LLM 请求/返回写入用户 ERROR 日志，避免只看到兜底文案。"""
+        """把 LLM 失败摘要写入 INFO；完整请求/返回只存在 DEBUG JSONL。"""
         if not session_id:
             return
         response_data = response if isinstance(response, dict) else None
         usage_summary = self._llm_usage_debug_summary(response_data)
-        payload = {
-            "purpose": purpose or "",
-            "tag": tag or "",
-            "status": status,
-            "error": error or "",
-            "finish_reason": self._llm_finish_reason(response_data),
-            "completion_tokens": usage_summary.get("completion_tokens", 0),
-            "request": {
-                "url": request_url or "",
-                "body": self._json_safe(request_body or {}),
-            },
-            "response": self._json_safe(response),
-        }
-        try:
-            text = json.dumps(payload, ensure_ascii=False, default=str)
-        except Exception:
-            text = str(payload)
-        self._ulog(session_id, "ERROR", f"LLM_FULL_LOG {text}")
+        finish_reason = self._llm_finish_reason(response_data)
+        error_text = str(error or "").replace("\r", " ").replace("\n", " ").strip()
+        if not error_text:
+            error_text = "unknown LLM error"
+        parts = [
+            "LLM_FAILED",
+            f"purpose={purpose or '-'}",
+            f"tag={tag or '-'}",
+            f"status={status if status is not None else '-'}",
+            f"finish_reason={finish_reason or '-'}",
+            f"completion_tokens={usage_summary.get('completion_tokens', 0)}",
+            f"error={error_text}",
+        ]
+        response_excerpt = ""
+        if isinstance(response, dict) and response.get("text") not in (None, ""):
+            response_excerpt = str(response.get("text") or "")
+        elif response not in (None, "") and not isinstance(response, dict):
+            response_excerpt = str(response)
+        response_excerpt = response_excerpt.replace("\r", " ").replace("\n", " ").strip()
+        if response_excerpt:
+            parts.append(f"response={response_excerpt[:500]}")
+        self._ulog(session_id, "ERROR", " ".join(parts))
 
     def _get_llm_value(self, purpose: str, name: str, default=None):
         prefix = "chat_llm" if purpose == "chat" else "image_llm"
@@ -828,60 +851,121 @@ class LLMRuntimeMixin:
                 validate_public_model_base_url(api_base)
             except ValueError as exc:
                 raise RuntimeError(f"用户模型 Base URL 不安全: {exc}") from exc
+        try:
+            timeout_seconds = max(1.0, float(resolved.get("timeout") or 120))
+        except (TypeError, ValueError):
+            timeout_seconds = 120.0
         last_error = None
         for attempt in range(2):
             connector = aiohttp.TCPConnector(resolver=PublicOnlyResolver()) if private_profile else None
             async with aiohttp.ClientSession(
                 trust_env=not private_profile,
                 connector=connector,
-                timeout=aiohttp.ClientTimeout(total=float(resolved.get("timeout") or 120)),
+                timeout=aiohttp.ClientTimeout(total=timeout_seconds),
                 headers={"Accept-Encoding": "gzip, deflate"},
             ) as s:
-                async with s.post(
-                    request_url,
-                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept-Encoding": "gzip, deflate"},
-                    json=body,
-                    allow_redirects=False,
-                ) as resp:
-                    if resp.status != 200:
-                        text = await read_limited_text(
+                try:
+                    async with s.post(
+                        request_url,
+                        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept-Encoding": "gzip, deflate"},
+                        json=body,
+                        allow_redirects=False,
+                    ) as resp:
+                        if resp.status != 200:
+                            text = await read_limited_text(
+                                resp,
+                                response_limit(self.config, "error_text"),
+                                label="LLM 错误响应",
+                            )
+                            self._record_llm_debug(
+                                purpose=purpose,
+                                tag=tag,
+                                session_id=session_id,
+                                resolved=resolved,
+                                request_url=request_url,
+                                request_body=body,
+                                response={"status": resp.status, "text": text},
+                                status=resp.status,
+                                error=f"LLM request failed: {resp.status}",
+                            )
+                            self._record_llm_error_log(
+                                session_id=session_id,
+                                purpose=purpose,
+                                tag=tag,
+                                request_url=request_url,
+                                request_body=body,
+                                response={"status": resp.status, "text": text},
+                                status=resp.status,
+                                error=f"LLM request failed: {resp.status}",
+                            )
+                            last_error = RuntimeError(f"LLM request failed: {resp.status} {text}")
+                            if resp.status == 500 and attempt == 0:
+                                logger.warning("LLM request failed with 500, retrying in 1 second...")
+                                await asyncio.sleep(1)
+                                continue
+                            raise last_error
+                        data = await read_limited_json(
                             resp,
-                            response_limit(self.config, "error_text"),
-                            label="LLM 错误响应",
+                            response_limit(self.config, "llm_json"),
+                            label="LLM JSON 响应",
                         )
-                        self._record_llm_debug(
-                            purpose=purpose,
-                            tag=tag,
-                            session_id=session_id,
-                            resolved=resolved,
-                            request_url=request_url,
-                            request_body=body,
-                            response={"status": resp.status, "text": text},
-                            status=resp.status,
-                            error=f"LLM request failed: {resp.status}",
-                        )
-                        self._record_llm_error_log(
-                            session_id=session_id,
-                            purpose=purpose,
-                            tag=tag,
-                            request_url=request_url,
-                            request_body=body,
-                            response={"status": resp.status, "text": text},
-                            status=resp.status,
-                            error=f"LLM request failed: {resp.status}",
-                        )
-                        last_error = RuntimeError(f"LLM request failed: {resp.status} {text}")
-                        if resp.status == 500 and attempt == 0:
-                            logger.warning("LLM request failed with 500, retrying in 1 second...")
-                            await asyncio.sleep(1)
-                            continue
-                        raise last_error
-                    data = await read_limited_json(
-                        resp,
-                        response_limit(self.config, "llm_json"),
-                        label="LLM JSON 响应",
+                        break
+                except asyncio.CancelledError:
+                    raise
+                except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as exc:
+                    if isinstance(exc, asyncio.TimeoutError):
+                        transport_error = f"LLM request timed out after {timeout_seconds:g}s"
+                    else:
+                        detail = str(exc).replace("\r", " ").replace("\n", " ").strip()
+                        transport_error = f"LLM network error: {type(exc).__name__}"
+                        if detail:
+                            transport_error += f": {detail}"
+                    self._record_llm_debug(
+                        purpose=purpose,
+                        tag=tag,
+                        session_id=session_id,
+                        resolved=resolved,
+                        request_url=request_url,
+                        request_body=body,
+                        response=None,
+                        status=None,
+                        error=transport_error,
                     )
-                    break
+                    self._record_llm_error_log(
+                        session_id=session_id,
+                        purpose=purpose,
+                        tag=tag,
+                        status=None,
+                        error=transport_error,
+                    )
+                    raise RuntimeError(transport_error) from exc
+                except Exception as exc:
+                    # 非 200 分支已经完整记录并主动抛出，避免在这里重复写一份。
+                    if exc is last_error:
+                        raise
+                    detail = str(exc).replace("\r", " ").replace("\n", " ").strip()
+                    response_error = f"LLM response handling error: {type(exc).__name__}"
+                    if detail:
+                        response_error += f": {detail}"
+                    self._record_llm_debug(
+                        purpose=purpose,
+                        tag=tag,
+                        session_id=session_id,
+                        resolved=resolved,
+                        request_url=request_url,
+                        request_body=body,
+                        response=None,
+                        status=None,
+                        error=response_error,
+                    )
+                    self._record_llm_error_log(
+                        session_id=session_id,
+                        purpose=purpose,
+                        tag=tag,
+                        status=None,
+                        error=response_error,
+                    )
+                    raise RuntimeError(response_error) from exc
         else:
             raise last_error
         # 记录 token 消耗（不阻塞主链路，解析失败仅记录日志）。

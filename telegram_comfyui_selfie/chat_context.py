@@ -241,18 +241,26 @@ class ChatContextMixin:
                 parts.append("\n".join(current_chunks))
             on_progress("\n\n".join(part for part in parts if part).strip())
 
-        for i, para in enumerate(paragraphs):
-            if i > 0:
-                await asyncio.sleep(1)
-            current_chunks = []
-            for chunk in self._split_text(para, 3900):
-                await self.tg_api("sendMessage", {"chat_id": str(chat_id), "text": chunk})
-                current_chunks.append(chunk)
-                report()
-            if current_chunks:
-                sent_paragraphs.append("\n".join(current_chunks))
+        try:
+            for i, para in enumerate(paragraphs):
+                if i > 0:
+                    await asyncio.sleep(1)
                 current_chunks = []
-                report()
+                for chunk in self._split_text(para, 3900):
+                    await self.tg_api("sendMessage", {"chat_id": str(chat_id), "text": chunk})
+                    current_chunks.append(chunk)
+                    report()
+                if current_chunks:
+                    sent_paragraphs.append("\n".join(current_chunks))
+                    current_chunks = []
+                    report()
+        finally:
+            sent = list(sent_paragraphs)
+            if current_chunks:
+                sent.append("\n".join(current_chunks))
+            sent_text = "\n\n".join(part for part in sent if part).strip()
+            if sent_text:
+                self._ulog(self.session_id_for_chat(chat_id), "BOT", sent_text)
 
     def _build_chat_final_recovery_messages(
         self,
@@ -356,7 +364,6 @@ class ChatContextMixin:
             else:
                 reply = await self.run_roleplay_chat(chat_id, session_id, text)
             if reply:
-                self._ulog(session_id, "BOT", reply)
                 split = str(self.config.get("chat_split_paragraphs", "true")).lower() in ("true", "1", "yes")
                 def update_sent(value: str) -> None:
                     nonlocal sent_reply

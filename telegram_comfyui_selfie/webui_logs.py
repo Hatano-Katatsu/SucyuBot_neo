@@ -295,11 +295,22 @@ async def api_llm_debug_log(request: web.Request):
     require_admin(request)
     service = service_from(request)
     base_path = service._llm_debug_log_path()
+    # Web 查看前强制落盘少量缓冲，避免最新请求要等满批次或停机后才可见。
+    if hasattr(service, "_flush_llm_debug"):
+        service._flush_llm_debug(force=True)
     if not base_path.exists() and hasattr(service, "_migrate_legacy_llm_debug_log"):
         await asyncio.to_thread(service._migrate_legacy_llm_debug_log)
+    if hasattr(service, "_remove_llm_debug_legacy_backups"):
+        await asyncio.to_thread(service._remove_llm_debug_legacy_backups)
+    # DEBUG 只保留一个历史分片；旧版本遗留的更多分片在首次查看时同步收敛。
+    if hasattr(service, "_prune_log_archives"):
+        await asyncio.to_thread(service._prune_log_archives, base_path, 1)
     path = service._resolve_log_chunk_path(base_path, request.query.get("chunk") or "") if hasattr(service, "_resolve_log_chunk_path") else base_path
+    entries_format = str(request.query.get("format") or "").strip().lower() == "entries"
     if not path.exists():
-        return json_ok({"content": {}, "updated_at": None, "chunks": [], "has_more": False})
+        empty = {"updated_at": None, "chunks": [], "has_more": False}
+        empty["entries" if entries_format else "content"] = [] if entries_format else {}
+        return json_ok(empty)
     try:
         try:
             limit = max(1, min(1000, int(request.query.get("limit", "200"))))
@@ -311,13 +322,8 @@ async def api_llm_debug_log(request: web.Request):
         except ValueError:
             return json_error("before 游标无效")
         page = await asyncio.to_thread(read_llm_debug_page, path, limit, before)
-        grouped: dict[str, list[dict[str, Any]]] = {}
-        for entry in page["entries"]:
-            key = str(entry.get("type") or "unknown:untagged")
-            grouped.setdefault(key, []).append(entry)
         updated_at = page["entries"][-1].get("time") if page["entries"] else None
-        return json_ok({
-            "content": grouped,
+        payload = {
             "updated_at": updated_at,
             "chunk": path.name,
             "chunks": log_chunk_items(service, base_path, path),
@@ -326,7 +332,16 @@ async def api_llm_debug_log(request: web.Request):
             "next_before": page["next_before"],
             "has_more": page["has_more"],
             "invalid_lines": page["invalid_lines"],
-        })
+        }
+        if entries_format:
+            payload["entries"] = page["entries"]
+        else:
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for entry in page["entries"]:
+                key = str(entry.get("type") or "unknown:untagged")
+                grouped.setdefault(key, []).append(entry)
+            payload["content"] = grouped
+        return json_ok(payload)
     except Exception as exc:
         return json_error(str(exc), status=500)
 

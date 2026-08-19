@@ -176,6 +176,7 @@ telegram_comfyui_selfie/
 - Telegram update 必须先与确认 offset 一起写入 SQLite inbox，再进入按会话有序的有界 worker；跨会话受全局并发上限控制，停机先停止拉取并排空，超时待办由下次启动恢复。
 - 同会话新消息可取消旧文字生成，但已进入生图/发图阶段的受保护任务不能被取消。
 - Web API 错误优先返回 JSON；前端也必须兼容非 JSON 错误体、401 跳转与可读错误摘要。
+- 日志分为 INFO 与 DEBUG：INFO 沿用 `data/logs/telegram_<chat_id>.log`、`errors.log` 及既有分片命名，长期保留完整用户输入、实际发送给用户的 Bot 文本/图片说明、业务行为、行动逻辑和判断依据；既有历史文件不迁移，均视为 INFO。DEBUG 使用 `llm_debug.jsonl` 保存完整 LLM 请求/返回，仅保留当前块和最新一个历史分片。新的 LLM 失败在 INFO 只写状态、用途、错误与短响应摘要，禁止再复制完整 prompt；管理员可在 WebUI 日志页切换 INFO/DEBUG。
 - 普通用户不可查看系统日志项或其他用户的数据；管理员才能维护全局模型和运维配置。
 - 管理员在 WebUI 设置页的独立面板维护全局模型 profile；角色页模型面板只管理当前用户私有 profile 和三类模型选择，避免混淆保存范围。
 - WebUI 命令下拉从 `/api/commands` 动态读取 `COMMAND_ALIAS_GROUPS`，避免前后端各维护一份命令列表。

@@ -984,15 +984,21 @@ select {
   margin-bottom: 6px;
 }
 
+.log-level-bar,
 .log-chunk-bar {
   display: flex;
   align-items: center;
   gap: 10px;
 }
 
+.log-level-bar label,
 .log-chunk-bar label {
   color: var(--muted);
   font-size: 13px;
+}
+
+.log-level-bar select {
+  min-width: 190px;
 }
 
 .log-chunk-bar select {

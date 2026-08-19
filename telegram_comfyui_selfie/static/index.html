@@ -349,6 +349,13 @@
               </div>
             </div>
             <div class="log-toolbar">
+              <div class="log-level-bar">
+                <label for="log-level">日志级别</label>
+                <select id="log-level">
+                  <option value="info" selected>INFO · 交互与行为</option>
+                  <option value="debug">DEBUG · 完整 LLM 请求</option>
+                </select>
+              </div>
               <div id="log-chunk-bar" class="log-chunk-bar" hidden>
                 <label for="log-chunk-select">日志块</label>
                 <select id="log-chunk-select"></select>

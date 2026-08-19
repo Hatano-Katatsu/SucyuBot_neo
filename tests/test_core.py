@@ -1937,7 +1937,31 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("x" * 120, archived_text)
         self.assertTrue(archived_text.endswith("\n"))
 
-    def test_web_system_error_log_reads_dedicated_chunks_and_expands_llm_payload(self):
+    def test_llm_debug_rotation_keeps_only_one_historical_chunk(self):
+        svc = self.make_service()
+        svc.config["user_log_rotate_bytes"] = 200
+        resolved = {"profile_id": "debug", "model": "model", "thinking": False}
+
+        for index in range(4):
+            svc._record_llm_debug(
+                purpose="chat",
+                tag="retention",
+                session_id="telegram:123",
+                resolved=resolved,
+                request_url="https://example.invalid/v1/chat/completions",
+                request_body={"messages": [{"role": "user", "content": f"request-{index}-" + "x" * 400}]},
+                response={"choices": [{"message": {"content": f"response-{index}"}}]},
+                status=200,
+            )
+            svc._flush_llm_debug(force=True)
+
+        path = svc._llm_debug_log_path()
+        archives = svc._log_archive_paths(path)
+        self.assertEqual(len(archives), 1)
+        self.assertIn("request-3", path.read_text(encoding="utf-8"))
+        self.assertNotIn("request-0", path.read_text(encoding="utf-8"))
+
+    def test_web_system_error_log_reads_llm_summary_without_full_debug_payload(self):
         async def run():
             from aiohttp import web
             from aiohttp.test_utils import make_mocked_request
@@ -1966,14 +1990,43 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             data = json.loads(resp.text)
             self.assertTrue(data["ok"])
             self.assertGreaterEqual(data["total"], 2)
-            llm_errors = [item for item in data["errors"] if item.get("kind") == "LLM_FULL_LOG"]
+            llm_errors = [item for item in data["errors"] if "LLM_FAILED" in item.get("message", "")]
             self.assertTrue(llm_errors)
             item = llm_errors[0]
             self.assertRegex(item["file"], r"^errors\.\d{8}_\d{6}(?:\.\d+)?\.log$")
             self.assertEqual(item["session_id"], sid)
-            self.assertEqual(item["error"], "chat-final returned tool_calls without content")
-            self.assertEqual(item["request"]["body"]["messages"][0]["content"], "hello")
-            self.assertEqual(item["response"]["choices"][0]["finish_reason"], "tool_calls")
+            self.assertIn("finish_reason=tool_calls", item["message"])
+            self.assertIn("error=chat-final returned tool_calls without content", item["message"])
+            self.assertNotIn("hello", item["line"])
+            self.assertNotIn("llm.example", item["line"])
+            self.assertNotIn("payload", item)
+
+        asyncio.run(run())
+
+    def test_web_system_error_log_keeps_legacy_full_llm_entries_readable_as_info_history(self):
+        async def run():
+            from aiohttp import web
+
+            svc = self.make_service()
+            sid = "telegram:legacy"
+            payload = {
+                "purpose": "chat",
+                "tag": "legacy",
+                "status": 500,
+                "error": "legacy failure",
+                "request": {"body": {"messages": [{"role": "user", "content": "old prompt"}]}},
+                "response": {"status": 500},
+            }
+            svc._ulog(sid, "ERROR", f"LLM_FULL_LOG {json.dumps(payload, ensure_ascii=False)}")
+
+            app = web.Application()
+            app["service"] = svc
+            req = make_mock_request(app, "/api/logs/system-errors", admin=True)
+            data = json.loads((await api_system_error_log(req)).text)
+
+            legacy = next(item for item in data["errors"] if item.get("kind") == "LLM_FULL_LOG")
+            self.assertEqual(legacy["error"], "legacy failure")
+            self.assertEqual(legacy["request"]["body"]["messages"][0]["content"], "old prompt")
 
         asyncio.run(run())
 
@@ -7371,6 +7424,39 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("hi", text)  # 别的用户不混进来
         self.assertTrue(svc._user_log_path("telegram:999").read_text(encoding="utf-8").strip().endswith("hi"))
 
+    def test_successful_telegram_text_output_is_logged_in_full(self):
+        async def run():
+            svc = self.make_service()
+            svc.tg_api = AsyncMock(return_value={"ok": True})
+
+            await svc.send_message(12345, "第一段\n\n第二段", split_paragraphs=True)
+
+            text = svc._user_log_path("telegram:12345").read_text(encoding="utf-8")
+            self.assertIn("BOT 第一段 ⏎  ⏎ 第二段", text)
+            self.assertEqual(svc.tg_api.await_count, 2)
+
+        asyncio.run(run())
+
+    def test_tracked_roleplay_output_logs_exact_text_once(self):
+        async def run():
+            svc = self.make_service()
+            svc.tg_api = AsyncMock(return_value={"ok": True})
+            progress = []
+
+            await svc._send_chat_reply_tracked(
+                12345,
+                "角色第一段\n\n角色第二段",
+                split_paragraphs=True,
+                on_progress=progress.append,
+            )
+
+            text = svc._user_log_path("telegram:12345").read_text(encoding="utf-8")
+            self.assertEqual(text.count(" BOT "), 1)
+            self.assertIn("BOT 角色第一段 ⏎  ⏎ 角色第二段", text)
+            self.assertEqual(progress[-1], "角色第一段\n\n角色第二段")
+
+        asyncio.run(run())
+
     def test_generation_logs_final_prompt(self):
         class FakeComfyResponse:
             def __init__(self, payload=None, data=b"image", status=200):
@@ -9664,9 +9750,70 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 status=200,
                 error="parse failed",
             )
-            payload = json.loads(logs[-1][1].split("LLM_FULL_LOG ", 1)[1])
-            self.assertEqual(payload["finish_reason"], "length")
-            self.assertEqual(payload["completion_tokens"], 8192)
+            self.assertEqual(logs[-1][0], "ERROR")
+            self.assertIn("LLM_FAILED", logs[-1][1])
+            self.assertIn("finish_reason=length", logs[-1][1])
+            self.assertIn("completion_tokens=8192", logs[-1][1])
+            self.assertNotIn("LLM_FULL_LOG", logs[-1][1])
+
+        asyncio.run(run())
+
+    def test_llm_transport_timeout_writes_summary_to_info_and_full_request_to_debug(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:timeout"
+            svc._resolved_llm_config = lambda purpose, session_id="", disable_thinking=None: {
+                "api_base": "https://llm.example/v1",
+                "api_key": "secret-key",
+                "model": "timeout-model",
+                "profile_id": "timeout-profile",
+                "profile_scope": "global",
+                "thinking": False,
+                "thinking_effort": "",
+                "thinking_control": "model_name",
+                "timeout": 3,
+                "max_tokens": 128,
+            }
+
+            class TimeoutPost:
+                async def __aenter__(self):
+                    raise asyncio.TimeoutError()
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+            class FakeSession:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                def post(self, *args, **kwargs):
+                    return TimeoutPost()
+
+            with patch("telegram_comfyui_selfie.llm_runtime.aiohttp.ClientSession", FakeSession):
+                with self.assertRaisesRegex(RuntimeError, "timed out after 3s"):
+                    await svc._call_llm_messages(
+                        [{"role": "user", "content": "full secret user request"}],
+                        purpose="chat",
+                        tag="timeout-test",
+                        session_id=sid,
+                    )
+
+            info = svc._user_log_path(sid).read_text(encoding="utf-8")
+            self.assertIn("LLM_FAILED", info)
+            self.assertIn("LLM request timed out after 3s", info)
+            self.assertNotIn("full secret user request", info)
+
+            svc._flush_llm_debug(force=True)
+            entries = [json.loads(line) for line in svc._llm_debug_log_path().read_text(encoding="utf-8").splitlines()]
+            entry = entries[-1]
+            self.assertEqual(entry["error"], "LLM request timed out after 3s")
+            self.assertEqual(entry["request"]["body"]["messages"][0]["content"], "full secret user request")
 
         asyncio.run(run())
 

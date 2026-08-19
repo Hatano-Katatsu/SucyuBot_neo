@@ -169,5 +169,19 @@ class StaticModuleBoundaryTestCase(unittest.TestCase):
         self.assertIn('params.set("before", String(before))', admin_logs)
         self.assertIn("data.next_before", admin_logs)
 
+    def test_log_ui_switches_info_debug_and_renders_full_debug_payload(self):
+        index = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+        admin_logs = (STATIC_ROOT / "admin_logs.js").read_text(encoding="utf-8")
+        app = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="log-level"', index)
+        self.assertIn('<option value="info" selected>INFO · 交互与行为</option>', index)
+        self.assertIn('<option value="debug">DEBUG · 完整 LLM 请求</option>', index)
+        self.assertIn('logLevel: "info"', app)
+        self.assertIn('state.logLevel === "debug"', admin_logs)
+        self.assertIn('完整请求:\\n${prettyJson(entry.request)}', admin_logs)
+        self.assertIn('完整返回:\\n${prettyJson(entry.response)', admin_logs)
+        self.assertIn("box.scrollTop = 0", admin_logs)
+
 if __name__ == "__main__":
     unittest.main()

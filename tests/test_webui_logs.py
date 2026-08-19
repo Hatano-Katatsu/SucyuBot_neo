@@ -97,7 +97,37 @@ class WebUILogTailTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_legacy_grouped_debug_log_migrates_with_backup(self):
+    def test_llm_debug_api_flushes_pending_entry_and_returns_full_request(self):
+        async def run():
+            svc = self.make_service()
+            path = svc._llm_debug_log_path()
+            svc._record_llm_debug(
+                purpose="chat",
+                tag="pending",
+                session_id="telegram:123",
+                resolved={"profile_id": "p", "model": "m", "thinking": False},
+                request_url="https://example.invalid/v1/chat/completions",
+                request_body={"messages": [{"role": "user", "content": "完整请求正文"}]},
+                response={"choices": [{"message": {"content": "完整返回正文"}}]},
+                status=200,
+            )
+            self.assertFalse(path.exists())
+
+            app = web.Application()
+            app["service"] = svc
+            request = make_mocked_request("GET", "/api/logs/llm-debug?limit=20&format=entries", app=app)
+            request["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+            data = json.loads((await api_llm_debug_log(request)).text)
+
+            self.assertTrue(path.exists())
+            self.assertEqual(len(data["entries"]), 1)
+            self.assertNotIn("content", data)
+            self.assertEqual(data["entries"][0]["request"]["body"]["messages"][0]["content"], "完整请求正文")
+            self.assertEqual(data["entries"][0]["response"]["choices"][0]["message"]["content"], "完整返回正文")
+
+        asyncio.run(run())
+
+    def test_legacy_grouped_debug_log_migrates_without_duplicate_backup(self):
         svc = self.make_service()
         legacy = svc._llm_debug_legacy_log_path()
         legacy.parent.mkdir(parents=True, exist_ok=True)
@@ -109,6 +139,7 @@ class WebUILogTailTestCase(ServiceFixtureMixin, unittest.TestCase):
                 ]
             }
         }), encoding="utf-8")
+        (legacy.parent / "llm_debug.legacy.json").write_text("obsolete", encoding="utf-8")
 
         svc._migrate_legacy_llm_debug_log()
 
@@ -116,4 +147,4 @@ class WebUILogTailTestCase(ServiceFixtureMixin, unittest.TestCase):
         entries = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([item["value"] for item in entries], ["earlier", "later"])
         self.assertFalse(legacy.exists())
-        self.assertTrue((legacy.parent / "llm_debug.legacy.json").exists())
+        self.assertEqual(list(legacy.parent.glob("llm_debug.legacy*.json")), [])
