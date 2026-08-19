@@ -837,7 +837,7 @@ class SchedulerRuntimeMixin:
         try:
             raw = await self._call_llm(
                 system, user, temp=0.4, tag="push_topic_direction",
-                purpose=purpose, session_id=session_id, max_tokens=600,
+                purpose=purpose, session_id=session_id,
             )
         except Exception as exc:
             self._ulog(session_id, "PUSH", f"话题方向决策失败，回退 life: {exc}")

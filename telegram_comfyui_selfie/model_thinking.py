@@ -10,6 +10,16 @@ _TRUE_VALUES = {"1", "true", "yes", "on", "enabled", "enable", "开启", "开", 
 _FALSE_VALUES = {"0", "false", "no", "off", "disabled", "disable", "关闭", "关", "停用"}
 
 
+def is_kimi_k27_model(value: Any) -> bool:
+    """识别 Kimi K2.7 Code 及其 OpenCode/Kimi Coding 高速别名。"""
+    model = str(value or "").strip().lower().replace("_", "-")
+    return (
+        "kimi-k2.7-code" in model
+        or "kimi-k2-7-code" in model
+        or model.startswith("kimi-for-coding")
+    )
+
+
 def normalize_thinking_setting(value: Any) -> bool | str | None:
     """规范化 thinking 设置：None、旧布尔值，或 reasoning effort 字符串。"""
     if value is None:

@@ -48,7 +48,7 @@ const configSections = [
     ["default_vision_model_profile", "默认视觉模型 profile", "model_select"],
     ["photo_caption_wait_seconds", "纯图片等待配文秒数", "number"],
     ["chat_reply_length", "回复长度", "select:,简短,适中,详细"],
-    ["chat_llm_max_tokens", "回复 max_tokens（含思考输出上限）", "text"],
+    ["chat_llm_max_tokens", "模型总生成预算（思考与正文共用）", "text"],
     ["llm_sampling_params_enabled", "自定义模型采样参数", "bool"],
     ["chat_llm_temperature", "回复温度", "text", "sampling-detail"],
     ["chat_llm_top_p", "回复 top_p（核采样，砍胡话尾巴，留空不下发）", "text", "sampling-detail"],
@@ -917,7 +917,7 @@ async function loadGlobalModels({ selectedProfileId = "", data = null } = {}) {
         <button id="global-model-save" class="primary" type="submit">添加全局模型</button>
         <button id="global-model-delete" class="danger" type="button" disabled>删除全局模型</button>
       </div>
-      <p class="muted">从“模型名”的候选列表选择启动时发现的模型，可自动带入来源 Base URL，并安全复用同端点已有全局 profile 的密钥。默认思考 Effort 会随该 profile 生效，但用户级思考设置仍有更高优先级。API Key 永远不会回显；编辑时留空即可保留。</p>
+      <p class="muted">从“模型名”的候选列表选择启动时发现的模型，可自动带入来源 Base URL，并安全复用同端点已有全局 profile 的密钥。默认思考 Effort 会随该 profile 生效，但用户级思考设置仍有更高优先级。DeepSeek V4 实际区分“思考开关”和 effort；OpenCode Go 的 Kimi K2.7 Code 不允许 none，实测 minimal、low、medium、high、xhigh、max 均可请求；Kimi K3 原生档位为 low、high、max。兼容端点可能忽略思考参数，首页模型测试显示的实际返回长度才是最终结果。API Key 永远不会回显；编辑时留空即可保留。</p>
     </form>
   `;
 
@@ -927,6 +927,14 @@ async function loadGlobalModels({ selectedProfileId = "", data = null } = {}) {
   const modelInput = form.elements.model;
   const saveButton = $("#global-model-save");
   const deleteButton = $("#global-model-delete");
+  const syncGlobalThinkingCapability = () => {
+    const model = String(modelInput.value || "").trim().toLowerCase().replaceAll("_", "-");
+    const kimiK27 = model.includes("kimi-k2.7-code") || model.includes("kimi-k2-7-code") || model.startsWith("kimi-for-coding");
+    const noneOption = form.elements.thinking_effort.querySelector('option[value="none"]');
+    if (noneOption) noneOption.disabled = kimiK27;
+    if (kimiK27 && form.elements.thinking_effort.value === "none") form.elements.thinking_effort.value = "";
+    form.elements.thinking_effort.title = kimiK27 ? "Kimi K2.7 Code 强制思考；OpenCode Go 不接受 none" : "";
+  };
 
   const showProfile = profileId => {
     form.reset();
@@ -937,7 +945,10 @@ async function loadGlobalModels({ selectedProfileId = "", data = null } = {}) {
     saveButton.textContent = "添加全局模型";
     deleteButton.disabled = true;
     const profile = globalProfiles[profileId];
-    if (!profile) return;
+    if (!profile) {
+      syncGlobalThinkingCapability();
+      return;
+    }
     form.dataset.editingProfileId = profileId;
     profileIdInput.value = profileId;
     profileIdInput.readOnly = true;
@@ -950,6 +961,7 @@ async function loadGlobalModels({ selectedProfileId = "", data = null } = {}) {
       : "尚未配置 API Key";
     saveButton.textContent = "保存全局模型修改";
     deleteButton.disabled = false;
+    syncGlobalThinkingCapability();
   };
 
   profileSelect.onchange = () => showProfile(profileSelect.value);
@@ -959,6 +971,7 @@ async function loadGlobalModels({ selectedProfileId = "", data = null } = {}) {
     profileIdInput.focus();
   };
   modelInput.onchange = () => {
+    syncGlobalThinkingCapability();
     const entry = availableGlobalModels.find(item => item.id === modelInput.value.trim());
     if (!entry) {
       delete form.dataset.catalogSourceProfileId;
@@ -971,6 +984,7 @@ async function loadGlobalModels({ selectedProfileId = "", data = null } = {}) {
       if (!form.elements.name.value.trim()) form.elements.name.value = entry.id || "";
     }
   };
+  modelInput.addEventListener("input", syncGlobalThinkingCapability);
   form.onsubmit = async event => {
     event.preventDefault();
     const values = formValues(form);
@@ -1031,11 +1045,9 @@ async function loadModels() {
   const globalProfiles = data.global_profiles || {};
   const userProfiles = data.user_profiles || {};
   const allProfiles = { ...globalProfiles, ...userProfiles };
-  const ids = Object.keys(allProfiles);
+  const visionDisabledProfileId = data.vision_disabled_profile_id || "__disabled__";
+  const ids = Object.keys(allProfiles).filter(id => id !== visionDisabledProfileId);
   const settings = data.settings || {};
-  const chatProfileId = settings.chat_profile_id || data.default_chat_model_profile || "";
-  const fastProfileId = settings.fast_profile_id || data.default_fast_model_profile || "";
-  const visionProfileId = settings.vision_profile_id || data.default_vision_model_profile || "";
   const options = ids.map(id => {
     const p = allProfiles[id] || {};
     const scope = userProfiles[id] ? "私有" : "全局";
@@ -1044,13 +1056,15 @@ async function loadModels() {
   const resolved = data.resolved || {};
   const resolvedText = key => {
     const item = resolved[key] || {};
+    if (item.disabled) return "用户已关闭 / - / 未配置 · 思考关";
     const configured = item.configured ? "已配置" : "未配置";
     const profile = item.profile_id || "默认";
     const model = item.model || "-";
     const thinking = item.thinking_effort
       ? ` · effort=${item.thinking_effort}`
       : (item.thinking === undefined ? "" : (item.thinking ? " · 思考开" : " · 思考关"));
-    return `${profile} / ${model} / ${configured}${thinking}`;
+    const locked = item.thinking_locked ? " · 模型固定" : "";
+    return `${profile} / ${model} / ${configured}${thinking}${locked}`;
   };
   const thinkingSelect = (name, label) => `
     <label>${label}<select name="${name}">
@@ -1069,11 +1083,12 @@ async function loadModels() {
     <form id="model-settings-form" class="model-settings-form">
       <label>对话模型<select name="chat_profile_id"><option value="">默认</option>${options}</select></label>
       <label>快速模型<select name="fast_profile_id"><option value="">默认</option>${options}</select></label>
-      <label>视觉模型<select name="vision_profile_id"><option value="">关闭</option>${options}</select></label>
+      <label>视觉模型<select name="vision_profile_id"><option value="">跟随全局</option><option value="${escapeHtml(visionDisabledProfileId)}">关闭</option>${options}</select></label>
       ${thinkingSelect("chat_thinking", "对话思考")}
       ${thinkingSelect("fast_thinking", "快速思考")}
       ${thinkingSelect("vision_thinking", "视觉思考")}
       <button class="primary" type="submit">保存模型选择</button>
+      <p class="muted">视觉模型留空表示跟随管理员设置的全局视觉模型；选择“关闭”才会只对当前用户禁用视觉理解。OpenCode Go 的 Kimi K2.7 Code 不能关闭思考或使用 none；其他非 none 档位可被端点接受。</p>
     </form>
     <div class="model-current">
       <div>当前用户: ${escapeHtml(data.user_id || selectedModelUserId() || "-")}</div>
@@ -1101,6 +1116,33 @@ async function loadModels() {
     const el = box.querySelector(`[name=${key}]`);
     if (el && settings[key] !== undefined && settings[key] !== null) el.value = String(settings[key]);
   });
+  const isKimiK27 = model => {
+    const value = String(model || "").trim().toLowerCase().replaceAll("_", "-");
+    return value.includes("kimi-k2.7-code") || value.includes("kimi-k2-7-code") || value.startsWith("kimi-for-coding");
+  };
+  const syncThinkingCapability = (profileField, thinkingField, globalDefault) => {
+    const profileSelect = box.querySelector(`[name=${profileField}]`);
+    const thinking = box.querySelector(`[name=${thinkingField}]`);
+    if (!profileSelect || !thinking) return;
+    const selectedId = profileSelect.value || globalDefault || "";
+    const profile = allProfiles[selectedId] || {};
+    const locked = isKimiK27(profile.model);
+    for (const value of ["false", "none"]) {
+      const option = thinking.querySelector(`option[value="${value}"]`);
+      if (option) option.disabled = locked;
+    }
+    if (locked && ["false", "none"].includes(thinking.value)) thinking.value = "";
+    thinking.title = locked ? "Kimi K2.7 Code 强制思考；OpenCode Go 不接受 none" : "";
+  };
+  const syncAllThinkingCapabilities = () => {
+    syncThinkingCapability("chat_profile_id", "chat_thinking", data.default_chat_model_profile);
+    syncThinkingCapability("fast_profile_id", "fast_thinking", data.default_fast_model_profile);
+    syncThinkingCapability("vision_profile_id", "vision_thinking", data.default_vision_model_profile);
+  };
+  for (const field of ["chat_profile_id", "fast_profile_id", "vision_profile_id"]) {
+    box.querySelector(`[name=${field}]`)?.addEventListener("change", syncAllThinkingCapabilities);
+  }
+  syncAllThinkingCapabilities();
   $("#model-settings-form").onsubmit = async event => {
     event.preventDefault();
     await api(modelApiUrl("/api/models/settings"), { method: "PATCH", body: formValues(event.currentTarget) });
@@ -1679,10 +1721,11 @@ async function runTest(path, body = undefined) {
     const data = await api(path, { method: "POST", body });
     if (Object.prototype.hasOwnProperty.call(data, "thinking_length") && Object.prototype.hasOwnProperty.call(data, "reply_length")) {
       const effort = data.thinking_effort ? ` · effort=${data.thinking_effort}` : "";
+      const locked = data.thinking_locked ? " · 模型固定" : "";
       out.textContent = [
         `Profile: ${data.profile_id || "-"}`,
         `模型: ${data.model || "-"}`,
-        `思考配置: ${data.thinking ? "开启" : "关闭"}${effort}`,
+        `请求思考配置: ${data.thinking ? "开启" : "关闭"}${effort}${locked}`,
         `返回思考长度: ${data.thinking_length} 字符`,
         `返回回复长度: ${data.reply_length} 字符`,
         `finish_reason: ${data.finish_reason ?? "-"}`,

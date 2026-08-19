@@ -14,10 +14,14 @@ import aiohttp
 
 from .http_limits import read_limited_json, read_limited_text, response_limit
 from .model_security import PublicOnlyResolver, validate_public_model_base_url
-from .model_thinking import normalize_profile_thinking_effort, resolve_thinking_setting
+from .model_thinking import is_kimi_k27_model, normalize_profile_thinking_effort, resolve_thinking_setting
 
 
 logger = logging.getLogger(__name__)
+
+
+# 用户级视觉模型三态中的“明确关闭”。空字符串保留为“跟随全局默认”。
+VISION_PROFILE_DISABLED_ID = "__disabled__"
 
 
 def _normalize_openai_api_base(value: Any) -> str:
@@ -334,7 +338,7 @@ class LLMRuntimeMixin:
         """解析当前会话实际使用的 LLM profile。
 
         chat 使用 chat_profile_id，image/fast 使用 fast_profile_id，vision 使用 vision_profile_id。
-        vision 没有显式配置时保持为空，用于关闭图片理解链路。
+        vision 没有用户级显式配置时跟随全局默认；保留值用于明确关闭图片理解链路。
         thinking 优先级：用户显式设置 > 全局默认 > profile thinking_effort > profile disable_thinking；
         用户/全局设置可为布尔或 effort。
         """
@@ -345,7 +349,10 @@ class LLMRuntimeMixin:
         if purpose == "chat":
             profile_id = settings.get("chat_profile_id") or self.config.get("default_chat_model_profile") or ""
         elif purpose == "vision":
-            profile_id = settings.get("vision_profile_id") or self.config.get("default_vision_model_profile") or ""
+            user_vision_profile_id = str(settings.get("vision_profile_id") or "").strip()
+            if user_vision_profile_id == VISION_PROFILE_DISABLED_ID:
+                return VISION_PROFILE_DISABLED_ID, {}, False, "", ""
+            profile_id = user_vision_profile_id or self.config.get("default_vision_model_profile") or ""
         else:
             profile_id = settings.get("fast_profile_id") or self.config.get("default_fast_model_profile") or ""
         profile = user_profiles.get(profile_id) or {}
@@ -433,6 +440,14 @@ class LLMRuntimeMixin:
             # 调用方显式要求关思考（如 checkpoint/dream 等结构化任务），覆盖用户设置。
             thinking = not bool(disable_thinking)
             thinking_effort = ""
+        profile_model_hint = profile.get("model_think") or profile.get("model") or ""
+        thinking_locked = is_kimi_k27_model(profile_model_hint)
+        if thinking_locked:
+            # Kimi K2.7 Code 经 Moonshot/OpenCode Go 都只允许思考开启；OpenCode Go
+            # 对 reasoning_effort=none 会返回 400，其他兼容档位可原样透传。
+            thinking = True
+            if thinking_effort == "none":
+                thinking_effort = ""
         model, api_base, api_key = self._llm_profile_model_name(profile, thinking)
         if purpose != "vision" and not api_base:
             if profile_scope == "user":
@@ -443,18 +458,24 @@ class LLMRuntimeMixin:
             api_key = self._get_llm_value(purpose, "api_key", "") or ""
         if purpose != "vision" and not model:
             model = self._get_llm_value(purpose, "model", "deepseek-chat") or "deepseek-chat"
+        thinking_control = str(profile.get("thinking_control") or "").strip()
+        if not thinking_control:
+            # DeepSeek V4 的开关是 thinking.type；自定义 profile 未填写内部兼容字段时
+            # 也应使用正确协议，而不是误把 reasoning_effort=none 当关闭指令。
+            thinking_control = "param" if "deepseek-v4" in str(model or "").lower() else "model_name"
         return {
             "profile_id": profile_id,
             "profile_scope": profile_scope,
             "profile": profile,
             "thinking": thinking,
             "thinking_effort": thinking_effort,
+            "thinking_locked": thinking_locked,
             "api_base": _normalize_openai_api_base(api_base),
             "api_key": api_key,
             "model": model,
             "max_tokens": profile.get("max_tokens") or self._get_llm_value(purpose, "max_tokens", "4096") or "4096",
             "timeout": profile.get("timeout") or 120,
-            "thinking_control": profile.get("thinking_control", "model_name"),
+            "thinking_control": thinking_control,
         }
 
     def _record_llm_usage_from_response(
@@ -756,6 +777,28 @@ class LLMRuntimeMixin:
             return value.strip().lower() in ("true", "1", "yes", "on", "开启", "启用")
         return bool(value)
 
+    @staticmethod
+    def _positive_max_tokens(value: Any, default: int = 4096) -> int:
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return max(1, int(default))
+
+    def _llm_request_max_tokens(self, resolved: dict[str, Any], requested: int | None) -> int:
+        """计算 API 的总生成预算。
+
+        Chat Completions 没有“只限制正文、不限制思考”的通用参数；思考与正文共享
+        max_tokens。业务调用传入的小额度因此只作为正文目标，思考开启时请求总预算
+        至少使用模型 Profile 的 max_tokens，避免思考先耗尽额度而没有正式回答。
+        """
+        profile_budget = self._positive_max_tokens(resolved.get("max_tokens"), 4096)
+        if requested is None:
+            return profile_budget
+        requested_budget = self._positive_max_tokens(requested, profile_budget)
+        if resolved.get("thinking"):
+            return max(requested_budget, profile_budget)
+        return requested_budget
+
     def has_llm_config(self, purpose: str, session_id: str = "") -> bool:
         resolved = self._resolved_llm_config(purpose, session_id)
         if purpose == "vision":
@@ -838,11 +881,7 @@ class LLMRuntimeMixin:
         if not api_key:
             label = "chat model" if purpose == "chat" else ("vision model" if purpose == "vision" else "fast model")
             raise RuntimeError(f"{label} API Key is not configured")
-        max_tokens_value = max_tokens if max_tokens is not None else (resolved.get("max_tokens") or "4096")
-        try:
-            max_tokens_int = max(1, int(max_tokens_value))
-        except (TypeError, ValueError):
-            max_tokens_int = 4096
+        max_tokens_int = self._llm_request_max_tokens(resolved, max_tokens)
         body = {
             "model": resolved["model"],
             "max_tokens": max_tokens_int,
@@ -879,17 +918,17 @@ class LLMRuntimeMixin:
         thinking = bool(resolved.get("thinking"))
         thinking_effort = str(resolved.get("thinking_effort") or "").strip().lower()
         control = str(resolved.get("thinking_control") or "model_name")
-        if thinking_effort:
-            # effort 与旧开关共用设置字段；选中 effort 时使用标准 OpenAI-compatible 参数。
-            body["reasoning_effort"] = thinking_effort
-        elif control == "param_always":
-            body["thinking"] = {"type": "enabled" if thinking else "disabled"}
-        elif control == "param":
-            # 双向显式控制：用户/配置显式开启或关闭思考都要落实到请求体，
-            # 否则 param 模式在 thinking=True 时不发参数，模型默认行为可能与设置不一致。
+        if control in {"param", "param_always"}:
+            # thinking 开关与 reasoning effort 是两个独立参数。尤其 effort=none 只代表
+            # 本地关闭语义，DeepSeek 等端点必须收到 thinking.type=disabled，不能把
+            # 不受支持的 reasoning_effort=none 当成关闭指令。
             body["thinking"] = {"type": "enabled" if thinking else "disabled"}
         elif control == "enable_thinking":
             body["enable_thinking"] = bool(thinking)
+        if thinking_effort and (thinking or control == "model_name"):
+            # OpenAI 原生模型可用 reasoning_effort=none；显式 thinking/enable_thinking
+            # 协议则在关闭时只发送关闭参数，开启时再附带实际 effort。
+            body["reasoning_effort"] = thinking_effort
         request_url = _openai_chat_completions_url(api_base)
         private_profile = resolved.get("profile_scope") == "user"
         if private_profile:
@@ -1037,15 +1076,48 @@ class LLMRuntimeMixin:
         if anchor:
             messages.append({"role": "system", "content": anchor})
         messages.extend([{"role": "system", "content": system}, {"role": "user", "content": user}])
-        data = await self._call_llm_messages(messages, tag=tag, temp=temp, purpose=purpose, disable_thinking=disable_thinking, session_id=session_id, max_tokens=max_tokens)
-        msg = data.get("choices", [{}])[0].get("message", {})
-        text = (msg.get("content") or "").strip()
-        text = _strip_llm_thinking_prefixes(text)
-        text = re.sub(r"^```[a-zA-Z]*\n", "", text)
-        text = re.sub(r"\n```$", "", text).strip()
-        if not text:
-            finish_reason = data.get("choices", [{}])[0].get("finish_reason") or ""
-            reasoning_len = len(str(msg.get("reasoning_content") or ""))
+        request_max_tokens = max_tokens
+        for attempt in range(2):
+            data = await self._call_llm_messages(
+                messages,
+                tag=tag,
+                temp=temp,
+                purpose=purpose,
+                disable_thinking=disable_thinking,
+                session_id=session_id,
+                max_tokens=request_max_tokens,
+            )
+            choice = (data.get("choices") or [{}])[0] if isinstance(data, dict) else {}
+            choice = choice if isinstance(choice, dict) else {}
+            metrics = llm_message_text_metrics(choice.get("message"))
+            text = _strip_llm_thinking_prefixes(str(metrics.get("reply") or ""))
+            text = re.sub(r"^```[a-zA-Z]*\n", "", text)
+            text = re.sub(r"\n```$", "", text).strip()
+            if text:
+                return text
+
+            finish_reason = str(choice.get("finish_reason") or "")
+            reasoning_len = int(metrics.get("thinking_length") or 0)
+            if finish_reason == "length" and attempt == 0:
+                resolved = self._resolved_llm_config(
+                    purpose,
+                    session_id,
+                    disable_thinking=disable_thinking,
+                )
+                current_budget = self._llm_request_max_tokens(resolved, request_max_tokens)
+                retry_ceiling = max(current_budget, 32768)
+                retry_budget = min(max(current_budget * 2, current_budget + 2048), retry_ceiling)
+                if retry_budget > current_budget:
+                    logger.warning(
+                        "LLM empty response reached max_tokens, retrying tag=%s purpose=%s max_tokens=%s->%s",
+                        tag or "-",
+                        purpose,
+                        current_budget,
+                        retry_budget,
+                    )
+                    request_max_tokens = retry_budget
+                    continue
+
             self._record_llm_error_log(
                 session_id=session_id,
                 purpose=purpose,
@@ -1056,8 +1128,8 @@ class LLMRuntimeMixin:
                 error=f"LLM returned empty content (finish_reason={finish_reason}, reasoning_len={reasoning_len})",
             )
             if reasoning_len:
-                # 思考内容不能当作结果返回：思考模型在 max_tokens 内只输出了 reasoning（通常 finish_reason=length），
+                # 思考内容不能当作结果返回：思考模型在总生成预算内只输出了 reasoning，
                 # 静默兜底会把思考文本当成正式结果流入下游（如 translate → AnimaFlow tags）。
                 raise RuntimeError("LLM 返回空内容（模型仅输出思考、无正式回答）")
             raise RuntimeError("LLM 返回空内容")
-        return text
+        raise RuntimeError("LLM 返回空内容")

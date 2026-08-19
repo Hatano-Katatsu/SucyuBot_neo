@@ -879,6 +879,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn('thinkingSelect("chat_thinking"', model_section)
         self.assertIn('thinkingSelect("fast_thinking"', model_section)
         self.assertIn('thinkingSelect("vision_thinking"', model_section)
+        self.assertIn('<option value="">跟随全局</option>', model_section)
+        self.assertIn('visionDisabledProfileId', model_section)
+        self.assertIn('选择“关闭”才会只对当前用户禁用视觉理解', model_section)
         self.assertIn('<option value="">跟随模型</option>', model_section)
         self.assertIn('<option value="true">开启</option>', model_section)
         self.assertIn('<option value="false">关闭</option>', model_section)
@@ -912,6 +915,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn('"timeout", "thinking_effort"', global_section)
         for effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
             self.assertIn(f'<option value="{effort}">{effort}</option>', global_section)
+        self.assertIn("Kimi K2.7 Code 不允许 none", global_section)
+        self.assertIn("Kimi K3 原生档位为 low、high、max", global_section)
         self.assertIn('method: "POST"', global_section)
         self.assertIn('?scope=global`, { method: "DELETE" }', global_section)
         self.assertIn('if (name === "settings" && state.auth?.role === "admin") loadGlobalModels()', app_js)
@@ -3971,6 +3976,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             prompt = svc._call_llm.await_args.args[0]
             self.assertIn("1-3", prompt)
             self.assertIn("具体话题引导", prompt)
+            self.assertEqual(svc._call_llm.await_args.kwargs["purpose"], "fast")
+            self.assertNotIn("max_tokens", svc._call_llm.await_args.kwargs)
         asyncio.run(run())
 
     def test_dialogue_decision_does_not_schedule_daily_web_topic_refresh(self):
@@ -9921,6 +9928,56 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             ordinary_messages = captured[2][0]
             self.assertEqual([m["role"] for m in ordinary_messages], ["system", "user"])
             self.assertEqual(ordinary_messages[0]["content"], "ordinary system")
+
+        asyncio.run(run())
+
+    def test_thinking_request_uses_profile_budget_as_small_body_target_floor(self):
+        svc = self.make_service()
+        resolved = {"thinking": True, "max_tokens": "4096"}
+
+        self.assertEqual(svc._llm_request_max_tokens(resolved, 600), 4096)
+        self.assertEqual(svc._llm_request_max_tokens(resolved, 8192), 8192)
+        self.assertEqual(svc._llm_request_max_tokens(resolved, None), 4096)
+        self.assertEqual(
+            svc._llm_request_max_tokens({"thinking": False, "max_tokens": "4096"}, 600),
+            600,
+        )
+
+    def test_call_llm_retries_empty_length_response_with_larger_total_budget(self):
+        async def run():
+            svc = self.make_service()
+            svc._resolved_llm_config = Mock(return_value={"thinking": True, "max_tokens": "4096"})
+            svc._call_llm_messages = AsyncMock(side_effect=[
+                {
+                    "choices": [{
+                        "finish_reason": "length",
+                        "message": {"content": "", "reasoning": "仍在分析，还没有正式答案"},
+                    }],
+                    "usage": {"completion_tokens": 4096},
+                },
+                {
+                    "choices": [{
+                        "finish_reason": "stop",
+                        "message": {"content": '{"topic_mode":"independent"}'},
+                    }],
+                },
+            ])
+            svc._record_llm_error_log = Mock()
+
+            text = await svc._call_llm(
+                "system",
+                "user",
+                tag="push_topic_direction",
+                purpose="fast",
+                session_id="telegram:1",
+                max_tokens=600,
+            )
+
+            self.assertEqual(text, '{"topic_mode":"independent"}')
+            self.assertEqual(svc._call_llm_messages.await_count, 2)
+            self.assertEqual(svc._call_llm_messages.await_args_list[0].kwargs["max_tokens"], 600)
+            self.assertEqual(svc._call_llm_messages.await_args_list[1].kwargs["max_tokens"], 8192)
+            svc._record_llm_error_log.assert_not_called()
 
         asyncio.run(run())
 

@@ -1997,6 +1997,7 @@ async def api_test_llm(request: web.Request):
             "model": resolved.get("model") or "",
             "thinking": bool(resolved.get("thinking")),
             "thinking_effort": resolved.get("thinking_effort") or "",
+            "thinking_locked": bool(resolved.get("thinking_locked")),
             "finish_reason": choice.get("finish_reason") if isinstance(choice, dict) else None,
         })
         return json_ok(result)

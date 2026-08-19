@@ -291,6 +291,59 @@ class ModelProfileTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_vision_profile_can_follow_global_or_be_explicitly_disabled(self):
+        from telegram_comfyui_selfie.llm_runtime import VISION_PROFILE_DISABLED_ID
+        from telegram_comfyui_selfie.webui_models import api_model_profiles, api_update_model_settings
+
+        async def run():
+            svc = self.make_service()
+            svc.config["global_model_profiles"] = {
+                "global-vision": {
+                    "name": "Global Vision",
+                    "base_url": "https://vision.example/v1",
+                    "api_key": "vision-key",
+                    "model": "vision-model",
+                    "disable_thinking": True,
+                },
+            }
+            svc.config["default_vision_model_profile"] = "global-vision"
+            request = JsonRequest(
+                svc,
+                {},
+                web_auth={"role": "user", "user_id": "1", "token": "test"},
+            )
+
+            followed = svc._resolved_llm_config("vision", "telegram:1")
+            self.assertEqual(followed["profile_id"], "global-vision")
+            self.assertTrue(svc.has_llm_config("vision", "telegram:1"))
+
+            disabled_response = await api_update_model_settings(JsonRequest(
+                svc,
+                {"vision_profile_id": VISION_PROFILE_DISABLED_ID},
+                web_auth=request["web_auth"],
+            ))
+            self.assertEqual(
+                json.loads(disabled_response.text)["settings"]["vision_profile_id"],
+                VISION_PROFILE_DISABLED_ID,
+            )
+            disabled = svc._resolved_llm_config("vision", "telegram:1")
+            self.assertEqual(disabled["profile_id"], VISION_PROFILE_DISABLED_ID)
+            self.assertFalse(svc.has_llm_config("vision", "telegram:1"))
+
+            model_data = json.loads((await api_model_profiles(request)).text)
+            self.assertEqual(model_data["vision_disabled_profile_id"], VISION_PROFILE_DISABLED_ID)
+            self.assertTrue(model_data["resolved"]["vision"]["disabled"])
+
+            await api_update_model_settings(JsonRequest(
+                svc,
+                {"vision_profile_id": ""},
+                web_auth=request["web_auth"],
+            ))
+            followed_again = svc._resolved_llm_config("vision", "telegram:1")
+            self.assertEqual(followed_again["profile_id"], "global-vision")
+
+        asyncio.run(run())
+
     def test_model_settings_roundtrip_reasoning_effort_in_same_field(self):
         from telegram_comfyui_selfie.webui_models import api_update_model_settings
 
@@ -365,6 +418,66 @@ class ModelProfileTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertNotIn("invalid-effort", svc.config["global_model_profiles"])
 
         asyncio.run(run())
+
+    def test_kimi_k27_forces_thinking_and_rejects_none_profile_default(self):
+        from telegram_comfyui_selfie.model_thinking import is_kimi_k27_model
+        from telegram_comfyui_selfie.webui_models import api_save_model_profile
+
+        async def run():
+            svc = self.make_service()
+            svc.config["global_model_profiles"] = {
+                "kimi": {
+                    "name": "Kimi K2.7 Code",
+                    "base_url": "https://opencode.ai/zen/go/v1",
+                    "api_key": "secret",
+                    "model": "kimi-k2.7-code",
+                    "disable_thinking": True,
+                },
+            }
+            svc.config["default_chat_model_profile"] = "kimi"
+            svc.app_store.update_user_model_settings("1", chat_thinking="none")
+
+            resolved = svc._resolved_llm_config("chat", "telegram:1")
+            self.assertTrue(resolved["thinking"])
+            self.assertEqual(resolved["thinking_effort"], "")
+            self.assertTrue(resolved["thinking_locked"])
+            self.assertEqual(resolved["thinking_control"], "model_name")
+            self.assertTrue(is_kimi_k27_model("kimi-for-coding-highspeed"))
+
+            svc.app_store.update_user_model_settings("1", chat_thinking="high")
+            resolved = svc._resolved_llm_config("chat", "telegram:1")
+            self.assertEqual(resolved["thinking_effort"], "high")
+
+            rejected = await api_save_model_profile(JsonRequest(
+                svc,
+                {
+                    "_scope": "global",
+                    "name": "Invalid Kimi",
+                    "base_url": "https://opencode.ai/zen/go/v1",
+                    "model": "kimi-k2.7-code",
+                    "thinking_effort": "none",
+                },
+                match_info={"profile_id": "invalid-kimi"},
+            ))
+            self.assertEqual(rejected.status, 400)
+            self.assertIn("不接受 effort=none", json.loads(rejected.text)["error"])
+
+        asyncio.run(run())
+
+    def test_custom_deepseek_v4_profile_infers_thinking_param_protocol(self):
+        svc = self.make_service()
+        svc.config["global_model_profiles"] = {
+            "custom-deepseek": {
+                "base_url": "https://api.deepseek.com",
+                "api_key": "secret",
+                "model": "deepseek-v4-flash",
+            },
+        }
+        svc.config["default_fast_model_profile"] = "custom-deepseek"
+
+        resolved = svc._resolved_llm_config("fast", "")
+
+        self.assertEqual(resolved["thinking_control"], "param")
 
     def test_llm_message_metrics_count_explicit_and_tagged_thinking(self):
         from telegram_comfyui_selfie.llm_runtime import llm_message_text_metrics
@@ -506,7 +619,20 @@ class ModelProfileTestCase(ServiceFixtureMixin, unittest.TestCase):
                     purpose="chat",
                     session_id="telegram:1",
                 )
+                svc.app_store.update_user_model_settings("1", chat_thinking="none")
+                await svc._call_llm_messages(
+                    [{"role": "user", "content": "hello"}],
+                    purpose="chat",
+                    session_id="telegram:1",
+                )
                 svc.app_store.update_user_model_settings("1", chat_thinking=False)
+                await svc._call_llm_messages(
+                    [{"role": "user", "content": "hello"}],
+                    purpose="chat",
+                    session_id="telegram:1",
+                )
+                svc.config["global_model_profiles"]["effort"]["thinking_control"] = "model_name"
+                svc.app_store.update_user_model_settings("1", chat_thinking="none")
                 await svc._call_llm_messages(
                     [{"role": "user", "content": "hello"}],
                     purpose="chat",
@@ -515,9 +641,13 @@ class ModelProfileTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             self.assertEqual(captured[0][0], "https://opencode.example/zen/go/v1/chat/completions")
             self.assertEqual(captured[0][1]["reasoning_effort"], "high")
-            self.assertNotIn("thinking", captured[0][1])
+            self.assertEqual(captured[0][1]["thinking"], {"type": "enabled"})
             self.assertNotIn("reasoning_effort", captured[1][1])
             self.assertEqual(captured[1][1]["thinking"], {"type": "disabled"})
+            self.assertNotIn("reasoning_effort", captured[2][1])
+            self.assertEqual(captured[2][1]["thinking"], {"type": "disabled"})
+            self.assertEqual(captured[3][1]["reasoning_effort"], "none")
+            self.assertNotIn("thinking", captured[3][1])
             resolved = svc._resolved_llm_config("chat", "telegram:1")
             self.assertEqual(resolved["api_base"], "https://opencode.example/zen/go/v1")
 

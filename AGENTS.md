@@ -77,8 +77,9 @@ telegram_comfyui_selfie/
 - `state.json` 已弃用；旧数据仅在 SQLite 为空时迁移并备份。
 - `app_store.py` 管理 session、城市目录、聊天、checkpoint、日记、上下文元数据、生活线、Web 凭据、模型 profile 和用量。
 - `session_schema.py` 是会话字段单一来源。当前仍处于盒子结构与少量旧扁平键双写的兼容期，删除兼容键前必须清点所有读写点并补迁移测试。
-- 模型配置统一走全局/用户 profile；chat、fast、vision 分别选择 profile。视觉 profile 留空时跳过图片理解。
-- thinking 优先级：用户级（`chat_thinking`/`fast_thinking`/`vision_thinking`）> 全局配置默认（`chat_thinking_enabled`/`fast_thinking_enabled`/`vision_thinking_enabled`）> 模型 profile 的 `thinking_effort` > profile 的 `disable_thinking`。用户/全局字段兼容空值、旧 `true/false` 开关和 `none/minimal/low/medium/high/xhigh/max` effort；管理员可在全局模型 Profile 表单配置每个模型的默认 effort。选择 effort 时下发 `reasoning_effort`，结构化任务显式关闭 thinking 时同时清除 effort。`thinking_fixed` 仅是 profile 默认标记，不再硬锁定用户设置。API 密钥对前端始终掩码，保存空值或 `********` 时保留旧值。
+- 模型配置统一走全局/用户 profile；chat、fast、vision 分别选择 profile。全局视觉 profile 留空时跳过图片理解；用户视觉 profile 空值表示跟随全局，保留值 `__disabled__` 表示只为该用户明确关闭。
+- thinking 优先级：用户级（`chat_thinking`/`fast_thinking`/`vision_thinking`）> 全局配置默认（`chat_thinking_enabled`/`fast_thinking_enabled`/`vision_thinking_enabled`）> 模型 profile 的 `thinking_effort` > profile 的 `disable_thinking`。用户/全局字段兼容空值、旧 `true/false` 开关和 `none/minimal/low/medium/high/xhigh/max` effort；管理员可在全局模型 Profile 表单配置每个模型的默认 effort。`thinking_control=param/param_always` 时开关必须通过 `thinking.type=enabled/disabled` 单独下发，仅在思考开启时附带非 `none` 的 `reasoning_effort`；`model_name` 协议仍可原样下发 OpenAI 原生 `reasoning_effort=none`。结构化任务显式关闭 thinking 时同时清除 effort。Kimi K2.7 Code 强制思考，OpenCode Go 拒绝 `none`、接受其他兼容 effort；Kimi K3 原生支持 `low/high/max`。兼容端点可能接受但不执行参数，实际能力以模型测试返回的思考长度为准。`thinking_fixed` 仅是 profile 默认标记，不再硬锁定用户设置。API 密钥对前端始终掩码，保存空值或 `********` 时保留旧值。
+- Chat Completions 的 `max_tokens` 是思考与正文共享的总预算，不能跨兼容端点统一实现“只限制正文”。业务调用的小额度在开启思考时以 profile 总预算为下限；若仍以 `finish_reason=length` 返回空正文，只放大总预算重试一次。
 - `llm_sampling_params_enabled` 是模型采样细节总开关；关闭时所有 LLM 请求省略 temperature、top_p、frequency_penalty 和 presence_penalty，并保留配置值供再次开启，max_tokens、thinking 和工具参数不受影响。WebUI 根据该开关折叠或展开采样参数详情。
 - OpenAI-compatible profile 的 `base_url` 同时接受 API Base 和完整 `/chat/completions` URL，运行时统一规范化。服务启动时仅对带密钥的全局端点并发拉取一次 `/models` 目录并保存在内存中，失败不阻止启动；目录只向管理员 WebUI 暴露，供全局 profile 选型与复用同端点密钥。
 - 思考型模型仅在 content 里输出带 `<thinking>`/`<reasoning>`/`<analysis>` 标签的草稿时，`_call_llm` 才剥离或判为思考泄漏；不做关键词启发式判断。

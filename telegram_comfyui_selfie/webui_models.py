@@ -15,9 +15,9 @@ from .animaflow_runtime import (
     inspect_animaflow_workflow,
 )
 from .encounter_runtime import normalize_cross_world_encounter_strength
-from .llm_runtime import _normalize_openai_api_base
+from .llm_runtime import VISION_PROFILE_DISABLED_ID, _normalize_openai_api_base
 from .model_security import validate_public_model_base_url
-from .model_thinking import normalize_profile_thinking_effort, normalize_thinking_setting
+from .model_thinking import is_kimi_k27_model, normalize_profile_thinking_effort, normalize_thinking_setting
 from .webui_common import (
     is_admin,
     json_error,
@@ -99,15 +99,27 @@ def merge_model_profile_secrets(new_profile: dict[str, Any], old_profile: dict[s
     return merged
 
 
+def validate_model_profile_thinking(profile: dict[str, Any]) -> None:
+    """阻止已知模型保存必然被上游拒绝的思考组合。"""
+    if (
+        is_kimi_k27_model(profile.get("model_think") or profile.get("model"))
+        and normalize_profile_thinking_effort(profile.get("thinking_effort")) == "none"
+    ):
+        raise ValueError("Kimi K2.7 Code 强制思考，OpenCode Go 不接受 effort=none")
+
+
 def resolved_model_summary(service, purpose: str, session_id: str) -> dict[str, Any]:
     resolved = service._resolved_llm_config(purpose, session_id)
+    disabled = purpose == "vision" and resolved.get("profile_id") == VISION_PROFILE_DISABLED_ID
     return {
-        "profile_id": resolved.get("profile_id") or "",
+        "profile_id": "" if disabled else (resolved.get("profile_id") or ""),
         "model": resolved.get("model") or "",
         "api_base": resolved.get("api_base") or "",
         "thinking": bool(resolved.get("thinking")),
         "thinking_effort": resolved.get("thinking_effort") or "",
+        "thinking_locked": bool(resolved.get("thinking_locked")),
         "configured": service.has_llm_config(purpose, session_id),
+        "disabled": disabled,
     }
 
 
@@ -331,6 +343,7 @@ async def api_model_profiles(request: web.Request):
         "default_chat_model_profile": service.config.get("default_chat_model_profile", ""),
         "default_fast_model_profile": service.config.get("default_fast_model_profile", ""),
         "default_vision_model_profile": service.config.get("default_vision_model_profile", ""),
+        "vision_disabled_profile_id": VISION_PROFILE_DISABLED_ID,
         "available_global_models": service.global_model_catalog() if is_admin(request) else [],
         "resolved": {
             "chat": resolved_model_summary(service, "chat", session_id),
@@ -348,6 +361,8 @@ async def api_save_model_profile(request: web.Request):
     profile_id = request.match_info["profile_id"].strip()
     if not profile_id:
         return json_error("profile_id 不能为空")
+    if profile_id == VISION_PROFILE_DISABLED_ID:
+        return json_error("该 profile_id 是视觉模型关闭状态的保留值")
     payload = await request.json()
     if not isinstance(payload, dict):
         return json_error("模型配置必须是 JSON 对象")
@@ -373,6 +388,10 @@ async def api_save_model_profile(request: web.Request):
             merged_payload = copy.deepcopy(current_profile)
             merged_payload.update(payload)
             payload = merge_model_profile_secrets(merged_payload, current_profile)
+            try:
+                validate_model_profile_thinking(payload)
+            except ValueError as exc:
+                return json_error(str(exc))
             if not payload.get("api_key") and catalog_source_profile_id:
                 source_profile = profiles.get(catalog_source_profile_id) or {}
                 requested_base = _normalize_openai_api_base(payload.get("base_url"))
@@ -399,6 +418,7 @@ async def api_save_model_profile(request: web.Request):
     current = service.app_store.list_model_profiles(user_id).get(profile_id) or {}
     payload = merge_model_profile_secrets(payload, current)
     try:
+        validate_model_profile_thinking(payload)
         for key in ("base_url", "base_url_no_think"):
             if payload.get(key):
                 validate_public_model_base_url(payload[key])
@@ -446,7 +466,10 @@ async def api_update_model_settings(request: web.Request):
     kwargs: dict[str, Any] = {}
     for key in ("chat_profile_id", "fast_profile_id", "vision_profile_id"):
         if key in payload:
-            kwargs[key] = str(payload.get(key) or "")
+            value = str(payload.get(key) or "").strip()
+            if value == VISION_PROFILE_DISABLED_ID and key != "vision_profile_id":
+                return json_error("关闭状态只适用于视觉模型")
+            kwargs[key] = value
     # 三模型 thinking 共用单字段：空=跟随 profile，true/false=旧开关，字符串=effort。
     for key in ("chat_thinking", "fast_thinking", "vision_thinking"):
         if key in payload:
