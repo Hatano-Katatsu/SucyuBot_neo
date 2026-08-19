@@ -927,7 +927,7 @@ class LLMRuntimeMixin:
             )
             if reasoning_len:
                 # 思考内容不能当作结果返回：思考模型在 max_tokens 内只输出了 reasoning（通常 finish_reason=length），
-                # 静默兜底会把思考文本当成正式结果流入下游（如 translate → animatool tags）。
+                # 静默兜底会把思考文本当成正式结果流入下游（如 translate → AnimaFlow tags）。
                 raise RuntimeError("LLM 返回空内容（模型仅输出思考、无正式回答）")
             raise RuntimeError("LLM 返回空内容")
         return text

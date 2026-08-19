@@ -79,6 +79,10 @@ STATE_SCHEMA: dict[str, Field] = {
     # 推送侧外部话题搜索配额（与聊天侧 web_search_count 独立，每天最多 1 次）。
     "push_topic_search_date": Field(G, default=""),
     "push_topic_search_count": Field(G, default=0),
+    # 同一会话内角色互动推送：参与角色、每日上限以及当天已完成次数。
+    "character_interaction_push": Field(G, default={
+        "character_keys": [], "daily_limit": 0, "date": "", "count": 0,
+    }),
     # —— 会话全局：角色池容器 / 初始化流程 ——
     "saved_characters": Field(G, default={}),
     "character_contexts": Field(G, default={}),
@@ -104,6 +108,9 @@ STATE_SCHEMA: dict[str, Field] = {
         "web_search_count": 0,
         "push_topic_search_date": "",
         "push_topic_search_count": 0,
+        "character_interaction_push": {
+            "character_keys": [], "daily_limit": 0, "date": "", "count": 0,
+        },
         "saved_characters": {},
         "character_contexts": {},
         "init_flow": {},
@@ -1259,6 +1266,9 @@ _SESSION_DEFAULT: dict[str, Any] = {
     "web_search_count": 0,
     "push_topic_search_date": "",
     "push_topic_search_count": 0,
+    "character_interaction_push": {
+        "character_keys": [], "daily_limit": 0, "date": "", "count": 0,
+    },
     "saved_characters": {},
     "character_contexts": {},
     "init_flow": {},
@@ -1281,6 +1291,7 @@ _LEGACY_SESSION_FLAT_KEYS = (
     "post_chat_push_date", "post_chat_push_count", "last_post_chat_push_time",
     "web_search_date", "web_search_count",
     "push_topic_search_date", "push_topic_search_count",
+    "character_interaction_push",
     "saved_characters", "character_contexts", "init_flow",
     "ntr_stage_reached", "ntr_reconcile_count", "ntr_affection_reset",
     "frozen", "frozen_at",
@@ -1450,6 +1461,45 @@ def get_push_topic_search_count(state):
 
 def set_push_topic_search_count(state, value):
     _session_set(state, "push_topic_search_count", int(value or 0))
+
+
+def _normalize_character_interaction_push(value: Any) -> dict[str, Any]:
+    """归一化同会话角色互动推送设置，保留空字符串作为默认角色键。"""
+    raw = value if isinstance(value, dict) else {}
+    keys: list[str] = []
+    seen: set[str] = set()
+    raw_keys = raw.get("character_keys")
+    for item in raw_keys if isinstance(raw_keys, list) else []:
+        key = str(item or "").strip()
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    try:
+        daily_limit = max(0, min(20, int(raw.get("daily_limit") or 0)))
+    except (TypeError, ValueError):
+        daily_limit = 0
+    try:
+        count = max(0, int(raw.get("count") or 0))
+    except (TypeError, ValueError):
+        count = 0
+    return {
+        "character_keys": keys,
+        "daily_limit": daily_limit,
+        "date": str(raw.get("date") or "").strip(),
+        "count": count,
+    }
+
+
+def get_character_interaction_push(state) -> dict[str, Any]:
+    value = _normalize_character_interaction_push(
+        _session_get(state, "character_interaction_push", is_dict=True)
+    )
+    _session_set(state, "character_interaction_push", value)
+    return value
+
+
+def set_character_interaction_push(state, value: Any) -> None:
+    _session_set(state, "character_interaction_push", _normalize_character_interaction_push(value))
 
 
 # ── NTR ──

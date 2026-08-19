@@ -1147,6 +1147,116 @@ select {
   font-weight: 600;
 }
 
+.character-interaction-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.character-interaction-status,
+.character-interaction-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+}
+
+.character-interaction-status > div {
+  display: grid;
+  gap: 3px;
+}
+
+.character-interaction-status strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.character-interaction-status small,
+.character-interaction-role small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.character-interaction-status > span {
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.character-interaction-status .available {
+  color: #166534;
+  background: #dcfce7;
+}
+
+.character-interaction-status .unavailable {
+  color: var(--muted);
+  background: var(--surface-subtle);
+  border: 1px solid var(--line);
+}
+
+.character-interaction-help {
+  max-width: 900px;
+}
+
+.character-interaction-roles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.character-interaction-role {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.character-interaction-role.active {
+  border-color: var(--accent);
+  background: var(--surface-subtle);
+}
+
+.character-interaction-role input {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.character-interaction-role span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.character-interaction-role strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.character-interaction-actions label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.character-interaction-actions input {
+  width: 88px;
+  min-height: 40px;
+}
+
+.character-interaction-actions button {
+  min-height: 40px;
+}
+
 .life-plan-head {
   display: flex;
   flex-wrap: wrap;

@@ -245,6 +245,15 @@ class DeletionRuntimeMixin:
         is_active = active_id == character_id
         saved.pop(character_id, None)
         session_schema.get_character_contexts(state).pop(character_key, None)
+        interaction_settings = session_schema.get_character_interaction_push(state)
+        if character_key in interaction_settings.get("character_keys", []):
+            session_schema.set_character_interaction_push(state, {
+                **interaction_settings,
+                "character_keys": [
+                    key for key in interaction_settings.get("character_keys", [])
+                    if key != character_key
+                ],
+            })
         if is_active:
             if hasattr(self, "_clear_transient_state"):
                 self._clear_transient_state(state, keep_appearance=False)

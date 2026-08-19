@@ -23,6 +23,17 @@ ORCHESTRATION_PAYLOAD = {
     "memory_b": "认识了外地来的小艾，她答应下次再来",
 }
 
+LOCAL_ORCHESTRATION_PAYLOAD = {
+    "summary": "小艾按午后的动线去了咖啡店，恰好遇见铃音，两人交换了最近各自忙碌的近况后一起喝完咖啡。",
+    "pov_active": "我在咖啡店碰见铃音，和她聊了最近的生活，还约好下次再坐一会儿。",
+    "pov_other": "我出门时遇见小艾，听她说了近况，也把自己的计划告诉了她。",
+    "relationship": "熟悉了一些，约好下次继续交换近况",
+    "memory_active": "在咖啡店遇见铃音，并约好下次继续聊近况",
+    "memory_other": "在咖啡店遇见小艾，并约好下次继续聊近况",
+    "push_caption": "刚才在咖啡店碰见铃音了，我们坐下来聊了好一会儿，连原本的安排都差点忘了。",
+    "scene_hint": "小艾独自坐在咖啡店靠窗座位，桌上有两只用过的咖啡杯，铃音已经离开画面。",
+}
+
 
 class EncounterTestCase(ServiceFixtureMixin, unittest.TestCase):
     def make_encounter_service(self, *, pairs=None, enabled=True):
@@ -54,6 +65,36 @@ class EncounterTestCase(ServiceFixtureMixin, unittest.TestCase):
     def _run(self, svc, pair=None):
         pair = pair or svc._cross_world_pairs()[0]
         return asyncio.run(svc._run_encounter(pair))
+
+    def _add_local_inactive_character(self, svc, sid: str, character: str = "铃音"):
+        state = svc._get_session_state(sid)
+        session_schema.get_saved_characters(state)[character] = {
+            "character": character,
+            "bot_name": character,
+            "persona": "安静但很会观察别人，喜欢在午后出门。",
+            "occupation": "自由职业",
+            "day_anchor": "flexible",
+            "workday_wake_time": "00:01",
+            "workday_sleep_time": "23:59",
+            "weekend_wake_time": "00:01",
+            "weekend_sleep_time": "23:59",
+        }
+        svc._save_session_state(sid, state)
+
+    def _save_current_local_plan(self, svc, sid: str, character: str, today: str):
+        svc._save_life_plan_payload(sid, character, {
+            "long_goals": [{"id": "l1", "text": "过好自己的生活", "status": "active", "dimension": "生活"}],
+            "mid_goals": [{"id": "m1", "text": "保持日常节奏", "status": "active", "parent_id": "l1"}],
+            "today": {
+                "date": today,
+                "texture": "按自己的节奏度过今天。",
+                "events": [{
+                    "id": "e1", "time_hint": "noon", "text": "去咖啡店整理近况",
+                    "place_key": "cafe", "status": "planned",
+                }],
+            },
+            "npcs": [],
+        })
 
     # ------------------------------------------------------------------
     # 配置
@@ -90,6 +131,86 @@ class EncounterTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(svc._encounter_cooldown_days(), 7.0)
         svc.config["cross_world_encounter_cooldown_days"] = "-3"
         self.assertEqual(svc._encounter_cooldown_days(), 0.0)
+
+    def test_local_interaction_settings_default_off_and_require_two_roles(self):
+        svc = self.make_encounter_service()
+        sid = svc.session_id_for_chat(1001)
+        self._add_local_inactive_character(svc, sid)
+        fixed_now = svc._session_now(sid).replace(hour=12, minute=0, second=0, microsecond=0)
+
+        status = svc._local_interaction_push_status(sid, now=fixed_now)
+        self.assertFalse(status["enabled"])
+        self.assertEqual(status["daily_limit"], 0)
+        with self.assertRaises(ValueError):
+            svc._configure_local_interaction_push(sid, ["小艾"], 1)
+
+        status = svc._configure_local_interaction_push(sid, ["小艾", "铃音"], 2)
+        status = svc._local_interaction_push_status(sid, now=fixed_now)
+        self.assertTrue(status["enabled"])
+        self.assertTrue(status["available"])
+        self.assertEqual(status["remaining"], 2)
+        self.assertEqual([item["character_key"] for item in status["candidates"]], ["铃音"])
+
+    def test_local_interaction_prepares_target_route_then_commits_both_histories(self):
+        async def run():
+            svc = self.make_encounter_service()
+            sid = svc.session_id_for_chat(1001)
+            self._add_local_inactive_character(svc, sid)
+            fixed_now = svc._session_now(sid).replace(hour=12, minute=0, second=0, microsecond=0)
+            today = svc._life_today_date(sid, fixed_now)
+            self._save_current_local_plan(svc, sid, "小艾", today)
+            self._save_current_local_plan(svc, sid, "铃音", today)
+            svc._configure_local_interaction_push(sid, ["小艾", "铃音"], 1)
+            original_ensure = svc.ensure_life_plan_for_today
+            svc.ensure_life_plan_for_today = AsyncMock(wraps=original_ensure)
+            svc._orchestrate_local_character_interaction = AsyncMock(
+                return_value=dict(LOCAL_ORCHESTRATION_PAYLOAD)
+            )
+
+            prepared = await svc._prepare_local_character_interaction_push(
+                sid,
+                fixed_now,
+                weather={"desc": "晴", "temp": "23"},
+                active_world={
+                    "character_place": {
+                        "key": "cafe", "label": "咖啡店", "name": "靠窗座位",
+                        "public": True, "indoor": True,
+                    },
+                },
+                target_character="铃音",
+            )
+
+            self.assertIsNotNone(prepared)
+            svc.ensure_life_plan_for_today.assert_awaited_once()
+            self.assertEqual(svc.ensure_life_plan_for_today.await_args.kwargs["character_key"], "铃音")
+            pair_key = prepared["pair_key"]
+            self.assertEqual(svc.app_store.list_encounters_for_pair(pair_key), [])
+            before = session_schema.get_character_interaction_push(svc._get_session_state(sid))
+            self.assertEqual(before["count"], 0)
+
+            self.assertTrue(svc._commit_local_character_interaction_push(sid, prepared))
+            self.assertEqual(svc._context_character_key(sid), "小艾")
+            records = svc.app_store.list_encounters_for_pair(pair_key)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["type"], "local_push")
+            after = session_schema.get_character_interaction_push(svc._get_session_state(sid))
+            self.assertEqual(after["count"], 1)
+            self.assertFalse(svc._commit_local_character_interaction_push(sid, prepared))
+            self.assertEqual(len(svc.app_store.list_encounters_for_pair(pair_key)), 1)
+
+            state = svc._get_session_state(sid)
+            active_history = session_schema.get_chat_history(state)
+            inactive_context = session_schema.get_character_contexts(state)["铃音"]
+            inactive_history = session_schema.get_chat_history(inactive_context)
+            self.assertIn("铃音是另一个角色", active_history[-1]["content"])
+            self.assertIn("小艾是另一个角色", inactive_history[-1]["content"])
+            for character in ("小艾", "铃音"):
+                stored = svc.app_store.list_messages(sid, character, limit=5)
+                self.assertTrue(any("同一用户角色池内" in item["content"] for item in stored))
+                plan = svc._load_life_plan_row(sid, character)["payload"]
+                self.assertTrue(any(event.get("status") == "done" for event in plan["today"]["events"]))
+
+        asyncio.run(run())
 
     def test_pair_config_webui_text_format(self):
         # WebUI 文本格式：每行 chat_id:角色名 = chat_id:角色名，兼容全角标点与注释行。

@@ -111,6 +111,22 @@ class ServiceStateMixin:
                         loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
                     if isinstance(loaded, dict):
                         cfg.update(loaded)
+                        # AnimaTool 旧配置只在加载边界迁移；运行时与新写回配置统一使用 AnimaFlow 键。
+                        legacy_backend = str(loaded.get("image_backend") or "").strip().lower()
+                        if "animaflow_enabled" not in loaded and legacy_backend in {"animatool", "animaflow"}:
+                            cfg["animaflow_enabled"] = True
+                        legacy_keys = {
+                            "animatool_workflow": "animaflow_workflow",
+                            "animatool_turbo_steps": "animaflow_steps",
+                            "animatool_turbo_cfg": "animaflow_cfg",
+                            "animatool_filename_prefix": "animaflow_filename_prefix",
+                        }
+                        for old_key, new_key in legacy_keys.items():
+                            if new_key not in loaded and old_key in loaded:
+                                cfg[new_key] = loaded[old_key]
+                            cfg.pop(old_key, None)
+                        if legacy_backend == "animatool":
+                            cfg["image_backend"] = "animaflow"
                 except Exception as exc:
                     raise RuntimeError(f"配置文件读取失败: {self.config_path}: {exc}") from exc
             else:

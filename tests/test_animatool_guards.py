@@ -7,16 +7,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from telegram_comfyui_selfie.generation import (
-    ANIMATOOL_WORKFLOWS,
     PromptSlots,
     _apply_animatool_guard_contract,
     _build_animatool_guard_contract,
     _build_animatool_turbo_payload,
+    _prepare_animaflow_generate_payload,
 )
-from telegram_comfyui_selfie.image_planning import plan_animatool_slots
+from telegram_comfyui_selfie.image_planning import plan_animaflow_slots, plan_animatool_slots
 
 
-class AnimaToolGuardContractTestCase(unittest.TestCase):
+class AnimaFlowGuardContractTestCase(unittest.TestCase):
     # 与反词策略定稿一致：性/裸露类反词只保留最小集（nude），不再维护 nipples 等词。
     GUARDED_NEGATIVE = (
         "bad hands, holding phone, mirror, unrelated extra person, "
@@ -40,12 +40,13 @@ class AnimaToolGuardContractTestCase(unittest.TestCase):
         }
 
     @staticmethod
-    def _service(workflow: str) -> SimpleNamespace:
+    def _service(workflow: str, *, cfg: str = "1.0") -> SimpleNamespace:
         return SimpleNamespace(
             config={
-                "animatool_workflow": workflow,
-                "animatool_filename_prefix": "guard-test",
-                "animatool_turbo_cfg": "1.0",
+                "animaflow_workflow": workflow,
+                "animaflow_filename_prefix": "guard-test",
+                "animaflow_cfg": cfg,
+                "animaflow_steps": "8",
                 "width": "832",
                 "height": "1216",
                 "bot_name": "Guard Test",
@@ -62,41 +63,26 @@ class AnimaToolGuardContractTestCase(unittest.TestCase):
             negative=negative if negative is not None else self.GUARDED_NEGATIVE,
         )
 
-    def test_all_four_workflows_preserve_the_same_guard_contract(self):
-        for workflow, metadata in ANIMATOOL_WORKFLOWS.items():
-            with self.subTest(workflow=workflow):
-                supports_neg = bool(metadata.get("supports_neg"))
-                schema = self._schema(supports_neg=supports_neg)
-                payload = _build_animatool_turbo_payload(
-                    self._service(workflow),
-                    self._slots(),
-                    "positive prompt",
-                    self.GUARDED_NEGATIVE,
-                    7,
-                    schema,
-                )
+    def test_cfg_one_ignores_schema_neg_and_preserves_guards_as_positive_text(self):
+        payload = _build_animatool_turbo_payload(
+            self._service("anima29_turbo", cfg="1"),
+            self._slots(),
+            "positive prompt",
+            self.GUARDED_NEGATIVE,
+            7,
+            self._schema(supports_neg=True),
+        )
 
-                if supports_neg:
-                    negative = payload["neg"].lower()
-                    for term in (
-                        "holding phone",
-                        "mirror",
-                        "unrelated extra person",
-                        "split screen",
-                        "nude",
-                    ):
-                        self.assertIn(term, negative)
-                else:
-                    self.assertNotIn("neg", payload)
-                    tags = payload["tags"].lower()
-                    for phrase in (
-                        "no phone",
-                        "no mirror",
-                        "no unrelated extra person",
-                        "one undivided single frame",
-                        "fully covers intimate areas",
-                    ):
-                        self.assertIn(phrase, tags)
+        self.assertNotIn("neg", payload)
+        tags = payload["tags"].lower()
+        for phrase in (
+            "capture equipment stays outside",
+            "one coherent view",
+            "only the intended visible subject",
+            "one undivided single-frame",
+            "fully and naturally covers intimate areas",
+        ):
+            self.assertIn(phrase, tags)
 
     def test_llm_negative_can_supplement_but_cannot_delete_guards(self):
         schema = self._schema(supports_neg=True)
@@ -118,7 +104,7 @@ class AnimaToolGuardContractTestCase(unittest.TestCase):
         async def run():
             schema = self._schema(supports_neg=True)
             service = SimpleNamespace(
-                config={"animatool_workflow": "turbo_v1"},
+                config={"animaflow_workflow": "anima29", "animaflow_cfg": "4.0"},
                 comfyui_url="http://animatool.invalid",
                 has_llm_config=lambda purpose, session_id: True,
                 _get_session_state=lambda session_id: {},
@@ -169,8 +155,8 @@ class AnimaToolGuardContractTestCase(unittest.TestCase):
         )
 
         self.assertNotIn("neg", payload)
-        self.assertIn("one undivided single frame", payload["tags"].lower())
-        self.assertIn("fully covers intimate areas", payload["tags"].lower())
+        self.assertIn("one undivided single-frame", payload["tags"].lower())
+        self.assertIn("fully and naturally covers intimate areas", payload["tags"].lower())
 
     def test_realtime_schema_neg_field_overrides_registry_metadata(self):
         schema = self._schema(supports_neg=True)
@@ -197,10 +183,10 @@ class AnimaToolGuardContractTestCase(unittest.TestCase):
             "turbo0.2",
         )
         tags = payload["tags"].lower()
-        self.assertIn("no duplicate phone", tags)
-        self.assertIn("at most one intended reflection", tags)
-        self.assertNotIn("no phone, camera interface", tags)
-        self.assertNotIn("no mirror or reflected duplicate", tags)
+        self.assertIn("one coherent set of intended handheld props", tags)
+        self.assertIn("one coherent intended reflection", tags)
+        self.assertNotIn("capture equipment stays outside", tags)
+        self.assertNotIn("appears directly in one coherent view", tags)
 
     def test_absent_native_guard_is_not_invented(self):
         slots = self._slots("bad hands")
@@ -214,6 +200,67 @@ class AnimaToolGuardContractTestCase(unittest.TestCase):
         )
 
         self.assertEqual(payload, original)
+
+    def test_legacy_turbo_v1_endpoint_does_not_receive_unified_workflow_field(self):
+        original = {"workflow": "turbo_v1", "tags": "A quiet scene."}
+        legacy = _prepare_animaflow_generate_payload(
+            original,
+            "turbo_v1",
+            {"legacy_fallback": True},
+        )
+        dynamic = _prepare_animaflow_generate_payload(
+            {"tags": "A quiet scene."},
+            "anima29_turbo",
+            {},
+        )
+
+        self.assertNotIn("workflow", legacy)
+        self.assertEqual(dynamic["workflow"], "anima29_turbo")
+        self.assertIn("workflow", original, "构造提交体不能原地修改规划结果")
+
+    def test_automatic_legacy_fallback_uses_cfg_one_policy_before_llm(self):
+        async def run():
+            schema = self._schema(supports_neg=True)
+            service = SimpleNamespace(
+                config={"animaflow_workflow": "anima29", "animaflow_cfg": "4.0"},
+                _animaflow_catalog={
+                    "workflows": {
+                        "turbo_v1": {
+                            "legacy_fallback": True,
+                            "defaults": {"cfg": 1.0, "steps": 12},
+                        }
+                    }
+                },
+                has_llm_config=lambda purpose, session_id: True,
+                _get_session_state=lambda session_id: {},
+                _get_effective_safety=lambda session_id: {"level": 8},
+                _get_purity=lambda session_id: 8,
+                _get_time_context=lambda session_id: {},
+                _format_time_context=lambda session_id: "",
+                _format_light_guard=lambda session_id: "",
+                _get_llm_value=lambda *args: "0.1",
+                _weather_caches={},
+                _call_llm=AsyncMock(return_value=json.dumps({
+                    "quality_meta_year_safe": "masterpiece, best quality, safe",
+                    "count": "1girl",
+                    "tags": "A quiet scene.",
+                    "neg": "should be removed",
+                })),
+            )
+
+            payload = await plan_animaflow_slots(
+                service,
+                "telegram:guard",
+                self._slots(),
+                workflow="turbo_v1",
+                schema=schema,
+                knowledge={},
+            )
+
+            self.assertNotIn("neg", payload)
+            self.assertIn("cfg=1 提示词规则", service._call_llm.await_args.args[0])
+
+        asyncio.run(run())
 
 
 if __name__ == "__main__":

@@ -8,6 +8,12 @@ from typing import Any
 from aiohttp import web
 
 from . import session_schema
+from .animaflow_runtime import (
+    AnimaFlowError,
+    animaflow_enabled,
+    configured_animaflow_workflow,
+    inspect_animaflow_workflow,
+)
 from .llm_runtime import _normalize_openai_api_base
 from .model_security import validate_public_model_base_url
 from .model_thinking import normalize_thinking_setting
@@ -200,7 +206,35 @@ async def _replace_config(service, candidate: dict[str, Any]) -> None:
 
 async def api_config(request: web.Request):
     require_admin(request)
-    return json_ok({"config": masked_config(service_from(request))})
+    service = service_from(request)
+    animaflow: dict[str, Any] | None = None
+    if animaflow_enabled(service.config):
+        try:
+            animaflow = await inspect_animaflow_workflow(
+                service,
+                configured_animaflow_workflow(service.config),
+            )
+        except Exception as exc:
+            animaflow = {"error": str(exc), "workflows": []}
+    return json_ok({"config": masked_config(service), "animaflow": animaflow})
+
+
+async def api_animaflow_discover(request: web.Request):
+    """管理员显式打开开关或切换工作流时强制重新发现 AnimaFlow。"""
+    require_admin(request)
+    service = service_from(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    workflow = str(payload.get("workflow") or "") if isinstance(payload, dict) else ""
+    try:
+        state = await inspect_animaflow_workflow(service, workflow, force=True)
+    except AnimaFlowError as exc:
+        return json_error(str(exc), status=502)
+    except Exception as exc:
+        return json_error(f"AnimaFlow 检测失败: {exc}", status=502)
+    return json_ok({"animaflow": state})
 
 
 async def api_save_config(request: web.Request):
@@ -218,10 +252,34 @@ async def api_save_config(request: web.Request):
     }
     schedule_changed = bool(global_schedule_keys.intersection(values))
     async with config_operation_lock(service):
+        old_enabled = animaflow_enabled(service.config)
+        old_workflow = configured_animaflow_workflow(service.config)
         try:
             candidate = prepare_config_candidate(service.config, values)
         except (TypeError, ValueError) as exc:
             return json_error(str(exc))
+        new_enabled = animaflow_enabled(candidate)
+        requested_workflow = configured_animaflow_workflow(candidate)
+        workflow_changed = requested_workflow != old_workflow
+        # 开关每次由关变开都强制检测目录；更换工作流也必须立即加载其 schema/knowledge 与默认参数。
+        if new_enabled and (not old_enabled or workflow_changed):
+            try:
+                animaflow_state = await inspect_animaflow_workflow(
+                    service,
+                    requested_workflow,
+                    force=True,
+                )
+            except AnimaFlowError as exc:
+                return json_error(str(exc), status=502)
+            except Exception as exc:
+                return json_error(f"AnimaFlow 检测失败: {exc}", status=502)
+            defaults = animaflow_state.get("defaults") if isinstance(animaflow_state, dict) else {}
+            cfg_default = defaults.get("cfg") if isinstance(defaults, dict) else None
+            steps_default = defaults.get("steps") if isinstance(defaults, dict) else None
+            candidate["animaflow_workflow"] = str(animaflow_state.get("selected") or requested_workflow)
+            # 少数旧工作流的公开 schema 未给出数值默认值；留空即让 AnimaFlow 使用其真实服务端默认。
+            candidate["animaflow_cfg"] = "" if cfg_default is None else str(cfg_default)
+            candidate["animaflow_steps"] = "" if steps_default is None else str(int(steps_default))
         try:
             await _replace_config(service, candidate)
         except Exception as exc:

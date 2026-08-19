@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""真实生图链路测试：sex 场景全链路（planner LLM → translate LLM → build_prompt → slots LLM → AnimaTool）。
+"""真实生图链路测试：sex 场景全链路（planner LLM → translate LLM → build_prompt → slots LLM → AnimaFlow）。
 
 用法: py -3 scripts/live_sex_chain_test.py
 输出: outputs/integration_test/sex_chain_<ts>.png + 各阶段 prompt 打印。
@@ -90,7 +90,7 @@ async def main() -> None:
     )
     print(f"      english scene:\n      {english}")
 
-    print("[3/4] do_generate (build_prompt + slots LLM + AnimaTool turbo_v1)...")
+    print("[3/4] do_generate (build_prompt + slots LLM + AnimaFlow dynamic workflow)...")
     t0 = time.time()
     ok, images, err = await do_generate(
         svc,

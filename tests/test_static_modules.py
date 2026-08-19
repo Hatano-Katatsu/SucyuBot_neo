@@ -71,6 +71,8 @@ class StaticModuleBoundaryTestCase(unittest.TestCase):
             "renderWorldRoute",
             "renderLifePlan",
             "handleLifePlanAction",
+            "renderCharacterInteraction",
+            "handleCharacterInteractionAction",
         )
 
         for name in domain_functions:
@@ -113,6 +115,24 @@ class StaticModuleBoundaryTestCase(unittest.TestCase):
         self.assertIn('toggle.className = "session-freeze-toggle"', world_ui)
         self.assertNotIn('role="button"', world_ui)
         self.assertIn('toast(err.message, "error")', world_ui)
+
+    def test_world_ui_exposes_local_character_interaction_settings(self):
+        world_ui = (STATIC_ROOT / "world_ui.js").read_text(encoding="utf-8")
+        app = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("/character-interaction", world_ui)
+        self.assertIn("每日互动上限", world_ui)
+        self.assertIn("当前活动角色也必须在所选列表中", world_ui)
+        self.assertIn('document.addEventListener("click", handleCharacterInteractionAction)', app)
+
+    def test_admin_animaflow_ui_discovers_workflows_and_surfaces_legacy_fallback(self):
+        app = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('["animaflow_enabled", "启用 AnimaFlow", "bool"]', app)
+        self.assertIn('"/api/admin/animaflow/discover"', app)
+        self.assertIn("data.legacy_fallback", app)
+        self.assertIn("已回退 turbo_v1", app)
+        self.assertNotIn('<option value="turbo_v1"', app)
 
     def test_llm_debug_ui_uses_cursor_pagination(self):
         index = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")

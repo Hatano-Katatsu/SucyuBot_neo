@@ -7,19 +7,24 @@ import time
 from datetime import datetime
 from typing import Any
 
-import aiohttp
-
 from . import session_schema
+from .animaflow_runtime import (
+    ANIMAFLOW_NEGATIVE_FIELDS,
+    ANIMAFLOW_NLTAG_FIELDS,
+    apply_animaflow_cfg_policy,
+    cfg_is_one,
+    fetch_animaflow_knowledge,
+    fetch_animaflow_schema,
+    load_animaflow_workflow_resources,
+)
 from .defaults import DEFAULT_CONFIG, WEEKDAY_NAMES
 from .generation import (
-    ANIMATOOL_NLTAG_FIELDS,
     _apply_wardrobe_item_states,
     _infer_prompt_view,
     _scene_breaks_pov_facing,
     _strip_non_mirror_camera_artifacts,
     public_outfit_guard_context,
 )
-from .http_limits import read_limited_json, response_limit
 from .llm_runtime import _looks_like_llm_thinking
 from .memory import USER_PROFILE_KIND, format_memory_lines
 from .world_runtime import PLACE_TYPES
@@ -34,12 +39,6 @@ EXPLICIT_ONE_SHOT_APPEARANCE_RE = re.compile(
     r"cardigan|coat|jacket|hoodie|pajamas|pyjamas|lingerie|underwear|swimsuit|bikini|glasses|necklace|earrings?|haircut|hair color|dye)\b)",
     re.IGNORECASE,
 )
-
-# AnimaTool knowledge/schema 缓存（按 comfyui_url + workflow 分键）
-_animatool_turbo_knowledge_cache: dict[str, tuple[dict[str, Any], float]] = {}
-_animatool_turbo_schema_cache: dict[str, tuple[dict[str, Any], float]] = {}
-_ANIMATOOL_KNOWLEDGE_TTL = 300.0
-
 
 def _sanitize_nltag_for_view(text: str, view: str) -> str:
     if view not in DEVICE_FREE_VIEWS:
@@ -289,78 +288,36 @@ def _parse_image_plan_json(raw_text: str) -> tuple[dict[str, Any], str, bool]:
         raise
 
 
-async def _fetch_animatool_turbo_knowledge(service: Any, ttl: float = _ANIMATOOL_KNOWLEDGE_TTL, workflow: str | None = None) -> dict[str, Any]:
-    """从 AnimaTool 动态获取当前工作流对应的画图知识规范。"""
-    from .generation import _get_animatool_workflow, ANIMATOOL_WORKFLOWS
-
-    url = str(service.config.get("comfyui_url", "http://127.0.0.1:8188")).rstrip("/")
-    wf = workflow or _get_animatool_workflow(service)
-    cache_key = f"{url}|{wf}"
-    now = time.monotonic()
-    cached = _animatool_turbo_knowledge_cache.get(cache_key)
-    if cached and (now - cached[1]) < ttl:
-        return cached[0]
-    knowledge_path = ANIMATOOL_WORKFLOWS.get(wf, {}).get("knowledge_path", "/anima/knowledge_turbo")
-    knowledge: dict[str, Any] = {}
-    try:
-        from .generation import ensure_comfy_session
-
-        ensure_comfy_session(service)
-        async with service.comfy_session.get(
-            f"{url}{knowledge_path}", timeout=aiohttp.ClientTimeout(total=10)
-        ) as resp:
-            if resp.status == 200:
-                knowledge = await read_limited_json(
-                    resp,
-                    response_limit(service.config, "comfy_json"),
-                    label="AnimaTool knowledge 响应",
-                ) or {}
-    except Exception as exc:
-        logger.debug("fetch animatool knowledge (%s) failed: %s", wf, exc)
-    _animatool_turbo_knowledge_cache[cache_key] = (knowledge, now)
-    return knowledge
+async def _fetch_animatool_turbo_knowledge(service: Any, ttl: float = 300.0, workflow: str | None = None) -> dict[str, Any]:
+    """兼容旧扩展的异步入口。"""
+    del ttl
+    return await fetch_animaflow_knowledge(service, workflow or "")
 
 
-async def _fetch_animatool_turbo_schema(service: Any, ttl: float = _ANIMATOOL_KNOWLEDGE_TTL, workflow: str | None = None) -> dict[str, Any]:
-    """从 AnimaTool 动态获取当前工作流对应接口的 JSON schema。"""
-    from .generation import _get_animatool_workflow, ANIMATOOL_WORKFLOWS
-
-    url = str(service.config.get("comfyui_url", "http://127.0.0.1:8188")).rstrip("/")
-    wf = workflow or _get_animatool_workflow(service)
-    cache_key = f"{url}|{wf}"
-    now = time.monotonic()
-    cached = _animatool_turbo_schema_cache.get(cache_key)
-    if cached and (now - cached[1]) < ttl:
-        return cached[0]
-    schema_path = ANIMATOOL_WORKFLOWS.get(wf, {}).get("schema_path", "/anima/schema_turbo")
-    schema: dict[str, Any] = {}
-    try:
-        from .generation import ensure_comfy_session
-
-        ensure_comfy_session(service)
-        async with service.comfy_session.get(
-            f"{url}{schema_path}", timeout=aiohttp.ClientTimeout(total=10)
-        ) as resp:
-            if resp.status == 200:
-                schema = await read_limited_json(
-                    resp,
-                    response_limit(service.config, "comfy_json"),
-                    label="AnimaTool schema 响应",
-                ) or {}
-    except Exception as exc:
-        logger.debug("fetch animatool schema (%s) failed: %s", wf, exc)
-    _animatool_turbo_schema_cache[cache_key] = (schema, now)
-    return schema
+async def _fetch_animaflow_knowledge(service: Any, workflow: str) -> dict[str, Any]:
+    # 经由旧入口转发，保留第三方测试/扩展的 monkeypatch 兼容性。
+    return await _fetch_animatool_turbo_knowledge(service, workflow=workflow)
 
 
-def _build_animatool_turbo_hint(knowledge: dict[str, Any], schema: dict[str, Any], workflow: str = "") -> str:
-    """根据动态获取的 knowledge/schema 生成给 image planner 的追加规则。"""
-    from .generation import ANIMATOOL_WORKFLOWS
+async def _fetch_animatool_turbo_schema(service: Any, ttl: float = 300.0, workflow: str | None = None) -> dict[str, Any]:
+    """兼容旧扩展的异步入口。"""
+    del ttl
+    return await fetch_animaflow_schema(service, workflow or "")
 
-    wf_meta = ANIMATOOL_WORKFLOWS.get(workflow, {})
-    wf_label = wf_meta.get("label", workflow or "AnimaTool")
-    knowledge_keys = wf_meta.get("knowledge_keys", ("turbo_expert", "turbo_examples"))
-    supports_neg = bool(wf_meta.get("supports_neg", False))
+
+async def _fetch_animaflow_schema(service: Any, workflow: str) -> dict[str, Any]:
+    return await _fetch_animatool_turbo_schema(service, workflow=workflow)
+
+
+def _build_animaflow_hint(
+    knowledge: dict[str, Any],
+    schema: dict[str, Any],
+    workflow: str = "",
+    *,
+    cfg: Any = None,
+) -> str:
+    """根据实时 knowledge/schema 生成给 image planner 的追加规则。"""
+    wf_label = workflow or "AnimaFlow"
 
     params = schema.get("parameters", {}) if isinstance(schema, dict) else {}
     properties = params.get("properties", {}) if isinstance(params, dict) else {}
@@ -371,14 +328,14 @@ def _build_animatool_turbo_hint(knowledge: dict[str, Any], schema: dict[str, Any
     content_fields = [k for k in properties if k not in _HYPER_KEYS]
     content_required = [k for k in required if k not in _HYPER_KEYS]
 
-    # knowledge 关键段落直接注入（按工作流对应的 knowledge 键）
+    # knowledge 的键也属于工作流动态协议，不预设文件名或段落名。
     knowledge_sections = []
-    for key in knowledge_keys:
-        val = str(knowledge.get(key, "")).strip()
+    for key, raw_value in knowledge.items():
+        val = str(raw_value or "").strip()
         if val:
             if len(val) > 3000:
                 val = val[:3000] + "\n...（截断）"
-            knowledge_sections.append(val)
+            knowledge_sections.append(f"### {key}\n{val}")
     knowledge_text = "\n\n".join(knowledge_sections) if knowledge_sections else ""
 
     # schema 内容字段定义
@@ -388,13 +345,11 @@ def _build_animatool_turbo_hint(knowledge: dict[str, Any], schema: dict[str, Any
         if name in properties
     )
 
-    neg_hint = (
-        "当前工作流支持反词（neg）字段，请按 schema 中 neg 字段描述输出反词。" if supports_neg
-        else "不要输出 neg 或 negative 字段；它们对当前工作流无意义。"
-    )
+    supports_neg = any(field in properties for field in ANIMAFLOW_NEGATIVE_FIELDS) and not cfg_is_one(cfg)
+    neg_hint = "严格按 schema 的负面字段说明填写。" if supports_neg else "不要输出任何负面提示词字段。"
 
     return (
-        f"\n【AnimaTool {wf_label}】（由 {wf_meta.get('knowledge_path', '')} + {wf_meta.get('schema_path', '')} 动态获取）\n"
+        f"\n【AnimaFlow {wf_label}】（由选中工作流的 knowledge + schema 动态获取）\n"
         "以下规则覆盖通用画面描述规则。\n"
         + (f"\n{knowledge_text}\n" if knowledge_text else "")
         + ("\n内容字段:\n" + field_hint + "\n" if field_hint else "")
@@ -403,6 +358,11 @@ def _build_animatool_turbo_hint(knowledge: dict[str, Any], schema: dict[str, Any
         + " 角色身份 → character/series（仅已知公开角色；OC 留空）。\n"
         + neg_hint
     )
+
+
+def _build_animatool_turbo_hint(knowledge: dict[str, Any], schema: dict[str, Any], workflow: str = "") -> str:
+    """兼容旧扩展的别名。"""
+    return _build_animaflow_hint(knowledge, schema, workflow)
 
 INTIMATE_CONTEXT_ZH = frozenset({
     "交合", "做爱", "插入", "进入她", "抽插", "骑乘", "后入", "结合",
@@ -1958,26 +1918,27 @@ async def plan_roleplay_image(
     }
 
 
-async def plan_animatool_slots(
+async def plan_animaflow_slots(
     service: Any,
     session_id: str,
     slots: "PromptSlots",
     *,
     intent: str = "",
     mood: str = "",
+    workflow: str = "",
+    schema: dict[str, Any] | None = None,
+    knowledge: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """把已算好的 PromptSlots 槽位交给 LLM，让它根据 AnimaTool schema 直出最终 JSON。
+    """把 PromptSlots 交给 LLM，按 AnimaFlow 实时 schema/knowledge 输出 JSON。
 
-    返回 dict（可直接 POST 当前工作流的 /anima/generate_* + seed/steps/cfg/filename_prefix），
-    失败时返回 None，调用方应回退到旧逻辑。
+    失败时返回 None，调用方会用同一份实时 schema 做确定性回退。
     """
     from .generation import (
-        ANIMATOOL_NEGATIVE_FIELDS,
-        ANIMATOOL_WORKFLOWS,
         _apply_animatool_guard_contract,
         _apply_clothing_off,
+        _animaflow_cfg,
+        _build_animaflow_quality_meta,
         _build_animatool_guard_contract,
-        _get_animatool_workflow,
         _is_full_nude_appearance,
         _strip_nude_scene_clothing,
     )
@@ -1985,34 +1946,34 @@ async def plan_animatool_slots(
     if not service.has_llm_config("image", session_id):
         return None
 
-    workflow = _get_animatool_workflow(service)
-    wf_meta = ANIMATOOL_WORKFLOWS.get(workflow, {})
-    wf_label = wf_meta.get("label", workflow or "AnimaTool")
-    knowledge_keys = wf_meta.get("knowledge_keys", ("turbo_expert", "turbo_examples", "artist_list"))
-
     try:
-        knowledge = await _fetch_animatool_turbo_knowledge(service, workflow=workflow)
-        schema = await _fetch_animatool_turbo_schema(service, workflow=workflow)
+        if not workflow or knowledge is None or schema is None:
+            workflow, _, _, schema, knowledge = await load_animaflow_workflow_resources(
+                service,
+                workflow,
+            )
     except Exception:
-        logger.debug("fetch animatool schema/knowledge failed", exc_info=True)
+        logger.debug("fetch animaflow schema/knowledge failed", exc_info=True)
         return None
+    wf_label = workflow or "AnimaFlow"
 
     params = schema.get("parameters", {}) if isinstance(schema, dict) else {}
     properties = params.get("properties", {}) if isinstance(params, dict) else {}
     required = params.get("required", []) if isinstance(params, dict) else []
     if not properties:
         return None
-    supports_neg = any(field in properties for field in ANIMATOOL_NEGATIVE_FIELDS)
+    cfg_value = _animaflow_cfg(service, workflow=workflow)
+    supports_neg = any(field in properties for field in ANIMAFLOW_NEGATIVE_FIELDS) and not cfg_is_one(cfg_value)
 
     # 过滤掉固定超参数，只列出内容字段
     _HYPER_KEYS = {"steps", "cfg", "width", "height", "batch_size", "filename_prefix", "seed", "aspect_ratio"}
     content_fields = [k for k in properties if k not in _HYPER_KEYS]
     content_required = [k for k in required if k not in _HYPER_KEYS]
 
-    # knowledge 注入：按工作流对应的 knowledge 键原样注入
+    # knowledge 的键由工作流动态定义，全部作为选中工作流的专属规则注入。
     knowledge_sections = []
-    for key in knowledge_keys:
-        val = str(knowledge.get(key, "")).strip()
+    for key, raw_value in knowledge.items():
+        val = str(raw_value or "").strip()
         if val:
             # 截断过长内容
             if len(val) > 4000:
@@ -2026,7 +1987,7 @@ async def plan_animatool_slots(
         ensure_ascii=False, indent=2,
     ) if content_fields else "（无内容字段）"
 
-    # 槽位信息：只传 AnimaTool API 需要的语义槽位。
+    # 槽位信息：只传 AnimaFlow API 需要的语义槽位。
     # quality / negative 不直接传入——它们是项目内部的全量质量/反词标签，
     # 直接传给 LLM 会导致把 highres/absurdres/anime coloring/clean lineart 等无关标签
     # 或场景特定反词（no panties/2girls/holding phone 等）堆进 quality_meta_year_safe / neg。
@@ -2082,10 +2043,20 @@ async def plan_animatool_slots(
             time_light = service._format_time_context(session_id) or ""
             light_guard = service._format_light_guard(session_id) or ""
         except Exception:
-            logger.debug("time/light context for animatool tags failed", exc_info=True)
+            logger.debug("time/light context for animaflow tags failed", exc_info=True)
 
-    # 反词规则：工作流支持 neg 时按实时 schema 的 neg description 构造（服务端维护，项目不再抄词表），否则禁止。
-    if supports_neg:
+    # cfg=1 规范优先于 schema 是否列出 neg：完全不构造负面提示词。
+    if cfg_is_one(cfg_value):
+        uncensored_rule = (
+            "；若安全等级为 nsfw/explicit，只在 tags/nltag 末尾加入 `no mosaic, uncensored`"
+            if safety_tag in {"nsfw", "explicit"} else ""
+        )
+        neg_rule = (
+            "## cfg=1 提示词规则（重要）\n"
+            "不要输出 neg、negative 或 negative_prompt，也不要花费内容考虑负面提示词"
+            f"{uncensored_rule}。\n\n"
+        )
+    elif supports_neg:
         neg_rule = (
             "## neg（反词）规则（重要）\n"
             f"当前工作流支持 neg 字段。严格按 schema 中 neg 字段的 description 构造反词（安全等级用 {safety_tag}），"
@@ -2118,8 +2089,8 @@ async def plan_animatool_slots(
         )
 
     system = (
-        f"你是 AnimaTool {wf_label} 的专用提示词工程师。\n"
-        f"用户给你已计算好的提示词槽位，你需要把它们映射到 AnimaTool {workflow} API 的 JSON 字段中。\n"
+        f"你是 AnimaFlow {wf_label} 的专用提示词工程师。\n"
+        f"用户给你已计算好的提示词槽位，你需要把它们映射到 AnimaFlow {workflow} API 的 JSON 字段中。\n"
         "steps/cfg/width/height/batch_size/filename_prefix/seed/aspect_ratio 由系统注入，不要输出。\n\n"
         f"## Knowledge\n{knowledge_text}\n\n"
         f"## Schema 内容字段\n{schema_text}\n\n"
@@ -2167,13 +2138,13 @@ async def plan_animatool_slots(
             system,
             user,
             temp=float(service._get_llm_value("image", "temperature_scene", "0.95")),
-            tag="animatool-slots-plan",
+            tag="animaflow-slots-plan",
             purpose="image",
             session_id=session_id,
         )
         parsed = json.loads(re.sub(r"```json\s*|```\s*$", "", text).strip())
     except Exception as exc:
-        logger.error("animatool slots planning failed: %s", exc)
+        logger.error("animaflow slots planning failed: %s", exc)
         return None
 
     if not isinstance(parsed, dict):
@@ -2182,11 +2153,7 @@ async def plan_animatool_slots(
     # 后处理：确保必填字段存在
     if "quality_meta_year_safe" in properties:
         q = parsed.get("quality_meta_year_safe", "")
-        # 兜底值按工作流格式：turbo_v1/aesthetic_v1 简化格式，turbo0.2/base 完整格式
-        if workflow in ("turbo_v1", "aesthetic_v1"):
-            qmws_fallback = f"masterpiece, best quality, {safety_tag}"
-        else:
-            qmws_fallback = f"masterpiece, best quality, highres, newest, year 2025, {safety_tag}"
+        qmws_fallback = _build_animaflow_quality_meta(slots, schema)
         if not q:
             parsed["quality_meta_year_safe"] = qmws_fallback
         elif safety_tag not in str(q).lower():
@@ -2200,21 +2167,21 @@ async def plan_animatool_slots(
         parsed["count"] = count_value or "1girl"
 
     nltag_field = ""
-    for field in ANIMATOOL_NLTAG_FIELDS:
+    for field in ANIMAFLOW_NLTAG_FIELDS:
         if field in content_required and field in properties:
             nltag_field = field
             break
     if not nltag_field:
-        for field in ANIMATOOL_NLTAG_FIELDS:
+        for field in ANIMAFLOW_NLTAG_FIELDS:
             if field in properties:
                 nltag_field = field
                 break
-    raw_nltag = next((str(parsed.get(field) or "").strip() for field in ANIMATOOL_NLTAG_FIELDS if str(parsed.get(field) or "").strip()), "")
+    raw_nltag = next((str(parsed.get(field) or "").strip() for field in ANIMAFLOW_NLTAG_FIELDS if str(parsed.get(field) or "").strip()), "")
     if nltag_field:
         nltag_value = raw_nltag or slots.scene or ""
         if _looks_like_llm_thinking(nltag_value):
             # LLM 把思考直接写进了 JSON 字段值（如 tags），丢弃并回退场景槽位。
-            logger.warning("animatool slots nltag 疑似思考文本泄漏，回退场景槽位 raw_len=%d", len(nltag_value))
+            logger.warning("animaflow slots nltag 疑似思考文本泄漏，回退场景槽位 raw_len=%d", len(nltag_value))
             nltag_value = slots.scene or ""
         view_for_nltag = prompt_view or _infer_prompt_view(nltag_value)
         nltag_value = _sanitize_nltag_for_view(nltag_value, view_for_nltag)
@@ -2224,12 +2191,12 @@ async def plan_animatool_slots(
         if not nltag_value and slots.scene:
             nltag_value = _sanitize_nltag_for_view(slots.scene, prompt_view or _infer_prompt_view(slots.scene))
         parsed[nltag_field] = nltag_value
-        for field in ANIMATOOL_NLTAG_FIELDS:
+        for field in ANIMAFLOW_NLTAG_FIELDS:
             if field != nltag_field:
                 parsed.pop(field, None)
 
     if _is_full_nude_appearance(slots.effective_appearance):
-        # appearance 也做一次终裁，覆盖 AnimaTool LLM 自行补回的 dress/straps/lace 等残留。
+        # appearance 也做一次终裁，覆盖 AnimaFlow LLM 自行补回的 dress/straps/lace 等残留。
         raw_appearance = parsed.get("appearance")
         if isinstance(raw_appearance, str) and raw_appearance.strip():
             parsed["appearance"], _ = _apply_clothing_off(
@@ -2240,7 +2207,7 @@ async def plan_animatool_slots(
                 [],
             )
 
-    for field in ANIMATOOL_NLTAG_FIELDS:
+    for field in ANIMAFLOW_NLTAG_FIELDS:
         if str(parsed.get(field) or "").strip():
             break
 
@@ -2252,7 +2219,39 @@ async def plan_animatool_slots(
 
     # 清理空值和超参数泄漏
     cleaned = {k: v for k, v in parsed.items() if v not in (None, "") and k not in _HYPER_KEYS}
-    cleaned = _apply_animatool_guard_contract(cleaned, schema, slots, workflow)
+    cleaned = _apply_animatool_guard_contract(cleaned, schema, slots, workflow, cfg=cfg_value)
+    cleaned = apply_animaflow_cfg_policy(
+        cleaned,
+        cfg=cfg_value,
+        safety=safety_tag,
+        schema=schema,
+    )
 
-    logger.info("ANIMATOOL_SLOTS_LLM: %s", json.dumps(cleaned, ensure_ascii=False)[:600])
+    logger.info("ANIMAFLOW_SLOTS_LLM: %s", json.dumps(cleaned, ensure_ascii=False)[:600])
     return cleaned
+
+
+async def plan_animatool_slots(
+    service: Any,
+    session_id: str,
+    slots: "PromptSlots",
+    *,
+    intent: str = "",
+    mood: str = "",
+) -> dict[str, Any] | None:
+    """兼容旧扩展的别名。"""
+    from .generation import _get_animatool_workflow
+
+    workflow = _get_animatool_workflow(service)
+    knowledge = await _fetch_animatool_turbo_knowledge(service, workflow=workflow)
+    schema = await _fetch_animatool_turbo_schema(service, workflow=workflow)
+    return await plan_animaflow_slots(
+        service,
+        session_id,
+        slots,
+        intent=intent,
+        mood=mood,
+        workflow=workflow,
+        schema=schema,
+        knowledge=knowledge,
+    )

@@ -18,6 +18,7 @@ const state = {
   logTail: 1000,
   llmDebugCursorStack: [null],
   profiles: {},
+  animaflow: null,
 };
 
 const frontendCore = window.SucyuFrontendCore;
@@ -40,7 +41,7 @@ const configSections = [
     ["telegram_proxy_enabled", "启用 Telegram 代理", "bool"],
     ["telegram_proxy_url", "Telegram 代理地址", "text"],
   ]],
-  ["模型运行参数（模型 profile 在角色页按用户配置；生图后端只读 YAML）", [
+  ["模型运行参数（模型 profile 在角色页按用户配置）", [
     ["default_chat_model_profile", "默认对话模型 profile", "model_select"],
     ["default_fast_model_profile", "默认快速模型 profile", "model_select"],
     ["default_vision_model_profile", "默认视觉模型 profile", "model_select"],
@@ -60,11 +61,15 @@ const configSections = [
     ["llm_temperature_classify", "默认分析温度", "text", "sampling-detail"],
   ]],
   ["生图", [
+    ["animaflow_enabled", "启用 AnimaFlow", "bool"],
+    ["animaflow_workflow", "AnimaFlow 工作流", "animaflow_select", "animaflow-detail"],
+    ["animaflow_cfg", "AnimaFlow CFG", "number", "animaflow-detail"],
+    ["animaflow_steps", "AnimaFlow 采样步数", "number", "animaflow-detail"],
+    ["animaflow_filename_prefix", "AnimaFlow 文件名前缀", "text", "animaflow-detail"],
     ["negative_prompt", "Negative Prompt", "textarea"],
     ["dynamic_appearance", "默认初始穿搭", "textarea"],
     ["style_pool", "画风池", "textarea"],
     ["current_style", "全局当前画风", "text"],
-    ["animatool_workflow", "AnimaTool 画图工作流", "select:turbo_v1,aesthetic_v1,turbo0.2,base"],
     ["width", "宽度", "number"],
     ["height", "高度", "number"],
     ["sampler", "Sampler", "text"],
@@ -332,6 +337,7 @@ async function loadAll() {
   if (config && config.config) {
     state.config = config.config.values;
     state.secretPresent = config.config.secret_present || {};
+    state.animaflow = config.animaflow || null;
   } else {
     state.config = state.config || {};
     state.secretPresent = state.secretPresent || {};
@@ -577,10 +583,32 @@ function inputFor([key, label, type, layout], values) {
     });
     input.innerHTML = opts.join("");
     input.value = value ?? "";
+  } else if (type === "animaflow_select") {
+    input = document.createElement("select");
+    const workflows = Array.isArray(state.animaflow?.workflows)
+      ? state.animaflow.workflows.filter(item => !item.deprecated)
+      : [];
+    const opts = workflows.map(item => (
+      `<option value="${escapeHtml(item.name || "")}">${escapeHtml(item.name || "")}</option>`
+    ));
+    if (value && !workflows.some(item => item.name === value)) {
+      opts.unshift(`<option value="${escapeHtml(value)}">${escapeHtml(value)} · 尚未检测</option>`);
+    }
+    input.innerHTML = opts.join("");
+    input.value = value ?? "";
+    const hint = document.createElement("p");
+    hint.className = "field-hint animaflow-workflow-hint";
+    hint.textContent = state.animaflow?.error
+      ? `检测失败：${state.animaflow.error}`
+      : (state.animaflow?.description || "开启后从 /anima/workflows 动态加载。弃用工作流不会列出。");
+    extraNodes.push(hint);
   } else {
     input = document.createElement("input");
     input.type = type === "secret" ? "password" : type;
-    if (type === "number") input.inputMode = "decimal";
+    if (type === "number") {
+      input.inputMode = "decimal";
+      input.step = key === "animaflow_cfg" ? "any" : "1";
+    }
     input.value = type === "secret" ? "" : (value ?? "");
     if (type === "secret" && state.secretPresent[key]) input.placeholder = "已保存；留空不修改";
   }
@@ -589,6 +617,101 @@ function inputFor([key, label, type, layout], values) {
   wrap.appendChild(input);
   extraNodes.forEach(node => wrap.appendChild(node));
   return wrap;
+}
+
+function applyAnimaflowStateToForm(form, data, { resetDefaults = false } = {}) {
+  if (!form || !data) return;
+  state.animaflow = data;
+  const select = form.elements.namedItem("animaflow_workflow");
+  const workflows = Array.isArray(data.workflows) ? data.workflows.filter(item => !item.deprecated) : [];
+  if (select) {
+    select.innerHTML = workflows.map(item => (
+      `<option value="${escapeHtml(item.name || "")}">${escapeHtml(item.name || "")}</option>`
+    )).join("");
+    select.value = data.selected || select.value;
+  }
+  const cfg = form.elements.namedItem("animaflow_cfg");
+  const steps = form.elements.namedItem("animaflow_steps");
+  if (resetDefaults) {
+    if (cfg) cfg.value = data.defaults?.cfg ?? "";
+    if (steps) steps.value = data.defaults?.steps ?? "";
+  }
+  for (const [input, bounds] of [[cfg, data.cfg_bounds], [steps, data.steps_bounds]]) {
+    if (!input) continue;
+    if (bounds?.minimum !== null && bounds?.minimum !== undefined) input.min = bounds.minimum;
+    else input.removeAttribute("min");
+    if (bounds?.maximum !== null && bounds?.maximum !== undefined) input.max = bounds.maximum;
+    else input.removeAttribute("max");
+  }
+  const hint = form.querySelector(".animaflow-workflow-hint");
+  if (hint) {
+    const fallbackText = data.legacy_fallback
+      ? `AnimaFlow 发现失败，已自动回退 turbo_v1 兼容接口：${data.fallback_reason || "未知原因"}。`
+      : "";
+    const negText = data.supports_negative ? "该工作流会使用负面提示词。" : "该工作流不构造负面提示词。";
+    const defaultsText = data.defaults?.cfg == null || data.defaults?.steps == null
+      ? "未公开数值的参数将留空并使用 AnimaFlow 服务端默认。" : "";
+    hint.textContent = `${fallbackText} ${data.description || "已加载工作流"} ${negText} ${defaultsText}`.trim();
+  }
+}
+
+async function discoverAnimaflow(form, workflow = "") {
+  const data = await api("/api/admin/animaflow/discover", {
+    method: "POST",
+    body: { workflow },
+  });
+  applyAnimaflowStateToForm(form, data.animaflow, { resetDefaults: true });
+  return data.animaflow;
+}
+
+function wireAnimaflowConfig(form) {
+  const toggle = form.elements.namedItem("animaflow_enabled");
+  const workflow = form.elements.namedItem("animaflow_workflow");
+  const detailWraps = [...form.querySelectorAll(".field-animaflow-detail")];
+  const sync = () => {
+    const enabled = toggle?.value === "true";
+    detailWraps.forEach(wrap => {
+      wrap.hidden = !enabled;
+      const control = wrap.querySelector("input, select, textarea");
+      if (control) control.disabled = !enabled;
+    });
+    if (toggle) toggle.setAttribute("aria-expanded", enabled ? "true" : "false");
+  };
+  if (state.animaflow && !state.animaflow.error) {
+    applyAnimaflowStateToForm(form, state.animaflow, { resetDefaults: false });
+  }
+  if (toggle) {
+    toggle.setAttribute("aria-controls", "field-animaflow_workflow");
+    toggle.addEventListener("change", async () => {
+      sync();
+      if (toggle.value !== "true") return;
+      toggle.disabled = true;
+      try {
+        const detected = await discoverAnimaflow(form, workflow?.value || "");
+        toast(detected.legacy_fallback ? "AnimaFlow 检测失败，已回退 turbo_v1" : "已检测 AnimaFlow 工作流");
+      } catch (err) {
+        toggle.value = "false";
+        sync();
+        toast(err.message, "error");
+      } finally {
+        toggle.disabled = false;
+      }
+    });
+  }
+  if (workflow) {
+    workflow.addEventListener("change", async () => {
+      workflow.disabled = true;
+      try {
+        const detected = await discoverAnimaflow(form, workflow.value);
+        toast(detected.legacy_fallback ? "工作流检测失败，已回退 turbo_v1 默认值" : "已载入工作流默认 CFG 与步数");
+      } catch (err) {
+        toast(err.message, "error");
+      } finally {
+        workflow.disabled = false;
+      }
+    });
+  }
+  sync();
 }
 
 function renderConfig() {
@@ -635,6 +758,7 @@ function renderConfig() {
     samplingToggle.addEventListener("change", syncSamplingDetails);
   }
   syncSamplingDetails();
+  wireAnimaflowConfig(form);
   const actions = document.createElement("div");
   actions.className = "form-actions";
   actions.innerHTML = `<button type="button" id="reload-config">撤销未保存</button><button class="primary" type="submit">保存设置</button>`;
@@ -1039,6 +1163,7 @@ async function runPromptCleanup(applyChanges, button) {
 
 async function initEvents() {
   document.addEventListener("click", handleLifePlanAction);
+  document.addEventListener("click", handleCharacterInteractionAction);
   $all(".nav").forEach(btn => btn.onclick = () => switchView(btn.dataset.view));
   $("#refresh-btn").onclick = () => loadAll().then(() => toast("已刷新"));
   $("#restart-btn").onclick = async () => {

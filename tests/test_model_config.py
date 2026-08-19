@@ -634,6 +634,134 @@ class ModelProfileTestCase(ServiceFixtureMixin, unittest.TestCase):
 class ConfigTransactionTestCase(ServiceFixtureMixin, unittest.TestCase):
     """Web 配置候选校验与原子落盘事务测试。"""
 
+    def test_enabling_animaflow_forces_discovery_and_applies_workflow_defaults(self):
+        from telegram_comfyui_selfie.webui_models import api_save_config
+
+        async def run():
+            svc = self.make_service()
+            discovered = {
+                "selected": "anima29_turbo",
+                "defaults": {"cfg": 1.0, "steps": 8},
+                "workflows": [{"name": "anima29_turbo", "description": "turbo"}],
+                "schema": {},
+                "knowledge": {},
+            }
+            discover_mock = AsyncMock(return_value=discovered)
+
+            with patch(
+                "telegram_comfyui_selfie.webui_models.inspect_animaflow_workflow",
+                new=discover_mock,
+            ):
+                response = await api_save_config(JsonRequest(svc, {
+                    "values": {
+                        "animaflow_enabled": True,
+                        "animaflow_workflow": "anima29_turbo",
+                        # 开启时必须以工作流默认值为准，不能保留表单里的旧值。
+                        "animaflow_cfg": "7",
+                        "animaflow_steps": "99",
+                    }
+                }))
+
+            self.assertEqual(response.status, 200)
+            discover_mock.assert_awaited_once_with(svc, "anima29_turbo", force=True)
+            self.assertTrue(svc.config["animaflow_enabled"])
+            self.assertEqual(svc.config["animaflow_workflow"], "anima29_turbo")
+            self.assertEqual(svc.config["animaflow_cfg"], "1.0")
+            self.assertEqual(svc.config["animaflow_steps"], "8")
+            persisted = json.loads(svc.config_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["animaflow_cfg"], "1.0")
+            self.assertEqual(persisted["animaflow_steps"], "8")
+
+        asyncio.run(run())
+
+    def test_animaflow_discovery_failure_does_not_mutate_runtime_or_file(self):
+        from telegram_comfyui_selfie.animaflow_runtime import AnimaFlowError
+        from telegram_comfyui_selfie.webui_models import api_save_config
+
+        async def run():
+            svc = self.make_service()
+            before_config = copy.deepcopy(svc.config)
+            before_file = svc.config_path.read_bytes()
+            discover_mock = AsyncMock(side_effect=AnimaFlowError("工作流目录不可用"))
+
+            with patch(
+                "telegram_comfyui_selfie.webui_models.inspect_animaflow_workflow",
+                new=discover_mock,
+            ):
+                response = await api_save_config(JsonRequest(svc, {
+                    "values": {"animaflow_enabled": True},
+                }))
+
+            self.assertEqual(response.status, 502)
+            self.assertIn("工作流目录不可用", json.loads(response.text)["error"])
+            discover_mock.assert_awaited_once()
+            self.assertEqual(svc.config, before_config)
+            self.assertEqual(svc.config_path.read_bytes(), before_file)
+
+        asyncio.run(run())
+
+    def test_switching_animaflow_workflow_resets_cfg_and_steps(self):
+        from telegram_comfyui_selfie.webui_models import api_save_config
+
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "animaflow_enabled": True,
+                "animaflow_workflow": "legacy_turbo",
+                "animaflow_cfg": "2.5",
+                "animaflow_steps": "20",
+            })
+            svc.save_config()
+            discover_mock = AsyncMock(return_value={
+                "selected": "anima29_turbo",
+                "defaults": {"cfg": 1.0, "steps": 8},
+                "workflows": [],
+                "schema": {},
+                "knowledge": {},
+            })
+
+            with patch(
+                "telegram_comfyui_selfie.webui_models.inspect_animaflow_workflow",
+                new=discover_mock,
+            ):
+                response = await api_save_config(JsonRequest(svc, {
+                    "values": {
+                        "animaflow_workflow": "anima29_turbo",
+                        "animaflow_cfg": "6",
+                        "animaflow_steps": "60",
+                    }
+                }))
+
+            self.assertEqual(response.status, 200)
+            discover_mock.assert_awaited_once_with(svc, "anima29_turbo", force=True)
+            self.assertEqual(svc.config["animaflow_cfg"], "1.0")
+            self.assertEqual(svc.config["animaflow_steps"], "8")
+
+        asyncio.run(run())
+
+    def test_legacy_animatool_config_is_migrated_without_runtime_aliases(self):
+        from telegram_comfyui_selfie import TelegramComfyUIService
+
+        root = make_project_temp_dir("animaflow_config_migration")
+        config_path = root / "config.json"
+        config_path.write_text(json.dumps({
+            "image_backend": "animatool",
+            "animatool_workflow": "turbo_v1",
+            "animatool_turbo_cfg": "0.9",
+            "animatool_turbo_steps": "11",
+            "animatool_filename_prefix": "legacy",
+        }), encoding="utf-8")
+
+        svc = TelegramComfyUIService(config_path, root / "state.json")
+
+        self.assertTrue(svc.config["animaflow_enabled"])
+        self.assertEqual(svc.config["image_backend"], "animaflow")
+        self.assertEqual(svc.config["animaflow_workflow"], "turbo_v1")
+        self.assertEqual(svc.config["animaflow_cfg"], "0.9")
+        self.assertEqual(svc.config["animaflow_steps"], "11")
+        self.assertEqual(svc.config["animaflow_filename_prefix"], "legacy")
+        self.assertFalse(any(key.startswith("animatool_") for key in svc.config))
+
     def test_late_cast_failure_does_not_apply_earlier_fields(self):
         from telegram_comfyui_selfie.webui_models import api_save_config
 

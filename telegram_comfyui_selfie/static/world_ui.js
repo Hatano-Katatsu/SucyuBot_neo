@@ -268,6 +268,68 @@ function currentLifePlan() {
   return (state.worldPreview && state.worldPreview.life_plan) || {};
 }
 
+function renderCharacterInteraction(settings = {}) {
+  const roles = settings.roles || [];
+  const roleOptions = roles.length ? roles.map(role => `
+    <label class="character-interaction-role${role.active ? " active" : ""}">
+      <input type="checkbox" value="${escapeHtml(role.key || "")}"${role.selected ? " checked" : ""}>
+      <span>
+        <strong>${escapeHtml(role.name || role.character_key || "默认角色")}</strong>
+        <small>${role.active ? "当前活动" : "非活动"} · ${role.awake ? "当前清醒" : "当前休息"}</small>
+      </span>
+    </label>
+  `).join("") : `<div class="empty-state small">还没有可选择的角色。</div>`;
+  const limit = Number(settings.daily_limit || 0);
+  const used = Number(settings.count || 0);
+  const remaining = Number(settings.remaining || 0);
+  return `
+    <div class="character-interaction-panel" data-character-interaction-panel>
+      <div class="character-interaction-status">
+        <div>
+          <strong>${settings.enabled ? `今日 ${used}/${limit}` : "默认关闭"}</strong>
+          <small>${settings.enabled ? `剩余 ${remaining} 次 · ${escapeHtml(settings.reason || "")}` : "每日上限设为 0 时不会进入推送候选"}</small>
+        </div>
+        <span class="${settings.available ? "available" : "unavailable"}">${settings.available ? "当前可抽取" : "当前不可抽取"}</span>
+      </div>
+      <p class="character-interaction-help">选择允许互相邂逅的角色。普通每日推送抽中该方向后，会先为非活动角色建立今日动线，再编排互动；推送成功才计数并分别写入双方历史。当前活动角色也必须在所选列表中。</p>
+      <div class="character-interaction-roles">${roleOptions}</div>
+      <div class="character-interaction-actions">
+        <label>每日互动上限
+          <input type="number" min="0" max="20" step="1" value="${escapeHtml(String(limit))}" data-character-interaction-limit>
+        </label>
+        <button class="primary" type="button" data-character-interaction-action="save">保存互动设置</button>
+      </div>
+    </div>
+  `;
+}
+
+async function handleCharacterInteractionAction(event) {
+  const btn = event.target.closest("[data-character-interaction-action]");
+  if (!btn || !state.selectedWorldSession) return;
+  const panel = btn.closest("[data-character-interaction-panel]");
+  if (!panel) return;
+  const limit = Number(panel.querySelector("[data-character-interaction-limit]")?.value ?? 0);
+  if (!Number.isInteger(limit) || limit < 0 || limit > 20) {
+    toast("每日互动上限必须是 0 到 20 的整数", "error");
+    return;
+  }
+  const characterKeys = Array.from(panel.querySelectorAll('input[type="checkbox"]:checked')).map(input => input.value);
+  setBusy(btn, true);
+  try {
+    const data = await api(`/api/world/${encodeURIComponent(state.selectedWorldSession)}/character-interaction`, {
+      method: "PUT",
+      body: { character_keys: characterKeys, daily_limit: limit },
+    });
+    if (state.worldPreview) state.worldPreview.character_interaction = data.character_interaction;
+    renderWorldRoute(state.worldPreview);
+    toast(limit > 0 ? "角色互动推送设置已保存" : "角色互动推送已关闭");
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    setBusy(btn, false);
+  }
+}
+
 function findLifeGoal(kind, id) {
   const plan = currentLifePlan();
   const items = kind === "long" ? (plan.long_goals || []) : (plan.mid_goals || []);
@@ -435,7 +497,13 @@ function renderWorldRoute(world) {
   $("#world-title").textContent = worldSessionTitle(session) || "实时动线";
   $("#world-subtitle").textContent = `${world.city || "未设置城市"} · UTC${world.timezone || "-"} · ${world.weather || "天气未知"}`;
   if (!world.enabled) {
-    box.innerHTML = `<div class="empty-state">自动动线已关闭。可在"设置 → 推送与本地控制台 → 启用自动动线"打开。</div>`;
+    box.innerHTML = `
+      <section class="world-block character-interaction-block">
+        <h4>角色互动推送</h4>
+        ${renderCharacterInteraction(world.character_interaction || {})}
+      </section>
+      <div class="empty-state">自动动线已关闭。角色互动需要在“设置 → 推送与本地控制台 → 启用自动动线”打开后才会进入推送候选。</div>
+    `;
     return;
   }
   const current = world.current || {};
@@ -463,6 +531,10 @@ function renderWorldRoute(world) {
       <h4>空间判断</h4>
       <p>${escapeHtml(current.relation || "暂无判断")}</p>
       ${override}
+    </section>
+    <section class="world-block character-interaction-block">
+      <h4>角色互动推送</h4>
+      ${renderCharacterInteraction(world.character_interaction || {})}
     </section>
     <section class="world-block">
       <h4>生活线</h4>

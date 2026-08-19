@@ -8,7 +8,7 @@ from .service import TelegramComfyUIService
 
 def main():
     parser = argparse.ArgumentParser(
-        description="SucyuBot — Telegram roleplay image bot with ComfyUI/AnimaTool backend.",
+        description="SucyuBot — Telegram roleplay image bot with ComfyUI/AnimaFlow backend.",
         epilog="Quick start: py -3 -m telegram_comfyui_selfie",
     )
     parser.add_argument(

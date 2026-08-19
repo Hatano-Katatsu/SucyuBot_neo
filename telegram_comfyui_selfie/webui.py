@@ -83,6 +83,7 @@ from .webui_models import (
     MODEL_SECRET_PLACEHOLDER,
     SECRET_KEYS,
     YAML_ONLY_CONFIG_KEYS,
+    api_animaflow_discover,
     api_config,
     api_delete_model_profile,
     api_model_profiles,
@@ -166,6 +167,7 @@ def create_web_app(service) -> web.Application:
     app.router.add_post("/api/feedback", api_submit_feedback)
     app.router.add_get("/api/config", api_config)
     app.router.add_post("/api/config", api_save_config)
+    app.router.add_post("/api/admin/animaflow/discover", api_animaflow_discover)
     app.router.add_get("/api/sessions", api_sessions)
     # 具体子资源路由先注册，避免被下面 {session_id:.+} 贪婪匹配吞掉
     app.router.add_get("/api/sessions/{session_id:.+}/memories", api_memories)
@@ -202,6 +204,7 @@ def create_web_app(service) -> web.Application:
     app.router.add_patch("/api/models/settings", api_update_model_settings)
     app.router.add_get("/api/prompt-slots/{session_id:.+}", api_prompt_slots)
     app.router.add_post("/api/world/{session_id:.+}/places/refresh", api_world_refresh_places)
+    app.router.add_put("/api/world/{session_id:.+}/character-interaction", api_world_character_interaction_update)
     app.router.add_post("/api/world/{session_id:.+}/life-plan", api_world_life_plan_generate)
     app.router.add_post("/api/world/{session_id:.+}/life-plan/goals", api_world_life_plan_goal_create)
     app.router.add_patch("/api/world/{session_id:.+}/life-plan/goals/{kind:[^/]+}/{goal_id:[^/]+}", api_world_life_plan_goal_update)
@@ -734,6 +737,13 @@ def build_world_route_preview(service, session_id: str, weather: Any = None) -> 
         "weather": service._weather_text(weather) if hasattr(service, "_weather_text") else (weather or ""),
         "catalog": catalog,
         "life_plan": serialize_life_plan_preview(service, session_id),
+        "character_interaction": (
+            service._local_interaction_push_status(session_id, now=now)
+            if hasattr(service, "_local_interaction_push_status") else {
+                "enabled": False, "available": False, "daily_limit": 0,
+                "count": 0, "remaining": 0, "roles": [],
+            }
+        ),
         "current": {},
         "timeline": [],
     }
@@ -1473,6 +1483,29 @@ async def api_world_refresh_places(request: web.Request):
     except Exception:
         weather = None
     return json_ok({"catalog": catalog, "world": build_world_route_preview(service, sid, weather=weather)})
+
+
+async def api_world_character_interaction_update(request: web.Request):
+    service = service_from(request)
+    sid = request.match_info["session_id"]
+    if not _session_allowed(request, sid):
+        return json_error("无权访问此会话", status=403)
+    if not hasattr(service, "_configure_local_interaction_push"):
+        return json_error("角色互动推送功能不可用", status=409)
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_error("请求体必须是 JSON")
+    if not isinstance(payload, dict):
+        return json_error("请求体必须是对象")
+    character_keys = payload.get("character_keys")
+    daily_limit = payload.get("daily_limit")
+    async with character_operation_lock(service, sid):
+        try:
+            status = service._configure_local_interaction_push(sid, character_keys, daily_limit)
+        except ValueError as exc:
+            return json_error(str(exc))
+    return json_ok({"character_interaction": status})
 
 
 async def api_world_life_plan_generate(request: web.Request):

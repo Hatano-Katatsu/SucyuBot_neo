@@ -8,7 +8,7 @@ import unittest
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from telegram_comfyui_selfie import TelegramComfyUIService
 from telegram_comfyui_selfie import appearance as appearance_rules
@@ -3007,6 +3007,53 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_missed_morning_window_is_marked_once_without_late_push(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        fixed_now = datetime(2026, 8, 18, 23, 3, tzinfo=timezone.utc)
+        logs = []
+        svc._ulog = lambda session_id, kind, text: logs.append((kind, text))
+        svc._create_scheduled_push_task = Mock()
+
+        svc._handle_morning_push_tick(
+            sid,
+            state,
+            fixed_now,
+            daily_limit=3,
+            wake_minute=7 * 60,
+        )
+        svc._handle_morning_push_tick(
+            sid,
+            state,
+            fixed_now.replace(minute=4),
+            daily_limit=3,
+            wake_minute=7 * 60,
+        )
+
+        self.assertEqual(session_schema.get_last_morning_greet_date(state), "2026-08-18")
+        self.assertEqual(logs, [("PUSH", "早安推送已处理 reason=missed-window")])
+        svc._create_scheduled_push_task.assert_not_called()
+
+    def test_disabled_morning_push_does_not_emit_missed_marker(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        fixed_now = datetime(2026, 8, 18, 23, 3, tzinfo=timezone.utc)
+        logs = []
+        svc._ulog = lambda session_id, kind, text: logs.append((kind, text))
+
+        svc._handle_morning_push_tick(
+            sid,
+            state,
+            fixed_now,
+            daily_limit=0,
+            wake_minute=7 * 60,
+        )
+
+        self.assertEqual(session_schema.get_last_morning_greet_date(state), "")
+        self.assertEqual(logs, [])
+
     def test_post_chat_push_schedule_replaces_pending_task(self):
         async def run():
             svc = self.make_service()
@@ -3554,6 +3601,34 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(svc._call_llm.await_count, 0)
         asyncio.run(run())
 
+    def test_decide_push_topic_direction_can_select_local_character_interaction(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            svc.config.update({"image_llm_api_key": "k", "image_llm_model": "m", "image_llm_api_base": "u"})
+            state = svc._get_session_state(sid)
+            now = datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc)
+            svc._local_interaction_push_status = Mock(return_value={
+                "available": True,
+                "reason": "可作为本次普通每日推送的话题方向",
+                "candidates": [{"name": "铃音", "character_key": "铃音"}],
+            })
+            svc._call_llm = AsyncMock(return_value=json.dumps({
+                "topic_mode": "character_interaction",
+                "topic_guides": [],
+                "reason": "今天适合让两个角色的动线交汇",
+            }, ensure_ascii=False))
+
+            decision = await svc._decide_push_topic_direction(sid, "normal", state, now)
+
+            self.assertEqual(decision["topic_direction"], "character_interaction")
+            self.assertEqual(decision["topic_guides"], [])
+            user_prompt = svc._call_llm.await_args.args[1]
+            self.assertIn("角色互动状态: 可用", user_prompt)
+            self.assertIn("铃音", user_prompt)
+
+        asyncio.run(run())
+
     def test_decide_independent_topic_skips_daily_refresh_when_quota_used(self):
         async def run():
             svc = self.make_service()
@@ -3612,6 +3687,93 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertTrue(ok)
             self.assertEqual(events, ["send", "refresh"])
             svc._refresh_push_web_topics_after_push.assert_awaited_once()
+        asyncio.run(run())
+
+    def test_character_interaction_push_commits_only_after_photo_send(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc)
+            svc.config["default_purity"] = "6"
+            state = svc._get_session_state(sid)
+            session_schema.set_last_interaction(state, 0)
+            events = []
+            prepared = {
+                "active_character": "小艾",
+                "other_character": "铃音",
+                "active_name": "小艾",
+                "other_name": "铃音",
+                "venue_name": "咖啡店",
+                "summary": "小艾在咖啡店遇见铃音，两人聊了各自今天的安排。",
+                "push_caption": "刚才在咖啡店碰见铃音了，我们坐下来聊了好一会儿。",
+                "scene_hint": "小艾独自坐在桌边，另一角色已经离开画面。",
+            }
+            svc.ensure_life_plan_for_today = AsyncMock(return_value={"status": "current"})
+            svc._fetch_weather = AsyncMock(return_value={"desc": "sunny", "temp": "22", "code": "113"})
+            svc._decide_push_topic_direction = AsyncMock(return_value={
+                "topic_direction": "character_interaction",
+                "topic_guides": [],
+            })
+            svc._prepare_local_character_interaction_push = AsyncMock(return_value=prepared)
+            svc._llm_write_scene = AsyncMock(return_value={
+                "scene": "solo cafe portrait", "caption": "规划器的说明不应发送", "new_appearance_tags": "",
+                "view": "selfie", "aspect_ratio": "2:3", "is_intimate": False,
+                "partner_in_frame": False, "device_in_frame": False, "clothing_off": "",
+            })
+            svc._translate_to_tags = AsyncMock(return_value="english prompt")
+            svc._do_generate = AsyncMock(return_value=(True, [b"image"], ""))
+
+            async def send_photo(*args, **kwargs):
+                events.append("send")
+
+            def commit(*args, **kwargs):
+                events.append("commit")
+                return True
+
+            svc.send_photo = AsyncMock(side_effect=send_photo)
+            svc._commit_local_character_interaction_push = Mock(side_effect=commit)
+
+            ok = await svc._sched_fire(sid, fixed_now, mode_override="normal")
+
+            self.assertTrue(ok)
+            self.assertEqual(events, ["send", "commit"])
+            svc.send_photo.assert_awaited_once_with(123, b"image", prepared["push_caption"])
+            svc._commit_local_character_interaction_push.assert_called_once_with(sid, prepared)
+            planner_kwargs = svc._llm_write_scene.await_args.kwargs
+            self.assertEqual(planner_kwargs["push_topic_direction"], "character_interaction")
+            self.assertIn("只让当前活动角色入画", planner_kwargs["temporary_system_prompt"])
+
+        asyncio.run(run())
+
+    def test_character_interaction_push_failure_does_not_consume_interaction(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc)
+            svc.config["default_purity"] = "6"
+            session_schema.set_last_interaction(svc._get_session_state(sid), 0)
+            svc.ensure_life_plan_for_today = AsyncMock(return_value={"status": "current"})
+            svc._fetch_weather = AsyncMock(return_value={"desc": "sunny", "temp": "22"})
+            svc._decide_push_topic_direction = AsyncMock(return_value={"topic_direction": "character_interaction"})
+            svc._prepare_local_character_interaction_push = AsyncMock(return_value={
+                "active_character": "小艾", "other_character": "铃音",
+                "other_name": "铃音", "venue_name": "公园", "summary": "偶遇",
+                "push_caption": "刚才碰见铃音了。", "scene_hint": "单人画面",
+            })
+            svc._llm_write_scene = AsyncMock(return_value={
+                "scene": "solo park portrait", "caption": "caption", "new_appearance_tags": "",
+                "view": "selfie", "aspect_ratio": "2:3", "is_intimate": False,
+                "partner_in_frame": False, "device_in_frame": False, "clothing_off": "",
+            })
+            svc._translate_to_tags = AsyncMock(return_value="english prompt")
+            svc._do_generate = AsyncMock(return_value=(False, [], "backend failed"))
+            svc.send_photo = AsyncMock()
+            svc._commit_local_character_interaction_push = Mock(return_value=True)
+
+            self.assertFalse(await svc._sched_fire(sid, fixed_now, mode_override="normal"))
+            svc.send_photo.assert_not_awaited()
+            svc._commit_local_character_interaction_push.assert_not_called()
+
         asyncio.run(run())
 
     def test_decide_push_topic_direction_returns_one_to_three_specific_guides(self):
@@ -6277,20 +6439,24 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("no visible second person", low)
         self.assertNotIn("male", neg.lower())
 
-    def test_build_animatool_neg_explicit_has_no_uncensored_double_negative(self):
-        """与服务端修复后的 schema 一致：显式场景 neg 不再含 "no mosaic, uncensored" 双重否定。"""
-        from telegram_comfyui_selfie.generation import _build_animatool_neg, PromptSlots
+    def test_animaflow_cfg_one_drops_neg_and_adds_uncensored_only_for_nsfw(self):
+        from telegram_comfyui_selfie.animaflow_runtime import apply_animaflow_cfg_policy
 
-        neg = _build_animatool_neg(PromptSlots(safety="explicit"), "turbo_v1")
-        self.assertIn("safe, sensitive, censored, mosaic", neg)
-        self.assertNotIn("uncensored", neg)
-        self.assertNotIn("no mosaic", neg)
+        explicit = apply_animaflow_cfg_policy(
+            {"tags": "An intimate bedroom scene.", "neg": "censored, mosaic"},
+            cfg=1,
+            safety="explicit",
+        )
+        self.assertNotIn("neg", explicit)
+        self.assertIn("no mosaic, uncensored", explicit["tags"])
 
-        # 任何场景都不再按安全等级维护性/裸露反词；safe 只剩构图与质量词
-        neg_safe = _build_animatool_neg(PromptSlots(safety="safe"), "turbo_v1")
-        self.assertNotIn("nsfw", neg_safe)
-        self.assertNotIn("nude", neg_safe)
-        self.assertNotIn("sex", neg_safe)
+        safe = apply_animaflow_cfg_policy(
+            {"tags": "A quiet library scene.", "negative_prompt": "nsfw"},
+            cfg=1,
+            safety="safe",
+        )
+        self.assertNotIn("negative_prompt", safe)
+        self.assertNotIn("uncensored", safe["tags"])
 
     def test_animatool_filename_prefix_uses_session_character_name_for_oc(self):
         """OC 没有视觉 identity：文件名角色名回退到会话内角色名，而不是全局默认 bot_name（蕾伊）。"""
@@ -6832,9 +6998,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 }
             }
 
-            with patch("telegram_comfyui_selfie.image_planning.plan_animatool_slots", new=planner), \
-                 patch("telegram_comfyui_selfie.generation._fetch_animatool_turbo_schema", new=AsyncMock(return_value=schema)), \
-                 patch("telegram_comfyui_selfie.generation._post_animatool", new=poster):
+            meta = {"endpoints": {"generate": "/anima/generate"}}
+            catalog = {"workflows": {"anima29_turbo": meta}}
+            with patch("telegram_comfyui_selfie.image_planning.plan_animaflow_slots", new=planner), \
+                 patch("telegram_comfyui_selfie.generation.load_animaflow_workflow_resources", new=AsyncMock(return_value=("anima29_turbo", meta, catalog, schema, {}))), \
+                 patch("telegram_comfyui_selfie.generation._post_animaflow", new=poster):
                 ok, imgs, err = await _do_generate_animatool(
                     svc,
                     "RAW scene: she holds her phone with one hand on the sofa.",
@@ -6877,20 +7045,21 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("neg", payload)
         self.assertNotIn("negative", payload)
         self.assertIn("nltag", payload)
-        # turbo_v1 简化格式：masterpiece, best quality, <safety>，不含 highres/newest/year 等
-        self.assertEqual(payload["quality_meta_year_safe"], "masterpiece, best quality, nsfw")
+        self.assertEqual(payload["quality_meta_year_safe"], "nsfw")
+        self.assertIn("no mosaic, uncensored", payload["nltag"])
 
-    def test_animatool_payload_includes_neg_when_schema_supports(self):
-        """turbo_v1 工作流的 schema 含 neg 字段时，payload 应包含按 schema 格式构造的 neg。"""
+    def test_animaflow_payload_uses_neg_guard_when_cfg_above_one(self):
+        """cfg>1 且 schema 含 neg 时，确定性终裁项仍写入负面字段。"""
         svc = self.make_service()
-        svc.config["animatool_workflow"] = "turbo_v1"
+        svc.config["animaflow_workflow"] = "anima29"
+        svc.config["animaflow_cfg"] = "4.0"
         slots = PromptSlots(
             scene="A girl reads by the window.",
             quality="masterpiece",
             safety="safe",
             count="1girl",
             effective_appearance="school uniform",
-            negative="bad anatomy, bad hands",
+            negative="bad anatomy, bad hands, holding phone, split screen",
         )
         schema = {
             "parameters": {
@@ -6904,28 +7073,25 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             }
         }
 
-        payload = _build_animatool_turbo_payload(svc, slots, "positive prompt", "bad anatomy, bad hands", 123, schema)
+        payload = _build_animatool_turbo_payload(svc, slots, "positive prompt", slots.negative, 123, schema)
 
         self.assertIn("neg", payload)
-        # neg 按 schema 格式构造，不直接复制槽位 negative；任何场景都不加性/裸露反词
-        self.assertIn("bad anatomy, bad hands, bad feet, extra fingers, missing fingers, text, watermark, logo", payload["neg"])
-        self.assertNotIn("nsfw, explicit", payload["neg"])
-        # 不应包含槽位里的场景特定反词
-        self.assertNotIn("no panties", payload["neg"])
-        self.assertNotIn("2girls", payload["neg"])
+        self.assertIn("holding phone", payload["neg"])
+        self.assertIn("split screen", payload["neg"])
+        self.assertNotIn("bad anatomy", payload["neg"])
         self.assertIn("tags", payload)
-        # quality_meta_year_safe 简化格式
-        self.assertEqual(payload["quality_meta_year_safe"], "masterpiece, best quality, safe")
+        self.assertEqual(payload["quality_meta_year_safe"], "safe")
 
-    def test_animatool_slots_turbo_v1_supports_neg(self):
-        """turbo_v1 默认工作流应在 system prompt 中要求输出 neg，并保留 LLM 返回的 neg。"""
+    def test_animaflow_slots_cfg_above_one_supports_neg(self):
+        """cfg>1 时按实时 schema 要求并保留 LLM 返回的 neg。"""
         async def run():
             svc = self.make_service()
             svc.config.update({
                 "image_llm_api_key": "image-key",
                 "image_llm_model": "image-model",
                 "image_llm_api_base": "https://image.example",
-                "animatool_workflow": "turbo_v1",
+                "animaflow_workflow": "anima29",
+                "animaflow_cfg": "4.0",
             })
             sid = "telegram:123"
             svc._call_llm = AsyncMock(return_value=json.dumps({
@@ -6965,35 +7131,31 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_animatool_workflow_selects_correct_endpoints(self):
-        """不同工作流应映射到不同的 schema/knowledge/generate 端点。"""
-        from telegram_comfyui_selfie.generation import ANIMATOOL_WORKFLOWS, _get_animatool_workflow
-        from telegram_comfyui_selfie.generation import _workflow_supports_neg
+    def test_animaflow_workflow_catalog_is_dynamic_and_prefers_turbo(self):
+        from telegram_comfyui_selfie.animaflow_runtime import (
+            normalize_animaflow_catalog,
+            select_animaflow_workflow,
+        )
+        from telegram_comfyui_selfie.generation import ANIMATOOL_WORKFLOWS
 
-        svc = self.make_service()
-        # 默认 turbo_v1
-        self.assertEqual(_get_animatool_workflow(svc), "turbo_v1")
-        self.assertTrue(_workflow_supports_neg(svc))
-        self.assertEqual(ANIMATOOL_WORKFLOWS["turbo_v1"]["generate_path"], "/anima/generate_turbo_v1")
-        self.assertEqual(ANIMATOOL_WORKFLOWS["turbo_v1"]["schema_path"], "/anima/schema_turbo_v1")
-        self.assertEqual(ANIMATOOL_WORKFLOWS["turbo_v1"]["knowledge_path"], "/anima/knowledge_new_models")
+        catalog = normalize_animaflow_catalog({
+            "default": "base",
+            "workflows": {
+                "base": {"description": "base", "endpoints": {}},
+                "future_turbo": {
+                    "description": "future",
+                    "endpoints": {
+                        "generate": "POST /anima/generate",
+                        "schema": "GET /anima/schema?workflow=future_turbo",
+                        "knowledge": "GET /anima/knowledge?workflow=future_turbo",
+                    },
+                },
+            },
+        })
 
-        svc.config["animatool_workflow"] = "turbo0.2"
-        self.assertEqual(_get_animatool_workflow(svc), "turbo0.2")
-        self.assertFalse(_workflow_supports_neg(svc))
-        self.assertEqual(ANIMATOOL_WORKFLOWS["turbo0.2"]["generate_path"], "/anima/generate_turbo")
-
-        svc.config["animatool_workflow"] = "base"
-        self.assertEqual(ANIMATOOL_WORKFLOWS["base"]["generate_path"], "/anima/generate")
-        self.assertTrue(_workflow_supports_neg(svc))
-
-        svc.config["animatool_workflow"] = "aesthetic_v1"
-        self.assertEqual(ANIMATOOL_WORKFLOWS["aesthetic_v1"]["generate_path"], "/anima/generate_aesthetic_v1")
-        self.assertTrue(_workflow_supports_neg(svc))
-
-        # 非法值回退默认
-        svc.config["animatool_workflow"] = "unknown"
-        self.assertEqual(_get_animatool_workflow(svc), "turbo_v1")
+        self.assertEqual(ANIMATOOL_WORKFLOWS, {})
+        self.assertEqual(select_animaflow_workflow(catalog), "future_turbo")
+        self.assertEqual(catalog["workflows"]["future_turbo"]["endpoints"]["generate"], "/anima/generate")
 
     def test_photo_history_is_recorded_as_stable_system_history(self):
         svc = self.make_service()
@@ -7697,6 +7859,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             "post_chat_push_date", "post_chat_push_count", "last_post_chat_push_time",
             "web_search_date", "web_search_count",
             "push_topic_search_date", "push_topic_search_count",
+            "character_interaction_push",
             "saved_characters", "character_contexts", "init_flow",
             "ntr_stage_reached", "ntr_reconcile_count", "ntr_affection_reset",
             "frozen", "frozen_at", "web_hidden",
@@ -8016,6 +8179,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(ss.get_last_morning_greet_date(legacy), "")
         self.assertEqual(ss.get_character_contexts(legacy), {})
         self.assertEqual(ss.get_init_flow(legacy), {})
+        self.assertEqual(ss.get_character_interaction_push(legacy), {
+            "character_keys": [], "daily_limit": 0, "date": "", "count": 0,
+        })
 
         # 访问器读写（双写：盒 + 扁平）
         st = {}
@@ -8049,6 +8215,20 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         ss.set_daily_triggered_times(st, ["09:00"])
         self.assertEqual(ss.get_daily_triggered_times(st), ["09:00"])
+
+        ss.set_character_interaction_push(st, {
+            "character_keys": ["角色A", "角色B", "角色A"],
+            "daily_limit": 3,
+            "date": "2026-06-24",
+            "count": 1,
+        })
+        self.assertEqual(ss.get_character_interaction_push(st), {
+            "character_keys": ["角色A", "角色B"],
+            "daily_limit": 3,
+            "date": "2026-06-24",
+            "count": 1,
+        })
+        self.assertEqual(st["session"]["character_interaction_push"]["daily_limit"], 3)
 
         # 容器返回 live 对象：原地变更持久
         saved = ss.get_saved_characters(st)

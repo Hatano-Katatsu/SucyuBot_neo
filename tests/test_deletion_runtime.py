@@ -93,6 +93,12 @@ class DeletionRuntimeTestCase(ServiceFixtureMixin, unittest.TestCase):
                 "角色A": {"dynamic_appearance": "A"},
                 "角色B": {"dynamic_appearance": "B"},
             })
+            session_schema.set_character_interaction_push(state, {
+                "character_keys": ["角色A", "角色B"],
+                "daily_limit": 2,
+                "date": "2026-07-20",
+                "count": 1,
+            })
             service._save_session_state(session_id, state)
             self._seed_character(service, session_id, "角色A", "A")
             self._seed_character(service, session_id, "角色B", "B")
@@ -119,6 +125,10 @@ class DeletionRuntimeTestCase(ServiceFixtureMixin, unittest.TestCase):
                 session_schema.get_character_contexts(service.sessions[session_id]),
             )
             self.assertEqual(session_schema.get_outfit(service.sessions[session_id]), "")
+            self.assertEqual(
+                session_schema.get_character_interaction_push(service.sessions[session_id])["character_keys"],
+                ["角色B"],
+            )
             self.assertFalse(checkpoint_dir.exists())
             self.assertFalse(avatar_path.exists())
             self.assertEqual(

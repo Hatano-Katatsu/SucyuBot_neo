@@ -1072,10 +1072,18 @@ class LifePlanMixin:
             logger.warning("life plan update failed", exc_info=True)
             return {"status": "failed", "date": today_date, "error": str(exc)}
 
-    async def ensure_life_plan_for_today(self, session_id: str, *, force: bool = False, reason: str = "manual") -> dict[str, Any]:
+    async def ensure_life_plan_for_today(
+        self,
+        session_id: str,
+        *,
+        force: bool = False,
+        reason: str = "manual",
+        character_key: str | None = None,
+    ) -> dict[str, Any]:
+        """保证指定角色存在今日生活线；未指定时保持活动角色的旧行为。"""
         local_dt = self._session_now(session_id)
-        character_key = self._life_plan_character_key(session_id)
-        row = self._load_life_plan_row(session_id, character_key)
+        key = self._life_plan_character_key(session_id) if character_key is None else str(character_key or "").strip()
+        row = self._load_life_plan_row(session_id, key)
         today_date = self._life_today_date(session_id, local_dt)
         if (
             not force
@@ -1084,16 +1092,20 @@ class LifePlanMixin:
             and not self._life_plan_needs_bootstrap(row.get("payload") or {})
         ):
             return {"status": "current", "life_plan": row}
+        snapshot = self._life_plan_character_snapshot(session_id, key)
+        if not snapshot.get("character_exists", True):
+            return {"status": "stale", "reason": "character_missing", "character": key}
         result = await self._update_life_plan_after_dream(
             session_id,
-            character_key,
+            key,
             local_dt,
             diary_date=(local_dt.date() - timedelta(days=1)).isoformat(),
             diary="",
             reason=reason,
             force=True,
+            character_snapshot=snapshot,
         )
-        row = self._load_life_plan_row(session_id, character_key)
+        row = self._load_life_plan_row(session_id, key)
         return {"status": result.get("status"), "result": result, "life_plan": row}
 
     async def regenerate_life_plan_goals(

@@ -14,6 +14,7 @@ from . import appearance as appearance_rules
 from . import character_card
 from . import prompt_intake
 from . import session_schema
+from .animaflow_runtime import animaflow_enabled, configured_animaflow_workflow
 from .command_aliases import resolve_command_alias
 from .defaults import INIT_GUIDE, MENU_BODY, MENU_TOPICS, MENU_TOPIC_ALIASES, OC_CREATE_HELP, SCENES, WEEKDAY_NAMES
 from .deletion_runtime import (
@@ -1772,9 +1773,16 @@ class CommandHandlersMixin:
                     label="ComfyUI system_stats 响应",
                 )
             sys = stats.get("system", {})
-            backend = self.config.get("image_backend", "native")
-            workflow = self.config.get("animatool_workflow", "turbo_v1")
-            backend_line = f"后端: {backend}" + (f" / 工作流: {workflow}" if backend == "animatool" else "")
+            use_animaflow = animaflow_enabled(self.config)
+            backend = "animaflow" if use_animaflow else "native"
+            workflow = configured_animaflow_workflow(self.config)
+            resolved_workflow = str(getattr(self, "_animaflow_resolved_workflow", "") or "")
+            fallback_reason = str(getattr(self, "_animaflow_fallback_reason", "") or "")
+            if use_animaflow and resolved_workflow and resolved_workflow != workflow:
+                workflow = f"{resolved_workflow}（兼容回退）"
+            backend_line = f"后端: {backend}" + (f" / 工作流: {workflow}" if use_animaflow else "")
+            if fallback_reason:
+                backend_line += f"\n回退原因: {fallback_reason[:180]}"
             await self.send_message(
                 chat_id,
                 f"ComfyUI {sys.get('comfyui_version', '?')}\n"

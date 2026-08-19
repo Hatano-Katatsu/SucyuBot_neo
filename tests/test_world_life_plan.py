@@ -12,6 +12,7 @@ from aiohttp import web
 from telegram_comfyui_selfie import session_schema
 from telegram_comfyui_selfie.image_planning import plan_roleplay_image
 from telegram_comfyui_selfie.webui import (
+    api_world_character_interaction_update,
     api_world_life_plan_generate,
     api_world_life_plan_goal_create,
     api_world_life_plan_goal_delete,
@@ -337,6 +338,52 @@ class WorldLifePlanTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(life["today"]["events"][0]["place_label"], "咖啡店")
         self.assertEqual(life["today"]["events"][0]["related_mid_text"], "整理手头小事")
         self.assertIn("嘈杂", push_side)
+        self.assertFalse(preview["character_interaction"]["enabled"])
+        self.assertEqual(preview["character_interaction"]["daily_limit"], 0)
+
+    def test_world_api_updates_local_character_interaction_settings(self):
+        async def run():
+            class JsonRequest(dict):
+                def __init__(self, app, sid, payload):
+                    super().__init__()
+                    self.app = app
+                    self.match_info = {"session_id": sid}
+                    self.query = {}
+                    self._payload = payload
+                    self["web_auth"] = {"role": "admin", "user_id": "admin", "token": "x"}
+
+                async def json(self):
+                    return self._payload
+
+            svc = self.make_service()
+            sid = "telegram:123"
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "小雨")
+            session_schema.get_saved_characters(state)["铃音"] = {
+                "character": "铃音", "bot_name": "铃音", "persona": "喜欢散步。",
+            }
+            svc._save_session_state(sid, state)
+            app = web.Application()
+            app["service"] = svc
+
+            request = JsonRequest(app, sid, {
+                "character_keys": ["小雨", "铃音"],
+                "daily_limit": 2,
+            })
+            response = json.loads((await api_world_character_interaction_update(request)).text)
+
+            self.assertTrue(response["ok"])
+            settings = response["character_interaction"]
+            self.assertTrue(settings["enabled"])
+            self.assertEqual(settings["daily_limit"], 2)
+            stored = session_schema.get_character_interaction_push(svc._get_session_state(sid))
+            self.assertEqual(stored["character_keys"], ["小雨", "铃音"])
+
+            invalid = JsonRequest(app, sid, {"character_keys": ["小雨"], "daily_limit": 1})
+            invalid_response = json.loads((await api_world_character_interaction_update(invalid)).text)
+            self.assertFalse(invalid_response["ok"])
+
+        asyncio.run(run())
 
     def test_world_runtime_infers_user_place_and_injects_chat_prompt(self):
         svc = self.make_service()
@@ -1027,6 +1074,40 @@ class WorldLifePlanTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertTrue(payload["long_goals"])
             self.assertTrue(payload["mid_goals"])
             self.assertFalse(svc._life_plan_needs_bootstrap(payload))
+
+        asyncio.run(run())
+
+    def test_ensure_life_plan_for_inactive_character_does_not_switch_active_role(self):
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 7, 2, 12, 0, tzinfo=timezone.utc)
+            svc._session_now = lambda session_id="": fixed_now
+            state = svc._get_session_state(sid)
+            session_schema.set_character_value(state, "custom_character", "小雨")
+            session_schema.get_saved_characters(state)["铃音"] = {
+                "character": "铃音", "bot_name": "铃音", "persona": "独立而安静。",
+            }
+            svc._save_session_state(sid, state)
+
+            async def fake_update(session_id, character_key, local_dt, **kwargs):
+                svc._save_life_plan_payload(session_id, character_key, {
+                    "long_goals": [{"id": "l1", "text": "认真生活", "status": "active"}],
+                    "mid_goals": [{"id": "m1", "parent_id": "l1", "text": "安排今天", "status": "active"}],
+                    "today": {"date": "2026-07-02", "events": [], "texture": "平静的一天。"},
+                })
+                return {"status": "updated", "character": character_key}
+
+            svc._update_life_plan_after_dream = AsyncMock(side_effect=fake_update)
+
+            result = await svc.ensure_life_plan_for_today(
+                sid, character_key="铃音", reason="local-character-interaction",
+            )
+
+            self.assertEqual(result["status"], "updated")
+            self.assertEqual(svc._context_character_key(sid), "小雨")
+            self.assertEqual(svc._update_life_plan_after_dream.await_args.args[1], "铃音")
+            self.assertEqual(svc._load_life_plan_row(sid, "铃音")["payload"]["today"]["date"], "2026-07-02")
 
         asyncio.run(run())
 

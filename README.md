@@ -1,6 +1,6 @@
 # SucyuBot_neo — Telegram ComfyUI 角色自拍服务
 
-使用 Telegram Bot API 原生 HTTP 接口的独立服务：结合 AI 角色扮演（DeepSeek 等 OpenAI 兼容 API）与 ComfyUI（Anima3 模型）生成动漫角色自拍与日常配图，内置图形控制台。
+使用 Telegram Bot API 原生 HTTP 接口的独立服务：结合 AI 角色扮演（DeepSeek 等 OpenAI 兼容 API）与 ComfyUI（Anima 系列模型）生成动漫角色自拍与日常配图，内置图形控制台。
 
 功能涵盖：ComfyUI 生图、角色聊天模型、生图辅助模型、角色 / 人格 / 外型 / 画风管理、天气与时区、主动推送、世界动线（季节自然光 / 城市地点 / 同处判断）、长期记忆，以及聊天中由 LLM 工具触发的生图。
 
@@ -10,30 +10,32 @@
 
 - **语言**：Python 3.11+
 - **第三方依赖**：仅 `aiohttp>=3.9`
-- **外部服务**：ComfyUI（本地，Anima3 模型）+ OpenAI 兼容 LLM（聊天 / 生图可分开配置）
-- **存储**：JSON（`data/config.json`、`data/state.json`）+ SQLite（长期记忆）
+- **外部服务**：ComfyUI（本地，Anima 系列模型）+ OpenAI 兼容 LLM（聊天 / 生图可分开配置）
+- **存储**：配置优先使用 `data/config.yml`（兼容 `data/config.json`）；会话、聊天、角色状态与长期记忆统一存入 SQLite
 
 ## 快速开始
 
-### 1. 安装 ComfyUI 插件
+### 1. 安装并配置 AnimaFlow
 
-本项目依赖 ComfyUI-AnimaTool 插件。**请使用本项目根目录下的 `ComfyUI-AnimaTool/`，这是为 SucyuBot 修改过的版本，与官方版本不兼容。**
+本项目不再内置 ComfyUI 插件源码。需要使用 AnimaFlow 生图时，请在 ComfyUI 中手动安装官方 [ComfyUI-AnimaFlow](https://github.com/Langzaigg/ComfyUI-AnimaFlow)：
 
 ```bash
-# 将本项目自带的插件复制到 ComfyUI custom_nodes
-cp -r ComfyUI-AnimaTool /path/to/ComfyUI/custom_nodes/
-pip install -r /path/to/ComfyUI/custom_nodes/ComfyUI-AnimaTool/requirements.txt
+cd /path/to/ComfyUI/custom_nodes
+git clone https://github.com/Langzaigg/ComfyUI-AnimaFlow.git
+pip install -r ComfyUI-AnimaFlow/requirements.txt
 ```
 
-> ⚠️ 不要使用 ComfyUI Manager 安装的官方版本，也不要从 GitHub 克隆官方仓库，功能和接口有差异。
+安装依赖并重启 ComfyUI 后，确认工作流发现接口可用：
 
-确保以下模型文件已放置到 ComfyUI 对应目录（[Hugging Face 下载](https://huggingface.co/circlestone-labs/Anima)）：
+```powershell
+Invoke-RestMethod http://127.0.0.1:8188/anima/workflows
+```
 
-| 文件 | 路径 | 说明 |
-|------|------|------|
-| `anima-preview.safetensors` | `models/diffusion_models/` | Anima UNET |
-| `qwen_3_06b_base.safetensors` | `models/text_encoders/` | Qwen3 CLIP |
-| `qwen_image_vae.safetensors` | `models/vae/` | VAE |
+不同工作流需要的模型文件、目录和可覆盖环境变量以 AnimaFlow 仓库中的 README、实时 schema 与 knowledge 为准；模型可从 [circlestone-labs/Anima](https://huggingface.co/circlestone-labs/Anima) 获取。SucyuBot 不复制工作流清单或模型规则。
+
+随后在管理员 WebUI 的“设置 → 生图”中打开“启用 AnimaFlow”。每次打开开关都会重新检测 `/anima/workflows`；工作流选项来自该接口，默认优先选择 `anima29_turbo`，不存在时选择其他可用的 turbo 工作流。切换工作流会加载它的 schema、knowledge 以及默认 CFG/步数，之后可在同一面板调整 CFG 与步数。
+
+若 `/anima/workflows` 或所选工作流的 schema/knowledge 检测失败，Bot 会自动回退到改造前的 `turbo_v1` 兼容接口（`/anima/schema_turbo_v1`、`/anima/knowledge_new_models`、`/anima/generate_turbo_v1`），默认 CFG 1、步数 12。该回退只调用 ComfyUI 中已安装插件暴露的 HTTP 接口，不会把插件源码重新内置到 Bot。
 
 ### 2. 安装依赖
 
@@ -51,16 +53,18 @@ cp config.example.json data/config.json        # Windows PowerShell: Copy-Item c
 
 - `telegram_bot_token`：找 Telegram [@BotFather](https://t.me/BotFather) 免费创建一个测试 bot
 - `comfyui_url`：本地 ComfyUI 地址（默认 `http://127.0.0.1:8188`）
+- `animaflow_enabled`：也可直接在配置文件打开；推荐在管理员 WebUI 开启，以便立即检测接口
+- `animaflow_workflow` / `animaflow_cfg` / `animaflow_steps`：由 WebUI 按实时工作流初始化并允许管理员调整
 - `chat_llm_api_key`：聊天与角色扮演模型 API key（回复用户、保持人设、决定何时发图）
 - `image_llm_api_key`：生图辅助模型 API key（写推送场景、翻译 ComfyUI tags、分析角色 / 外型、判断空间与亲密场景、识别时区）
 - 也可只填旧版 `llm_api_key`，两类任务会自动沿用这套通用模型配置
-- `unet_model` / `clip_model` / `vae_model`：需与你 ComfyUI 中实际存在的模型文件名一致
+- `unet_model` / `clip_model` / `vae_model`：仅原生 ComfyUI 后端使用；AnimaFlow 模型配置由插件自身管理
 - 需要限制使用者时，设置 `allowed_chat_ids`
 
 ### 4. 启动
 
 ```bash
-python -m telegram_comfyui_selfie --config data/config.json --state data/state.json --web-port 8787
+py -3 -m telegram_comfyui_selfie --config data/config.json --web-port 8787
 ```
 
 Windows 下也可直接运行 `Start-SucyuBot.cmd`（会自动打开图形控制台）。
@@ -79,8 +83,8 @@ Windows 下也可直接运行 `Start-SucyuBot.cmd`（会自动打开图形控制
 启动参数示例：
 
 ```bash
-python -m telegram_comfyui_selfie --web-host 127.0.0.1 --web-port 8787
-python -m telegram_comfyui_selfie --no-web
+py -3 -m telegram_comfyui_selfie --web-host 127.0.0.1 --web-port 8787
+py -3 -m telegram_comfyui_selfie --no-web
 ```
 
 ## 主要命令
@@ -98,7 +102,7 @@ python -m telegram_comfyui_selfie --no-web
 ## 测试
 
 ```bash
-python -m unittest tests.test_core -v
+py -3 -m unittest tests.test_core -v
 ```
 
 ## 协作开发须知（重要）

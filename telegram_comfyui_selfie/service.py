@@ -685,19 +685,42 @@ class TelegramComfyUIService(
     def _take_pending_photo_history_messages(self, session_id: str) -> list[dict[str, str]]:
         return self._pending_photo_history_bucket().pop(session_id, [])
 
-    def _append_photo_history_message(self, session_id: str, message: dict[str, str], *, state: dict[str, Any] | None = None):
+    def _append_character_history_message(
+        self,
+        session_id: str,
+        character_key: str,
+        message: dict[str, str],
+        *,
+        state: dict[str, Any] | None = None,
+    ) -> None:
+        """把系统历史写入指定角色；非活动角色直接写冻结上下文，不临时切角。"""
         if not session_id or not message:
             return
         state = state if state is not None else self._get_session_state(session_id)
-        history = session_schema.get_chat_history(state)
+        key = str(character_key or "").strip()
+        active_key = self._context_character_key(session_id)
+        target_state = state
+        if key != active_key:
+            context_key = key or "__default__"
+            contexts = session_schema.get_character_contexts(state)
+            target_state = contexts.setdefault(context_key, {})
+        history = session_schema.get_chat_history(target_state)
         history.append(dict(message))
-        session_schema.set_chat_history(state, history)
+        session_schema.set_chat_history(target_state, history)
         try:
-            self.app_store.append_messages(session_id, self._context_character_key(session_id), [dict(message)])
+            self.app_store.append_messages(session_id, key, [dict(message)])
         except Exception:
-            logger.warning("photo history sqlite append failed", exc_info=True)
+            logger.warning("character history sqlite append failed", exc_info=True)
         if hasattr(self, "_apply_history_trim"):
-            self._apply_history_trim(state, self._history_storage_cap())
+            self._apply_history_trim(target_state, self._history_storage_cap())
+
+    def _append_photo_history_message(self, session_id: str, message: dict[str, str], *, state: dict[str, Any] | None = None):
+        self._append_character_history_message(
+            session_id,
+            self._context_character_key(session_id),
+            message,
+            state=state,
+        )
 
     def _append_encounter_system_message(
         self,
@@ -710,8 +733,10 @@ class TelegramComfyUIService(
         relationship: str,
         when: str,
         role: str,
+        character_key: str | None = None,
+        event_scope: str = "cross_session",
     ) -> None:
-        """注入一条跨会话邂逅事件的 system 历史（内存 + SQLite），模式同照片历史。
+        """注入一条邂逅事件的 system 历史（内存 + SQLite），模式同照片历史。
 
         与照片历史的「低权重、不要主动复述」措辞相反：邂逅是重磅关系事件，
         用户紧接的对话很可能涉及此事，应可自然承接。视角约束必须写死：
@@ -719,8 +744,12 @@ class TelegramComfyUIService(
         """
         if not session_id:
             return
+        scope_text = (
+            "同一用户角色池内的角色互动推送编排"
+            if event_scope == "local_push" else "跨会话角色互动编排"
+        )
         lines = [
-            "邂逅事件（系统记录，跨会话角色互动编排；这是真实发生过的事，用户紧接的对话可能涉及此事，可自然承接）:",
+            f"邂逅事件（系统记录，{scope_text}；这是真实发生过的事，用户紧接的对话可能涉及此事，可自然承接）:",
             f"time: {when}（{city}）",
             f"venue: {venue}",
             f"with: {other}（{role}；{other}是另一个角色，不是你正在对话的用户，不要把用户当成{other}）",
@@ -728,7 +757,11 @@ class TelegramComfyUIService(
         ]
         if relationship:
             lines.append(f"relationship: {relationship}")
-        self._append_photo_history_message(session_id, {"role": "system", "content": "\n".join(lines)})
+        self._append_character_history_message(
+            session_id,
+            self._context_character_key(session_id) if character_key is None else character_key,
+            {"role": "system", "content": "\n".join(lines)},
+        )
 
     @staticmethod
     def _identity_key(value: Any) -> str:

@@ -738,6 +738,16 @@ class SchedulerRuntimeMixin:
                 "topic_seed": "",
                 "reason": "followup 默认对话承接",
             }
+        interaction_status = (
+            self._local_interaction_push_status(session_id, now=now)
+            if mode == "normal" and hasattr(self, "_local_interaction_push_status")
+            else {"available": False, "candidates": [], "reason": "当前模式不参与角色互动"}
+        )
+        interaction_available = bool(interaction_status.get("available"))
+        interaction_candidates = "、".join(
+            str(item.get("name") or item.get("character_key") or "默认角色")
+            for item in interaction_status.get("candidates") or []
+        )
         purpose = "fast" if self.has_llm_config("fast", session_id) else "image"
         if not self.has_llm_config(purpose, session_id):
             return {
@@ -760,12 +770,14 @@ class SchedulerRuntimeMixin:
             "先判断本次是否继续用户对话；如果不继续，则从生活线和当前网络话题列表中选择 1-3 个"
             "可以直接交给下游写作模型的具体话题引导。"
             "只输出一个 JSON 对象。\n"
-            "两种决策模式：\n"
+            "三种决策模式：\n"
             "- dialogue：承接用户最近一次对话中的明确对象、问题、约定或未完成细节；引导来源写 dialogue。\n"
             "- independent：不继续用户话题。引导来源可写 life 或 web，1-3 条里允许同时混合两种来源。"
             "life 从今日生活线选择具体事件或连续推进上一段动线；web 只能从当前网络话题列表选近期未提过且仍有时效性的条目。\n"
+            "- character_interaction：让当前活动角色与系统列出的一个非活动角色按各自今日动线相遇。"
+            "只有状态明确标为可用时才能选择；具体对象和事件由后续编排器决定，此模式 topic_guides 可以为空。\n"
             "关键规则：\n"
-            "1) topic_guides 必须有 1-3 条，每条含 source 和 guide；guide 要点明聊什么、从哪个具体细节切入，"
+            "1) dialogue/independent 的 topic_guides 必须有 1-3 条，每条含 source 和 guide；guide 要点明聊什么、从哪个具体细节切入，"
             "不能只写‘延续对话’‘分享生活’‘聊聊新闻’。\n"
             "2) 用户发言后 1-2 次推送内可选 dialogue；超过 2 次仍没回复，应优先 independent。\n"
             "3) independent 的 1-3 条可以全是 life、全是 web，或 life+web 混合；必须避开最近已经推送的话题。\n"
@@ -774,7 +786,7 @@ class SchedulerRuntimeMixin:
             "扩展搜索的核心目的是增加话题广度：search_interest 和 search_query 必须避开当前网络话题列表、"
             "上一轮搜索词及最近推送的中心主题，选择角色另一个兴趣面或生活线延展点；禁止只换同义词再次搜索现有主题。"
             "search_topic 按用途选 general/news/finance：实时政治、体育和重大事件用 news；金融市场用 finance；其他用 general。\n"
-            "输出格式: {\"topic_mode\":\"dialogue|independent\",\"topic_guides\":["
+            "输出格式: {\"topic_mode\":\"dialogue|independent|character_interaction\",\"topic_guides\":["
             "{\"source\":\"dialogue|life|web\",\"guide\":\"具体引导\"}],"
             "\"search_interest\":\"兴趣点或空\",\"search_query\":\"搜索词或空\","
             "\"search_topic\":\"general|news|finance或空\",\"reason\":\"简短理由\"}"
@@ -782,6 +794,9 @@ class SchedulerRuntimeMixin:
         user = (
             f"当前推送模式: {mode}\n"
             f"当前时间: {now.strftime('%Y-%m-%d %H:%M %A')}\n\n"
+            f"角色互动状态: {'可用' if interaction_available else '不可用'}；"
+            f"候选非活动角色: {interaction_candidates or '无'}；"
+            f"原因: {interaction_status.get('reason') or '-'}\n\n"
             f"{context}\n\n"
             "请输出 JSON（以 { 开头）。"
         )
@@ -821,13 +836,17 @@ class SchedulerRuntimeMixin:
         direction = str(parsed.get("topic_mode") or parsed.get("topic_direction") or "").strip().lower()
         if direction in ("life", "external_topic"):
             direction = "independent"
-        if direction not in ("dialogue", "independent"):
+        if direction == "character_interaction" and not interaction_available:
+            direction = "independent"
+        if direction not in ("dialogue", "independent", "character_interaction"):
             direction = "independent"
         default_source = "dialogue" if direction == "dialogue" else "life"
-        topic_items = self._normalize_push_topic_items(
+        topic_items = [] if direction == "character_interaction" else self._normalize_push_topic_items(
             parsed.get("topic_guides") or [], default_source=default_source, limit=3,
         )
-        if direction == "dialogue":
+        if direction == "character_interaction":
+            topic_items = []
+        elif direction == "dialogue":
             topic_items = [item for item in topic_items if item["source"] == "dialogue"]
         else:
             # 未搜索的新内容不能提前混进本次推送；web 引导必须有既存池作为依据。
@@ -838,7 +857,7 @@ class SchedulerRuntimeMixin:
                     item["source"] == "web" and item["guide"].casefold() in pool_keys
                 )
             ]
-        if not topic_items:
+        if not topic_items and direction != "character_interaction":
             fallback_direction = "dialogue" if direction == "dialogue" else "life"
             topic_items = [
                 {"source": default_source, "guide": guide}
@@ -2513,6 +2532,41 @@ class SchedulerRuntimeMixin:
             drain=True,
         )
 
+    def _handle_morning_push_tick(
+        self,
+        session_id: str,
+        state: dict[str, Any],
+        local_dt: datetime,
+        *,
+        daily_limit: int,
+        wake_minute: int,
+    ) -> None:
+        """处理本轮早安推送；窗口结束后只落一次错过标记。"""
+        if daily_limit <= 0:
+            return
+        today = local_dt.strftime("%Y-%m-%d")
+        if session_schema.get_last_morning_greet_date(state) == today:
+            return
+        now_minute = local_dt.hour * 60 + local_dt.minute
+        minutes_after_wake = now_minute - int(wake_minute)
+        if minutes_after_wake < 0:
+            return
+        if minutes_after_wake >= 5:
+            # 早安有明确的时效，错过窗口后不在白天或夜间补发；与随机推送点一致，
+            # 将当天标为已处理，避免调度器每分钟重复记录同一条 missed 日志。
+            if session_id not in self._active_pushes:
+                self._mark_morning_greet_sent(session_id, local_dt, reason="missed-window")
+            return
+        if self._check_goodnight_inhibition(state):
+            self._ulog(session_id, "PUSH", "早安推送本轮受晚安抑制，窗口内保留重试")
+        elif session_id not in self._active_pushes:
+            self._create_scheduled_push_task(
+                session_id,
+                local_dt,
+                mode_override="morning",
+                mark_morning=True,
+            )
+
     async def scheduler_loop(self):
         await asyncio.sleep(10)
         while True:
@@ -2554,18 +2608,13 @@ class SchedulerRuntimeMixin:
                         self._mark_dirty(session_id)
 
                     # 推送关闭(每日次数=0)时，早安推送也不发——否则“关闭推送”每天早上又冒出来（用户报的“只持续一天”）。
-                    if daily_limit > 0 and self._is_morning_push_time(session_id, now) and session_schema.get_last_morning_greet_date(state) != today:
-                        if self._check_goodnight_inhibition(state):
-                            self._ulog(session_id, "PUSH", "早安推送本轮受晚安抑制，窗口内保留重试")
-                        elif session_id not in self._active_pushes:
-                            self._create_scheduled_push_task(
-                                session_id,
-                                now,
-                                mode_override="morning",
-                                mark_morning=True,
-                            )
-                    if session_schema.get_last_morning_greet_date(state) != today and now_minute - int(schedule.get("wake", 0)) > 5:
-                        self._ulog(session_id, "NOTIFY", "missed-morning-window")
+                    self._handle_morning_push_tick(
+                        session_id,
+                        state,
+                        now,
+                        daily_limit=daily_limit,
+                        wake_minute=int(schedule["wake"]),
+                    )
 
                     triggered = session_schema.get_daily_triggered_times(state)
                     for t in session_schema.get_daily_trigger_times(state):
@@ -2723,6 +2772,7 @@ class SchedulerRuntimeMixin:
                     state = self._get_session_state(session_id)
                 except Exception:
                     logger.debug("push pre-checkpoint failed", exc_info=True)
+            world: dict[str, Any] = {}
             if hasattr(self, "build_world_state"):
                 try:
                     world = self.build_world_state(session_id, weather=w or weather, now=local_dt, mode=mode)
@@ -2751,6 +2801,37 @@ class SchedulerRuntimeMixin:
             push_topic_guides = self._normalize_push_topic_guides(topic_decision.get("topic_guides") or [], limit=3)
             post_push_search_query = str(topic_decision.get("post_push_search_query") or "").strip()
             post_push_search_topic = str(topic_decision.get("post_push_search_topic") or "general").strip()
+            local_interaction = None
+            effective_system_prompt = temporary_system_prompt
+            if topic_direction == "character_interaction":
+                interaction_allowed = bool(
+                    mode == "normal" and not skip_active_check and not temporary_system_prompt
+                    and hasattr(self, "_prepare_local_character_interaction_push")
+                )
+                if interaction_allowed:
+                    try:
+                        local_interaction = await self._prepare_local_character_interaction_push(
+                            session_id,
+                            local_dt,
+                            weather=w,
+                            active_world=world,
+                        )
+                    except Exception:
+                        logger.warning("local character interaction preparation failed", exc_info=True)
+                if local_interaction:
+                    other_name = str(local_interaction.get("other_name") or "另一个角色")
+                    venue_name = str(local_interaction.get("venue_name") or "公共场所")
+                    push_topic_guides = [
+                        f"按既定事件表现刚在{venue_name}与{other_name}发生的互动；"
+                        f"画面只出现当前活动角色，{other_name}保持在画外。"
+                    ]
+                    effective_system_prompt = self._local_interaction_push_system_prompt(local_interaction)
+                    post_push_search_query = ""
+                else:
+                    topic_direction = "independent"
+                    push_topic_guides = self._fallback_push_topic_guides(session_id, state, "life")
+                    post_push_search_query = ""
+                    self._ulog(session_id, "PUSH", "角色互动准备不可用，本次回退生活线独立推送")
             plan = await self._llm_write_scene(
                 mode,
                 weather,
@@ -2763,13 +2844,15 @@ class SchedulerRuntimeMixin:
                 push_topic_seed=push_topic_seed,
                 push_topic_direction=topic_direction,
                 push_topic_guides=push_topic_guides,
-                temporary_system_prompt=temporary_system_prompt,
+                temporary_system_prompt=effective_system_prompt,
             )
             if not plan or not plan.get("scene"):
                 self._ulog(session_id, "PUSH", f"推送规划为空 mode={mode}")
                 return False
             scene = plan.get("scene") or ""
-            caption = self._single_line_push_caption(plan.get("caption") or "")
+            caption = self._single_line_push_caption(
+                local_interaction.get("push_caption") if local_interaction else (plan.get("caption") or "")
+            )
             new_app = plan.get("new_appearance_tags") or ""
             view = plan.get("view") or ""
             orientation = plan.get("aspect_ratio") or ""
@@ -2777,8 +2860,12 @@ class SchedulerRuntimeMixin:
             partner_in_frame = bool(plan.get("partner_in_frame"))
             device_in_frame = bool(plan.get("device_in_frame"))
             clothing_off = plan.get("clothing_off") or ""
+            source_intent = (
+                f"{mode} 模式同会话角色互动推送，时段: {time_period}，天气: {weather}"
+                if local_interaction else f"{mode} 模式自动推送，时段: {time_period}，天气: {weather}"
+            )
             source = self._format_image_source_description(
-                intent=f"{mode} 模式自动推送，时段: {time_period}，天气: {weather}",
+                intent=source_intent,
                 prompt=caption or "",
             )
             state_mutation = self._image_state_mutation_from_plan(plan, source, scene)
@@ -2816,6 +2903,14 @@ class SchedulerRuntimeMixin:
                     source_kind=source_kind,
                 )
                 self._commit_image_state_mutation(session_id, state_mutation)
+                if local_interaction:
+                    try:
+                        committed = self._commit_local_character_interaction_push(session_id, local_interaction)
+                        if not committed:
+                            self._ulog(session_id, "ERROR", "角色互动图片已发送，但互动状态提交被拒绝")
+                    except Exception as exc:
+                        self._ulog(session_id, "ERROR", f"角色互动图片已发送，但双方历史提交失败: {exc}")
+                        logger.warning("local character interaction commit failed", exc_info=True)
                 # 记录推送话题日志（用于话题级避重与方向间隔统计；跨 /新场景 保留）。
                 # 记录本次实际使用的具体引导，供后续话题决策避重。
                 used_query = (topic_decision.get("search_query") or "") if topic_direction == "external_topic" else ""

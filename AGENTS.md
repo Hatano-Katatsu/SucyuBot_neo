@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-SucyuBot_neo 是独立运行的 Telegram AI 角色扮演与动漫角色生图服务，包含 Telegram Bot、WebUI、角色卡、长期记忆、短期上下文、生活线、地点动线、天气时间以及 ComfyUI / AnimaTool 生图规划。
+SucyuBot_neo 是独立运行的 Telegram AI 角色扮演与动漫角色生图服务，包含 Telegram Bot、WebUI、角色卡、长期记忆、短期上下文、生活线、地点动线、天气时间以及 ComfyUI / AnimaFlow 生图规划。
 
 ## 技术栈
 
@@ -43,6 +43,7 @@ telegram_comfyui_selfie/
 ├── chat_context.py          # 聊天上下文、checkpoint、工具调用
 ├── generation.py            # PromptSlots 与生图后端
 ├── image_planning.py        # LLM 画面规划
+├── animaflow_runtime.py     # AnimaFlow 工作流发现、schema/knowledge 与默认参数
 ├── appearance.py            # 外观、衣柜与标签处理
 ├── prompt_intake.py         # 自然语言外观/角色输入分类
 ├── memory.py                # 长期记忆 SQLite 存储
@@ -134,7 +135,7 @@ telegram_comfyui_selfie/
 - 场景衣物冲突采用精确删除，不生成 `the current outfit` 等不可渲染占位语，也不能误删人物动作。
 - 画幅只允许 2:3 或 3:2；负向提示词压制 split screen、grid、multiple panels、collage。
 - 任何场景都不自动追加性/裸露类反词（`no panties`、`bottomless`、`nsfw`、`nude` 等）；只有「公开场景且 purity>2」的护栏路径按最精简集追加防走光反词（`nude, topless, bottomless`，各表一种裸露程度、无同义重复），其余场景完全靠正向提示控制。
-- AnimaTool 工作流与 schema 由 `ANIMATOOL_WORKFLOWS` 管理。quality、neg、count 必须按实时 schema 构造，不能直接复制项目内部槽位全文。
+- AnimaFlow 源码不随 Bot 仓库分发；运行时以 `/anima/workflows` 为工作流单一来源，再按目录动态加载选中工作流的 schema、knowledge 与 generate 端点，禁止维护本地工作流清单。管理员开关默认关闭；每次开启都重新发现目录，切换工作流时用其动态默认值重置 cfg/steps。发现目录或工作流资源失败时，只通过外部 HTTP 接口回退到旧 `turbo_v1` 协议，不重新内置插件源码。cfg=1 时不构造任何负面字段，仅在 nsfw/explicit 的正面 tags 末尾追加 `no mosaic, uncensored`。
 
 ## 调度与世界状态
 
@@ -144,6 +145,8 @@ telegram_comfyui_selfie/
 - 业务后台协程统一通过 `_spawn_background()` 登记作用域与停机策略；完成回调必须消费异常并清理兼容 task map，停机在关闭 HTTP 前取消或排空。
 - 同一会话的推送使用 `asyncio.Lock` 串行化，避免 morning/daily/continuity 并发重复发图。
 - 多阶段 NTR/连续推送按阶段顺序 await；单阶段失败要隔离并记录，不阻塞后续调度循环。
+- 同一会话角色互动推送默认关闭（每日上限 0）；用户在动线页选择参与角色并设置每日上限。它只作为普通每日推送的话题方向，当前活动角色必须在参与列表中，目标从已选择且清醒的非活动角色中随机抽取。
+- 同会话角色互动抽中目标后，必须先按目标角色键建立其当日生活线/动线，禁止通过临时切换角色借用 live 上下文。编排结果在图片成功发送后才扣每日额度，并分别写入双方冻结/活动历史、SQLite 消息、长期记忆、生活线事件/NPC 与 encounters 关系史；生图仍保持单活动角色入画，另一角色位于画外。
 - 场景结束和晚安判断只读取近期用户消息，不让 assistant 台词或照片 system 误触发。
 - normal 推送先判断是否承接用户；不承接时从生活线与已有网络话题池中混选 1-3 条具体引导。当天第一次选择不承接后，必须先完成本次推送，再按角色兴趣搜索并补充角色维度的当日网络话题池；跨日整理可保留至多少量仍有时效性的旧话题。followup 默认承接用户，不调方向 LLM。
 - 网络话题扩展的兴趣点、query 和整理结果都必须避开上一轮搜索、旧话题池与最近实际推送；同义改写按重复处理，最近已用条目不得作为历史话题保留。
