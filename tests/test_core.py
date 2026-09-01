@@ -1527,6 +1527,39 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("@00 gx4", pos)
         self.assertIn("bad anatomy", neg)
 
+    def test_build_prompt_keeps_card_eye_color_with_eyelash_lace_outfit(self):
+        # 回归：服装描述含 "eyelash lace"（睫毛蕾丝）时，parse_appearance 曾把整段服装
+        # 误判进 eyes 槽，inject_appearance 的 override 分支随后把角色卡的真实瞳色全部顶替。
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        session_schema.set_character_value(state, "custom_character", "蕾伊")
+        session_schema.set_character_value(
+            state,
+            "custom_positive_prefix",
+            "long black hairs, pink pupils, slit pupils, purple eyes, bedroom eyes, succubus",
+        )
+        session_schema.set_outfit(
+            state,
+            "black silk chemise trimmed with delicate black eyelash lace, black lace panties",
+        )
+        pos, _ = svc._build_prompt("sitting by window", session_id=sid)
+        for tag in ("pink pupils", "slit pupils", "purple eyes", "bedroom eyes"):
+            self.assertIn(tag, pos)
+        self.assertIn("eyelash lace", pos)
+
+    def test_parse_appearance_word_boundary_hair_eyes(self):
+        # 回归：chair 不进 hair 槽、bunny 不误中 bun、eyelash 不进 eyes 槽。
+        from telegram_comfyui_selfie.appearance import parse_appearance
+
+        slots = parse_appearance("wooden chair, bunny girl, eyelash lace bra", [], [])
+        self.assertEqual(slots["hair"], [])
+        self.assertEqual(slots["eyes"], [])
+        self.assertEqual(slots["outfit"], ["eyelash lace bra"])
+        slots = parse_appearance("twin tails, purple eyes", [], [])
+        self.assertEqual(slots["hair"], ["twin tails"])
+        self.assertEqual(slots["eyes"], ["purple eyes"])
+
     def test_record_sent_photo_uses_effective_visual_appearance_when_empty(self):
         svc = self.make_service()
         sid = "telegram:1"
