@@ -27,6 +27,22 @@ HAIRSTYLE_WORDS = (
     "drill", "sidetail", "side tail", "hime cut", "updo", "bob cut", "马尾", "辫",
 )
 
+# 发/瞳识别必须按单词边界匹配（AGENTS.md 既有约定）：子串匹配会把 "eyelash lace"
+# （睫毛蕾丝，服装）误判进 eyes 槽、把 "chair" 误判进 hair 槽，曾导致整段服装描述
+# 劫持 eyes 槽并把角色卡的真实瞳色全部顶替。英文词允许可选复数 s 结尾（twin tails 等）。
+def _word_boundary_alts(words: tuple[str, ...]) -> str:
+    alts = []
+    for w in words:
+        esc = re.escape(w)
+        alts.append(esc if w.endswith("s") else esc + "s?")
+    return "|".join(alts)
+
+
+_HAIR_TAG_RE = re.compile(
+    r"\b(?:hairs?|" + _word_boundary_alts(tuple(h for h in HAIRSTYLE_WORDS if h.isascii())) + r")\b"
+)
+_EYES_TAG_RE = re.compile(r"\b(?:eyes?|pupils?)\b")
+
 FINE_OUTFIT_WORDS = (
     "sports bra", "bralette", "brassiere", "bra",
     "g-string", "thong", "panties", "panty", "knickers", "briefs", "underwear",
@@ -77,9 +93,9 @@ def parse_appearance(appearance: str, outfit_kw: list[str], accessory_kw: list[s
         if not tag:
             continue
         tl = tag.lower()
-        if "hair" in tl or "发" in tl or any(h in tl for h in HAIRSTYLE_WORDS):
+        if _HAIR_TAG_RE.search(tl) or "发" in tl or any(h in tl for h in HAIRSTYLE_WORDS if not h.isascii()):
             slots["hair"].append(tag)
-        elif "eye" in tl or "pupil" in tl or "瞳" in tl or "眼" in tl:
+        elif _EYES_TAG_RE.search(tl) or "瞳" in tl or "眼" in tl:
             slots["eyes"].append(tag)
         elif _contains_fine_outfit_word(tl):
             slots["outfit"].append(tag)
@@ -154,9 +170,9 @@ FINE_SLOT_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 def _wardrobe_slot_for_tag(tag: str, accessory_kw: list[str] | None = None) -> str:
     tl = tag.lower()
-    if "hair" in tl or "发" in tl or any(h in tl for h in HAIRSTYLE_WORDS):
+    if _HAIR_TAG_RE.search(tl) or "发" in tl or any(h in tl for h in HAIRSTYLE_WORDS if not h.isascii()):
         return "hair"
-    if "eye" in tl or "pupil" in tl or "瞳" in tl or "眼" in tl:
+    if _EYES_TAG_RE.search(tl) or "瞳" in tl or "眼" in tl:
         return "eyes"
     for slot, kws in FINE_SLOT_KEYWORDS:
         if any(k in tl for k in kws):
