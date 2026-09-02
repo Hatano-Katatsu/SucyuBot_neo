@@ -874,6 +874,7 @@ class LLMRuntimeMixin:
         session_id: str = "",
         sampling: bool = False,
         max_tokens: int | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         resolved = self._resolved_llm_config(purpose, session_id, disable_thinking=disable_thinking)
         api_base = resolved["api_base"]
@@ -936,10 +937,18 @@ class LLMRuntimeMixin:
                 validate_public_model_base_url(api_base)
             except ValueError as exc:
                 raise RuntimeError(f"用户模型 Base URL 不安全: {exc}") from exc
+        # 长文摘要类任务（角色历史提要等）输出长、且部分聊天模型强制思考，思考与正文
+        # 共享生成预算，profile 的默认超时容易不够用。允许调用方按任务放宽本次超时，
+        # 只放宽、不收紧，避免个别调用把 profile 配置的长超时改短。
         try:
             timeout_seconds = max(1.0, float(resolved.get("timeout") or 120))
         except (TypeError, ValueError):
             timeout_seconds = 120.0
+        if timeout is not None:
+            try:
+                timeout_seconds = max(timeout_seconds, float(timeout))
+            except (TypeError, ValueError):
+                logger.warning("忽略非法 timeout 覆盖值 %r", timeout)
         last_error = None
         for attempt in range(2):
             connector = aiohttp.TCPConnector(resolver=PublicOnlyResolver()) if private_profile else None
@@ -1070,7 +1079,7 @@ class LLMRuntimeMixin:
         )
         return data
 
-    async def _call_llm(self, system: str, user: str, temp: float = 0.3, tag: str = "", purpose: str = "image", disable_thinking: bool | None = None, session_id: str = "", max_tokens: int | None = None) -> str:
+    async def _call_llm(self, system: str, user: str, temp: float = 0.3, tag: str = "", purpose: str = "image", disable_thinking: bool | None = None, session_id: str = "", max_tokens: int | None = None, timeout: float | None = None) -> str:
         anchor = _SIMPLE_LLM_CACHE_ANCHORS.get(tag or "")
         messages = []
         if anchor:
@@ -1086,6 +1095,7 @@ class LLMRuntimeMixin:
                 disable_thinking=disable_thinking,
                 session_id=session_id,
                 max_tokens=request_max_tokens,
+                timeout=timeout,
             )
             choice = (data.get("choices") or [{}])[0] if isinstance(data, dict) else {}
             choice = choice if isinstance(choice, dict) else {}

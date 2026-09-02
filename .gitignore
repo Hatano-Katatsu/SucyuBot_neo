@@ -17,3 +17,10 @@ last_selfie.txt
 TODO.md
 
 .worktrees/
+
+# 本地工具/产物目录与临时脚本（不入库）
+.mimocode/
+.workbuddy/
+outputs/
+ref/
+tmp_*.py

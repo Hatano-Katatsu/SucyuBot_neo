@@ -340,6 +340,11 @@ DEFAULT_CONFIG = {
     "chat_persona_first": False,
     "character_history_summary_target_chars": 2000,
     "character_history_summary_max_chars": 6000,
+    # 角色历史提要目标两千字，思考型模型还要在同一预算里思考，profile 默认额度/超时不够用。
+    # 思考长度不可预测（强制思考的模型可能想很久），预算按总量给足，正文长度由提示词里的
+    # 目标字数和 character_history_summary_max_chars 约束，不靠 max_tokens 截断。
+    "character_history_summary_max_tokens": 25600,
+    "character_history_summary_timeout_seconds": 240,
     "push_continuity_hours": 2,
     "image_llm_temperature_scene": "",
     "image_llm_temperature_translate": "",
@@ -354,6 +359,10 @@ DEFAULT_CONFIG = {
     "checkpoint_hard_limit_chars": "3000",
     "checkpoint_source_hard_limit_chars": "18000",
     "dream_source_hard_limit_chars": "50000",
+    # 日记与角色历史提要同一失败模式：来源对话可能很长，且强制思考的模型让 disable_thinking 失效，
+    # 思考与正文共享预算。总量给足，正文长度由提示词约束，不靠 max_tokens 截断。
+    "dream_diary_max_tokens": 25600,
+    "dream_diary_timeout_seconds": 240,
     "dream_memory_summarize_max_tokens": "8192",
     "dream_morning_hour": "8",
     "dream_idle_hours": "2",

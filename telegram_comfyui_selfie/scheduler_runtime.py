@@ -1568,6 +1568,64 @@ class SchedulerRuntimeMixin:
                 break
         raise RuntimeError(json.dumps({"attempts": attempts, "error": str(last_exc or '')}, ensure_ascii=False))
 
+    async def _call_summary_text_llm(
+        self,
+        session_id: str,
+        system: str,
+        user: str,
+        *,
+        tag: str,
+        temp: float = 0.2,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
+        log_kind: str = "HISTORY",
+    ) -> str:
+        """纯文本长摘要任务：chat 模型优先，失败时回落 fast 模型。
+
+        与 _call_memory_json_llm 同一套回落策略，区别是不解析 JSON。角色历史提要这类
+        任务目标输出两千字以上，而部分聊天模型强制思考且思考与正文共享 max_tokens，
+        在 profile 默认额度/超时内经常跑不完（表现为 completion_tokens=0 的超时）。
+        调用方通过 max_tokens/timeout 放宽本次预算，仍失败则换 fast 模型再试一次。
+        """
+        purposes: list[str] = []
+        if self.has_llm_config("chat", session_id):
+            purposes.append("chat")
+        if self.has_llm_config("image", session_id):
+            purposes.append("image")
+        if not purposes:
+            raise RuntimeError("chat/fast model API Key is not configured")
+
+        attempts: list[dict[str, str]] = []
+        last_exc: Exception | None = None
+        for purpose in purposes:
+            try:
+                text = await self._call_llm(
+                    system,
+                    user,
+                    temp=temp,
+                    tag=tag if purpose == "chat" else f"{tag}-fast-fallback",
+                    purpose=purpose,
+                    disable_thinking=True if purpose == "chat" else None,
+                    session_id=session_id,
+                    max_tokens=max_tokens,
+                    timeout=timeout,
+                )
+            except Exception as exc:
+                last_exc = exc
+                attempts.append({"purpose": purpose, "status": "failed", "error": str(exc)})
+                continue
+            text = str(text or "").strip()
+            if text:
+                if attempts:
+                    self._ulog(
+                        session_id,
+                        log_kind,
+                        f"{tag} 回落成功 purpose={purpose} attempts={json.dumps(attempts, ensure_ascii=False)}",
+                    )
+                return text
+            attempts.append({"purpose": purpose, "status": "empty"})
+        raise RuntimeError(json.dumps({"attempts": attempts, "error": str(last_exc or '')}, ensure_ascii=False))
+
     async def _dream_once(self, session_id: str, character_key: str, local_dt: datetime, *, reason: str):
         life_plan_character_snapshot = None
         if hasattr(self, "_life_plan_character_snapshot"):
@@ -1781,7 +1839,8 @@ class SchedulerRuntimeMixin:
     ) -> str:
         if not source_text and existing_diary:
             return existing_diary
-        if not self.has_llm_config("chat", session_id):
+        # chat 不可用时不再直接降级成原始对话：本任务允许回落 fast 模型，两者都没有才降级。
+        if not (self.has_llm_config("chat", session_id) or self.has_llm_config("image", session_id)):
             return ((existing_diary.rstrip() + "\n\n") if existing_diary else "") + (source_text or "No new dialogue.")
         weekday = self._dream_diary_weekday(diary_date)
         if not source_role_legend:
@@ -1826,7 +1885,26 @@ class SchedulerRuntimeMixin:
             f"\n\nNew dialogue since last dream:\n{source_text or 'none'}"
             f"\n\nPrivate life background for diary:\n{life_plan_context or 'none'}"
         )
-        diary = await self._call_llm(system, user, temp=0.2, tag="dream-diary", purpose="chat", disable_thinking=True, session_id=session_id)
+        # 与角色历史提要同一失败模式：来源对话最长可达 dream_source_hard_limit_chars，
+        # 且强制思考的聊天模型会让 disable_thinking 失效，profile 默认额度/超时内跑不完。
+        try:
+            diary_max_tokens = max(1024, int(self.config.get("dream_diary_max_tokens", "25600") or 25600))
+        except (TypeError, ValueError):
+            diary_max_tokens = 25600
+        try:
+            diary_timeout = max(30.0, float(self.config.get("dream_diary_timeout_seconds", "240") or 240))
+        except (TypeError, ValueError):
+            diary_timeout = 240.0
+        diary = await self._call_summary_text_llm(
+            session_id,
+            system,
+            user,
+            tag="dream-diary",
+            temp=0.2,
+            max_tokens=diary_max_tokens,
+            timeout=diary_timeout,
+            log_kind="DREAM",
+        )
         preserved = self._ensure_diary_preserves_existing(existing_diary, diary)
         if preserved != diary:
             self._ulog(session_id, "DREAM", f"旧日记保全追加 date={diary_date} missing_chars={len(preserved) - len(diary)}")
@@ -2244,7 +2322,8 @@ class SchedulerRuntimeMixin:
         return (head + marker + tail)[:hard_limit]
 
     async def _generate_character_history_summary(self, session_id: str, character_key: str, diaries: list[dict[str, Any]]):
-        if not diaries or not self.has_llm_config("chat", session_id):
+        # chat 不可用时不再直接放弃：本任务允许回落到 fast 模型，只要有一个可用就继续。
+        if not diaries or not (self.has_llm_config("chat", session_id) or self.has_llm_config("image", session_id)):
             return
         try:
             hard_limit = min(20000, max(800, int(self.config.get("character_history_summary_max_chars", "6000") or 6000)))
@@ -2255,6 +2334,18 @@ class SchedulerRuntimeMixin:
         except (TypeError, ValueError):
             target_limit = 2000
         target_limit = min(target_limit, hard_limit)
+        # 生成预算与超时：目标两千字中文，思考型模型还要在同一预算里思考，
+        # profile 默认额度/超时（常见 4096 token / 120s）不够用，这里按任务放宽。
+        # 思考长度不可预测，预算给足总量；正文长度由提示词目标字数和 hard_limit 兜底，
+        # 不依赖 max_tokens 截断（截断只会得到半截摘要，反而更糟）。
+        try:
+            summary_max_tokens = max(1024, int(self.config.get("character_history_summary_max_tokens", "25600") or 25600))
+        except (TypeError, ValueError):
+            summary_max_tokens = 25600
+        try:
+            summary_timeout = max(30.0, float(self.config.get("character_history_summary_timeout_seconds", "240") or 240))
+        except (TypeError, ValueError):
+            summary_timeout = 240.0
         # meta/检查点/记忆的读写一律使用传入的 character_key，不在生成途中现取活动角色，
         # 避免 LLM 等待期间用户切换角色导致旧角色提要写进新角色。
         key = str(character_key or "").strip()
@@ -2336,9 +2427,14 @@ class SchedulerRuntimeMixin:
             f"最近日记:\n{diary_text}"
         )
         try:
-            summary = await self._call_llm(
-                system, user, temp=0.2, tag="history-summary",
-                purpose="chat", disable_thinking=True, session_id=session_id,
+            summary = await self._call_summary_text_llm(
+                session_id,
+                system,
+                user,
+                tag="history-summary",
+                temp=0.2,
+                max_tokens=summary_max_tokens,
+                timeout=summary_timeout,
             )
             summary = (summary or "").strip()
             if not summary:
@@ -2346,7 +2442,8 @@ class SchedulerRuntimeMixin:
             original_chars = len(summary)
             if len(summary) > hard_limit:
                 try:
-                    compressed = await self._call_llm(
+                    compressed = await self._call_summary_text_llm(
+                        session_id,
                         (
                             "你是角色历史提要压缩器。将输入压缩到硬上限以内。必须保留关系阶段、重大转折、仍有效的承诺与边界、"
                             "未解事件、角色心理边界，以及末尾的新一天演绎方向；只删除重复、铺垫、修辞、流水账和低价值细节。"
@@ -2354,11 +2451,10 @@ class SchedulerRuntimeMixin:
                             f"输出不超过 {hard_limit} 字，只输出压缩后的中文提要。"
                         ),
                         summary,
-                        temp=0.1,
                         tag="history-summary-compress",
-                        purpose="chat",
-                        disable_thinking=True,
-                        session_id=session_id,
+                        temp=0.1,
+                        max_tokens=summary_max_tokens,
+                        timeout=summary_timeout,
                     )
                     compressed = str(compressed or "").strip()
                     if compressed and len(compressed) < len(summary):

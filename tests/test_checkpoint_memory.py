@@ -477,6 +477,71 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_write_dream_diary_falls_back_to_fast_model_with_relaxed_budget(self):
+        """chat 超时时日记回落 fast 模型；预算与超时按任务放宽，不用 profile 默认值。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.config["user_log_enabled"] = False
+            svc.has_llm_config = lambda purpose, session_id="": purpose in ("chat", "image")
+            calls = []
+
+            async def fake_call_llm(system, user, **kwargs):
+                calls.append(kwargs)
+                if kwargs.get("purpose") == "chat":
+                    raise RuntimeError("LLM request timed out after 120s")
+                return "# 2026-06-26 星期五 回落日记\n今天把话说开了。"
+
+            svc._call_llm = fake_call_llm
+            logs = []
+            svc._ulog = lambda session_id, kind, text: logs.append((kind, text))
+
+            diary = await svc._write_dream_diary(
+                sid, "2026-06-26", "User: 晚安\nAssistant: 我会等你。", reason="manual",
+            )
+
+            self.assertIn("回落日记", diary)
+            self.assertEqual([c.get("purpose") for c in calls], ["chat", "image"])
+            self.assertEqual(
+                [c.get("tag") for c in calls],
+                ["dream-diary", "dream-diary-fast-fallback"],
+            )
+            self.assertGreaterEqual(calls[0].get("max_tokens"), 25600)
+            self.assertGreaterEqual(calls[0].get("timeout"), 240.0)
+            self.assertTrue(any(kind == "DREAM" and "回落成功" in text for kind, text in logs))
+
+        asyncio.run(run())
+
+    def test_write_dream_diary_degrades_only_when_no_model_available(self):
+        """chat 缺失但 fast 可用时仍然写日记，不再直接降级成原始对话。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            svc.config["user_log_enabled"] = False
+            svc.has_llm_config = lambda purpose, session_id="": purpose == "image"
+            svc._ulog = lambda session_id, kind, text: None
+            calls = []
+
+            async def fake_call_llm(system, user, **kwargs):
+                calls.append(kwargs)
+                return "# 2026-06-26 星期五 fast 日记\n内容。"
+
+            svc._call_llm = fake_call_llm
+
+            diary = await svc._write_dream_diary(
+                sid, "2026-06-26", "User: 晚安\nAssistant: 我会等你。", reason="manual",
+            )
+            self.assertIn("fast 日记", diary)
+            self.assertEqual([c.get("purpose") for c in calls], ["image"])
+
+            svc.has_llm_config = lambda purpose, session_id="": False
+            degraded = await svc._write_dream_diary(
+                sid, "2026-06-26", "User: 晚安\nAssistant: 我会等你。", reason="manual",
+            )
+            self.assertIn("User: 晚安", degraded)
+
+        asyncio.run(run())
+
     def test_dream_diary_preserves_existing_when_model_omits_old_content(self):
         svc = self.make_service()
         old = "# 2026-06-26 星期五 旧日记\n我和用户约好周末去水族馆。\n我还记得他不喜欢太吵的地方。"

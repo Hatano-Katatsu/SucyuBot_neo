@@ -11381,6 +11381,142 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_history_summary_falls_back_to_fast_model_on_chat_timeout(self):
+        """chat 模型超时时回落 fast 模型，提要仍然落库（强制思考模型跑不完不应停更）。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = svc._context_character_key(sid)
+            svc.config["user_log_enabled"] = False
+            svc.has_llm_config = lambda purpose, session_id="": purpose in ("chat", "image")
+            calls = []
+
+            async def fake_call_llm(system, user, **kwargs):
+                calls.append(kwargs)
+                if kwargs.get("purpose") == "chat":
+                    raise RuntimeError("LLM request timed out after 120s")
+                return "关系/剧情惯性：角色开始主动靠近。"
+
+            svc._call_llm = fake_call_llm
+            logs = []
+            svc._ulog = lambda session_id, kind, text: logs.append((kind, text))
+
+            await svc._generate_character_history_summary(
+                sid,
+                key,
+                [{"diary_date": "2026-08-18", "content": "今天发生了一件重要的事。"}],
+            )
+
+            self.assertEqual([c.get("purpose") for c in calls], ["chat", "image"])
+            self.assertEqual(
+                [c.get("tag") for c in calls],
+                ["history-summary", "history-summary-fast-fallback"],
+            )
+            stored = svc.app_store.get_context_meta(sid, key).get("character_history_summary") or ""
+            self.assertIn("角色开始主动靠近", stored)
+            self.assertTrue(any(kind == "HISTORY" and "回落成功" in text for kind, text in logs))
+            self.assertFalse(any(kind == "ERROR" for kind, text in logs))
+
+        asyncio.run(run())
+
+    def test_history_summary_relaxes_generation_budget_and_timeout(self):
+        """提要目标两千字且可能强制思考，必须显式放宽 max_tokens 与超时，而不是用 profile 默认值。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:1"
+            key = svc._context_character_key(sid)
+            svc.config["user_log_enabled"] = False
+            svc.config["character_history_summary_max_tokens"] = "7000"
+            svc.config["character_history_summary_timeout_seconds"] = "300"
+            svc.has_llm_config = lambda purpose, session_id="": purpose in ("chat", "image")
+            captured = {}
+
+            async def fake_call_llm(system, user, **kwargs):
+                captured.update(kwargs)
+                return "关系/剧情惯性：无明显变化。"
+
+            svc._call_llm = fake_call_llm
+            svc._ulog = lambda session_id, kind, text: None
+
+            await svc._generate_character_history_summary(
+                sid,
+                key,
+                [{"diary_date": "2026-08-18", "content": "今天发生了一件重要的事。"}],
+            )
+
+            self.assertEqual(captured.get("max_tokens"), 7000)
+            self.assertEqual(captured.get("timeout"), 300.0)
+            self.assertTrue(captured.get("disable_thinking"))
+
+            # 默认档位：思考长度不可预测，总预算必须给足，不能退回 profile 的小额度。
+            default_svc = self.make_service()
+            default_svc.config["user_log_enabled"] = False
+            default_svc.has_llm_config = lambda purpose, session_id="": purpose in ("chat", "image")
+            default_captured = {}
+
+            async def fake_default_call_llm(system, user, **kwargs):
+                default_captured.update(kwargs)
+                return "关系/剧情惯性：无明显变化。"
+
+            default_svc._call_llm = fake_default_call_llm
+            default_svc._ulog = lambda session_id, kind, text: None
+            await default_svc._generate_character_history_summary(
+                sid,
+                default_svc._context_character_key(sid),
+                [{"diary_date": "2026-08-18", "content": "今天发生了一件重要的事。"}],
+            )
+            self.assertGreaterEqual(default_captured.get("max_tokens"), 25600)
+            self.assertGreaterEqual(default_captured.get("timeout"), 240.0)
+
+        asyncio.run(run())
+
+    def test_llm_timeout_override_only_widens_profile_timeout(self):
+        """调用方传入的 timeout 只放宽、不收紧 profile 配置的超时。"""
+        async def run():
+            svc = self.make_service()
+            svc.config["chat_llm_api_key"] = "k"
+            captured_timeouts = []
+
+            class FakeResponse:
+                status = 200
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                async def json(self):
+                    return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+
+            class FakeSession:
+                def __init__(self, *args, **kwargs):
+                    captured_timeouts.append(kwargs["timeout"].total)
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                def post(self, url, **kwargs):
+                    return FakeResponse()
+
+            messages = [{"role": "user", "content": "hi"}]
+            with patch("telegram_comfyui_selfie.llm_runtime.aiohttp.ClientSession", FakeSession):
+                await svc._call_llm_messages(messages, purpose="chat", session_id="telegram:1")
+                base_timeout = captured_timeouts[-1]
+                await svc._call_llm_messages(
+                    messages, purpose="chat", session_id="telegram:1", timeout=base_timeout + 180,
+                )
+                self.assertEqual(captured_timeouts[-1], base_timeout + 180)
+                await svc._call_llm_messages(
+                    messages, purpose="chat", session_id="telegram:1", timeout=1,
+                )
+                self.assertEqual(captured_timeouts[-1], base_timeout)
+
+        asyncio.run(run())
+
     def test_history_summary_uses_long_memory_checkpoint_and_current_window(self):
         async def run():
             svc = self.make_service()
