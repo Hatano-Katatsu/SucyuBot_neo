@@ -83,6 +83,44 @@ class WorldLifePlanTestCase(ServiceFixtureMixin, unittest.TestCase):
         svc._save_life_plan_payload(sid, "小雨", payload)
         self.assertEqual(svc._life_plan_chat_context(sid, now=fixed_now), "")
 
+    def test_life_plan_chat_context_injects_only_current_period_slot(self):
+        """生活底色只注入当前时段那一条短事实；没有分时段槽时退回 texture 的第一行。"""
+        svc = self.make_service()
+        sid = "telegram:123"
+        fixed_now = datetime(2026, 7, 2, 15, 0, tzinfo=timezone.utc)  # afternoon
+        svc._session_now = lambda session_id="": fixed_now
+        state = svc._get_session_state(sid)
+        session_schema.set_character_value(state, "custom_character", "小雨")
+        svc._save_session_state(sid, state)
+        today = svc._life_today_date(sid, fixed_now)
+        svc._save_life_plan_payload(sid, "小雨", {
+            "long_goals": [],
+            "mid_goals": [],
+            "today": {
+                "date": today,
+                "events": [],
+                "texture": "昨晚没睡好\n午后翻了旧书\n夜里手机扣在茶几上",
+                "texture_slots": {
+                    "morning": "昨晚没睡好",
+                    "afternoon": "午后翻了旧书",
+                    "night": "夜里手机扣在茶几上",
+                },
+            },
+        })
+
+        context = svc._life_plan_chat_context(sid, now=fixed_now)
+        self.assertIn("午后翻了旧书", context)
+        self.assertNotIn("昨晚没睡好", context)
+        self.assertNotIn("夜里手机扣在茶几上", context)
+
+        payload = svc.app_store.get_life_plan(sid, "小雨")["payload"]
+        self.assertEqual(payload["today"]["texture_slots"]["night"], "夜里手机扣在茶几上")
+        payload["today"].pop("texture_slots", None)
+        svc._save_life_plan_payload(sid, "小雨", payload)
+        fallback = svc._life_plan_chat_context(sid, now=fixed_now)
+        self.assertIn("昨晚没睡好", fallback)
+        self.assertNotIn("午后翻了旧书", fallback)
+
     def test_life_plan_push_context_lists_current_period_candidates(self):
         svc = self.make_service()
         sid = "telegram:123"
@@ -506,7 +544,8 @@ class WorldLifePlanTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn(light_marker, noon_tail)
         self.assertNotEqual(noon_tail, night_tail)
 
-    def test_world_conditions_change_can_force_checkpoint_after_half_window(self):
+    def test_world_conditions_change_queues_normal_checkpoint_after_half_window(self):
+        """半稳定槽变化只按普通阈值排 checkpoint，不再 force：强制折叠只会把逐字历史换成摘要。"""
         async def run():
             svc = self.make_service()
             sid = "telegram:123"
@@ -520,7 +559,7 @@ class WorldLifePlanTestCase(ServiceFixtureMixin, unittest.TestCase):
             started = asyncio.Event()
 
             async def fake_checkpoint(session_id, character_key, keep, *, force=False):
-                self.assertTrue(force)
+                self.assertFalse(force)
                 started.set()
 
             svc._run_context_checkpoint = fake_checkpoint

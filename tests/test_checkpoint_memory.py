@@ -831,9 +831,12 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertNotIn("red blouse", semistable)
             historical_event = next(
                 message["content"] for message in messages
-                if message.get("role") == "system" and message.get("content", "").startswith("衣橱状态（系统记录")
+                if message.get("role") == "system" and message.get("content", "").startswith("衣橱记录（")
             )
+            # 进 prompt 时 state_json 被压成一行中文；存储里仍是可解析的 state_json
             self.assertIn("red blouse", historical_event)
+            self.assertNotIn("state_json", historical_event)
+            self.assertIn("bottom=half_off", historical_event)
             await asyncio.sleep(0)
 
         asyncio.run(run())
@@ -864,7 +867,7 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
             messages = svc._build_chat_messages(sid, "你换好了吗")
             event_index = next(
                 index for index, message in enumerate(messages)
-                if message.get("content", "").startswith("衣橱状态（系统记录")
+                if message.get("content", "").startswith("衣橱记录（")
             )
             self.assertLess(event_index, len(messages) - 1)
             self.assertEqual(messages[-1], {"role": "user", "content": "你换好了吗"})

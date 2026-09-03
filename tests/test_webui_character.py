@@ -720,10 +720,14 @@ class WebUICharacterTestCase(ServiceFixtureMixin, unittest.TestCase):
                 session_schema.get_saved_characters(after)["角色B"]["avatar_path"],
                 "avatars/telegram_123/角色B.png",
             )
+            self.assertEqual(b_context["sent_photos_history"][-1]["nltag"], "B final nltag")
             b_history_text = "\n".join(m.get("content", "") for m in b_context.get("chat_history", []))
-            self.assertIn("B final nltag", b_history_text)
+            # 照片记录只保留中文配文/意图，英文 nltag 留在 sent_photos_history
+            self.assertIn("照片记录：", b_history_text)
+            self.assertIn("配文：B caption", b_history_text)
+            self.assertNotIn("B final nltag", b_history_text)
             active_history_text = "\n".join(m.get("content", "") for m in session_schema.get_chat_history(after))
-            self.assertNotIn("B final nltag", active_history_text)
+            self.assertNotIn("B caption", active_history_text)
 
         asyncio.run(run())
 

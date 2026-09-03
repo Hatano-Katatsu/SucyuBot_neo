@@ -808,13 +808,15 @@ class TelegramIOMixin:
         if external_image_count:
             attachment_lines.append("外部引用消息里的图片：1 张")
         blocks.append("【图片附件】\n" + "\n".join(attachment_lines))
+        # 当前输入不再加「【用户当前输入】」标题：历史里的 user 消息没有这个标题，
+        # 当前轮与历史格式保持一致，模型才会把它们当成同一类输入。
         if text:
-            blocks.append("【用户当前输入】\n" + text)
+            blocks.append(text)
         elif current_count:
             fallback = "用户发送了多张图片。" if current_count > 1 else "用户发送了一张图片。"
-            blocks.append("【用户当前输入】\n" + fallback)
+            blocks.append(fallback)
         else:
-            blocks.append("【用户当前输入】\n用户正在回复或引用一条带图片的消息。")
+            blocks.append("用户正在回复或引用一条带图片的消息。")
         augmented_text = "\n\n".join(blocks).strip()
 
         content: list[dict[str, Any]] = [{"type": "text", "text": augmented_text}]
@@ -876,8 +878,8 @@ class TelegramIOMixin:
         if image_blocks:
             blocks.append("【图片描述】\n" + "\n".join(image_blocks))
         if text:
-            blocks.append("【用户当前输入】\n" + text)
+            blocks.append(text)
         elif image_blocks:
             fallback = "用户发送了多张图片。" if grouped else "用户发送了一张图片。"
-            blocks.append("【用户当前输入】\n" + fallback)
+            blocks.append(fallback)
         return "\n\n".join(blocks).strip()

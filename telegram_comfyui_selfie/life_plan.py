@@ -31,6 +31,9 @@ def _compact_dimension(value: Any) -> str:
     return text.strip("[]【】（）()：:，,。；; ")
 
 
+LIFE_TEXTURE_PERIODS = ("morning", "noon", "afternoon", "evening", "night")
+
+
 class LifePlanMixin:
     """角色生活线：结构化目标只给后台，聊天只注入降解后的生活底色。"""
 
@@ -351,6 +354,12 @@ class LifePlanMixin:
             "events": events,
             "texture": str(today.get("texture") or "").strip(),
         }
+        if isinstance(today.get("texture_slots"), dict):
+            plan["today"]["texture_slots"] = {
+                str(k): str(v).strip()[:40]
+                for k, v in today["texture_slots"].items()
+                if str(k) in LIFE_TEXTURE_PERIODS and str(v).strip()
+            }
         if isinstance(today.get("event_sides"), dict):
             plan["today"]["event_sides"] = {str(k): str(v).strip() for k, v in today["event_sides"].items() if str(v).strip()}
         plan["last_long_review_date"] = str(raw.get("last_long_review_date") or today_date)
@@ -1000,13 +1009,19 @@ class LifePlanMixin:
         selected = self._select_life_texture_mid_goals(plan, today_date=today_date, session_id=session_id)
         events = (plan.get("today") or {}).get("events") or []
         texture = ""
+        texture_slots: dict[str, str] = {}
         event_sides: dict[str, str] = {}
         if self.has_llm_config("chat", session_id) or self.has_llm_config("image", session_id):
             system = (
                 "Render private structured life plan into low-purpose daily texture for a roleplay chat bot. "
-                "Return strict JSON: {\"texture\":\"2-4 Chinese lines\", \"event_sides\":{\"event_id\":\"one vague Chinese state sentence\"}}.\n"
-                "Do not use these words in texture: 目标、计划、任务、为了、争取、完成、打算、必须. "
-                "No lists, no timetable, no '今天要做X'. Write mood, body state, vague background, and ordinary life residue. "
+                "Return strict JSON: {\"texture_slots\":{\"morning\":\"...\",\"noon\":\"...\",\"afternoon\":\"...\",\"evening\":\"...\",\"night\":\"...\"}, "
+                "\"event_sides\":{\"event_id\":\"one vague Chinese state sentence\"}}.\n"
+                "Each texture slot is ONE plain factual Chinese line of at most 20 characters describing a concrete small state "
+                "for that time of day (e.g. 昨晚没睡好 / 绿萝挪到了向阳角 / 想吃辣). "
+                "Plain statements only: no imagery, no metaphors, no literary prose, no '像……一样'. "
+                "The chat model imitates style far more than it cites content; prose here would leak into every reply. "
+                "Do not use these words: 目标、计划、任务、为了、争取、完成、打算、必须. "
+                "No lists inside a slot, no timetable, no '今天要做X'. "
                 "Event side sentences are for image push planner: they must describe current state/emotion, not progress reports."
             )
             base_user = (
@@ -1028,9 +1043,19 @@ class LifePlanMixin:
                         fail_fast=fail_fast,
                     )
                     if isinstance(parsed, dict):
+                        raw_slots = parsed.get("texture_slots") if isinstance(parsed.get("texture_slots"), dict) else {}
+                        slots = {
+                            period: str(raw_slots.get(period) or "").strip()[:40]
+                            for period in LIFE_TEXTURE_PERIODS
+                            if str(raw_slots.get(period) or "").strip()
+                            and not self._life_text_has_purpose_words(str(raw_slots.get(period) or ""))
+                        }
                         candidate = str(parsed.get("texture") or "").strip()
+                        if slots and not candidate:
+                            candidate = "\n".join(slots[p] for p in LIFE_TEXTURE_PERIODS if p in slots)
                         if candidate and not self._life_text_has_purpose_words(candidate):
                             texture = candidate
+                            texture_slots = slots
                             raw_sides = parsed.get("event_sides") if isinstance(parsed.get("event_sides"), dict) else {}
                             event_sides = {
                                 str(k): str(v).strip()
@@ -1050,6 +1075,7 @@ class LifePlanMixin:
         today = plan.setdefault("today", {"date": today_date, "events": []})
         today["date"] = today_date
         today["texture"] = texture
+        today["texture_slots"] = texture_slots
         for event in today.get("events") or []:
             side = event_sides.get(str(event.get("id") or "")) or self._fallback_life_event_side(event)
             if side and not self._life_text_has_purpose_words(side):
@@ -1361,10 +1387,19 @@ class LifePlanMixin:
         texture = str(today.get("texture") or "").strip()
         if not texture or self._life_text_has_purpose_words(texture):
             return ""
+        # 只注入当前时段那一条：给模型四个时段的底色，上午的对话里它也会去用"夜里"那句。
+        current = now or self._session_now(session_id)
+        period = self._life_time_hint_for_dt(current)
+        slots = today.get("texture_slots") if isinstance(today.get("texture_slots"), dict) else {}
+        line = str(slots.get(period) or "").strip()
+        if not line:
+            line = next((part.strip() for part in texture.splitlines() if part.strip()), texture)
+        if not line or self._life_text_has_purpose_words(line):
+            return ""
         return (
-            "生活底色（角色近日的心绪与生活背景。这不是日程或剧本：不要主动汇报、不要刻意推进、不要每轮都提及；"
-            "只在用户问起、或情境自然触及时自然流露。用户当前的话题永远优先于这里的任何内容）:\n"
-            f"{texture}"
+            "生活底色（角色今天的一个小状态；不是日程或剧本，不要主动汇报，只在用户问起或情境自然触及时带一句。"
+            "用户当前的话题永远优先）:\n"
+            f"{line}"
         )
 
     def _life_plan_event_for_now(self, session_id: str, *, now: datetime | None = None) -> dict[str, Any] | None:

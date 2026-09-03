@@ -6,7 +6,13 @@ import re
 from typing import Any
 
 from . import session_schema
-from .memory import USER_PROFILE_KIND, format_memory_lines, normalize_kind
+from .memory import (
+    USER_PROFILE_KIND,
+    compact_memory_summary,
+    format_memory_lines,
+    normalize_kind,
+    render_memory_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,22 +54,103 @@ class MemoryPolicyMixin:
             return ""
         return (self._get_session_state(session_id).get("custom_character") or "").strip()
 
-    def _long_term_memory_context(self, session_id: str, limit: int | None = None) -> str:
+    def _long_memory_stable_limit(self, default: int = 6) -> int:
+        try:
+            return max(1, min(20, int(self.config.get("long_memory_stable_limit", default) or default)))
+        except Exception:
+            return default
+
+    def _long_memory_topic_limit(self, default: int = 3) -> int:
+        try:
+            return max(0, min(10, int(self.config.get("long_memory_topic_limit", default) or default)))
+        except Exception:
+            return default
+
+    def _long_memory_candidates(self, session_id: str, limit: int | None = None) -> list[dict[str, Any]]:
         if not session_id or not self._long_memory_enabled():
-            return ""
+            return []
         character = self._memory_character(session_id)
-        memories = self.memory.context_memories(
+        return self.memory.context_memories(
             session_id, character=character, limit=limit or self._long_memory_limit()
         )
+
+    def _long_memory_stable_selection(self, memories: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """稳定层：全部用户画像 + 按重要度取前 N 条其它记忆；渲染顺序按 id 固定，内容不变时块不抖。"""
+        profiles = [m for m in memories if normalize_kind(m.get("kind", "")) == USER_PROFILE_KIND]
+        others = [m for m in memories if normalize_kind(m.get("kind", "")) != USER_PROFILE_KIND]
+        others.sort(key=lambda m: (-int(m.get("importance") or 0), int(m.get("id") or 0)))
+        selected = profiles + others[: self._long_memory_stable_limit()]
+        selected.sort(key=lambda m: (
+            0 if normalize_kind(m.get("kind", "")) == USER_PROFILE_KIND else 1,
+            int(m.get("id") or 0),
+        ))
+        return selected
+
+    def _long_term_memory_context(self, session_id: str, limit: int | None = None) -> str:
+        """历史前稳定层的长期记忆块：用户画像 + 高重要度固定 N 条，去掉 kind/重要度/标签元数据。"""
+        memories = self._long_memory_candidates(session_id, limit)
         if not memories:
             return ""
+        selected = self._long_memory_stable_selection(memories)
         # 在「注入 prompt」这一层记录使用：缓存命中也算被想起；touch 只写 last_used_at，
         # 不改内容，因此不失效 context_memories 读缓存。
         try:
-            self.memory.touch_memories(session_id, [m.get("id") for m in memories], character=character)
+            self.memory.touch_memories(
+                session_id,
+                [m.get("id") for m in selected],
+                character=self._memory_character(session_id),
+            )
         except Exception:
             logger.debug("touch memory last_used_at failed", exc_info=True)
-        return format_memory_lines(memories, with_ids=False)
+        return render_memory_context(selected)
+
+    def _long_term_memory_full_reference(self, session_id: str) -> str:
+        """给 checkpoint/记忆整理等后台任务看的完整记忆清单（带元数据），不用于聊天前缀。"""
+        memories = self._long_memory_candidates(session_id)
+        return format_memory_lines(memories, with_ids=False) if memories else ""
+
+    @staticmethod
+    def _memory_query_bigrams(text: str) -> set[str]:
+        compact = re.sub(r"[\s\W_]+", "", str(text or ""))
+        return {compact[i:i + 2] for i in range(max(0, len(compact) - 1))}
+
+    def _long_term_memory_topic_context(self, session_id: str, query_text: str) -> str:
+        """动态尾部的话题相关记忆：稳定层没选中的候选里，按与本轮输入/最近对话的字面重合挑 2-3 条。"""
+        topic_limit = self._long_memory_topic_limit()
+        if topic_limit <= 0 or not str(query_text or "").strip():
+            return ""
+        memories = self._long_memory_candidates(session_id)
+        if not memories:
+            return ""
+        stable_ids = {int(m.get("id") or 0) for m in self._long_memory_stable_selection(memories)}
+        query_bigrams = self._memory_query_bigrams(query_text)
+        if not query_bigrams:
+            return ""
+        query_text_compact = re.sub(r"\s+", "", str(query_text or ""))
+        scored: list[tuple[int, int, dict[str, Any]]] = []
+        for memory in memories:
+            if int(memory.get("id") or 0) in stable_ids:
+                continue
+            summary = str(memory.get("summary") or "")
+            tags = [str(t) for t in (memory.get("tags") or []) if len(str(t)) >= 2]
+            tag_hits = sum(1 for tag in tags if tag in query_text_compact)
+            overlap = len(self._memory_query_bigrams(summary) & query_bigrams)
+            score = tag_hits * 3 + overlap
+            if tag_hits >= 1 or overlap >= 3:
+                scored.append((score, int(memory.get("id") or 0), memory))
+        if not scored:
+            return ""
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        picked = [item[2] for item in scored[:topic_limit]]
+        try:
+            self.memory.touch_memories(
+                session_id,
+                [m.get("id") for m in picked],
+                character=self._memory_character(session_id),
+            )
+        except Exception:
+            logger.debug("touch topic memory last_used_at failed", exc_info=True)
+        return "\n".join(f"- {compact_memory_summary(str(m.get('summary') or ''))}" for m in picked)
 
     def _long_memory_structured_fields(self, session_id: str, character: str | None = None) -> list[tuple[str, Any]]:
         """返回指定角色的结构化边界，后台任务不得借用另一活动角色的 live state。"""
@@ -196,6 +283,7 @@ class MemoryPolicyMixin:
             "如果已有相关记忆已经覆盖，不要重复输出。\n"
             "必须输出严格 JSON: {\"memories\":[{\"kind\":\"user_profile|profile|preference|relationship|setting|boundary|visual|event|correction\","
             "\"summary\":\"一句中文记忆摘要\",\"importance\":1-5,\"tags\":[\"标签\"]}]}。没有值得保存的内容时 memories 为空数组。\n"
+            "summary 一条只写一个事实，不超过 60 字，不要用分号把多件事串成一条。\n"
             "importance 打分锚点（严格按此口径区分，不要默认都打 3）: "
             "1=转瞬即逝的日常细节（某顿吃了什么、某天穿了什么）；2=轻微偏好或顺带一提的爱好；"
             "3=明确的偏好、习惯或稳定事实；4=重要的关系进展、强烈好恶、明确约定；"

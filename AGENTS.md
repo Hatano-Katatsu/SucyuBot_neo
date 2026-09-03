@@ -94,12 +94,18 @@ telegram_comfyui_selfie/
 - 上下文按稳定度分层：全局规则、角色人格、低频记忆/历史、外观与世界半稳定槽、checkpoint、未折叠历史、精确时间与本轮输入动态尾部。
 - 天气半稳定槽使用天气描述与温度区间；精确温度只放动态尾部，避免小幅温度变化破坏稳定前缀。
 - 稳定前缀（system_static、stable_front）必须不含会话级插值（用户性别、空间关系、intimate 预判等），这些值统一放动态尾部；location-extract 等 prompt 的地点枚举从 `PLACE_TYPES` 运行时推导，不得硬编码两遍。
-- chat system_static 只保留「何时必须调用工具」与行为约束；工具参数机制以 tools schema 为单一来源，避免双份描述。
+- chat system_static（`CHAT_SYSTEM_STATIC_RULES`）只保留回复格式默认、工具一句话和照片记录说明，目标 ≤ 700 字；工具「何时调用」以 tools schema 的 description 为单一来源，不在 system 里再写一份。回复格式是「默认」不是「必须」，允许纯台词/纯动作/单句，避免四段模板。
+- 对话推进规则与事实来源优先级（`CHAT_FOCUS_RULES`）是关于如何取舍背景的元指令，固定放在动态尾部末段、紧贴本轮 user；性爱语言规则（`CHAT_INTIMATE_LANGUAGE_RULES`）只在裸体状态或本轮/最近两轮命中 `INTIMATE_SCENE_RE` 时注入尾部；语言理解规则只对 purity ≥ 5 的角色注入低频对话控制层；衣橱清单只在命中 `CLOSET_TRIGGER_RE` 或用户明确要图时注入尾部。发图频率/发图提醒不写进对话 prompt，节奏由 `_judge_image_moment` 单独判断（`selfie_frequency=关闭` 仍写一句硬约束）。
+- 背景层不得放导演指令：角色历史提要只写「关系/剧情惯性」「角色心理与心情界定」「未解事件」三段，不生成「新一天演绎提示/可用钩子」；生活底色按 `texture_slots` 只注入当前时段一条 ≤ 20 字的事实句；聊天动态尾部不带生图规划器材料（自然光硬规则、场景约束/推荐视角）。
+- 长期记忆分两层：稳定层 = 用户画像（按分号拆句去重成块）+ 按重要度取 `long_memory_stable_limit`（默认 6）条其它记忆，按 id 固定顺序、不带 kind/重要度/#tag；动态尾部按 `long_memory_topic_limit`（默认 3）条与本轮输入/最近两轮字面重合的记忆。非画像记忆单条 ≤ 150 字、一条一个事实；用户画像 ≤ 600 字。checkpoint 去重参考用 `_long_term_memory_full_reference()` 完整清单。
 - checkpoint 摘要 system/user 模板为模块级常量，chat/image 两分支共用同一文本仅 purpose 不同。
-- 短期注意规则（切场景后提醒模型不要续旧上下文）在 checkpoint 落库后自动清除，不在稳定前缀永久驻留。
-- `_chat_prompt_history()` 使用 checkpoint 之后的全量历史；裁剪后第一条必须为 `user`。
+- 短期注意规则（切场景后提醒模型不要续旧上下文）最多驻留 `SHORT_CONTEXT_NOTICE_MAX_TURNS`（2）轮角色回复，回复入库时由 `_expire_short_context_notice` 清除，不在稳定前缀永久驻留。
+- `_chat_prompt_history()` 使用 checkpoint 之后的全量历史；裁剪后第一条必须为 `user`。任何折叠路径（普通 checkpoint、推送前 `_checkpoint_context_before_push`）都只按 `context_window_message_limit` 超限才折、折完保留 `checkpoint_keep_message_limit` 条；推送前不得把窗口掏到只剩最后一轮。半稳定槽/世界条件/动态尾部变化只记录签名，不 `force` checkpoint。
+- 历史里的系统记录进 prompt 时压成一行中文（`_compact_system_history_message`）：旧格式照片历史只留意图/配文，衣橱 `state_json` 渲染为「衣橱记录：现在穿 …」且相邻记录只留最后一条；存储格式不变，`state_json` 仍供 checkpoint 同步解析。新写入的照片记录本身就是一行「照片记录：中文场景（视角；意图）｜配文」，英文 nltag 与视角元数据只留在 `sent_photos_history` 给规划器。推送文案同时以 `assistant` 消息入历史。
+- Telegram 输入增强只保留「【引用内容】」「【图片附件】/【图片描述】」分段，当前输入不加「【用户当前输入】」标题，与历史格式一致（历史入库仍兼容剥离旧标题）。
 - checkpoint 按最旧完整轮次和实际字符预算正序分页；超长单轮分块全部成功后才推进其消息 ID。所有入口共享 `session_id + character` 锁，SQLite 提交使用版本 CAS 且边界只允许单调前进。
-- 照片历史是精简后的历史 `system` 消息。dream 与长期记忆提取只消费真实 `user/assistant` 对话。
+- 照片记录是一行中文的历史 `system` 消息。dream 与长期记忆提取只消费真实 `user/assistant` 对话。
+- `scripts/context_quality_metrics.py` 从现有日志离线统计逐字历史量、背景/对话字数比、中段 system 记录、相邻回复 4-gram 重复率、四段模板率和折叠次数，改动上下文结构前后各跑一次做对比。
 - `/新场景`、`/上下文重置` 先提炼旧窗口，再清空模型侧上下文；SQLite 原始聊天保留给 dream。切场景同时清理裸体与衣物部件状态。
 - OpenAI 兼容端点返回在文本中的 DSML 工具调用时，要转换为内部工具调用并清理原始标记。
 

@@ -1426,10 +1426,11 @@ class WorldRuntimeMixin:
             lines.append(
                 f"- 日常此时多半在 {cp['label']} 一带（仅背景倾向，当前位置以对话为准，不要据此瞬移）"
             )
-        lines += [
-            f"- 用户位置: {user_text_line}",
-            f"- 场景约束: {'；'.join(world['constraints'])}",
-        ]
+        lines.append(f"- 用户位置: {user_text_line}")
+        if mode != "chat":
+            # 场景约束（天气避雨、推荐视角等）是给生图规划器的材料；聊天模型看到"推荐视角"
+            # 只会更想发图，且它位于 user 前一行的高注意力位置，聊天模式不输出。
+            lines.append(f"- 场景约束: {'；'.join(world['constraints'])}")
         if pin_location:
             lines.append(f"- 空间关系判断: {world['relation']}")
         return "\n".join(lines)

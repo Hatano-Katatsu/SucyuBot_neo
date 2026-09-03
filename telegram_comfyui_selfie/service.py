@@ -646,31 +646,44 @@ class TelegramComfyUIService(
             result = result[:max_chars].rstrip() + "..."
         return result
 
+    _PHOTO_VIEW_LABELS = {
+        "selfie": "自拍",
+        "mirror": "对镜自拍",
+        "pov": "用户视角",
+        "third": "第三人称",
+        "portrait": "他人帮拍",
+    }
+
     @staticmethod
     def _format_photo_history_system_message(photo: dict[str, Any]) -> dict[str, str]:
-        scene = str(photo.get("scene") or "").strip()
+        """聊天历史里的照片记录：一行中文，只给聊天模型承接"刚才那张"所需的信息。
+
+        英文 nltag、视角/来源等元数据留在 sent_photos_history 供生图规划器使用，不进聊天历史——
+        一段上千字的英文生图描述插在中文对话中间，比它前后三轮对话加起来还长，只会分散注意力。
+        """
+        scene = re.sub(r"\s+", " ", str(photo.get("scene") or "")).strip()
         caption = str(photo.get("caption") or "").strip()
-        nltag = str(photo.get("nltag") or "").strip() or scene
         source_intent = (
             str(photo.get("source_intent") or "").strip()
             or TelegramComfyUIService._compact_photo_source_intent(str(photo.get("source_description") or ""))
         )
-        view = str(photo.get("view") or "").strip()
-        source_kind = str(photo.get("source_kind") or "unknown").strip()
-        lines = [
-            "照片历史（系统记录，保留到 checkpoint/历史溢出统一裁剪；低权重连续性参考，用户明确提到照片/刚才画面时再引用，不要主动复述）：",
-            f"source_kind: {source_kind or 'unknown'}",
-            f"view: {view or '未知视角'}",
-            f"nltag: {nltag or '未记录'}",
-        ]
-        visual_state = str(photo.get("visual_state") or "").strip()
-        if visual_state:
-            lines.append(f"visual_state: {visual_state}")
+        view = str(photo.get("view") or "").strip().lower()
+        view_label = TelegramComfyUIService._PHOTO_VIEW_LABELS.get(view, "")
+        has_cjk = bool(re.search(r"[一-鿿]", scene))
+        summary = scene if has_cjk else ""
+        if len(summary) > 80:
+            summary = summary[:80].rstrip("，,、；;。 ") + "……"
+        details = []
+        if view_label:
+            details.append(view_label)
         if source_intent:
-            lines.append(f"source_intent: {source_intent}")
+            details.append(source_intent[:80])
+        body = summary or "一张贴合当时对话的照片"
+        if details:
+            body += f"（{'；'.join(details)}）"
         if caption and caption != scene:
-            lines.append(f"caption: {caption}")
-        return {"role": "system", "content": "\n".join(lines)}
+            body += f"｜配文：{caption[:80]}"
+        return {"role": "system", "content": f"照片记录：{body}"}
 
     def _pending_photo_history_bucket(self) -> dict[str, list[dict[str, str]]]:
         bucket = getattr(self, "_pending_photo_history_messages", None)

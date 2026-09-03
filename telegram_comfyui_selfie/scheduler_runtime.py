@@ -2042,6 +2042,7 @@ class SchedulerRuntimeMixin:
             "boundary/correction memories must be kept even when long unused. "
             "Every update or delete op must include a \"reason\" field: one short Chinese sentence citing the evidence "
             "(which memory, which diary entry, or which event justifies the change); add ops may optionally include it as a source note. "
+            "Each non-user_profile summary must state exactly one fact in at most 60 Chinese characters; never chain unrelated facts with '；'. "
             "Return strict JSON: {\"ops\":[{\"op\":\"add|update|delete\",\"id\":123,\"kind\":\"user_profile|profile|preference|relationship|setting|boundary|visual|event|correction\",\"summary\":\"...\",\"importance\":1-5,\"tags\":[\"...\"],\"reason\":\"依据...\"}]}"
         )
         diary_text = "\n\n".join(f"[{d.get('diary_date')}]\n{d.get('content','')}" for d in (diaries or []))
@@ -2184,7 +2185,9 @@ class SchedulerRuntimeMixin:
             "For time nodes, deadlines, appointments, schedules, or countdowns, do not drop them merely because the "
             "date or time has passed; keep or merge them until the related event is resolved, canceled, superseded, "
             "or has fully faded from recent diaries and checkpoint. "
-            "Each memory should be self-contained and cover a broader theme rather than a single fact. "
+            "Each non-user_profile memory must state exactly one self-contained fact in at most 60 Chinese characters; "
+            "do not chain several facts into one item with '；'. The user_profile item may list several facts separated by '；', "
+            "each at most 40 characters, with no repeated sentences. "
             "Never include manual memories. "
             "Importance scoring anchors (1-5, apply this scale consistently; do not default everything to 3): "
             "1=fleeting daily detail; 2=mild preference; 3=clear preference, habit, or stable fact; "
@@ -2397,7 +2400,7 @@ class SchedulerRuntimeMixin:
         system = (
             "你是角色历史提要生成器。根据上一次的历史提要和最近两天的日记，"
             "并参考已经整理过的长期记忆、当前 checkpoint 和当前窗口，生成一份简洁的角色发展脉络摘要。"
-            "涵盖关系进展、重大事件台账、情感变化、重要承诺、未解事件、角色个人轨迹和扮演计划。"
+            "涵盖关系进展、重大事件台账、情感变化、重要承诺、未解事件和角色个人轨迹。"
             "这是给聊天模型的长期背景参考，不是日记复述。"
             "长期记忆已经负责稳定事实、偏好、边界和纠正；角色历史不要把它们改写成第二份记忆列表。"
             "checkpoint 和当前窗口只负责近期连续性；角色历史只提升会改变长期剧情惯性、人物轨迹或后续扮演方向的内容。"
@@ -2411,9 +2414,10 @@ class SchedulerRuntimeMixin:
             "各段内部按长期影响和后续扮演价值由高到低排列，使最关键内容优先出现。"
             "日记是当前 bot 角色的一人称记录；日记里的「我」指角色本人，「用户」「对方」指人类用户。"
             "必须保持角色和用户的视角归属，不要把用户的动作、承诺、情绪写成角色的，也不要反过来。"
-            "建议结构为「关系/剧情惯性」「角色心理与心情界定」「未解事件」「新一天演绎提示」四段，内容必须精炼。"
-            "「新一天演绎提示」需要尊重剧情逻辑惯性，重点分析角色当前心理、防御/期待/羞耻/依恋等心情边界，"
-            "给出顺着既有矛盾和情绪自然延展的扮演方向；不要写死具体台词、地点、日程或剧情分支。"
+            "建议结构为「关系/剧情惯性」「角色心理与心情界定」「未解事件」三段，内容必须精炼。"
+            "只写已经发生的事实、当前心理状态和悬而未决的事项；不要写「演绎提示」「可用钩子」「可复用的说法」"
+            "「适合摆出的姿态」这类给编剧看的导演指令或扮演建议——聊天模型会把它们当成每轮必须复用的台词，"
+            "导致回复反复围绕同一组梗。不要写死具体台词、地点、日程或剧情分支。"
             "只基于提供的日记、长期记忆、checkpoint 和当前窗口，不要编造、推断或补充来源中没有明确提到的事件、规则、约定或承诺。"
             "如果只能判断情绪倾向，必须写成倾向或可能性，不要包装成已发生事实。"
             f"目标控制在 {target_limit} 字以内，不要为了接近字数而填充内容。只输出中文摘要文本。"
@@ -2446,7 +2450,8 @@ class SchedulerRuntimeMixin:
                         session_id,
                         (
                             "你是角色历史提要压缩器。将输入压缩到硬上限以内。必须保留关系阶段、重大转折、仍有效的承诺与边界、"
-                            "未解事件、角色心理边界，以及末尾的新一天演绎方向；只删除重复、铺垫、修辞、流水账和低价值细节。"
+                            "未解事件和角色心理边界；只删除重复、铺垫、修辞、流水账和低价值细节。"
+                            "如果输入里有「新一天演绎提示」「可用钩子」之类的扮演建议段落，直接整段删除。"
                             "不得添加输入中没有的信息，不得改变角色与用户的视角归属。"
                             f"输出不超过 {hard_limit} 字，只输出压缩后的中文提要。"
                         ),
@@ -3165,6 +3170,13 @@ class SchedulerRuntimeMixin:
                     source_description=source,
                     source_kind=source_kind,
                 )
+                # 推送文案在用户眼里就是角色说的一段话；作为 assistant 消息进历史，
+                # 用户回复推送时模型才能看到"我刚说了什么"，而不是只有一条低权重照片记录。
+                if caption:
+                    self._append_photo_history_message(
+                        session_id,
+                        {"role": "assistant", "content": caption},
+                    )
                 self._commit_image_state_mutation(session_id, state_mutation)
                 if local_interaction:
                     try:

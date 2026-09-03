@@ -128,11 +128,11 @@ class LongTermMemoryStore:
         tags: Any = None,
         source: str = "",
     ) -> int | None:
-        summary = (summary or "").strip()[:600]
+        kind = normalize_kind(kind)
+        summary = (summary or "").strip()[:summary_char_limit(kind)]
         if not session_id or not summary:
             return None
         character = (character or "").strip()
-        kind = normalize_kind(kind)
         importance = clamp_importance(importance)
         tag_list = normalize_tags(tags)
         now = time.time()
@@ -234,7 +234,7 @@ class LongTermMemoryStore:
 
             prepared.append({
                 "kind": kind,
-                "summary": summary.strip()[:600],
+                "summary": summary.strip()[:summary_char_limit(kind)],
                 "importance": raw_importance,
                 "tags": normalize_tags(raw_tags),
             })
@@ -706,3 +706,65 @@ def format_memory_lines(memories: list[dict[str, Any]], *, with_ids: bool = True
         prefix = f"{memory['id']}. " if with_ids else "- "
         lines.append(f"{prefix}[{memory.get('kind', 'event')}/重要度{memory.get('importance', 3)}] {memory.get('summary', '')}{tag_text}")
     return "\n".join(lines)
+
+
+# 单条记忆的字符上限：用户画像是唯一置顶的合并条目，允许更长；其它记忆一条只写一个事实。
+MEMORY_SUMMARY_CHAR_LIMIT = 150
+USER_PROFILE_SUMMARY_CHAR_LIMIT = 600
+
+
+def summary_char_limit(kind: str) -> int:
+    return USER_PROFILE_SUMMARY_CHAR_LIMIT if normalize_kind(kind) == USER_PROFILE_KIND else MEMORY_SUMMARY_CHAR_LIMIT
+
+
+def split_memory_sentences(summary: str) -> list[str]:
+    """把用分号/句号串起来的合并条目拆成去重后的短句。"""
+    parts = [p.strip(" ;；。") for p in re.split(r"[;；]\s*", str(summary or ""))]
+    seen: set[str] = set()
+    result: list[str] = []
+    for part in parts:
+        key = re.sub(r"\s+", "", part)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(part)
+    return result
+
+
+def compact_memory_summary(summary: str, limit: int = MEMORY_SUMMARY_CHAR_LIMIT) -> str:
+    """按句累加到上限；优先落在自然句边界，避免机械截断。"""
+    sentences = split_memory_sentences(summary)
+    if not sentences:
+        return str(summary or "").strip()[:limit]
+    kept: list[str] = []
+    total = 0
+    for sentence in sentences:
+        extra = len(sentence) + (1 if kept else 0)
+        if kept and total + extra > limit:
+            break
+        kept.append(sentence)
+        total += extra
+    text = "；".join(kept)
+    return text if len(text) <= limit else text[:limit]
+
+
+def render_memory_context(memories: list[dict[str, Any]]) -> str:
+    """给聊天模型看的长期记忆：用户画像按短句成块，其它记忆一行一个事实，不带元数据。"""
+    profile_sentences: list[str] = []
+    fact_lines: list[str] = []
+    for memory in memories:
+        summary = str(memory.get("summary") or "").strip()
+        if not summary:
+            continue
+        if normalize_kind(memory.get("kind", "")) == USER_PROFILE_KIND:
+            for sentence in split_memory_sentences(summary):
+                if sentence not in profile_sentences:
+                    profile_sentences.append(sentence)
+        else:
+            fact_lines.append(f"- {compact_memory_summary(summary)}")
+    blocks: list[str] = []
+    if profile_sentences:
+        blocks.append("用户画像:\n" + "\n".join(f"- {s}" for s in profile_sentences[:12]))
+    if fact_lines:
+        blocks.append("稳定事实与约定:\n" + "\n".join(fact_lines))
+    return "\n".join(blocks)
