@@ -653,6 +653,78 @@ class ModelProfileTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_opencode_endpoint_sends_session_header_and_custom_user_agent(self):
+        """OpenCode Go 端点必须携带 x-opencode-session 与专属 User-Agent。"""
+        async def run():
+            from telegram_comfyui_selfie.llm_runtime import _opencode_extra_headers
+
+            # 非 opencode.ai 端点不附加任何额外请求头。
+            self.assertEqual(_opencode_extra_headers("https://api.example.com/v1", "telegram:1"), {})
+            self.assertEqual(_opencode_extra_headers("", "telegram:1"), {})
+
+            svc = self.make_service()
+            svc.config["global_model_profiles"] = {
+                "go": {
+                    "name": "OpenCode Go",
+                    "base_url": "https://opencode.ai/zen/go/v1",
+                    "api_key": "secret",
+                    "model": "kimi-k3",
+                },
+            }
+            svc.config["default_chat_model_profile"] = "go"
+            captured: list[dict] = []
+
+            class FakeResponse:
+                status = 200
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                async def json(self):
+                    return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+
+            class FakeSession:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                def post(self, url, **kwargs):
+                    captured.append(copy.deepcopy(kwargs["headers"]))
+                    return FakeResponse()
+
+            with patch("telegram_comfyui_selfie.llm_runtime.aiohttp.ClientSession", FakeSession):
+                await svc._call_llm_messages(
+                    [{"role": "user", "content": "hello"}],
+                    purpose="chat",
+                    session_id="telegram:42",
+                )
+                await svc._call_llm_messages(
+                    [{"role": "user", "content": "hello again"}],
+                    purpose="chat",
+                    session_id="telegram:42",
+                )
+                await svc._call_llm_messages(
+                    [{"role": "user", "content": "background"}],
+                    purpose="fast",
+                    session_id="",
+                )
+
+            self.assertEqual(captured[0]["x-opencode-session"], "sucyubot-telegram-42")
+            # 同一会话内会话 ID 必须稳定，供服务端优化路由与提示缓存。
+            self.assertEqual(captured[0]["x-opencode-session"], captured[1]["x-opencode-session"])
+            self.assertEqual(captured[0]["User-Agent"], "SucyuBot/1.0")
+            self.assertEqual(captured[2]["x-opencode-session"], "sucyubot-task")
+
+        asyncio.run(run())
+
     def test_global_model_catalog_loads_once_and_deduplicates_sources(self):
         async def run():
             svc = self.make_service()

@@ -46,6 +46,32 @@ def _openai_chat_completions_url(value: Any) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
 
 
+def _opencode_session_id(session_id: str) -> str:
+    """为 OpenCode Go 端点推导稳定会话 ID（同一会话内恒定，便于路由与提示缓存）。"""
+    raw = str(session_id or "").strip() or "task"
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip("-") or "task"
+    return f"sucyubot-{cleaned}"
+
+
+def _opencode_extra_headers(api_base: Any, session_id: str) -> dict[str, str]:
+    """OpenCode Go 要求所有请求携带 x-opencode-session 与专属 User-Agent。
+
+    参见 https://opencode.ai/docs/go/：缺少会话头会被拒绝路由
+    （"Request is missing x-opencode-session and cannot be routed efficiently"）。
+    非 opencode.ai 端点返回空字典，不影响其他提供商。
+    """
+    try:
+        host = (urlsplit(str(api_base or "")).hostname or "").lower()
+    except ValueError:
+        return {}
+    if "opencode.ai" not in host:
+        return {}
+    return {
+        "x-opencode-session": _opencode_session_id(session_id),
+        "User-Agent": "SucyuBot/1.0",
+    }
+
+
 def _openai_models_url(value: Any) -> str:
     """从 Base URL 或完整 chat/completions URL 推导标准 models 目录地址。"""
     raw = str(value or "").strip().rstrip("/")
@@ -950,6 +976,12 @@ class LLMRuntimeMixin:
             except (TypeError, ValueError):
                 logger.warning("忽略非法 timeout 覆盖值 %r", timeout)
         last_error = None
+        request_headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept-Encoding": "gzip, deflate",
+        }
+        request_headers.update(_opencode_extra_headers(api_base, session_id))
         for attempt in range(2):
             connector = aiohttp.TCPConnector(resolver=PublicOnlyResolver()) if private_profile else None
             async with aiohttp.ClientSession(
@@ -961,7 +993,7 @@ class LLMRuntimeMixin:
                 try:
                     async with s.post(
                         request_url,
-                        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept-Encoding": "gzip, deflate"},
+                        headers=request_headers,
                         json=body,
                         allow_redirects=False,
                     ) as resp:
