@@ -98,6 +98,24 @@
     return auth?.role !== "admin" && userId ? `telegram:${userId}` : "";
   }
 
+  // hash 路由支持的视图与角色页二级 tab，顺序即快捷键 1-7 的映射顺序
+  const VIEW_ROUTE_IDS = Object.freeze(["overview", "settings", "characters", "world", "logs", "usage", "actions"]);
+  const CHARACTER_TAB_IDS = Object.freeze(["wardrobe", "memory", "diary"]);
+
+  function parseViewRoute(hash) {
+    const text = String(hash || "").trim().replace(/^#/, "").replace(/^\/+/, "");
+    const segments = text.split("/").filter(Boolean);
+    const view = VIEW_ROUTE_IDS.includes(segments[0]) ? segments[0] : "overview";
+    const tab = view === "characters" && CHARACTER_TAB_IDS.includes(segments[1]) ? segments[1] : "";
+    return { view, tab };
+  }
+
+  function buildViewRoute(view, tab) {
+    const name = VIEW_ROUTE_IDS.includes(view) ? view : "overview";
+    if (name === "characters" && CHARACTER_TAB_IDS.includes(tab)) return `#/characters/${tab}`;
+    return `#/${name}`;
+  }
+
   function resolveSelectedSession(sessions, selectedSession, auth = {}) {
     const fixedSession = authenticatedSessionId(auth);
     if (fixedSession) return fixedSession;
@@ -106,6 +124,19 @@
       .filter(Boolean);
     const selected = String(selectedSession || "").trim();
     return selected && ids.includes(selected) ? selected : (ids[0] || "");
+  }
+
+  // 通用防抖：窗口期内的连续调用只保留最后一次；依赖宿主环境的全局定时器
+  function debounce(fn, ms = 200) {
+    if (typeof fn !== "function") throw new TypeError("fn 必须是函数");
+    let timer = null;
+    return function debounced(...args) {
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        fn.apply(this, args);
+      }, ms);
+    };
   }
 
   function configTextareaValue(value) {
@@ -124,10 +155,13 @@
     ApiError,
     authenticatedSessionId,
     buildRequestOptions,
+    buildViewRoute,
     configTextareaValue,
+    debounce,
     firstInvalidNumberField,
     isFiniteNumberInput,
     parseApiResponse,
+    parseViewRoute,
     requestApi,
     resolveCommands,
     resolveSelectedSession,

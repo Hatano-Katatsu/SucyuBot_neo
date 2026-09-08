@@ -260,7 +260,10 @@ async def api_animaflow_discover(request: web.Request):
 async def api_save_config(request: web.Request):
     require_admin(request)
     service = service_from(request)
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_error("请求体不是合法 JSON")
     values = payload.get("values", payload)
     if not isinstance(values, dict):
         return json_error("配置数据格式不正确")
@@ -363,7 +366,10 @@ async def api_save_model_profile(request: web.Request):
         return json_error("profile_id 不能为空")
     if profile_id == VISION_PROFILE_DISABLED_ID:
         return json_error("该 profile_id 是视觉模型关闭状态的保留值")
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_error("请求体不是合法 JSON")
     if not isinstance(payload, dict):
         return json_error("模型配置必须是 JSON 对象")
     if "thinking_effort" in payload:
@@ -462,7 +468,10 @@ async def api_update_model_settings(request: web.Request):
         return json_error("缺少用户身份", status=403)
     if is_admin(request) and request.query.get("user_id"):
         user_id = request.query.get("user_id") or user_id
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_error("请求体不是合法 JSON")
     kwargs: dict[str, Any] = {}
     for key in ("chat_profile_id", "fast_profile_id", "vision_profile_id"):
         if key in payload:

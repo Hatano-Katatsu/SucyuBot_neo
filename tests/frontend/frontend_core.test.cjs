@@ -109,3 +109,51 @@ test("配置 textarea 把邂逅配对对象数组渲染为行文本", () => {
   assert.equal(core.configTextareaValue(null), "");
   assert.equal(core.configTextareaValue(undefined), "");
 });
+
+test("parseViewRoute 解析视图与角色页 tab，非法或空 hash 回退 overview", () => {
+  ["", "#", "#/", "#/unknown", null, undefined].forEach(hash => {
+    assert.deepEqual(core.parseViewRoute(hash), { view: "overview", tab: "" }, String(hash));
+  });
+  assert.deepEqual(core.parseViewRoute("#/world"), { view: "world", tab: "" });
+  assert.deepEqual(core.parseViewRoute("#/characters/memory"), { view: "characters", tab: "memory" });
+  assert.deepEqual(core.parseViewRoute("#/characters/diary"), { view: "characters", tab: "diary" });
+  // 非法 tab 与非角色页的 tab 段被忽略
+  assert.deepEqual(core.parseViewRoute("#/characters/nope"), { view: "characters", tab: "" });
+  assert.deepEqual(core.parseViewRoute("#/usage/memory"), { view: "usage", tab: "" });
+  // 多余段不影响前两段的解析
+  assert.deepEqual(core.parseViewRoute("#/characters/wardrobe/extra"), { view: "characters", tab: "wardrobe" });
+});
+
+test("buildViewRoute 生成规范 hash，非法输入回退 overview", () => {
+  assert.equal(core.buildViewRoute("overview"), "#/overview");
+  assert.equal(core.buildViewRoute("usage"), "#/usage");
+  assert.equal(core.buildViewRoute("characters", "memory"), "#/characters/memory");
+  assert.equal(core.buildViewRoute("characters", "nope"), "#/characters");
+  assert.equal(core.buildViewRoute("characters"), "#/characters");
+  // 非角色页不带 tab 段
+  assert.equal(core.buildViewRoute("logs", "memory"), "#/logs");
+  assert.equal(core.buildViewRoute("nope"), "#/overview");
+});
+
+test("parseViewRoute 与 buildViewRoute 互为往返", () => {
+  ["overview", "settings", "characters", "world", "logs", "usage", "actions"].forEach(view => {
+    assert.deepEqual(core.parseViewRoute(core.buildViewRoute(view)), { view, tab: "" });
+  });
+  ["wardrobe", "memory", "diary"].forEach(tab => {
+    assert.deepEqual(core.parseViewRoute(core.buildViewRoute("characters", tab)), { view: "characters", tab });
+  });
+});
+
+test("debounce 窗口期内只执行最后一次调用并透传参数", async () => {
+  const calls = [];
+  const debounced = core.debounce((value) => calls.push(value), 20);
+  debounced("a");
+  debounced("b");
+  debounced("c");
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.deepEqual(calls, ["c"]);
+  // 窗口结束后可再次触发
+  debounced("d");
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.deepEqual(calls, ["c", "d"]);
+});

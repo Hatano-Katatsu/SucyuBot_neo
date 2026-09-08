@@ -235,7 +235,10 @@ async def api_save_character(request: web.Request):
     sid = request.match_info["session_id"]
     if not session_allowed(request, sid):
         return json_error("无权访问此会话", status=403)
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_error("请求体不是合法 JSON")
     if not isinstance(payload, dict):
         return json_error("角色数据必须是 JSON 对象")
     # activate/导入会切换活动角色，纳入角色操作锁，与头像/推送/Telegram 消息处理互斥。

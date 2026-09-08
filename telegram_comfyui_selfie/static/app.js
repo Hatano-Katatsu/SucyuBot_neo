@@ -9,6 +9,7 @@ const state = {
   characterData: null,
   memoryDiaryTab: "wardrobe",
   selectedWorldSession: null,
+  currentView: "overview",
   worldPreview: null,
   logs: [],
   selectedLog: null,
@@ -293,12 +294,56 @@ function delay(ms) {
   return new Promise(resolve => window.setTimeout(resolve, ms));
 }
 
-function switchView(name) {
+// 视图是否对当前用户可见：usage 等管理员视图对普通用户隐藏，无权限路由回退 overview
+function isViewAccessible(name) {
+  if (!viewMeta[name]) return false;
+  if (name === "usage" && state.auth?.role !== "admin") return false;
+  return true;
+}
+
+// 同步地址栏 hash；push=true 由用户主动导航产生历史记录，其余用 replaceState 不新增历史条目
+function syncRouteToHash(route, { push = false } = {}) {
+  const target = frontendCore.buildViewRoute(route.view, route.tab);
+  if (window.location.hash === target) return;
+  if (push) window.location.hash = target;
+  else window.history.replaceState(null, "", target);
+}
+
+// 按当前地址栏 hash 恢复视图与角色页 tab；hash 与当前状态一致时不重复加载
+function applyHashRoute() {
+  const route = frontendCore.parseViewRoute(window.location.hash);
+  const view = isViewAccessible(route.view) ? route.view : "overview";
+  if (view !== state.currentView) {
+    switchView(view, { tab: route.tab });
+    return;
+  }
+  if (view === "characters" && route.tab && route.tab !== state.memoryDiaryTab) {
+    switchMemoryDiaryTab(route.tab);
+    return;
+  }
+  // 空 hash 保持地址栏原样直接停在 overview；非法或无权限 hash 规范化为当前实际路由
+  const tab = view === "characters" ? state.memoryDiaryTab : "";
+  if (window.location.hash && window.location.hash !== frontendCore.buildViewRoute(view, tab)) {
+    syncRouteToHash({ view, tab });
+  }
+}
+
+function switchView(name, { tab = "", push = false } = {}) {
+  // 无权限视图不切换（hash 入口的回退由 applyHashRoute 处理）
+  if (!isViewAccessible(name)) return;
+  state.currentView = name;
   _stopOverviewPolling();
-  $all(".nav").forEach(btn => btn.classList.toggle("active", btn.dataset.view === name));
+  $all(".nav").forEach(btn => {
+    const active = btn.dataset.view === name;
+    btn.classList.toggle("active", active);
+    if (active) btn.setAttribute("aria-current", "page");
+    else btn.removeAttribute("aria-current");
+  });
   $all(".view").forEach(view => view.classList.toggle("active", view.id === `view-${name}`));
   $("#view-title").textContent = viewMeta[name][0];
   $("#view-subtitle").textContent = viewMeta[name][1];
+  if (name === "characters" && tab) switchMemoryDiaryTab(tab, { skipRoute: true });
+  syncRouteToHash({ view: name, tab: name === "characters" ? state.memoryDiaryTab : "" }, { push });
   if (name === "overview") { loadFeedbackBoard(); _startOverviewPolling(); }
   if (name === "world") loadWorldSessions();
   if (name === "logs") loadLogs();
@@ -307,7 +352,7 @@ function switchView(name) {
   if (name === "settings" && state.auth?.role === "admin") loadGlobalModels();
 }
 
-async function loadAll() {
+async function loadAll({ forceConfig = false } = {}) {
   // 先获取身份，决定是否加载管理员专属数据
   try {
     const me = await api("/api/auth/me");
@@ -361,7 +406,7 @@ async function loadAll() {
   loadFeedbackBoard();
   renderStatus();
   if (isAdmin) {
-    renderConfig();
+    renderConfig({ force: forceConfig });
     await loadGlobalModels({ data: modelData });
   }
   renderWorldSessionList();
@@ -372,6 +417,8 @@ async function loadAll() {
   if (document.querySelector('.nav[data-view="overview"].active')) {
     _startOverviewPolling();
   }
+  // 数据与身份就绪后按地址栏 hash 恢复视图（hash 与当前视图一致时不重复加载）
+  applyHashRoute();
 }
 
 function renderSessionSelector() {
@@ -755,8 +802,20 @@ function wireCrossWorldConfig(form) {
   sync();
 }
 
-function renderConfig() {
+// 设置页未保存修改提示条；dirty 时显示，提示自动刷新保留了表单内容
+function syncConfigDirtyNotice(dirty) {
+  const notice = $("#config-dirty-notice");
+  if (notice) notice.hidden = !dirty;
+}
+
+function renderConfig({ force = false } = {}) {
   const form = $("#config-form");
+  // 表单有未保存修改时不静默重建（刷新/启动停止机器人等全量加载会走到这里）；
+  // 只有保存成功或用户点「撤销未保存」（force）才允许覆盖表单内容。
+  if (!force && form.dataset.dirty === "true") {
+    syncConfigDirtyNotice(true);
+    return;
+  }
   form.innerHTML = "";
   for (const [title, fields] of configSections) {
     const fs = document.createElement("fieldset");
@@ -803,9 +862,18 @@ function renderConfig() {
   wireCrossWorldConfig(form);
   const actions = document.createElement("div");
   actions.className = "form-actions";
-  actions.innerHTML = `<button type="button" id="reload-config">撤销未保存</button><button class="primary" type="submit">保存设置</button>`;
+  actions.innerHTML = `<button class="btn" type="button" id="reload-config">撤销未保存</button><button class="btn primary" type="submit">保存设置</button>`;
   form.appendChild(actions);
-  $("#reload-config").onclick = () => loadAll().then(() => toast("已重新载入配置"));
+  $("#reload-config").onclick = () => loadAll({ forceConfig: true }).then(() => toast("已重新载入配置"));
+  // 脏检查：任何输入改动标记 dirty（oninput/onchange 赋值不叠加监听器，重建后只需重挂一次）
+  form.dataset.dirty = "false";
+  syncConfigDirtyNotice(false);
+  const markDirty = () => {
+    form.dataset.dirty = "true";
+    syncConfigDirtyNotice(true);
+  };
+  form.oninput = markDirty;
+  form.onchange = markDirty;
 }
 
 function formValues(form) {
@@ -859,6 +927,29 @@ function syncConfigGlobalProfileSelects() {
   }
 }
 
+// Kimi K2.7 Code 强制思考：统一判定模型名与同步思考选项可用状态，全局/用户表单共用
+const THINKING_EFFORT_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const KIMI_K27_THINKING_HINT = "Kimi K2.7 Code 强制思考；OpenCode Go 不接受 none";
+
+function thinkingEffortOptions(labelPrefix = "") {
+  return THINKING_EFFORT_LEVELS.map(value => `<option value="${value}">${labelPrefix}${value}</option>`).join("");
+}
+
+function isKimiK27Model(model) {
+  const value = String(model || "").trim().toLowerCase().replaceAll("_", "-");
+  return value.includes("kimi-k2.7-code") || value.includes("kimi-k2-7-code") || value.startsWith("kimi-for-coding");
+}
+
+function syncThinkingCapabilityOptions(selectEl, locked, blockedValues) {
+  if (!selectEl) return;
+  for (const value of blockedValues) {
+    const option = selectEl.querySelector(`option[value="${value}"]`);
+    if (option) option.disabled = locked;
+  }
+  if (locked && blockedValues.includes(selectEl.value)) selectEl.value = "";
+  selectEl.title = locked ? KIMI_K27_THINKING_HINT : "";
+}
+
 async function loadGlobalModels({ selectedProfileId = "", data = null } = {}) {
   const box = $("#global-model-manager");
   if (!box || state.auth?.role !== "admin") return;
@@ -889,7 +980,7 @@ async function loadGlobalModels({ selectedProfileId = "", data = null } = {}) {
           ${profileOptions}
         </select>
       </label>
-      <button id="global-model-new" type="button">新建全局 profile</button>
+      <button id="global-model-new" class="btn" type="button">新建全局 profile</button>
       <span class="muted">已配置 ${Object.keys(globalProfiles).length} 个；启动时发现 ${availableGlobalModels.length} 个可用模型</span>
     </div>
     <form id="global-model-profile-form" class="global-model-form">
@@ -903,19 +994,13 @@ async function loadGlobalModels({ selectedProfileId = "", data = null } = {}) {
         <label>超时秒数<input name="timeout" type="number" min="1" step="1" inputmode="numeric" placeholder="可选"></label>
         <label>默认思考 Effort<select name="thinking_effort">
           <option value="">不指定（沿用模型开关）</option>
-          <option value="none">none</option>
-          <option value="minimal">minimal</option>
-          <option value="low">low</option>
-          <option value="medium">medium</option>
-          <option value="high">high</option>
-          <option value="xhigh">xhigh</option>
-          <option value="max">max</option>
+          ${thinkingEffortOptions()}
         </select></label>
       </div>
       <datalist id="${modelCatalogId}">${modelCatalogOptions}</datalist>
       <div class="form-actions global-model-actions">
-        <button id="global-model-save" class="primary" type="submit">添加全局模型</button>
-        <button id="global-model-delete" class="danger" type="button" disabled>删除全局模型</button>
+        <button id="global-model-save" class="btn primary" type="submit">添加全局模型</button>
+        <button id="global-model-delete" class="btn danger" type="button" disabled>删除全局模型</button>
       </div>
       <p class="muted">从“模型名”的候选列表选择启动时发现的模型，可自动带入来源 Base URL，并安全复用同端点已有全局 profile 的密钥。默认思考 Effort 会随该 profile 生效，但用户级思考设置仍有更高优先级。DeepSeek V4 实际区分“思考开关”和 effort；OpenCode Go 的 Kimi K2.7 Code 不允许 none，实测 minimal、low、medium、high、xhigh、max 均可请求；Kimi K3 原生档位为 low、high、max。兼容端点可能忽略思考参数，首页模型测试显示的实际返回长度才是最终结果。API Key 永远不会回显；编辑时留空即可保留。</p>
     </form>
@@ -928,12 +1013,7 @@ async function loadGlobalModels({ selectedProfileId = "", data = null } = {}) {
   const saveButton = $("#global-model-save");
   const deleteButton = $("#global-model-delete");
   const syncGlobalThinkingCapability = () => {
-    const model = String(modelInput.value || "").trim().toLowerCase().replaceAll("_", "-");
-    const kimiK27 = model.includes("kimi-k2.7-code") || model.includes("kimi-k2-7-code") || model.startsWith("kimi-for-coding");
-    const noneOption = form.elements.thinking_effort.querySelector('option[value="none"]');
-    if (noneOption) noneOption.disabled = kimiK27;
-    if (kimiK27 && form.elements.thinking_effort.value === "none") form.elements.thinking_effort.value = "";
-    form.elements.thinking_effort.title = kimiK27 ? "Kimi K2.7 Code 强制思考；OpenCode Go 不接受 none" : "";
+    syncThinkingCapabilityOptions(form.elements.thinking_effort, isKimiK27Model(modelInput.value), ["none"]);
   };
 
   const showProfile = profileId => {
@@ -1071,13 +1151,7 @@ async function loadModels() {
       <option value="">跟随模型</option>
       <option value="true">开启</option>
       <option value="false">关闭</option>
-      <option value="none">Effort · none</option>
-      <option value="minimal">Effort · minimal</option>
-      <option value="low">Effort · low</option>
-      <option value="medium">Effort · medium</option>
-      <option value="high">Effort · high</option>
-      <option value="xhigh">Effort · xhigh</option>
-      <option value="max">Effort · max</option>
+      ${thinkingEffortOptions("Effort · ")}
     </select></label>`;
   box.innerHTML = `
     <form id="model-settings-form" class="model-settings-form">
@@ -1087,7 +1161,7 @@ async function loadModels() {
       ${thinkingSelect("chat_thinking", "对话思考")}
       ${thinkingSelect("fast_thinking", "快速思考")}
       ${thinkingSelect("vision_thinking", "视觉思考")}
-      <button class="primary" type="submit">保存模型选择</button>
+      <button class="btn primary" type="submit">保存模型选择</button>
       <p class="muted">视觉模型留空表示跟随管理员设置的全局视觉模型；选择“关闭”才会只对当前用户禁用视觉理解。OpenCode Go 的 Kimi K2.7 Code 不能关闭思考或使用 none；其他非 none 档位可被端点接受。</p>
     </form>
     <div class="model-current">
@@ -1104,8 +1178,8 @@ async function loadModels() {
       <label>模型名<input name="model" placeholder="deepseek-chat" autocomplete="off"></label>
       <label>最大 tokens<input name="max_tokens" type="number" min="1" step="1" inputmode="decimal" placeholder="可选"></label>
       <label>超时秒数<input name="timeout" type="number" min="1" step="1" inputmode="decimal" placeholder="可选"></label>
-      <button type="submit">保存私有模型 profile</button>
-      <button id="delete-model-profile" class="danger" type="button">删除私有 profile</button>
+      <button class="btn" type="submit">保存私有模型 profile</button>
+      <button id="delete-model-profile" class="btn danger" type="button">删除私有 profile</button>
       <p class="muted">这里只管理当前用户的私有 profile；管理员请到“设置 → 全局模型配置”维护全局 profile。API Key 保存空值或 ******** 时会保留旧密钥。对话与视觉选择解析到同一 API Base 和模型名时，用户发送或显式引用的图片会直接进入对话模型；否则先由视觉模型转成文字描述。</p>
     </form>
   `;
@@ -1116,23 +1190,13 @@ async function loadModels() {
     const el = box.querySelector(`[name=${key}]`);
     if (el && settings[key] !== undefined && settings[key] !== null) el.value = String(settings[key]);
   });
-  const isKimiK27 = model => {
-    const value = String(model || "").trim().toLowerCase().replaceAll("_", "-");
-    return value.includes("kimi-k2.7-code") || value.includes("kimi-k2-7-code") || value.startsWith("kimi-for-coding");
-  };
   const syncThinkingCapability = (profileField, thinkingField, globalDefault) => {
     const profileSelect = box.querySelector(`[name=${profileField}]`);
     const thinking = box.querySelector(`[name=${thinkingField}]`);
     if (!profileSelect || !thinking) return;
     const selectedId = profileSelect.value || globalDefault || "";
     const profile = allProfiles[selectedId] || {};
-    const locked = isKimiK27(profile.model);
-    for (const value of ["false", "none"]) {
-      const option = thinking.querySelector(`option[value="${value}"]`);
-      if (option) option.disabled = locked;
-    }
-    if (locked && ["false", "none"].includes(thinking.value)) thinking.value = "";
-    thinking.title = locked ? "Kimi K2.7 Code 强制思考；OpenCode Go 不接受 none" : "";
+    syncThinkingCapabilityOptions(thinking, isKimiK27Model(profile.model), ["false", "none"]);
   };
   const syncAllThinkingCapabilities = () => {
     syncThinkingCapability("chat_profile_id", "chat_thinking", data.default_chat_model_profile);
@@ -1258,7 +1322,35 @@ async function runPromptCleanup(applyChanges, button) {
 async function initEvents() {
   document.addEventListener("click", handleLifePlanAction);
   document.addEventListener("click", handleCharacterInteractionAction);
-  $all(".nav").forEach(btn => btn.onclick = () => switchView(btn.dataset.view));
+  // 窄屏抽屉导航（≤900px）：汉堡按钮开合，遮罩/ESC/选视图后关闭，焦点在按钮与抽屉间往返；
+  // 桌面端按钮被 CSS 隐藏，此处逻辑全部空转无副作用
+  const navToggle = $("#nav-toggle");
+  const navBackdrop = $("#nav-backdrop");
+  const setNavOpen = open => {
+    document.body.classList.toggle("nav-open", open);
+    navToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    navToggle.setAttribute("aria-label", open ? "关闭导航菜单" : "打开导航菜单");
+    navBackdrop.hidden = !open;
+    if (open) {
+      (document.querySelector("#sidebar-nav .nav.active") || document.querySelector("#sidebar-nav .nav"))?.focus();
+    } else if (document.activeElement?.closest("#sidebar-nav")) {
+      navToggle.focus();
+    }
+  };
+  navToggle.onclick = () => setNavOpen(!document.body.classList.contains("nav-open"));
+  navBackdrop.onclick = () => setNavOpen(false);
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && document.body.classList.contains("nav-open")) setNavOpen(false);
+  });
+  // 窗口从窄屏拉回桌面时收起抽屉，避免 aria-expanded 与实际可见状态不一致
+  window.matchMedia("(min-width: 901px)").addEventListener("change", event => {
+    if (event.matches) setNavOpen(false);
+  });
+  $all(".nav").forEach(btn => btn.onclick = () => {
+    switchView(btn.dataset.view, { push: true });
+    setNavOpen(false);
+  });
+  window.addEventListener("hashchange", () => applyHashRoute());
   $("#refresh-btn").onclick = () => loadAll().then(() => toast("已刷新"));
   $("#restart-btn").onclick = async () => {
     if (!confirm("确认重启服务？\n\n服务将短暂中断后自动恢复。")) return;
@@ -1268,7 +1360,7 @@ async function initEvents() {
       await api("/api/service/restart", { method: "POST" });
       toast("重启指令已发送，服务将在几秒后恢复");
     } catch (e) {
-      toast("重启失败: " + e.message, true);
+      toast("重启失败: " + e.message, "error");
     } finally {
       setBusy(btn, false);
     }
@@ -1338,7 +1430,7 @@ async function initEvents() {
     else if (state.selectedLogType) await selectSystemLog(state.selectedLogType);
     toast("日志已刷新");
   };
-  $("#log-filter").oninput = () => renderFilteredLog(state.logRawContent);
+  $("#log-filter").oninput = frontendCore.debounce(() => renderFilteredLog(state.logRawContent), 200);
   $("#log-level").onchange = async event => {
     state.logLevel = event.currentTarget.value === "debug" ? "debug" : "info";
     state.selectedLog = null;
@@ -1408,9 +1500,11 @@ async function initEvents() {
     loadUsage().then(() => toast("用量已刷新")).finally(() => setBusy(btn, false));
   };
   $("#usage-range").onchange = () => loadUsage();
+  // 筛选/排序统一走 200ms 防抖，避免文本筛选每次击键都重渲染整个 tbody
+  const rerenderUsageDebounced = frontendCore.debounce(() => { if (state.usage) renderUsage(state.usage); }, 200);
   ["usage-filter-text", "usage-filter-profile", "usage-filter-model", "usage-filter-purpose", "usage-filter-tag", "usage-sort"].forEach(id => {
     const el = $(`#${id}`);
-    if (el) el.oninput = el.onchange = () => { if (state.usage) renderUsage(state.usage); };
+    if (el) el.oninput = el.onchange = rerenderUsageDebounced;
   });
   $("#log-clear").onclick = async () => {
     if (!state.selectedLog) return;
@@ -1438,6 +1532,8 @@ async function initEvents() {
         throw new Error("字段「" + (invalid.closest("label")?.textContent?.trim() || invalid.name) + "」必须是有效数字");
       }
       await api("/api/config", { method: "POST", body: { values: formValues(event.currentTarget) } });
+      // 保存成功后先清 dirty，随后的全量加载才能用新配置重建表单
+      event.currentTarget.dataset.dirty = "false";
       await loadAll();
       toast("设置已保存");
     } catch (err) {
@@ -1511,7 +1607,7 @@ async function initEvents() {
     }
   };
   $all("#view-characters .tab").forEach(tab => {
-    tab.onclick = () => switchMemoryDiaryTab(tab.dataset.tab);
+    tab.onclick = () => switchMemoryDiaryTab(tab.dataset.tab, { push: true });
   });
   $("#memory-diary-refresh").onclick = async (event) => {
     if (!state.selectedSession || !state.selectedCharacter) return;
@@ -1688,9 +1784,11 @@ async function initEvents() {
     }
     if (editable || event.ctrlKey || event.metaKey || event.altKey) return;
     const key = Number(event.key);
-    if (key >= 1 && key <= 5) {
-      const views = Object.keys(viewMeta);
-      if (key <= views.length) switchView(views[key - 1]);
+    // 快捷键 1-7 按侧边栏顺序切换视图，无权限视图由 switchView 忽略
+    const views = Object.keys(viewMeta);
+    if (key >= 1 && key <= views.length) {
+      switchView(views[key - 1], { push: true });
+      setNavOpen(false);
     }
   });
 }

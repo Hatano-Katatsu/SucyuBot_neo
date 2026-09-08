@@ -8,6 +8,16 @@ function characterApiKey(id) {
   return char && char.is_default === true ? "__default__" : id;
 }
 
+// 角色级异步加载竞态守卫：进入时捕获「会话::角色」快照，响应落地时与当前值比对，
+// 期间用户切换角色或会话则放弃本次写入，替代各处手工比较 state.selectedCharacter。
+function characterLoadToken() {
+  return `${state.selectedSession || ""}::${state.selectedCharacter || ""}`;
+}
+
+function isCharacterLoadCurrent(token) {
+  return token === characterLoadToken();
+}
+
 function compactText(value, max = 80) {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   if (!text) return "";
@@ -281,8 +291,8 @@ function closetRows(clothing = {}) {
         <div class="closet-option${isActive ? " is-active" : ""}">
           <button class="closet-choice" type="button" data-wardrobe-action="wear-closet" data-name="${escapeHtml(name)}" title="${escapeHtml(entry.tags || "")}"${isActive ? " disabled" : ""}>${escapeHtml(closetDisplayName(name, entry))}</button>
           <span class="closet-option-tools">
-            <button class="ghost tiny" type="button" data-wardrobe-action="edit-closet" data-name="${escapeHtml(name)}" data-tags="${escapeHtml(entry.tags || "")}">改</button>
-            <button class="ghost tiny danger" type="button" data-wardrobe-action="delete-closet" data-name="${escapeHtml(name)}">删</button>
+            <button class="btn ghost tiny" type="button" data-wardrobe-action="edit-closet" data-name="${escapeHtml(name)}" data-tags="${escapeHtml(entry.tags || "")}">改</button>
+            <button class="btn ghost tiny danger" type="button" data-wardrobe-action="delete-closet" data-name="${escapeHtml(name)}">删</button>
           </span>
         </div>`;
         }).join("")}
@@ -308,15 +318,15 @@ function renderRuntimeClothingPanel(char, isActive) {
           <p>这里改的是当前角色现在穿在身上的衣服；会直接影响聊天后的生图。</p>
         </div>
         <div class="runtime-clothing-head-actions">
-          <button class="ghost" type="button" data-wardrobe-action="clear-item-states">一键还原状态</button>
-          <button class="ghost danger" type="button" data-wardrobe-action="clear">清空当前穿搭</button>
+          <button class="btn ghost" type="button" data-wardrobe-action="clear-item-states">一键还原状态</button>
+          <button class="btn ghost danger" type="button" data-wardrobe-action="clear">清空当前穿搭</button>
         </div>
       </div>
       <div class="wardrobe-editor">
         <textarea id="wardrobe-description" rows="2" placeholder="输入换装：例如 黑色丝绸睡裙，白色棉质针织开衫"></textarea>
         <div class="wardrobe-editor-actions">
-          <button class="primary" type="button" data-wardrobe-action="apply">直接换上</button>
-          <button class="ghost" type="button" data-wardrobe-action="save-closet">存进衣橱（暂不换）</button>
+          <button class="btn primary" type="button" data-wardrobe-action="apply">直接换上</button>
+          <button class="btn ghost" type="button" data-wardrobe-action="save-closet">存进衣橱（暂不换）</button>
         </div>
       </div>
       <div class="runtime-clothing-layout">
@@ -342,7 +352,7 @@ function renderRuntimeClothingPanel(char, isActive) {
           </div>
           ${wardrobeRows(clothing.public_fallback_outfit || {})}
           ${clothing.public_fallback_in_current ? `
-            <button class="ghost" type="button" data-wardrobe-action="stash-public-fallback">从当前穿搭移出兜底</button>
+            <button class="btn ghost" type="button" data-wardrobe-action="stash-public-fallback">从当前穿搭移出兜底</button>
           ` : ""}
         </section>
         <section class="runtime-clothing-pane is-closet">
@@ -367,8 +377,8 @@ function startClosetEdit(button) {
       <input type="text" data-closet-edit="name" placeholder="名称（衣橱里显示的名字）">
       <input type="text" data-closet-edit="tags" placeholder="英文标签（生图用，逗号分隔）">
       <div class="closet-edit-actions">
-        <button class="primary tiny" type="button" data-wardrobe-action="save-edit-closet">保存</button>
-        <button class="ghost tiny" type="button" data-wardrobe-action="cancel-edit-closet">取消</button>
+        <button class="btn primary tiny" type="button" data-wardrobe-action="save-edit-closet">保存</button>
+        <button class="btn ghost tiny" type="button" data-wardrobe-action="cancel-edit-closet">取消</button>
       </div>
     </div>`;
   row.querySelector('[data-closet-edit="name"]').value = button.dataset.name || "";
@@ -646,7 +656,7 @@ function renderCharacterForm() {
     <div class="character-profile-media">
       ${characterAvatarMarkup(char, state.selectedCharacter, "character-profile-avatar")}
       <div class="character-profile-actions">
-        <button type="button" id="character-avatar-generate">${char.avatar_path ? "重新生成头像" : "生成头像"}</button>
+        <button type="button" class="btn" id="character-avatar-generate">${char.avatar_path ? "重新生成头像" : "生成头像"}</button>
       </div>
     </div>
     <div class="character-profile-main">
@@ -703,7 +713,7 @@ function renderCharacterForm() {
         <label for="history-summary-editor">历史提要 <span class="muted">（dream 自动生成，可手动编辑）</span></label>
         <textarea id="history-summary-editor" name="history_summary" rows="6" placeholder="暂无历史提要，等待 dream 生成或手动输入。"></textarea>
         <div class="field-actions">
-          <button type="button" id="history-summary-save" class="primary">保存提要</button>
+          <button type="button" id="history-summary-save" class="btn primary">保存提要</button>
         </div>
       </div>
     </div>
@@ -734,8 +744,8 @@ function renderCharacterForm() {
         <label for="character-checkpoint-select">JSON 检查点 <span class="muted">（dream 前自动生成，保留最近 7 天）</span></label>
         <div class="field-actions">
           <select id="character-checkpoint-select">${checkpointOptions}</select>
-          <button type="button" id="export-character-checkpoint" ${checkpointRows.length ? "" : "disabled"}>导出检查点</button>
-          <button type="button" id="export-current-checkpoint">导出当前状态</button>
+          <button type="button" class="btn" id="export-character-checkpoint" ${checkpointRows.length ? "" : "disabled"}>导出检查点</button>
+          <button type="button" class="btn" id="export-current-checkpoint">导出当前状态</button>
         </div>
       </div>
     </div>
@@ -744,7 +754,7 @@ function renderCharacterForm() {
 
   const actions = document.createElement("div");
   actions.className = "form-actions";
-  actions.innerHTML = `<button type="button" class="danger" id="delete-character" ${isDefault ? "disabled" : ""}>删除角色</button><button class="primary" type="submit">保存角色</button>`;
+  actions.innerHTML = `<button type="button" class="btn danger" id="delete-character" ${isDefault ? "disabled" : ""}>删除角色</button><button class="btn primary" type="submit">保存角色</button>`;
   form.appendChild(actions);
 
   form.querySelectorAll(".section-toggle").forEach(toggle => {
@@ -810,7 +820,7 @@ function renderCharacterForm() {
       await api(`/api/sessions/${sid}/characters`, { method: "POST", body: values });
       form.dataset.modified = "false";
       await loadCharacters();
-      await loadAll();
+      await refreshSessionsUi();
       toast("角色已保存");
     } catch (err) {
       toast(err.message, "error");
@@ -832,12 +842,13 @@ async function loadHistorySummary() {
   const sid = encodeURIComponent(state.selectedSession);
   const rawCharKey = state.selectedCharacter || "";
   const charKey = characterApiKey(rawCharKey);
+  const loadToken = characterLoadToken();
   try {
     const data = await api(`/api/sessions/${sid}/history-summary?character_key=${encodeURIComponent(charKey)}`);
-    if (state.selectedCharacter !== rawCharKey) return;
+    if (!isCharacterLoadCurrent(loadToken)) return;
     editor.value = data.summary || "";
   } catch (_) {
-    if (state.selectedCharacter !== rawCharKey) return;
+    if (!isCharacterLoadCurrent(loadToken)) return;
     editor.value = "";
   }
   if (saveBtn) {
@@ -856,6 +867,16 @@ async function loadHistorySummary() {
       }
     };
   }
+}
+
+// 角色操作后的轻量刷新：只重拉会话列表并刷新依赖它的区域，不做全量 loadAll，
+// 避免连带重建设置页表单等不相关视图
+async function refreshSessionsUi() {
+  const data = await api("/api/sessions");
+  state.sessions = data.sessions || [];
+  renderChatIdOptions();
+  renderSessionSelector();
+  renderWorldSessionList();
 }
 
 async function loadCharacters() {
@@ -901,29 +922,32 @@ async function loadMemories() {
   const sid = encodeURIComponent(state.selectedSession);
   const rawCharKey = state.selectedCharacter;
   const charKey = encodeURIComponent(characterApiKey(rawCharKey));
+  const loadToken = characterLoadToken();
   try {
+    // 重建前记住条数选择与搜索词，操作后的重渲染不丢失用户的筛选状态
     const limitEl = document.getElementById("memory-limit");
     const limit = limitEl ? Number(limitEl.value || "60") : 60;
+    const searchText = document.getElementById("memory-search")?.value || "";
     const data = await api(`/api/sessions/${sid}/memories?character_key=${charKey}&limit=${limit}`);
-    if (state.selectedCharacter !== rawCharKey) return;
+    if (!isCharacterLoadCurrent(loadToken)) return;
     const rows = (data.memories || []).map(mem => `
       <div class="manager-row memory-row${mem.kind === "user_profile" ? " is-user-profile" : ""}">
         ${mem.kind === "user_profile" ? `<div class="memory-row-label">置顶用户画像</div>` : ""}
         <textarea data-memory-summary="${mem.id}" rows="2" placeholder="记忆内容">${escapeHtml(mem.summary || "")}</textarea>
-        <select data-memory-kind="${mem.id}" title="类型">${memoryKindOptions(mem.kind || "manual")}</select>
+        <select data-memory-kind="${mem.id}" title="类型" aria-label="记忆类型">${memoryKindOptions(mem.kind || "manual")}</select>
         <div class="range-wrap" title="重要度 1-5">
-          <input type="range" data-memory-importance="${mem.id}" min="1" max="5" step="1" value="${escapeHtml(String(mem.importance ?? 3))}">
+          <input type="range" data-memory-importance="${mem.id}" min="1" max="5" step="1" value="${escapeHtml(String(mem.importance ?? 3))}" aria-label="重要度 1-5">
           <span class="range-value">${escapeHtml(String(mem.importance ?? 3))}</span>
         </div>
-        <button data-memory-save="${mem.id}" type="button">保存</button>
-        <button class="danger" data-memory-delete="${mem.id}" type="button">删除</button>
+        <button class="btn" data-memory-save="${mem.id}" type="button">保存</button>
+        <button class="btn danger" data-memory-delete="${mem.id}" type="button">删除</button>
         ${mem.source ? `<div class="memory-source" title="${escapeHtml(String(mem.source))}">来源：${escapeHtml(String(mem.source))}</div>` : ""}
       </div>
     `).join("");
     box.innerHTML = `
       <div class="memory-toolbar">
-        <input id="memory-search" type="search" placeholder="搜索记忆…" autocomplete="off" style="flex:1;min-width:140px;max-width:280px">
-        <select id="memory-limit" title="显示条数" style="width:auto">
+        <input id="memory-search" type="search" placeholder="搜索记忆…" autocomplete="off" aria-label="搜索记忆">
+        <select id="memory-limit" title="显示条数" aria-label="显示条数">
           <option value="30">30 条</option>
           <option value="60" selected>60 条</option>
           <option value="120">120 条</option>
@@ -934,26 +958,32 @@ async function loadMemories() {
         <textarea name="summary" placeholder="新增一条手动记忆" rows="2"></textarea>
         <select name="kind">${memoryKindOptions("manual")}</select>
         <div class="range-wrap">
-          <input type="range" name="importance" min="1" max="5" step="1" value="3">
+          <input type="range" name="importance" min="1" max="5" step="1" value="3" aria-label="重要度 1-5">
           <span class="range-value">3</span>
         </div>
-        <button class="primary" type="submit">新增记忆</button>
+        <button class="btn primary" type="submit">新增记忆</button>
       </form>
       <div id="memory-list" class="manager-list">${rows || `<div class="empty-state">暂无记忆。</div>`}</div>
     `;
     bindRangeInputs(box);
     // 记忆搜索过滤
-    $("#memory-search").oninput = () => {
-      const q = ($("#memory-search").value || "").toLowerCase();
-      const rows = $all("#memory-list .memory-row");
-      rows.forEach(row => {
+    const searchInput = $("#memory-search");
+    const applyMemoryFilter = () => {
+      const q = (searchInput.value || "").toLowerCase();
+      $all("#memory-list .memory-row").forEach(row => {
         const text = (row.textContent || "").toLowerCase();
         row.style.display = q && !text.includes(q) ? "none" : "";
       });
     };
-    // 记忆 limit 变化重新加载
+    searchInput.oninput = applyMemoryFilter;
+    if (searchText) {
+      searchInput.value = searchText;
+      applyMemoryFilter();
+    }
+    // 记忆 limit 变化重新加载；先恢复重建前的选择（模板默认选中 60）
     const limitSelect = $("#memory-limit");
     if (limitSelect) {
+      limitSelect.value = String(limit);
       limitSelect.onchange = () => loadMemories();
     }
     // textarea auto-grow
@@ -1005,7 +1035,7 @@ async function loadMemories() {
       };
     });
   } catch (err) {
-    if (state.selectedCharacter !== rawCharKey) return;
+    if (!isCharacterLoadCurrent(loadToken)) return;
     box.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
     toast(err.message, "error");
   }
@@ -1020,12 +1050,13 @@ async function loadDiaries() {
   const sid = encodeURIComponent(state.selectedSession);
   const rawCharKey = state.selectedCharacter;
   const charKey = encodeURIComponent(characterApiKey(rawCharKey));
+  const loadToken = characterLoadToken();
   try {
     const data = await api(`/api/sessions/${sid}/diaries?character_key=${charKey}&limit=30`);
-    if (state.selectedCharacter !== rawCharKey) return;
+    if (!isCharacterLoadCurrent(loadToken)) return;
     renderDiaries(data.diaries || [], sid, charKey);
   } catch (err) {
-    if (state.selectedCharacter !== rawCharKey) return;
+    if (!isCharacterLoadCurrent(loadToken)) return;
     box.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
     toast(err.message, "error");
   }
@@ -1049,8 +1080,8 @@ function renderDiaries(diaries, sid, charKey) {
         </div>
         <textarea class="diary-note-editor" data-diary-date="${escapeHtml(date)}" rows="9">${escapeHtml(content)}</textarea>
         <div class="diary-note-actions">
-          <button data-diary-save="${escapeHtml(date)}" type="button">保存</button>
-          <button class="danger" data-diary-delete="${escapeHtml(date)}" type="button">删除</button>
+          <button class="btn" data-diary-save="${escapeHtml(date)}" type="button">保存</button>
+          <button class="btn danger" data-diary-delete="${escapeHtml(date)}" type="button">删除</button>
         </div>
       </article>
     `;
@@ -1059,7 +1090,7 @@ function renderDiaries(diaries, sid, charKey) {
     <form id="diary-add-form" class="diary-compose">
       <input type="date" name="diary_date" value="${today}">
       <textarea name="content" placeholder="新增或覆盖一条日记" rows="4"></textarea>
-      <button class="primary" type="submit">新增日记</button>
+      <button class="btn primary" type="submit">新增日记</button>
     </form>
     <div class="diary-note-grid">${rows || `<div class="empty-state">暂无日记。</div>`}</div>
   `;
@@ -1091,10 +1122,14 @@ function renderDiaries(diaries, sid, charKey) {
   });
 }
 
-function switchMemoryDiaryTab(tab) {
+function switchMemoryDiaryTab(tab, { push = false, skipRoute = false } = {}) {
   state.memoryDiaryTab = tab;
   $all("#view-characters .tab").forEach(t => t.classList.toggle("active", t.dataset.tab === tab));
   $all("#view-characters .tab-panel").forEach(p => p.classList.toggle("active", p.id === `${tab}-tab`));
+  // skipRoute 时由 switchView 统一写 hash，避免同一次切换写两遍
+  if (!skipRoute && state.currentView === "characters") {
+    syncRouteToHash({ view: "characters", tab }, { push });
+  }
   if (tab === "wardrobe") renderWardrobePanel();
 }
 
@@ -1192,14 +1227,13 @@ async function importCharacter() {
   if (existing) existing.remove();
   const dialog = document.createElement("dialog");
   dialog.id = "import-json-dialog";
-  dialog.style.cssText = "border:1px solid var(--line);border-radius:var(--radius-lg);padding:20px;max-width:560px;width:92vw;max-height:80vh;overflow:auto";
   dialog.innerHTML = `
     <form method="dialog">
-      <h3 style="margin:0 0 12px">粘贴角色 JSON</h3>
-      <textarea name="json" rows="12" placeholder="粘贴角色 JSON 或角色检查点 JSON…" style="min-height:200px;font-size:13px;font-family:monospace"></textarea>
-      <div class="form-actions" style="margin-top:14px">
-        <button type="button" value="cancel">取消</button>
-        <button class="primary" type="submit" value="confirm">导入</button>
+      <h3 class="dialog-title">粘贴角色 JSON</h3>
+      <textarea name="json" rows="12" class="import-json-input" placeholder="粘贴角色 JSON 或角色检查点 JSON…"></textarea>
+      <div class="form-actions dialog-actions">
+        <button class="btn" type="button" value="cancel">取消</button>
+        <button class="btn primary" type="submit" value="confirm">导入</button>
       </div>
     </form>
   `;

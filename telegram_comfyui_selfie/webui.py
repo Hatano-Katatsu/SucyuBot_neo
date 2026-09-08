@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import html
 import secrets
 import os
 import time
@@ -250,91 +251,22 @@ async def index(request: web.Request):
     return web.FileResponse(Path(__file__).with_name("static") / "index.html")
 
 
-async def login_page(request: web.Request):
-    html = """<!doctype html>
+async def login_page(request: web.Request, error: str = "", status: int = 200):
+    error_html = ""
+    if error:
+        error_html = f'<p id="login-error" class="login-error">{html.escape(error)}</p>'
+    else:
+        error_html = '<p id="login-error" class="login-error" hidden></p>'
+    page = """<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sucyubot Console 登录</title>
-  <style>
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      font-family: "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-      background: #f8fafc;
-      color: #0f172a;
-    }
-    .card {
-      width: min(380px, calc(100vw - 32px));
-      background: white;
-      border: 1px solid #e2e8f0;
-      border-radius: 18px;
-      padding: 32px;
-      box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.08), 0 4px 6px -4px rgba(15, 23, 42, 0.04);
-    }
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      margin-bottom: 24px;
-    }
-    .brand-mark {
-      width: 44px;
-      height: 44px;
-      border-radius: 12px;
-      background: linear-gradient(135deg, #0d9488, #14b8a6);
-      display: grid;
-      place-items: center;
-      font-weight: 700;
-      font-size: 16px;
-      color: white;
-      box-shadow: 0 4px 12px rgba(13, 148, 136, 0.35);
-    }
-    .brand h1 { margin: 0; font-size: 20px; font-weight: 700; }
-    .brand p { margin: 2px 0 0; color: #64748b; font-size: 13px; }
-    label { display: block; margin: 14px 0 6px; font-size: 13px; color: #475569; font-weight: 500; }
-    input {
-      box-sizing: border-box;
-      width: 100%;
-      padding: 11px 14px;
-      border: 1px solid #e2e8f0;
-      border-radius: 10px;
-      font-size: 15px;
-      transition: all 0.15s ease;
-    }
-    input:focus {
-      outline: none;
-      border-color: #0d9488;
-      box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.08);
-    }
-    button {
-      margin-top: 22px;
-      width: 100%;
-      border: 0;
-      border-radius: 10px;
-      padding: 12px 14px;
-      background: #0d9488;
-      color: white;
-      font-size: 15px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.15s ease;
-      box-shadow: 0 2px 6px rgba(13, 148, 136, 0.25);
-    }
-    button:hover {
-      background: #0f766e;
-      box-shadow: 0 4px 10px rgba(13, 148, 136, 0.3);
-      transform: translateY(-1px);
-    }
-    p.note { margin: 18px 0 0; color: #64748b; font-size: 13px; line-height: 1.55; }
-  </style>
+  <link rel="stylesheet" href="/static/styles.css">
 </head>
-<body>
-  <form method="post" action="/login" class="card">
+<body class="login-body">
+  <form method="post" action="/login" class="login-card" id="login-form">
     <div class="brand">
       <div class="brand-mark">SC</div>
       <div>
@@ -346,15 +278,48 @@ async def login_page(request: web.Request):
     <input name="username" autocomplete="username" required>
     <label>密码</label>
     <input name="password" type="password" autocomplete="current-password" required>
-    <button type="submit">登录</button>
+    <!--LOGIN_ERROR-->
+    <button class="btn primary" type="submit">登录</button>
     <p class="note">Telegram 用户账号为你的 TG 数字 ID，密码用 bot 命令 /web密码 设置。管理员账号密码来自配置文件。</p>
   </form>
+  <script>
+  (function () {
+    var form = document.getElementById("login-form");
+    var errorBox = document.getElementById("login-error");
+    if (!form || !errorBox) return;
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+      errorBox.hidden = true;
+      fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: form.elements.username.value,
+          password: form.elements.password.value
+        })
+      }).then(function (resp) {
+        return resp.json().catch(function () { return null; }).then(function (data) {
+          if (resp.ok && data && data.ok) {
+            location.href = "/";
+            return;
+          }
+          errorBox.textContent = (data && data.error) || "登录失败，请稍后重试";
+          errorBox.hidden = false;
+        });
+      }).catch(function () {
+        errorBox.textContent = "网络错误，请稍后重试";
+        errorBox.hidden = false;
+      });
+    });
+  })();
+  </script>
 </body>
 </html>"""
-    return web.Response(text=html, content_type="text/html")
+    return web.Response(text=page.replace("<!--LOGIN_ERROR-->", error_html), content_type="text/html", status=status)
 
 
-async def _login_with_credentials(request: web.Request, username: str, password: str) -> web.Response:
+def _authenticate_credentials(request: web.Request, username: str, password: str) -> tuple[str, str] | None:
+    """表单与 JSON 登录共用的认证逻辑：成功返回 (role, token)，失败返回 None。"""
     service = service_from(request)
     admin_user = str(service.config.get("web_admin_username") or "admin")
     admin_password = str(service.config.get("web_admin_password") or "admin")
@@ -365,20 +330,27 @@ async def _login_with_credentials(request: web.Request, username: str, password:
             sessions = set()
             service._web_admin_sessions = sessions
         sessions.add(token)
-        resp = web.HTTPFound("/")
-        resp.set_cookie("web_session", token, max_age=24 * 3600, httponly=True, samesite="Lax")
-        return resp
+        return "admin", token
     if service.app_store.verify_user_password(username, password):
-        token = service.app_store.get_or_create_web_token(username)
-        resp = web.HTTPFound("/")
-        resp.set_cookie("web_session", token, max_age=365 * 24 * 3600, httponly=True, samesite="Lax")
-        return resp
-    raise web.HTTPUnauthorized(text="账号或密码错误")
+        return "user", service.app_store.get_or_create_web_token(username)
+    return None
+
+
+def _login_success_response(role: str, token: str, *, redirect: bool) -> web.Response:
+    resp = web.HTTPFound("/") if redirect else json_ok({"role": role})
+    max_age = 24 * 3600 if role == "admin" else 365 * 24 * 3600
+    resp.set_cookie("web_session", token, max_age=max_age, httponly=True, samesite="Lax")
+    return resp
 
 
 async def web_login(request: web.Request):
+    """无 JS 兜底表单路径：与 /api/auth/login 走同一套认证逻辑。"""
     data = await request.post()
-    return await _login_with_credentials(request, str(data.get("username") or ""), str(data.get("password") or ""))
+    result = _authenticate_credentials(request, str(data.get("username") or ""), str(data.get("password") or ""))
+    if result is None:
+        return await login_page(request, error="账号或密码错误", status=401)
+    role, token = result
+    return _login_success_response(role, token, redirect=True)
 
 
 async def api_auth_login(request: web.Request):
@@ -386,10 +358,11 @@ async def api_auth_login(request: web.Request):
         payload = await request.json()
     except Exception:
         payload = {}
-    username = str(payload.get("username") or "")
-    password = str(payload.get("password") or "")
-    resp = await _login_with_credentials(request, username, password)
-    return json_ok({"redirect": "/"}) if not isinstance(resp, web.HTTPFound) else resp
+    result = _authenticate_credentials(request, str(payload.get("username") or ""), str(payload.get("password") or ""))
+    if result is None:
+        return json_error("账号或密码错误", status=401)
+    role, token = result
+    return _login_success_response(role, token, redirect=False)
 
 
 async def api_auth_me(request: web.Request):
@@ -1187,7 +1160,10 @@ async def api_update_session(request: web.Request):
     sid = request.match_info["session_id"]
     if not _session_allowed(request, sid):
         return json_error("无权访问此会话", status=403)
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_error("请求体不是合法 JSON")
     async with character_operation_lock(service, sid):
         return _update_session_locked(service, sid, payload)
 
@@ -1317,7 +1293,10 @@ async def api_add_memory(request: web.Request):
     sid = request.match_info["session_id"]
     if not _session_allowed(request, sid):
         return json_error("无权访问此会话", status=403)
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_error("请求体不是合法 JSON")
     summary = str(payload.get("summary") or "").strip()
     if not summary:
         return json_error("记忆内容不能为空")
@@ -1342,7 +1321,10 @@ async def api_update_memory(request: web.Request):
     sid = request.match_info["session_id"]
     if not _session_allowed(request, sid):
         return json_error("无权访问此会话", status=403)
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_error("请求体不是合法 JSON")
     char = required_character_key_from_request(request, payload)
     if char is None:
         return json_error("缺少 character_key，角色页操作必须指定目标角色")
@@ -1413,7 +1395,10 @@ async def api_save_diary(request: web.Request):
     sid = request.match_info["session_id"]
     if not _session_allowed(request, sid):
         return json_error("无权访问此会话", status=403)
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_error("请求体不是合法 JSON")
     character_key = required_character_key_from_request(request, payload)
     if character_key is None:
         return json_error("缺少 character_key，角色页操作必须指定目标角色")
@@ -1833,7 +1818,10 @@ async def api_test_push_selected_character(request: web.Request):
     sid = request.match_info["session_id"]
     if not _session_allowed(request, sid):
         return json_error("无权操作此会话", status=403)
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_error("请求体不是合法 JSON")
     char = required_character_key_from_request(request, payload)
     if char is None:
         return json_error("缺少 character_key，手动推送必须指定目标角色")
@@ -1919,7 +1907,10 @@ async def api_save_history_summary(request: web.Request):
     sid = request.match_info["session_id"]
     if not _session_allowed(request, sid):
         return json_error("无权操作此会话", status=403)
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_error("请求体不是合法 JSON")
     summary = str(payload.get("summary") or "").strip()
     char = required_character_key_from_request(request, payload)
     if char is None:
@@ -2009,7 +2000,10 @@ async def api_send_message(request: web.Request):
     service = service_from(request)
     if not service.is_bot_running:
         return json_error("机器人尚未启动", status=409)
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_error("请求体不是合法 JSON")
     chat_id = str(payload.get("chat_id", "")).strip()
     text = str(payload.get("text", "")).strip()
     if not chat_id or not text:
@@ -2027,7 +2021,10 @@ async def api_run_command(request: web.Request):
     service = service_from(request)
     if not service.is_bot_running:
         return json_error("机器人尚未启动", status=409)
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception:
+        return json_error("请求体不是合法 JSON")
     chat_id = str(payload.get("chat_id", "")).strip()
     command = str(payload.get("command", "")).strip().lstrip("/")
     arg = str(payload.get("arg", "")).strip()

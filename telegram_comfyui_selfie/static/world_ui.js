@@ -297,7 +297,7 @@ function renderCharacterInteraction(settings = {}) {
         <label>每日互动上限
           <input type="number" min="0" max="20" step="1" value="${escapeHtml(String(limit))}" data-character-interaction-limit>
         </label>
-        <button class="primary" type="button" data-character-interaction-action="save">保存互动设置</button>
+        <button class="btn primary" type="button" data-character-interaction-action="save">保存互动设置</button>
       </div>
     </div>
   `;
@@ -348,7 +348,6 @@ function promptLifeGoalPayload(kind, existing = null) {
     if (existing2) existing2.remove();
     const dialog = document.createElement("dialog");
     dialog.id = "life-goal-dialog";
-    dialog.style.cssText = "border:1px solid var(--line);border-radius:var(--radius-lg);padding:20px;max-width:520px;width:92vw;max-height:80vh;overflow:auto";
     const parentOptions = isLong ? "" : activeLongs.map(item =>
       `<option value="${escapeHtml(String(item.id || ""))}">${escapeHtml((item.dimension ? `[${item.dimension}] ` : "") + item.text)}</option>`
     ).join("");
@@ -362,8 +361,8 @@ function promptLifeGoalPayload(kind, existing = null) {
 
     dialog.innerHTML = `
       <form method="dialog">
-        <h3 style="margin:0 0 14px">${existing ? "编辑" : "新增"}${label}</h3>
-        <div style="display:grid;gap:12px">
+        <h3 class="dialog-title">${existing ? "编辑" : "新增"}${label}</h3>
+        <div class="dialog-grid">
           <label>文本<textarea name="text" rows="3" required>${escapeHtml(existing?.text || "")}</textarea></label>
           ${isLong ? `
           <label>目标维度（可自定义）<input name="dimension" list="life-goal-dimensions" value="${escapeHtml(existing?.dimension || "")}">
@@ -386,20 +385,22 @@ function promptLifeGoalPayload(kind, existing = null) {
             </select>
           </label>
         </div>
-        <div class="form-actions" style="margin-top:14px;border-top:none;padding-top:0">
-          <button type="button" value="cancel">取消</button>
-          <button class="primary" type="submit" value="confirm">${existing ? "保存" : "新增"}</button>
+        <div class="form-actions dialog-actions-flush">
+          <button class="btn" type="button" value="cancel">取消</button>
+          <button class="btn primary" type="submit" value="confirm">${existing ? "保存" : "新增"}</button>
         </div>
       </form>
     `;
     document.body.appendChild(dialog);
-    dialog.querySelector('[value="cancel"]').onclick = () => { dialog.close(); resolve(null); };
+    // 统一在 close 时用 returnValue 结算：confirm 为提交，其余（取消按钮/ESC）视为放弃
+    let payload = null;
+    dialog.querySelector('[value="cancel"]').onclick = () => dialog.close("cancel");
     dialog.querySelector("form").onsubmit = (event) => {
       event.preventDefault();
       const form = event.currentTarget;
       const text = String(form.elements.text?.value || "").trim();
       if (!text) { toast("目标文本不能为空", "error"); return; }
-      const payload = { kind, text };
+      payload = { kind, text };
       if (existing?.id) payload.id = existing.id;
       if (isLong) {
         payload.dimension = String(form.elements.dimension?.value || "").trim();
@@ -409,18 +410,11 @@ function promptLifeGoalPayload(kind, existing = null) {
         payload.progress_note = String(form.elements.progress_note?.value || "").trim();
       }
       payload.status = String(form.elements.status?.value || "active").trim() || "active";
-      dialog.close();
-      resolve(payload);
+      dialog.close("confirm");
     };
     dialog.addEventListener("close", () => {
-      // 如果 dialog 被关闭但没有通过 submit 处理（如按 ESC），resolve null
-      // 但 submit handler 已经 resolve 了，这里需要避免重复 resolve
-      dialog._resolved = true;
-    });
-    // 超时保护：监听 close 来兜底
-    dialog.addEventListener("close", () => {
       dialog.remove();
-      if (!dialog._resolved) resolve(null);
+      resolve(dialog.returnValue === "confirm" ? payload : null);
     }, { once: true });
     dialog.showModal();
   });

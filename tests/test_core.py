@@ -887,8 +887,10 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn('<option value="">跟随模型</option>', model_section)
         self.assertIn('<option value="true">开启</option>', model_section)
         self.assertIn('<option value="false">关闭</option>', model_section)
-        for effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
-            self.assertIn(f'<option value="{effort}">Effort · {effort}</option>', model_section)
+        self.assertIn('${thinkingEffortOptions("Effort · ")}', model_section)
+        # effort 档位单一来源：共享常量与生成函数
+        self.assertIn('const THINKING_EFFORT_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];', app_js)
+        self.assertIn("function thinkingEffortOptions(", app_js)
         # 不暴露 profile 级内部字段
         self.assertNotIn("disable_thinking", model_section)
         self.assertNotIn("thinking_fixed", model_section)
@@ -915,8 +917,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn('const body = { _scope: "global" }', global_section)
         self.assertIn('name="thinking_effort"', global_section)
         self.assertIn('"timeout", "thinking_effort"', global_section)
-        for effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
-            self.assertIn(f'<option value="{effort}">{effort}</option>', global_section)
+        self.assertIn("${thinkingEffortOptions()}", global_section)
         self.assertIn("Kimi K2.7 Code 不允许 none", global_section)
         self.assertIn("Kimi K3 原生档位为 low、high、max", global_section)
         self.assertIn('method: "POST"', global_section)

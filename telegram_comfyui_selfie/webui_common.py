@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from aiohttp import web
@@ -39,7 +40,10 @@ def session_allowed(request: web.Request, session_id: str) -> bool:
 
 def require_admin(request: web.Request):
     if not is_admin(request):
-        raise web.HTTPForbidden(text="需要管理员权限")
+        raise web.HTTPForbidden(
+            body=json.dumps({"ok": False, "error": "需要管理员权限"}, ensure_ascii=False),
+            content_type="application/json",
+        )
 
 
 def parse_bool(value) -> bool:
