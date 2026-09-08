@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from . import session_schema
+from .appearance import WARDROBE_CLOTHING_SLOTS, seed_wardrobe_from_text
 from .animaflow_runtime import (
     ANIMAFLOW_NEGATIVE_FIELDS,
     ANIMAFLOW_NLTAG_FIELDS,
@@ -54,11 +55,14 @@ def _sanitize_planned_one_shot_appearance(
     mood: str = "",
     must_include: str = "",
     prompt: str = "",
+    context: str = "",
 ) -> str:
     text = str(tags or "").strip()
     if not text:
         return ""
-    request_text = "\n".join(str(x or "") for x in (intent, mood, must_include, prompt))
+    # 显式换装信号除本轮请求参数外，也看最近对话（推送模式没有 intent/prompt，
+    # 换装意图只存在于「角色刚答应换衣服」这类对话里，不看对话会把规划器的换装判断静默丢弃）。
+    request_text = "\n".join(str(x or "") for x in (intent, mood, must_include, prompt, context))
     if EXPLICIT_ONE_SHOT_APPEARANCE_RE.search(request_text):
         return text
     try:
@@ -963,6 +967,7 @@ def _build_image_state_mutation(
     clear_undress_state: bool = False,
     planned_at: float = 0.0,
     accessory_sources: tuple[str, ...] = (),
+    outfit_commit: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """构造生图成功后才可提交的会话状态变更，不在规划阶段触碰共享状态。"""
     mutation: dict[str, Any] = {}
@@ -971,6 +976,14 @@ def _build_image_state_mutation(
         mutation["clear_undress_state"] = True
     if "nude" in clothing_off.lower():
         mutation["nudity"] = "completely nude"
+    if isinstance(outfit_commit, dict):
+        clean_commit = {
+            str(slot).strip(): str(tags).strip()
+            for slot, tags in outfit_commit.items()
+            if str(slot).strip() and str(tags or "").strip()
+        }
+        if clean_commit:
+            mutation["outfit_commit"] = clean_commit
 
     raw_user_location = str(user_location or "").strip().lower()
     if user_co_located or raw_user_location in PLACE_TYPES:
@@ -1405,7 +1418,10 @@ async def plan_roleplay_image(
         "museum/landmark/temple/library/zoo/amusement/bar/ktv/stadium/supermarket/bookstore/beach/salon。"
         "系统会从 user_location 自动推导用户是否与角色同处（co_located），你不需要单独输出 co_located。"
         "new_appearance_tags 只填这张图需要额外强调的一次性服装、配饰、临时发型或发色瞳色变化，英文标签逗号分隔；"
-        "这些标签只用于本次生图，不会写入长期外型。不要把姿势、表情、动作、场景、灯光写进去。没有一次性外观补充时留空。"
+        "不要把姿势、表情、动作、场景、灯光写进去。没有一次性外观补充时留空。"
+        "若剧情里角色刚换上/答应换某套衣服（最近对话有明确换装意图），或 scene 描述了与当前可见外貌不同的服装，"
+        "必须把新服装的英文标签同步填进 new_appearance_tags——只写进 scene 会被当作与衣柜冲突而丢弃，图里仍是旧衣服；"
+        "这类明确换装在图片成功后会写入长期衣柜，之后的图保持一致。"
         "clothing_off 填这张图里【应当从角色当前着装中去掉/已脱下/未穿】的服装或配饰（英文标签逗号分隔，如 'cardigan, jacket'），"
         "或填裸露状态词 'nude'/'topless'/'bottomless'/'completely nude' 表示相应程度的裸体；"
         "只要叙事表明此刻角色脱了某件、在试穿前脱下原装、正在裸体或性爱中褪去衣物，就据对话如实填写。"
@@ -1894,7 +1910,25 @@ async def plan_roleplay_image(
         mood=mood,
         must_include=must_include,
         prompt=prompt,
+        context=continuity_context or "",
     )
+    # 过了显式换装闸的一次性服装/配饰属于剧情里明确发生的持久变化（角色答应换装、用户点名换装），
+    # 图片成功后提交衣柜；发/瞳/其它槽不提交，避免身份特征随单图漂移。
+    outfit_commit: dict[str, str] = {}
+    if new_appearance_tags:
+        try:
+            one_shot_seed = seed_wardrobe_from_text(
+                new_appearance_tags,
+                getattr(service, "_outfit_kw", []),
+                getattr(service, "_accessory_kw", []),
+            )
+        except Exception:
+            one_shot_seed = {}
+        outfit_commit = {
+            slot: tags
+            for slot, tags in one_shot_seed.items()
+            if slot in WARDROBE_CLOTHING_SLOTS or slot == "accessory"
+        }
     return {
         "scene": scene,
         "view": final_view,
@@ -1914,6 +1948,7 @@ async def plan_roleplay_image(
             clear_undress_state=clear_undress_state_after_success,
             planned_at=now.timestamp() if isinstance(now, datetime) else 0.0,
             accessory_sources=(intent, prompt, scene),
+            outfit_commit=outfit_commit,
         ),
     }
 

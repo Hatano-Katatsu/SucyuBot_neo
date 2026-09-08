@@ -54,7 +54,8 @@ FINE_OUTFIT_WORDS = (
     "hoodie", "blazer", "jacket", "coat", "cloak", "cape", "robe",
     "sundress", "nightgown", "nightdress", "negligee", "cheongsam", "qipao",
     "kimono", "yukata", "hanfu", "jumpsuit", "romper", "bodysuit", "leotard",
-    "swimsuit", "one-piece", "dress", "gown",
+    "swimsuit", "one-piece", "slip dress", "chemise", "babydoll", "nightie",
+    "lingerie", "dress", "gown",
     "bikini top", "tube top", "crop top", "tank top", "camisole", "turtleneck",
     "sweatshirt", "sweater", "t-shirt", "blouse", "shirt", "jersey", "halter",
     "vest", "top",
@@ -162,7 +163,7 @@ FINE_SLOT_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("legwear", ("pantyhose", "thigh-highs", "thighhighs", "thigh highs", "stockings", "tights", "knee socks", "socks", "leg warmers", "garter belt", "garter")),
     ("footwear", ("high heels", "heels", "boots", "sneakers", "sandals", "slippers", "loafers", "flats", "pumps", "mary janes", "shoes")),
     ("outerwear", ("windbreaker", "trench coat", "trenchcoat", "overcoat", "parka", "cardigan", "hoodie", "blazer", "jacket", "coat", "cloak", "cape", "robe")),
-    ("dress", ("sundress", "nightgown", "nightdress", "negligee", "cheongsam", "qipao", "kimono", "yukata", "hanfu", "jumpsuit", "romper", "bodysuit", "leotard", "swimsuit", "one-piece", "dress", "gown")),
+    ("dress", ("sundress", "nightgown", "nightdress", "negligee", "cheongsam", "qipao", "kimono", "yukata", "hanfu", "jumpsuit", "romper", "bodysuit", "leotard", "swimsuit", "one-piece", "slip dress", "chemise", "babydoll", "nightie", "lingerie", "dress", "gown")),
     ("top", ("bikini top", "tube top", "crop top", "tank top", "camisole", "turtleneck", "sweatshirt", "sweater", "t-shirt", "blouse", "shirt", "jersey", "halter", "vest", "top")),
     ("bottom", ("bikini bottom", "miniskirt", "skirt", "jeans", "trousers", "slacks", "sweatpants", "joggers", "leggings", "hotpants", "shorts", "pants", "culottes")),
 )

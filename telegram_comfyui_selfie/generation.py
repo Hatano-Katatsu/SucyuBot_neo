@@ -486,10 +486,13 @@ def _strip_conflicting_scene_outfit(scene_desc: str, outfit_override: list[str],
     garment_phrase_loose = rf"{garment_loose}(?:\s+and\s+{garment})*"
     # 衣物做主语时的状态谓语尾巴（"rides up slightly as she shifts"）随衣物一起删；
     # 只收衣物状态动词，保留 sit/stand 等人物姿态谓语，避免把角色动作吃掉。
+    # 尾巴不得越过从句连接词（while/when/as/...），否则 "draped over her shoulders while she leans
+    # forward looking at the camera" 这类句子会把衣物之后的人物动作与神态整句吃到句尾。
     state_tail = (
         rf"(?:\s+(?:rides?|slips?|slides?|pools?|gathers?|bunches?|clings?|hugs?|hangs?|drapes?|falls?|"
         rf"fits?|flares?|billows?|rises?|shifts?|opens?|splits?|slipping|hanging|pooling|riding|"
-        rf"gathered|bunched|clinging|hugging|draped)\b[^,.;]*)?"
+        rf"gathered|bunched|clinging|hugging|draped)\b"
+        rf"(?:(?!\s+(?:while|when|whenever|whereas|although|though|because|since|as)\b)[^,.;])*)?"
     )
     # 直接删除场景里的衣物描述（连同前导动词/介词/冠词），不再替换成 "the current outfit" 占位语——
     # 占位语对生图模型不可渲染；旧实现句中替换还会产生 "her the current outfit" 破句，
@@ -1530,6 +1533,28 @@ def build_prompt(
     if service._parse_appearance(scene_desc).get("outfit"):
         for old in service._parse_appearance(char).get("outfit", []):
             char = service._remove_tag(char, old)
+    # 规划器一次性换装（new_appearance_tags 已过显式换装闸）：按槽位从本图外观里移除撞槽的衣柜标签，
+    # 避免旧衣物与新装同框冲突；未涉及的槽位（内衣/袜子/配饰等）保留，发/瞳/其它槽不受影响。
+    # char 与后面的 appearance_override 都携带衣柜标签，两处都要移除。
+    one_shot_override_tags: list[str] = []
+    one_shot_text = (one_shot_appearance or "").strip()
+    if one_shot_text and session_id:
+        one_shot_seed = seed_wardrobe_from_text(one_shot_text, service._outfit_kw, service._accessory_kw)
+        override_slots = {slot for slot in one_shot_seed if slot in WARDROBE_CLOTHING_SLOTS}
+        # 连衣裙与上衣/下装互斥，与 apply_wardrobe_change 同一规则。
+        if "dress" in override_slots:
+            override_slots |= {"top", "bottom"}
+        elif override_slots & {"top", "bottom"}:
+            override_slots.add("dress")
+        if override_slots:
+            worn_flat = service._effective_dynamic_appearance(session_id)
+            worn_seed = seed_wardrobe_from_text(worn_flat, service._outfit_kw, service._accessory_kw)
+            for slot in override_slots:
+                for worn_tag in [t.strip() for t in (worn_seed.get(slot) or "").split(",") if t.strip()]:
+                    if worn_tag not in one_shot_override_tags:
+                        one_shot_override_tags.append(worn_tag)
+            for worn_tag in one_shot_override_tags:
+                char = service._remove_tag(char, worn_tag)
     # 角色性别先算出来（人数槽与“第二人”检测都要用）。
     persisted_count = (state.get("custom_count") or "").strip() if session_id else ""
     gender_from_count = infer_gender_from_count(persisted_count) if persisted_count else ""
@@ -1772,6 +1797,9 @@ def build_prompt(
     # 非公开场景不再按纯度追加任何性/裸露反词（走光防护只走公开场景最小集护栏）。
 
     appearance_override = _explicit_appearance_override(service, state)
+    if one_shot_override_tags and appearance_override:
+        for worn_tag in one_shot_override_tags:
+            appearance_override = service._remove_tag(appearance_override, worn_tag)
     identity = ", ".join(part for part in (character, series) if part)
     effective_appearance = char
     if appearance_override:

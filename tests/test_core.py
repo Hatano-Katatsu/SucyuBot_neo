@@ -2580,6 +2580,85 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_push_planner_keeps_one_shot_tags_when_recent_dialogue_changes_outfit(self):
+        """推送模式没有 intent/prompt，换装意图只能来自最近对话（角色刚答应换装）。
+        对话带明确换装词时，规划器的一次性服装标签必须保留，并提出衣柜提交。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 7, 4, 14, 0, tzinfo=timezone.utc)
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            state = svc._get_session_state(sid)
+            session_schema.set_outfit(state, "black silk chemise, black lace panties")
+            session_schema.set_chat_history(state, [
+                {"role": "user", "content": "姐姐有秋天穿的衣服吗"},
+                {"role": "assistant", "content": "姐姐去换好开衫再拍给你看~"},
+            ])
+            svc._save_session_state(sid, state)
+            self.mock_image_planner_messages(svc, {
+                "scene": "角色穿着白色针织开衫坐在咖啡店窗边自拍",
+                "caption": "换好啦。",
+                "view": "selfie",
+                "new_appearance_tags": "white knit cardigan, black slip dress",
+            })
+
+            plan = await plan_roleplay_image(
+                svc,
+                sid,
+                mode="followup",
+                now=fixed_now,
+                weather_data={"desc": "雨", "temp": "22", "code": "305"},
+            )
+
+            self.assertEqual(plan["new_appearance_tags"], "white knit cardigan, black slip dress")
+            self.assertEqual(
+                plan["state_mutation"]["outfit_commit"],
+                {"dress": "black slip dress", "outerwear": "white knit cardigan"},
+            )
+
+        asyncio.run(run())
+
+    def test_push_planner_drops_one_shot_tags_without_outfit_change_dialogue(self):
+        """推送模式下最近对话没有换装意图时，规划器的一次性服装标签仍然丢弃（防外观漂移）。"""
+        async def run():
+            svc = self.make_service()
+            sid = "telegram:123"
+            fixed_now = datetime(2026, 7, 4, 14, 0, tzinfo=timezone.utc)
+            svc.config.update({
+                "image_llm_api_key": "image-key",
+                "image_llm_model": "image-model",
+                "image_llm_api_base": "https://image.example",
+            })
+            state = svc._get_session_state(sid)
+            session_schema.set_chat_history(state, [
+                {"role": "user", "content": "今天工作好累"},
+                {"role": "assistant", "content": "辛苦啦，给你抱抱~"},
+            ])
+            svc._save_session_state(sid, state)
+            self.mock_image_planner_messages(svc, {
+                "scene": "角色在客厅挥手",
+                "caption": "回来啦。",
+                "view": "selfie",
+                "new_appearance_tags": "white knit cardigan, black slip dress",
+            })
+
+            plan = await plan_roleplay_image(
+                svc,
+                sid,
+                mode="followup",
+                now=fixed_now,
+                weather_data={"desc": "雨", "temp": "22", "code": "305"},
+            )
+
+            self.assertEqual(plan["new_appearance_tags"], "")
+            self.assertNotIn("outfit_commit", plan["state_mutation"])
+
+        asyncio.run(run())
+
     def test_scheduler_scene_injects_recent_photo_continuity(self):
         async def run():
             svc = self.make_service()
@@ -5387,7 +5466,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             )
             # 聊天途中的配图不带配文（聊天模型已经在文字里回复了）
             svc.send_photo.assert_awaited_once_with(123, b"image", "")
-            self.assertEqual(session_schema.get_outfit(state), "")
+            # 用户明确点名换装（must_include + 对话记录）时，一次性服装在图片成功后提交衣柜，
+            # 之后的图保持新装，而不是下一张又穿回旧衣服。
+            self.assertEqual(session_schema.get_outfit(state), "black camisole dress")
             self.assertEqual(state["sent_photos_history"][-1]["caption"], "")
             self.assertEqual(state["sent_photos_history"][-1]["appearance"], "black camisole dress")
             self.assertIn("用户想看角色下班后在家等自己的样子", state["sent_photos_history"][-1]["source_description"])
@@ -9640,6 +9721,30 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("dark brown hair", low)
         self.assertNotIn("black fitted dress", low)
 
+    def test_one_shot_outfit_overrides_conflicting_wardrobe_slots(self):
+        """规划器一次性换装（已过显式换装闸）按槽位覆盖当前图里的衣柜标签：
+        撞槽的旧衣物（含 chemise 这类私有衣物词）移除，未撞槽的内衣/配饰保留。"""
+        svc = self.make_service()
+        sid = "telegram:1"
+        state = svc._get_session_state(sid)
+        state["custom_positive_prefix"] = "1girl, blonde hair, blue eyes"
+        session_schema.set_wardrobe(state, {
+            "dress": "black silk chemise",
+            "panties": "black lace panties",
+        })
+        session_schema.set_outfit(state, "black silk chemise, black lace panties")
+        pos, _ = svc._build_prompt(
+            "A woman sits by a window, looking at viewer",
+            session_id=sid,
+            one_shot_appearance="white knit cardigan, black slip dress",
+        )
+        low = pos.lower()
+        self.assertIn("white knit cardigan", low)
+        self.assertIn("black slip dress", low)
+        self.assertNotIn("chemise", low)
+        self.assertIn("black lace panties", low)
+        self.assertIn("blonde hair", low)
+
     def test_scene_outfit_cleanup_does_not_split_hyphenated_color_words(self):
         from telegram_comfyui_selfie.generation import _strip_conflicting_scene_outfit
 
@@ -9691,6 +9796,29 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertNotIn("dress", out2.lower())
         self.assertNotIn("rides up", out2.lower())
         self.assertIn("revealing a sliver of bare thigh", out2)
+
+    def test_scene_outfit_cleanup_stops_at_clause_connector(self):
+        """回归：衣物状态尾巴（draped ...）不能越过 while/as 等从句连接词，
+        否则 "draped over her shoulders while she leans forward" 会把人物动作整句吃掉。"""
+        from telegram_comfyui_selfie.generation import _strip_conflicting_scene_outfit
+
+        scene = (
+            "She sits by a rain-speckled window with warm afternoon light through the glass "
+            "wearing a soft white knit cardigan draped unbuttoned over her shoulders "
+            "with a black silk slip dress featuring a deep plunging neckline "
+            "while she leans slightly forward looking directly at the camera "
+            "with a teasing bedroom-eyes expression as rain droplets trail down the windowpane behind her."
+        )
+        out = _strip_conflicting_scene_outfit(
+            scene, ["black lace panties"], ["cardigan", "dress", "panties"]
+        )
+        self.assertNotIn("cardigan", out.lower())
+        self.assertNotIn("slip dress", out.lower())
+        # 衣物之后的人物动作、神态与环境描写必须保留。
+        self.assertIn("leans slightly forward", out)
+        self.assertIn("looking directly at the camera", out)
+        self.assertIn("bedroom-eyes", out)
+        self.assertIn("rain droplets trail down the windowpane", out)
 
     def test_daytime_prompt_rewrites_premature_sunset_terms(self):
         svc = self.make_service()

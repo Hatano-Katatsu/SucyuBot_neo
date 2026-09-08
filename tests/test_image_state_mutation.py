@@ -363,6 +363,49 @@ class ImageStateMutationTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_outfit_commit_applies_to_wardrobe_and_clears_nudity(self):
+        service = self.make_service()
+        session_id = "telegram:outfit-commit"
+        state = service._get_session_state(session_id)
+        session_schema.set_wardrobe(state, {"dress": "black silk chemise", "panties": "black lace panties"})
+        session_schema.set_outfit(state, "black silk chemise, black lace panties")
+        session_schema.set_nudity(state, "completely nude", at=10.0)
+        session_schema.set_wardrobe_item_state(state, "dress", "half_off")
+        service._save_session_state(session_id, state)
+
+        changed = service._commit_image_state_mutation(session_id, {
+            "outfit_commit": {"dress": "black slip dress", "outerwear": "white knit cardigan"},
+        })
+
+        self.assertTrue(changed)
+        wardrobe = session_schema.get_wardrobe(state)
+        self.assertEqual(wardrobe.get("dress"), "black slip dress")
+        self.assertEqual(wardrobe.get("outerwear"), "white knit cardigan")
+        # 未撞槽的内衣槽保留。
+        self.assertEqual(wardrobe.get("panties"), "black lace panties")
+        self.assertEqual(
+            session_schema.get_outfit(state),
+            "black slip dress, white knit cardigan, black lace panties",
+        )
+        # 换上新衣服后旧部件状态与持久裸体态解除。
+        self.assertEqual(session_schema.get_wardrobe_item_states(state), {})
+        self.assertEqual(session_schema.get_nudity(state), "")
+
+    def test_empty_outfit_commit_is_noop(self):
+        service = self.make_service()
+        session_id = "telegram:outfit-noop"
+        state = service._get_session_state(session_id)
+        session_schema.set_wardrobe(state, {"dress": "red dress"})
+        session_schema.set_outfit(state, "red dress")
+        service._save_session_state(session_id, state)
+
+        changed = service._commit_image_state_mutation(session_id, {
+            "outfit_commit": {"hair": "messy bun", "other": ""},
+        })
+
+        self.assertFalse(changed)
+        self.assertEqual(session_schema.get_outfit(state), "red dress")
+
     def test_success_commits_all_proposed_state_after_photo_history(self):
         async def run():
             service, session_id, state = self._prepared_service()

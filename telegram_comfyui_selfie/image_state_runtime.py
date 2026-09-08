@@ -5,6 +5,7 @@ import re
 import time
 from typing import Any
 
+from . import appearance as appearance_rules
 from . import session_schema
 from .world_runtime import PLACE_TYPES
 
@@ -137,6 +138,31 @@ class ImageStateRuntimeMixin:
                     f'图片成功后持久化 accessory_remove={remove_tags} '
                     f'来源=clothing_off="{clothing_off[:80]}" | 结果="{rendered[:140]}"',
                 ))
+
+        outfit_commit = mutation.get("outfit_commit")
+        if isinstance(outfit_commit, dict):
+            commit_seed = {
+                str(slot).strip(): str(tags).strip()
+                for slot, tags in outfit_commit.items()
+                if str(slot).strip() in appearance_rules.WARDROBE_CLOTHING_SLOTS + ("accessory",)
+                and str(tags or "").strip()
+            }
+            if commit_seed:
+                wardrobe = self._get_wardrobe(working)
+                new_wardrobe = appearance_rules.apply_wardrobe_seed(wardrobe, commit_seed)
+                rendered = appearance_rules.render_wardrobe(new_wardrobe)
+                if rendered and rendered != session_schema.get_outfit(working):
+                    session_schema.set_wardrobe(working, new_wardrobe)
+                    session_schema.set_outfit(working, rendered)
+                    # 换上了新衣服 → 旧衣物部件状态与持久裸体态不再适用。
+                    session_schema.clear_wardrobe_item_states(working, list(commit_seed))
+                    session_schema.prune_wardrobe_item_states(working, new_wardrobe)
+                    session_schema.clear_nudity(working)
+                    changed = True
+                    logs.append((
+                        "WARDROBE",
+                        f'图片成功后提交换装 分槽={commit_seed} | 结果="{rendered[:140]}"',
+                    ))
 
         if not changed:
             return False
