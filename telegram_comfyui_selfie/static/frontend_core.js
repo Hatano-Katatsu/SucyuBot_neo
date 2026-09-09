@@ -98,9 +98,9 @@
     return auth?.role !== "admin" && userId ? `telegram:${userId}` : "";
   }
 
-  // hash 路由支持的视图与角色页二级 tab，顺序即快捷键 1-7 的映射顺序
-  const VIEW_ROUTE_IDS = Object.freeze(["overview", "settings", "characters", "world", "logs", "usage", "actions"]);
-  const CHARACTER_TAB_IDS = Object.freeze(["wardrobe", "memory", "diary"]);
+  // hash 路由支持的视图与角色页二级 tab，视图顺序即快捷键 1-8 的映射顺序
+  const VIEW_ROUTE_IDS = Object.freeze(["overview", "settings", "characters", "wardrobe", "world", "logs", "usage", "actions"]);
+  const CHARACTER_TAB_IDS = Object.freeze(["memory", "diary"]);
 
   function parseViewRoute(hash) {
     const text = String(hash || "").trim().replace(/^#/, "").replace(/^\/+/, "");

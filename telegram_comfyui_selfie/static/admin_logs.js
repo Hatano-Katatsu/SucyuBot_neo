@@ -36,7 +36,7 @@ async function loadUsage() {
   const now = Math.floor(Date.now() / 1000);
   const after = seconds > 0 ? now - seconds : 0;
   try {
-    const data = await api(`/api/admin/llm-usage?after=${after}&before=${now}&group_by=profile_id,model,purpose,tag`);
+    const data = await api(`/api/admin/llm-usage?after=${after}&before=${now}&group_by=profile_id,model,purpose,tag,endpoint,profile_scope`);
     state.usage = data;
     populateUsageFilters(data.groups || []);
     renderUsage(data);
@@ -71,13 +71,15 @@ function renderUsage(data) {
       <div class="metric"><span>请求数</span><strong>${formatNumber(summary.requests)}</strong></div>
       <div class="metric"><span>Prompt Tokens</span><strong>${formatNumber(summary.prompt_tokens)}</strong></div>
       <div class="metric"><span>Completion Tokens</span><strong>${formatNumber(summary.completion_tokens)}</strong></div>
-      <div class="metric"><span>缓存命中</span><strong>${formatNumber(summary.cached_tokens)}</strong></div>
-      <div class="metric"><span>缓存命中率</span><strong>${formatRate(summary.cache_hit_rate)}</strong></div>
+      <div class="metric"><span>已报告缓存量</span><strong>${formatNumber(summary.cached_tokens)}</strong></div>
+      <div class="metric"><span>已报告样本命中率</span><strong>${summary.cache_hit_rate == null ? "未知" : formatRate(summary.cache_hit_rate)}</strong></div>
+      <div class="metric"><span>缓存字段覆盖率（输入）</span><strong>${formatRate(summary.cache_coverage)}</strong></div>
+      <div class="metric"><span>未报告缓存量的请求</span><strong>${formatNumber(summary.cache_unknown_requests)}</strong></div>
       <div class="metric"><span>Total Tokens</span><strong>${formatNumber(summary.total_tokens)}</strong></div>
     `;
   }
   const tbody = $("#usage-table-body");
-  let rows = (data.groups || []).map(row => ({ ...row, hitRate: row.prompt_tokens ? (row.cached_tokens / row.prompt_tokens) : 0 }));
+  let rows = (data.groups || []).map(row => ({ ...row, hitRate: row.cache_hit_rate ?? null }));
   if (!rows.length) {
     tbody.innerHTML = `<tr><td colspan="10" class="empty-cell">该时间范围内暂无 LLM 调用记录</td></tr>`;
     return;
@@ -91,7 +93,7 @@ function renderUsage(data) {
 
   if (textFilter) {
     rows = rows.filter(row =>
-      [row.profile_id, row.model, row.purpose, row.tag].some(v => (v || "").toLowerCase().includes(textFilter))
+      [row.profile_id, row.model, row.purpose, row.tag, row.endpoint, row.profile_scope].some(v => (v || "").toLowerCase().includes(textFilter))
     );
   }
   if (profileFilter) rows = rows.filter(row => row.profile_id === profileFilter);
@@ -104,6 +106,8 @@ function renderUsage(data) {
   rows.sort((a, b) => {
     let va, vb;
     if (sortKey === "cache_hit_rate") {
+      // 未报告保持未知，并始终排在有实测值的记录后。
+      if (a.hitRate == null || b.hitRate == null) return (a.hitRate == null ? 1 : 0) - (b.hitRate == null ? 1 : 0);
       va = a.hitRate;
       vb = b.hitRate;
     } else if (sortKey === "last_used" || sortKey === "first_used") {
@@ -123,7 +127,7 @@ function renderUsage(data) {
 
   tbody.innerHTML = rows.map(row => `
     <tr>
-      <td>${escapeHtml(row.profile_id || "-")}</td>
+      <td>${escapeHtml(row.profile_id || "-")}<div class="muted">${escapeHtml(row.profile_scope || "历史范围未知")} · ${escapeHtml(row.endpoint || "历史端点未知")}</div></td>
       <td>${escapeHtml(row.model || "-")}</td>
       <td>${escapeHtml(row.purpose || "-")}</td>
       <td>${escapeHtml(row.tag || "-")}</td>
@@ -131,7 +135,7 @@ function renderUsage(data) {
       <td>${formatNumber(row.prompt_tokens)}</td>
       <td>${formatNumber(row.completion_tokens)}</td>
       <td>${formatNumber(row.cached_tokens)}</td>
-      <td>${formatRate(row.hitRate)}</td>
+      <td>${row.hitRate == null ? "未知" : formatRate(row.hitRate)}<div class="muted">覆盖 ${formatRate(row.cache_coverage)} · 未报告 ${formatNumber(row.cache_unknown_requests)} 次</div></td>
       <td>${formatNumber(row.total_tokens)}</td>
     </tr>
   `).join("");

@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import Counter
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from telegram_comfyui_selfie.llm_metrics import cache_usage
 
 
 DEFAULT_LOG_PATH = Path("data/logs/llm_debug - 副本.json")
@@ -71,8 +75,8 @@ def stable_json(value: Any) -> str:
 def ordered_json(value: Any) -> str:
     """保留原始键序的 JSON 串，模拟真实请求体的线上字节序。
 
-    前缀缓存命中取决于请求体的字面字节序列，因此公共前缀字符数
-    必须基于保留插入顺序的序列化结果，不能用 sort_keys 重排。
+    此字符数仅用于观察 HTTP 序列化差异，不是供应商实际 token 缓存长度。
+    缓存还取决于供应商渲染的聊天模板、token、模型、路由与保留策略。
     """
 
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
@@ -196,22 +200,8 @@ def usage_int(value: Any) -> int:
 
 
 def provider_cache_tokens(usage: dict[str, Any]) -> int:
-    if not isinstance(usage, dict):
-        return 0
-    details = usage.get("prompt_tokens_details")
-    if not isinstance(details, dict):
-        details = {}
-    cached = usage_int(
-        usage.get("prompt_cache_hit_tokens")
-        or usage.get("prompt_cached_tokens")
-        or usage.get("cached_tokens")
-        or details.get("cached_tokens")
-    )
-    miss_tokens = usage_int(usage.get("prompt_cache_miss_tokens") or usage.get("cache_miss_tokens"))
-    tokens = prompt_tokens(usage)
-    if not cached and miss_tokens and tokens:
-        cached = max(0, tokens - miss_tokens)
-    return max(0, cached)
+    """保留旧数值接口，命中率另行区分未知状态。"""
+    return cache_usage(usage)["cached_tokens"]
 
 
 def prompt_tokens(usage: dict[str, Any]) -> int:
@@ -220,9 +210,10 @@ def prompt_tokens(usage: dict[str, Any]) -> int:
     return usage_int(usage.get("prompt_tokens"))
 
 
-def cache_rate(usage: dict[str, Any]) -> float:
+def cache_rate(usage: dict[str, Any]) -> float | None:
     tokens = prompt_tokens(usage)
-    return provider_cache_tokens(usage) / tokens if tokens else 0.0
+    cache = cache_usage(usage)
+    return cache["cached_tokens"] / tokens if tokens and cache["cache_reported"] else None
 
 
 def non_prefix_equal_blocks(old_hashes: list[str], new_hashes: list[str], prefix_size: int) -> list[EqualBlock]:
@@ -333,8 +324,8 @@ def format_bool(value: bool) -> str:
     return "yes" if value else "no"
 
 
-def format_percent(value: float) -> str:
-    return f"{value * 100:.2f}%"
+def format_percent(value: float | None) -> str:
+    return "unknown" if value is None else f"{value * 100:.2f}%"
 
 
 def build_report(

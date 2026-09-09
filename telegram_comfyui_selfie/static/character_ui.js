@@ -305,66 +305,90 @@ function closetRows(clothing = {}) {
 function renderRuntimeClothingPanel(char, isActive) {
   if (!isActive) return "";
   const clothing = state.characterData?.current_clothing || {};
-  const current = clothing.dynamic_appearance || char.outfit || "";
-  const currentSummary = wardrobeSummaryText(clothing.wardrobe || {}, clothing.wardrobe_display || {}, current);
-  const nudityBadge = clothing.nudity
-    ? `<span class="badge danger" title="持久裸体状态会影响后续生图">裸体状态：${escapeHtml(clothing.nudity)}</span>`
-    : "";
-  return `
-    <section class="form-section character-section runtime-clothing-section">
-      <div class="runtime-clothing-head">
-        <div>
-          <h3>当前衣柜 ${nudityBadge}</h3>
-          <p>这里改的是当前角色现在穿在身上的衣服；会直接影响聊天后的生图。</p>
-        </div>
-        <div class="runtime-clothing-head-actions">
-          <button class="btn ghost" type="button" data-wardrobe-action="clear-item-states">一键还原状态</button>
-          <button class="btn ghost danger" type="button" data-wardrobe-action="clear">清空当前穿搭</button>
-        </div>
-      </div>
-      <div class="wardrobe-editor">
-        <textarea id="wardrobe-description" rows="2" placeholder="输入换装：例如 黑色丝绸睡裙，白色棉质针织开衫"></textarea>
-        <div class="wardrobe-editor-actions">
-          <button class="btn primary" type="button" data-wardrobe-action="apply">直接换上</button>
-          <button class="btn ghost" type="button" data-wardrobe-action="save-closet">存进衣橱（暂不换）</button>
-        </div>
-      </div>
-      <div class="runtime-clothing-layout">
-        <section class="runtime-clothing-pane is-current">
-          <div class="pane-title">
-            <h4>身上穿着</h4>
-            <span>换装去「衣橱收藏」操作；单件状态可在这里调整</span>
-          </div>
-          <div class="runtime-clothing-current">
-            <span>当前摘要</span>
-            <strong title="${escapeHtml(current)}">${escapeHtml(currentSummary || "未设置")}</strong>
-          </div>
-          ${wardrobeRows(clothing.wardrobe || {}, {
-            displayNames: clothing.wardrobe_display || {},
-            states: clothing.wardrobe_item_states || {},
-            editableStates: true,
-          })}
-        </section>
-        <section class="runtime-clothing-pane is-fallback">
-          <div class="pane-title">
-            <h4>公开兜底</h4>
-            <span>只在外出/公开场景临时叠加</span>
-          </div>
-          ${wardrobeRows(clothing.public_fallback_outfit || {})}
-          ${clothing.public_fallback_in_current ? `
-            <button class="btn ghost" type="button" data-wardrobe-action="stash-public-fallback">从当前穿搭移出兜底</button>
-          ` : ""}
-        </section>
-        <section class="runtime-clothing-pane is-closet">
-          <div class="pane-title">
-            <h4>衣橱收藏</h4>
-            <span>点开槽位换穿、改名或删除；「空」= 该槽位不穿</span>
-          </div>
-          ${closetRows(clothing)}
-        </section>
-      </div>
-    </section>
-  `;
+  const summary = wardrobeSummaryText(clothing.wardrobe || {}, clothing.wardrobe_display || {}, clothing.dynamic_appearance || char.outfit || "");
+  return `<section class="runtime-clothing-section wardrobe-studio">
+    <aside class="outfit-preview-card">
+      <div class="pane-title"><h4>搭配预览</h4><span>完整造型 · 自动保存</span></div>
+      <div id="outfit-preview-image" class="outfit-preview-image" aria-live="polite"><p>正在查找这套搭配的预览…</p></div>
+      <strong class="outfit-summary">${escapeHtml(summary || "尚未设置穿搭")}</strong>
+      <button id="outfit-preview-generate" class="btn primary" type="button" disabled>生成搭配预览</button>
+      <p id="outfit-preview-status" class="muted" role="status">生成后再次选中相同搭配会自动显示。</p>
+    </aside>
+    <div class="wardrobe-workbench">
+      <section class="runtime-clothing-pane">
+        <div class="pane-title"><h4>衣橱收藏</h4><span>点开分类选择衣物，立即换上当前角色</span></div>
+        ${closetRows(clothing)}
+      </section>
+      <details class="runtime-clothing-pane wardrobe-add"><summary>添加衣物 / 描述换装</summary>
+        <div class="wardrobe-editor"><textarea id="wardrobe-description" rows="2" placeholder="例如：白色衬衫，深蓝百褶裙"></textarea>
+        <div class="wardrobe-editor-actions"><button class="btn primary" type="button" data-wardrobe-action="apply">直接换上</button><button class="btn ghost" type="button" data-wardrobe-action="save-closet">存进衣橱</button></div></div>
+      </details>
+      <details class="runtime-clothing-pane"><summary>衣物状态与穿搭管理 ${clothing.nudity ? `<span class="badge danger">${escapeHtml(clothing.nudity)}</span>` : ""}</summary>
+        ${wardrobeRows(clothing.wardrobe || {}, {displayNames: clothing.wardrobe_display || {}, states: clothing.wardrobe_item_states || {}, editableStates: true})}
+        <div class="button-row"><button class="btn ghost" type="button" data-wardrobe-action="clear-item-states">还原衣物状态</button><button class="btn ghost danger" type="button" data-wardrobe-action="clear">清空当前穿搭</button></div>
+      </details>
+      <details class="runtime-clothing-pane"><summary>公开场合备用穿搭</summary>
+        ${wardrobeRows(clothing.public_fallback_outfit || {})}
+        ${clothing.public_fallback_in_current ? '<button class="btn ghost" type="button" data-wardrobe-action="stash-public-fallback">从当前穿搭移出备用衣物</button>' : '<p class="muted">仅在公开场景需要时使用。</p>'}
+      </details>
+    </div>
+  </section>`;
+}
+
+async function loadOutfitPreview() {
+  const target = $("#outfit-preview-image");
+  const button = $("#outfit-preview-generate");
+  const status = $("#outfit-preview-status");
+  if (!target || !button || !state.selectedSession || !state.selectedCharacter) return;
+  const sid = state.selectedSession;
+  const character = state.selectedCharacter;
+  const current = () => target.isConnected && state.selectedSession === sid && state.selectedCharacter === character;
+  const endpoint = `/api/sessions/${encodeURIComponent(sid)}/wardrobe-preview?character_key=${encodeURIComponent(characterApiKey(character))}`;
+  let preview;
+  const show = value => {
+    preview = value;
+    target.replaceChildren();
+    if (value.image_url) {
+      const image = document.createElement("img");
+      image.src = value.image_url;
+      image.alt = "当前角色的完整搭配预览";
+      image.tabIndex = 0;
+      image.setAttribute("role", "button");
+      image.setAttribute("aria-label", "放大搭配预览");
+      image.onclick = () => openAvatarPreview(value.image_url, "搭配预览");
+      image.onkeydown = event => {
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); image.click(); }
+      };
+      image.onerror = () => { if (current()) status.textContent = "预览图读取失败，可以重新生成。"; };
+      target.append(image);
+    } else {
+      const message = document.createElement("p");
+      message.textContent = "这套搭配还没有预览，生成一张看看吧。";
+      target.append(message);
+    }
+    button.textContent = value.cached ? "重新生成预览" : "生成搭配预览";
+    button.disabled = false;
+    status.textContent = value.cached ? "已载入保存的搭配预览" : "预览仅展示在衣橱中，生成后自动保存。";
+  };
+  try {
+    const data = await api(endpoint);
+    if (!current()) return;
+    show(data.preview);
+  } catch (error) {
+    if (current()) { target.textContent = "暂时无法读取预览"; status.textContent = error.message; }
+    return;
+  }
+  button.onclick = async () => {
+    button.disabled = true;
+    button.textContent = "正在生成…";
+    status.textContent = "正在绘制完整搭配，可以继续浏览其他页面。";
+    try {
+      const data = await api(`${endpoint}&key=${preview.key}${preview.cached ? "&refresh=1" : ""}`, {method: "POST"});
+      if (current()) show(data.preview);
+    } catch (error) {
+      if (current()) { status.textContent = error.message; button.textContent = "重试生成预览"; }
+    } finally { if (current()) button.disabled = false; }
+  };
 }
 
 function startClosetEdit(button) {
@@ -489,8 +513,14 @@ function renderWardrobePanel() {
   const box = $("#wardrobe-manager");
   if (!box) return;
   if (!state.selectedSession || !state.selectedCharacter || !state.characterData) {
+    if ($("#wardrobe-character-select")) $("#wardrobe-character-select").innerHTML = "";
     box.innerHTML = `<div class="empty-state">选择角色后查看衣橱。</div>`;
     return;
+  }
+  const select = $("#wardrobe-character-select");
+  if (select) {
+    select.innerHTML = Object.entries(state.characterData.characters || {}).map(([id, value]) => `<option value="${escapeHtml(id)}">${escapeHtml(value.character || value.bot_name || id)}${id === state.characterData.active_id ? " · 当前" : ""}</option>`).join("");
+    select.value = state.selectedCharacter;
   }
   const charId = state.selectedCharacter;
   const char = state.characterData.characters?.[charId];
@@ -500,7 +530,8 @@ function renderWardrobePanel() {
   }
   const isActive = charId === state.characterData.active_id;
   if (!isActive) {
-    box.innerHTML = `<div class="empty-state">该角色不是当前角色，请先「设为当前」再操作衣橱。</div>`;
+    box.innerHTML = `<div class="empty-state">该角色尚未激活。<button id="wardrobe-activate" class="primary" type="button">设为当前并打开衣橱</button></div>`;
+    $("#wardrobe-activate").onclick = () => activateSelectedCharacter();
     return;
   }
   const html = renderRuntimeClothingPanel(char, true);
@@ -510,6 +541,7 @@ function renderWardrobePanel() {
   }
   box.innerHTML = html;
   bindRuntimeClothingHandlers(box);
+  loadOutfitPreview();
 }
 
 function diaryTitle(content, date) {
@@ -548,7 +580,7 @@ async function loadCharacterPage() {
     return;
   }
   await loadCharacters();
-  await Promise.all([loadMemories(), loadDiaries(), loadModels()]);
+  switchMemoryDiaryTab(state.memoryDiaryTab || "profile");
 }
 
 function renderCharacterPool() {
@@ -695,7 +727,7 @@ function renderCharacterForm() {
   characterFieldSections.forEach(([sectionTitle, fields], index) => {
     const section = document.createElement("section");
     section.className = "form-section character-section";
-    const collapsed = index > 2;
+    const collapsed = index > (window.matchMedia("(max-width: 760px)").matches ? 0 : 2);
     section.innerHTML = `<button type="button" class="section-toggle ${collapsed ? "collapsed" : ""}" data-panel-id="${sectionTitle}" aria-expanded="${collapsed ? "false" : "true"}">${sectionTitle}</button>`;
     const grid = document.createElement("div");
     grid.className = `field-grid ${collapsed ? "collapsed" : ""}`;
@@ -707,8 +739,8 @@ function renderCharacterForm() {
   const histSection = document.createElement("section");
   histSection.className = "form-section character-section";
   histSection.innerHTML = `
-    <button type="button" class="section-toggle" aria-expanded="true">角色历史提要</button>
-    <div class="field-grid">
+    <button type="button" class="section-toggle collapsed" aria-expanded="false">角色历史提要</button>
+    <div class="field-grid collapsed">
       <div class="field-wrap full-width">
         <label for="history-summary-editor">历史提要 <span class="muted">（dream 自动生成，可手动编辑）</span></label>
         <textarea id="history-summary-editor" name="history_summary" rows="6" placeholder="暂无历史提要，等待 dream 生成或手动输入。"></textarea>
@@ -888,6 +920,7 @@ async function loadCharacters() {
   const sid = encodeURIComponent(state.selectedSession);
   try {
     const data = await api(`/api/sessions/${sid}/characters`);
+    if (encodeURIComponent(state.selectedSession) !== sid) return;
     state.characterData = data;
     renderCharacterPool();
     const characters = data.characters || {};
@@ -1062,38 +1095,56 @@ async function loadDiaries() {
   }
 }
 
-function renderDiaries(diaries, sid, charKey) {
+function renderDiaries(diaries, sid, charKey, page = 0) {
   const box = $("#diary-manager");
+  const pageSize = 6;
+  const pages = Math.max(1, Math.ceil(diaries.length / pageSize));
+  page = Math.max(0, Math.min(page, pages - 1));
   const today = new Date().toISOString().slice(0, 10);
-  const rows = diaries.map(diary => {
+  const rows = diaries.slice(page * pageSize, (page + 1) * pageSize).map(diary => {
     const date = diary.diary_date;
     const updated = new Date(diary.updated_at * 1000).toLocaleString("zh-CN");
     const content = diary.content || "";
     return `
-      <article class="diary-note">
-        <div class="diary-header">
+      <details class="diary-note">
+        <summary class="diary-header">
           <div>
             <strong>${escapeHtml(diaryDateLabel(date))}</strong>
             <span>${escapeHtml(diaryTitle(content, date))}</span>
           </div>
           <time>${escapeHtml(updated)}</time>
-        </div>
+        </summary>
+        <div class="diary-note-body">
         <textarea class="diary-note-editor" data-diary-date="${escapeHtml(date)}" rows="9">${escapeHtml(content)}</textarea>
         <div class="diary-note-actions">
           <button class="btn" data-diary-save="${escapeHtml(date)}" type="button">保存</button>
           <button class="btn danger" data-diary-delete="${escapeHtml(date)}" type="button">删除</button>
         </div>
-      </article>
+        </div>
+      </details>
     `;
   }).join("");
   box.innerHTML = `
+    <details class="diary-add"><summary>写一篇日记</summary>
     <form id="diary-add-form" class="diary-compose">
       <input type="date" name="diary_date" value="${today}">
       <textarea name="content" placeholder="新增或覆盖一条日记" rows="4"></textarea>
       <button class="btn primary" type="submit">新增日记</button>
     </form>
+    </details>
     <div class="diary-note-grid">${rows || `<div class="empty-state">暂无日记。</div>`}</div>
+    <div class="diary-pagination" aria-label="日记翻页">
+      <button type="button" data-diary-page="${page - 1}" ${page === 0 ? "disabled" : ""}>上一页</button>
+      <span>${page + 1} / ${pages} · 最近 ${diaries.length} 篇</span>
+      <button type="button" data-diary-page="${page + 1}" ${page + 1 >= pages ? "disabled" : ""}>下一页</button>
+    </div>
   `;
+  box.querySelectorAll("[data-diary-page]").forEach(button => {
+    button.onclick = () => {
+      renderDiaries(diaries, sid, charKey, Number(button.dataset.diaryPage));
+      box.scrollIntoView({block: "start"});
+    };
+  });
   $("#diary-add-form").onsubmit = async event => {
     event.preventDefault();
     const values = formValues(event.currentTarget);
@@ -1105,7 +1156,7 @@ function renderDiaries(diaries, sid, charKey) {
   box.querySelectorAll("[data-diary-save]").forEach(btn => {
     btn.onclick = async () => {
       const date = btn.dataset.diarySave;
-      const content = box.querySelector(`[data-diary-date="${date}"]`).value;
+      const content = btn.closest(".diary-note").querySelector("textarea").value;
       await api(`/api/sessions/${sid}/diaries/${encodeURIComponent(date)}?character_key=${charKey}`, { method: "POST", body: { content } });
       await loadDiaries();
       toast("日记已保存");
@@ -1126,11 +1177,14 @@ function switchMemoryDiaryTab(tab, { push = false, skipRoute = false } = {}) {
   state.memoryDiaryTab = tab;
   $all("#view-characters .tab").forEach(t => t.classList.toggle("active", t.dataset.tab === tab));
   $all("#view-characters .tab-panel").forEach(p => p.classList.toggle("active", p.id === `${tab}-tab`));
+  $("#memory-organize-btn").hidden = tab !== "memory";
   // skipRoute 时由 switchView 统一写 hash，避免同一次切换写两遍
   if (!skipRoute && state.currentView === "characters") {
     syncRouteToHash({ view: "characters", tab }, { push });
   }
-  if (tab === "wardrobe") renderWardrobePanel();
+  if (tab === "memory") loadMemories();
+  if (tab === "diary") loadDiaries();
+  if (tab === "models") loadModels();
 }
 
 async function exportSelectedCharacterCheckpoint(button) {

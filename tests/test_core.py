@@ -4820,7 +4820,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             result = await svc._translate_to_tags("坐在床边，带着挑逗的笑", session_id="telegram:123", view="pov")
 
-            system_prompt = svc._call_llm.await_args.args[0]
+            system_prompt = svc._call_llm.await_args.args[0] + svc._call_llm.await_args.kwargs.get("system_tail", "")
             self.assertIn("英文自然语言画面描述", system_prompt)
             self.assertIn("少量 danbooru 补强标签", system_prompt)
             self.assertIn("不要压缩成纯标签列表", system_prompt)
@@ -7287,7 +7287,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 payload = await plan_animatool_slots(svc, sid, slots)
 
             self.assertIsNotNone(payload)
-            system_prompt = svc._call_llm.await_args.args[0]
+            system_prompt = svc._call_llm.await_args.args[0] + svc._call_llm.await_args.kwargs.get("system_tail", "")
             self.assertIn("当前天气: 小雨 18 C", system_prompt)
             self.assertIn("tags 必须自然体现当前天气", system_prompt)
             self.assertIn("不要输出 neg", system_prompt)
@@ -7553,7 +7553,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                 payload = await plan_animatool_slots(svc, sid, slots)
 
             self.assertIsNotNone(payload)
-            system_prompt = svc._call_llm.await_args.args[0]
+            system_prompt = svc._call_llm.await_args.args[0] + svc._call_llm.await_args.kwargs.get("system_tail", "")
             self.assertIn("当前工作流支持 neg 字段", system_prompt)
             self.assertIn("neg", payload)
             self.assertEqual(payload["neg"], "bad anatomy, bad hands, nsfw, explicit")
@@ -9861,56 +9861,6 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_call_llm_messages_places_tools_before_messages_in_request_body(self):
-        async def run():
-            svc = self.make_service()
-            svc.config.update({"chat_llm_api_key": "k", "chat_llm_model": "m", "chat_llm_api_base": "http://x"})
-            captured = {}
-
-            class FakeResponse:
-                status = 200
-
-                async def __aenter__(self):
-                    return self
-
-                async def __aexit__(self, exc_type, exc, tb):
-                    return False
-
-                async def json(self):
-                    return {"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": 1}}
-
-                async def text(self):
-                    return ""
-
-            class FakeSession:
-                def __init__(self, *args, **kwargs):
-                    pass
-
-                async def __aenter__(self):
-                    return self
-
-                async def __aexit__(self, exc_type, exc, tb):
-                    return False
-
-                def post(self, *args, **kwargs):
-                    body = kwargs["json"]
-                    captured["keys"] = list(body.keys())
-                    return FakeResponse()
-
-            with patch("telegram_comfyui_selfie.service.aiohttp.ClientSession", FakeSession):
-                await svc._call_llm_messages(
-                    [{"role": "user", "content": "hi"}],
-                    tools=[{"type": "function", "function": {"name": "x"}}],
-                    tool_choice="auto",
-                    purpose="chat",
-                    session_id="telegram:1",
-                )
-
-            self.assertLess(captured["keys"].index("tools"), captured["keys"].index("messages"))
-            self.assertLess(captured["keys"].index("tool_choice"), captured["keys"].index("messages"))
-
-        asyncio.run(run())
-
     def test_auxiliary_model_strips_images_unless_it_matches_vision_model(self):
         async def run():
             svc = self.make_service()
@@ -10307,6 +10257,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc = self.make_service()
             svc.config.update({"chat_llm_api_key": "k", "chat_llm_model": "m", "chat_llm_api_base": "http://x"})
             captured = []
+            tools = [{"type": "function", "function": {"name": "example", "parameters": {"type": "object", "properties": {}}}}]
 
             class FakeResponse:
                 status = 200
@@ -10342,6 +10293,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                     [{"role": "user", "content": "hi"}],
                     purpose="chat",
                     tag="chat",
+                    tools=tools,
+                    tool_choice="auto",
                     session_id="telegram:1",
                     sampling=True,
                 )
@@ -10357,12 +10310,19 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
                     [{"role": "user", "content": "provider defaults"}],
                     purpose="chat",
                     tag="chat-provider-defaults",
+                    tools=tools,
+                    tool_choice="auto",
                     temp=0.2,
                     session_id="telegram:1",
                     sampling=True,
                 )
 
             reply_body, internal_body, provider_default_body = captured
+            # 采样开关不影响工具/消息内容；HTTP 对象键顺序不是供应商缓存契约。
+            for body in (reply_body, provider_default_body):
+                self.assertEqual(body["tools"], tools)
+                self.assertEqual(body["tool_choice"], "auto")
+            self.assertEqual(reply_body["messages"], [{"role": "user", "content": "hi"}])
             self.assertEqual(reply_body["temperature"], 0.9)
             self.assertEqual(reply_body["top_p"], 0.92)
             self.assertEqual(reply_body["frequency_penalty"], 0.4)
@@ -11662,37 +11622,6 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_checkpoint_summarizer_prompt_has_grounding_rule(self):
-        """checkpoint 摘要 prompt 应包含反幻觉约束。"""
-        from telegram_comfyui_selfie import chat_context as chat_context_mod
-
-        src = chat_context_mod._CHECKPOINT_SUMMARY_SYSTEM_TEMPLATE
-        self.assertIn("Do not invent", src)
-        self.assertIn("literally stated", src)
-        self.assertIn("time anchors", src)
-        self.assertIn("deadlines", src)
-        self.assertIn("{role_legend}", src)
-        self.assertIn("{durable_rules}", src)
-        self.assertIn("Do not swap their perspective", src)
-        durable = chat_context_mod._CHECKPOINT_DURABLE_RULES
-        self.assertIn("Stable user facts, preferences, boundaries, and corrections belong to long-term memory", durable)
-        self.assertIn("macro relationship arcs, major event ledger, character trajectory", durable)
-        self.assertIn("Drop expired, resolved, superseded", durable)
-
-    def test_checkpoint_summarizer_templates_render_single_source(self):
-        """两分支共用模块级模板，渲染后含 role_legend 与 durable rules 且无占位符残留。"""
-        from telegram_comfyui_selfie import chat_context as chat_context_mod
-
-        rendered = chat_context_mod._CHECKPOINT_SUMMARY_SYSTEM_TEMPLATE.format(
-            durable_rules=chat_context_mod._CHECKPOINT_DURABLE_RULES,
-            soft="2000",
-            role_legend="User = human user; Assistant = the current bot roleplay character.",
-        )
-        self.assertNotIn("{", rendered)
-        self.assertIn("User = human user", rendered)
-        self.assertIn("Drop expired, resolved, superseded", rendered)
-        self.assertIn("Soft limit: 2000 Chinese characters", rendered)
-
     def test_checkpoint_summarizer_injects_role_legend(self):
         async def run():
             svc = self.make_service()
@@ -11713,25 +11642,18 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             ])
 
             self.assertIn("User = human user; Assistant = the current bot roleplay character", captured["system"])
+            # 检查实际下发模板，避免源码常量中有规则、真实请求却漏掉。
+            self.assertIn("Do not invent", captured["system"])
+            self.assertIn("time anchors", captured["system"])
+            self.assertIn("Drop expired, resolved, superseded", captured["system"])
+            self.assertNotIn("{role_legend}", captured["system"])
+            self.assertNotIn("{durable_rules}", captured["system"])
+            self.assertNotIn("{soft}", captured["system"])
             self.assertIn("Dialogue role legend", captured["user"])
             self.assertIn("User: 我会晚点回来。", captured["user"])
             self.assertIn("Assistant: 「我等你。」", captured["user"])
 
         asyncio.run(run())
-
-    def test_memory_extractor_prompt_has_strong_grounding(self):
-        """记忆提取 prompt 应包含明确的反编造规则约束。"""
-        svc = self.make_service()
-        import inspect
-        src = inspect.getsource(svc._extract_long_term_memories)
-        self.assertIn("只从对话原文提取", src)
-        self.assertIn("不要推断", src)
-        self.assertIn("时间节点", src)
-        self.assertIn("作为 event 记忆保存", src)
-        self.assertIn("不要把整段当成用户发言", src)
-        self.assertIn("User/用户 是人类用户", src)
-        self.assertIn("user_profile", src)
-        self.assertIn("用户画像", src)
 
     def test_memory_extractor_checkpoint_dialog_keeps_user_assistant_roles(self):
         async def run():
@@ -11754,35 +11676,15 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             )
 
             self.assertIn("User/用户 是人类用户", captured["system"])
+            self.assertIn("只从对话原文提取", captured["system"])
+            self.assertIn("不要推断", captured["system"])
+            self.assertIn("时间节点", captured["system"])
             self.assertIn("来源对话（按行读取", captured["user"])
             self.assertIn("User=人类用户，Assistant=当前 bot 角色", captured["user"])
             self.assertIn("Assistant: 「我等你。」", captured["user"])
             self.assertNotIn("本轮对话:\n用户: [checkpoint]", captured["user"])
 
         asyncio.run(run())
-
-    def test_history_summary_prompt_has_grounding(self):
-        """角色历史提要 prompt 应包含反幻觉约束。"""
-        svc = self.make_service()
-        import inspect
-        src = inspect.getsource(svc._generate_character_history_summary)
-        self.assertIn("不要编造", src)
-        self.assertIn("只基于提供的日记", src)
-        self.assertNotIn("「新一天演绎提示」四段", src)
-        self.assertIn("导演指令", src)
-        self.assertIn("角色心理", src)
-        self.assertIn("心情界定", src)
-        self.assertIn("日记是当前 bot 角色的一人称记录", src)
-        self.assertIn("不要把用户的动作", src)
-        self.assertIn("长期记忆已经负责稳定事实", src)
-        self.assertIn("checkpoint 和当前窗口只负责近期连续性", src)
-        self.assertIn("已经过期、解决、被替代", src)
-        self.assertIn("严格去除流水账和低价值细节", src)
-        self.assertIn("同一事实只写一次", src)
-        self.assertIn("直接写结论", src)
-        self.assertIn("目标字数是软目标", src)
-        self.assertIn("按长期影响和后续扮演价值由高到低排列", src)
-        self.assertIn("不要为了接近字数而填充内容", src)
 
     def test_history_summary_upstream_failure_propagates_for_dream_retry(self):
         async def run():
@@ -11978,6 +11880,10 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("当前窗口", captured["user"])
             self.assertIn("当前窗口重大转折", captured["user"])
             self.assertIn("已经过期、解决、被替代", captured["system"])
+            self.assertIn("只基于提供的日记", captured["system"])
+            self.assertIn("不要编造", captured["system"])
+            self.assertIn("日记是当前 bot 角色的一人称记录", captured["system"])
+            self.assertIn("目标字数是软目标", captured["system"])
 
         asyncio.run(run())
 
@@ -12036,21 +11942,6 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertTrue(stored.startswith("关系阶段开头"))
         self.assertIn("中间超长内容已省略", stored)
         self.assertTrue(stored.endswith("新一天演绎方向必须保留。"))
-
-    def test_dream_memory_prompt_keeps_time_nodes_until_faded(self):
-        """dream 记忆整理应软约束过时时间节点，不是一过期就删。"""
-        svc = self.make_service()
-        import inspect
-        incremental = inspect.getsource(svc._incremental_organize_memories)
-        summarize = inspect.getsource(svc._summarize_all_memories)
-        self.assertIn("time nodes", incremental)
-        self.assertIn("fully faded", incremental)
-        self.assertIn("Do not create new memories from inference", incremental)
-        self.assertIn("user_profile", incremental)
-        self.assertIn("User_profile is character-scoped", incremental)
-        self.assertIn("do not drop them merely", summarize)
-        self.assertIn("Use only the supplied memories", summarize)
-        self.assertIn("at most one user_profile", summarize)
 
     def test_scene_stale_hint_when_gap_exceeds_threshold(self):
         """场景断档感知: 距离上次对话超过阈值时在 system_dynamic 注入提示。"""

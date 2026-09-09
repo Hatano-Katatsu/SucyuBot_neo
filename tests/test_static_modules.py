@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 
 
@@ -9,103 +10,28 @@ STATIC_ROOT = PROJECT_ROOT / "telegram_comfyui_selfie" / "static"
 
 
 class StaticModuleBoundaryTestCase(unittest.TestCase):
-    """前端拆分的静态契约，防止功能又被并回单体入口。"""
+    """保留页面加载与用户功能契约，不固定函数必须位于哪个文件。"""
 
-    def test_admin_logs_module_loads_before_app_entrypoint(self):
-        index = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    def test_frontend_dependencies_load_once_before_entrypoint(self):
+        class Scripts(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.sources = []
 
-        admin_pos = index.index('<script src="/static/admin_logs.js"></script>')
-        app_pos = index.index('<script src="/static/app.js"></script>')
+            def handle_starttag(self, tag, attrs):
+                if tag == "script":
+                    self.sources.append(dict(attrs).get("src"))
 
-        self.assertLess(admin_pos, app_pos)
-
-    def test_frontend_core_loads_before_and_is_used_by_app_entrypoint(self):
-        index = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
-        app = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
-
-        core_pos = index.index('<script src="/static/frontend_core.js"></script>')
-        app_pos = index.index('<script src="/static/app.js"></script>')
-        self.assertLess(core_pos, app_pos)
-        for helper in (
-            "buildRequestOptions",
-            "parseApiResponse",
-            "firstInvalidNumberField",
-            "resolveCommands",
-            "resolveSelectedSession",
-        ):
-            self.assertIn(f"frontendCore.{helper}", app)
-
-    def test_admin_logs_domain_is_kept_out_of_app_entrypoint(self):
-        admin_logs = (STATIC_ROOT / "admin_logs.js").read_text(encoding="utf-8")
-        app = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
-        domain_functions = (
-            "loadLogs",
-            "loadUsage",
-            "renderLogList",
-            "renderUsage",
-            "selectLog",
-            "selectSystemLog",
-            "formatSystemErrorEntry",
-        )
-
-        for name in domain_functions:
-            declaration = f"function {name}("
-            self.assertIn(declaration, admin_logs)
-            self.assertNotIn(declaration, app)
-
-    def test_world_ui_module_loads_before_app_entrypoint(self):
-        index = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
-
-        world_pos = index.index('<script src="/static/world_ui.js"></script>')
-        app_pos = index.index('<script src="/static/app.js"></script>')
-
-        self.assertLess(world_pos, app_pos)
-
-    def test_world_domain_is_kept_out_of_app_entrypoint(self):
-        world_ui = (STATIC_ROOT / "world_ui.js").read_text(encoding="utf-8")
-        app = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
-        domain_functions = (
-            "loadWorldSessions",
-            "loadWorldRoute",
-            "renderWorldSessionList",
-            "renderWorldRoute",
-            "renderLifePlan",
-            "handleLifePlanAction",
-            "renderCharacterInteraction",
-            "handleCharacterInteractionAction",
-        )
-
-        for name in domain_functions:
-            declaration = f"function {name}("
-            self.assertIn(declaration, world_ui)
-            self.assertNotIn(declaration, app)
-
-    def test_character_ui_module_loads_before_app_entrypoint(self):
-        index = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
-
-        character_pos = index.index('<script src="/static/character_ui.js"></script>')
-        app_pos = index.index('<script src="/static/app.js"></script>')
-
-        self.assertLess(character_pos, app_pos)
-
-    def test_character_domain_is_kept_out_of_app_entrypoint(self):
-        character_ui = (STATIC_ROOT / "character_ui.js").read_text(encoding="utf-8")
-        app = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
-        domain_functions = (
-            "renderWardrobePanel",
-            "loadCharacterPage",
-            "renderCharacterPool",
-            "renderCharacterForm",
-            "loadMemories",
-            "loadDiaries",
-            "activateSelectedCharacter",
-            "handleCharacterImportFile",
-        )
-
-        for name in domain_functions:
-            declaration = f"function {name}("
-            self.assertIn(declaration, character_ui)
-            self.assertNotIn(declaration, app)
+        parser = Scripts()
+        parser.feed((STATIC_ROOT / "index.html").read_text(encoding="utf-8"))
+        sources = parser.sources
+        self.assertEqual(sources.count("/static/app.js"), 1)
+        for name in ("frontend_core", "admin_logs", "world_ui", "character_ui"):
+            with self.subTest(module=name):
+                src = f"/static/{name}.js"
+                self.assertEqual(sources.count(src), 1)
+                self.assertLess(sources.index(src), sources.index("/static/app.js"))
+                self.assertTrue((STATIC_ROOT / f"{name}.js").is_file())
 
     def test_world_session_actions_are_separate_native_buttons(self):
         world_ui = (STATIC_ROOT / "world_ui.js").read_text(encoding="utf-8")

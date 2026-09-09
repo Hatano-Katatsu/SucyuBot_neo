@@ -240,7 +240,7 @@ class AnimaFlowGuardContractTestCase(unittest.TestCase):
             self.assertIn("llm supplemental artifact", negative)
             self.assertIn("holding phone", negative)
             self.assertIn("split screen", negative)
-            system_prompt = service._call_llm.await_args.args[0]
+            system_prompt = service._call_llm.await_args.args[0] + service._call_llm.await_args.kwargs.get("system_tail", "")
             self.assertIn("系统终裁护栏（只可补充，不可删除）", system_prompt)
 
         asyncio.run(run())
@@ -358,7 +358,7 @@ class AnimaFlowGuardContractTestCase(unittest.TestCase):
             )
 
             self.assertNotIn("neg", payload)
-            self.assertIn("cfg=1 提示词规则", service._call_llm.await_args.args[0])
+            self.assertIn("cfg=1 提示词规则", service._call_llm.await_args.kwargs["system_tail"])
 
         asyncio.run(run())
 

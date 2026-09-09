@@ -567,7 +567,9 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
             auto_id = next(m["id"] for m in memories if m.get("kind") == "preference")
 
             # mock LLM 返回 ops：尝试 delete manual 和 update auto
+            systems = []
             async def fake_call_llm(system, user, **kw):
+                systems.append(system)
                 return json.dumps({"ops": [
                     {"op": "delete", "id": manual_id},
                     {"op": "update", "id": manual_id, "summary": "被改了"},
@@ -578,6 +580,11 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
 
             await svc._organize_memories_after_dream(sid, key)
 
+            self.assertTrue(systems)
+            for system in systems:
+                self.assertIn("time nodes", system)
+                self.assertIn("fully faded", system)
+                self.assertIn("Do not create new memories from inference", system)
             # manual 记忆应仍存在且内容不变
             memories_after = svc.memory.list_memories(sid, character=key, limit=10)
             manual_after = next((m for m in memories_after if m["id"] == manual_id), None)
@@ -585,6 +592,7 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(manual_after.get("summary"), "手动记忆-不应被改",
                              "manual 记忆不应被 update")
             self.assertEqual(manual_after.get("kind"), "manual")
+            self.assertEqual(next(m for m in memories_after if m["id"] == auto_id)["summary"], "自动记忆已更新")
 
         asyncio.run(run())
 
@@ -951,8 +959,10 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
             editable = svc.memory.list_memories(sid, character=key, limit=20)
             svc.has_llm_config = lambda purpose, session_id="": purpose in {"chat", "image"}
             calls = []
+            systems = []
 
             async def fake_call_llm(system, user, **kw):
+                systems.append(system)
                 calls.append(kw)
                 if kw.get("purpose") == "chat":
                     return "```"
@@ -967,6 +977,10 @@ class DreamManualMemoryTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(result.get("status"), "ok")
             self.assertEqual(result.get("llm_purpose"), "image")
             self.assertEqual([call.get("purpose") for call in calls], ["chat", "image"])
+            for system in systems:
+                self.assertIn("do not drop them merely", system)
+                self.assertIn("Use only the supplied memories", system)
+                self.assertIn("at most one user_profile", system)
             self.assertTrue(calls[0].get("disable_thinking"))
             self.assertIsNone(calls[1].get("disable_thinking"))
             self.assertEqual(calls[1].get("tag"), "dream-memory-summarize-fast-fallback")

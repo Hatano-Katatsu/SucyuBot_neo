@@ -19,6 +19,8 @@ from .deletion_runtime import (
     DeletionNotFoundError,
 )
 from .http_limits import read_limited_json, response_limit
+from .llm_metrics import usage_rates
+from .webui_wardrobe_preview import api_wardrobe_preview, api_wardrobe_preview_image
 from .llm_runtime import llm_message_text_metrics
 from .webui_characters import (
     PUBLIC_FALLBACK_CLOSET_PREFIX,
@@ -178,6 +180,9 @@ def create_web_app(service) -> web.Application:
     app.router.add_get("/api/sessions/{session_id:.+}/characters", api_characters)
     app.router.add_post("/api/sessions/{session_id:.+}/characters", api_save_character)
     app.router.add_post("/api/sessions/{session_id:.+}/wardrobe", api_update_wardrobe)
+    app.router.add_get("/api/sessions/{session_id:.+}/wardrobe-preview", api_wardrobe_preview)
+    app.router.add_post("/api/sessions/{session_id:.+}/wardrobe-preview", api_wardrobe_preview)
+    app.router.add_get("/api/sessions/{session_id:.+}/wardrobe-preview/{preview_key:[^/]+}", api_wardrobe_preview_image)
     app.router.add_post("/api/sessions/{session_id:.+}/characters/{character_id:[^/]+}/avatar", api_generate_character_avatar)
     app.router.add_get("/api/sessions/{session_id:.+}/characters/{character_id:[^/]+}/avatar-image", api_character_avatar_image)
     app.router.add_get("/api/sessions/{session_id:.+}/characters/{character_id:[^/]+}/checkpoints", api_character_checkpoints)
@@ -1671,8 +1676,8 @@ async def api_admin_llm_usage(request: web.Request):
         before = float(query.get("before") or 0) or (now + 0.001)
     except ValueError:
         before = now + 0.001
-    group_by = [c.strip() for c in (query.get("group_by") or "profile_id,model,purpose,tag").split(",") if c.strip()]
-    valid_cols = {"profile_id", "model", "purpose", "tag", "session_id"}
+    group_by = [c.strip() for c in (query.get("group_by") or "profile_id,model,purpose,tag,endpoint,profile_scope").split(",") if c.strip()]
+    valid_cols = {"profile_id", "model", "purpose", "tag", "session_id", "endpoint", "profile_scope"}
     group_by = [c for c in group_by if c in valid_cols]
     if not group_by:
         group_by = ["profile_id"]
@@ -1684,9 +1689,11 @@ async def api_admin_llm_usage(request: web.Request):
         "cached_tokens": sum(r.get("cached_tokens", 0) or 0 for r in rows),
         "total_tokens": sum(r.get("total_tokens", 0) or 0 for r in rows),
     }
-    total["cache_hit_rate"] = (
-        round(total["cached_tokens"] / total["prompt_tokens"], 4) if total["prompt_tokens"] else 0
-    )
+    for key in ("cache_reported_prompt_tokens", "cache_reported_requests", "cache_unknown_requests", "cache_anomaly_requests"):
+        total[key] = sum(r.get(key, 0) or 0 for r in rows)
+    total.update(usage_rates(total))
+    for row in rows:
+        row.update(usage_rates(row))
     return json_ok({
         "summary": total,
         "groups": rows,

@@ -115,13 +115,14 @@ test("parseViewRoute 解析视图与角色页 tab，非法或空 hash 回退 ove
     assert.deepEqual(core.parseViewRoute(hash), { view: "overview", tab: "" }, String(hash));
   });
   assert.deepEqual(core.parseViewRoute("#/world"), { view: "world", tab: "" });
+  assert.deepEqual(core.parseViewRoute("#/wardrobe"), { view: "wardrobe", tab: "" });
   assert.deepEqual(core.parseViewRoute("#/characters/memory"), { view: "characters", tab: "memory" });
   assert.deepEqual(core.parseViewRoute("#/characters/diary"), { view: "characters", tab: "diary" });
   // 非法 tab 与非角色页的 tab 段被忽略
   assert.deepEqual(core.parseViewRoute("#/characters/nope"), { view: "characters", tab: "" });
   assert.deepEqual(core.parseViewRoute("#/usage/memory"), { view: "usage", tab: "" });
   // 多余段不影响前两段的解析
-  assert.deepEqual(core.parseViewRoute("#/characters/wardrobe/extra"), { view: "characters", tab: "wardrobe" });
+  assert.deepEqual(core.parseViewRoute("#/characters/memory/extra"), { view: "characters", tab: "memory" });
 });
 
 test("buildViewRoute 生成规范 hash，非法输入回退 overview", () => {
@@ -136,10 +137,10 @@ test("buildViewRoute 生成规范 hash，非法输入回退 overview", () => {
 });
 
 test("parseViewRoute 与 buildViewRoute 互为往返", () => {
-  ["overview", "settings", "characters", "world", "logs", "usage", "actions"].forEach(view => {
+  ["overview", "settings", "characters", "wardrobe", "world", "logs", "usage", "actions"].forEach(view => {
     assert.deepEqual(core.parseViewRoute(core.buildViewRoute(view)), { view, tab: "" });
   });
-  ["wardrobe", "memory", "diary"].forEach(tab => {
+  ["memory", "diary"].forEach(tab => {
     assert.deepEqual(core.parseViewRoute(core.buildViewRoute("characters", tab)), { view: "characters", tab });
   });
 });

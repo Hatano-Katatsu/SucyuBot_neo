@@ -859,8 +859,14 @@ class AppStateStore:
         session_id: str = "",
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
-        cached_tokens: int = 0,
+        cached_tokens: int | None = None,
         total_tokens: int = 0,
+        cache_reported: bool | None = None,
+        cache_source: str = "",
+        cache_anomaly: str = "",
+        endpoint: str = "",
+        profile_scope: str = "",
+        request_meta: dict[str, Any] | None = None,
     ):
         """记录一次 LLM 调用的 token 消耗。"""
         with closing(self._connect()) as conn:
@@ -868,9 +874,10 @@ class AppStateStore:
                 """
                 INSERT INTO llm_usage(
                     created_at, profile_id, model, purpose, tag, session_id,
-                    prompt_tokens, completion_tokens, cached_tokens, total_tokens
+                    prompt_tokens, completion_tokens, cached_tokens, total_tokens,
+                    cache_reported, cache_source, cache_anomaly, endpoint, profile_scope, request_meta
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _now(),
@@ -883,6 +890,12 @@ class AppStateStore:
                     int(completion_tokens or 0),
                     int(cached_tokens or 0),
                     int(total_tokens or 0),
+                    int(cached_tokens is not None if cache_reported is None else cache_reported),
+                    str(cache_source or ""),
+                    str(cache_anomaly or ""),
+                    str(endpoint or ""),
+                    str(profile_scope or ""),
+                    json.dumps(request_meta or {}, ensure_ascii=False, separators=(",", ":")),
                 ),
             )
             conn.commit()
@@ -895,7 +908,7 @@ class AppStateStore:
         group_by: tuple[str, ...] = ("profile_id", "model", "purpose", "tag"),
     ) -> list[dict[str, Any]]:
         """按指定维度聚合 LLM 用量。"""
-        cols = [c for c in group_by if c in {"profile_id", "model", "purpose", "tag", "session_id"}]
+        cols = list(dict.fromkeys(c for c in group_by if c in {"profile_id", "model", "purpose", "tag", "session_id", "endpoint", "profile_scope"}))
         if not cols:
             cols = ["profile_id"]
         select_cols = ", ".join(cols)
@@ -913,7 +926,11 @@ class AppStateStore:
                    COUNT(*) AS requests,
                    SUM(prompt_tokens) AS prompt_tokens,
                    SUM(completion_tokens) AS completion_tokens,
-                   SUM(cached_tokens) AS cached_tokens,
+                   SUM(CASE WHEN cache_reported=1 THEN cached_tokens ELSE 0 END) AS cached_tokens,
+                   SUM(CASE WHEN cache_reported=1 THEN prompt_tokens ELSE 0 END) AS cache_reported_prompt_tokens,
+                   SUM(cache_reported) AS cache_reported_requests,
+                   SUM(CASE WHEN cache_reported=0 THEN 1 ELSE 0 END) AS cache_unknown_requests,
+                   SUM(CASE WHEN cache_anomaly!='' THEN 1 ELSE 0 END) AS cache_anomaly_requests,
                    SUM(total_tokens) AS total_tokens,
                    MAX(created_at) AS last_used,
                    MIN(created_at) AS first_used

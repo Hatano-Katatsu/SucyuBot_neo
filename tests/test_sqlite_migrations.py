@@ -249,7 +249,7 @@ class EncountersMigrationTestCase(unittest.TestCase):
 
         app_store = AppStateStore(path)
         self.assertEqual(app_store.schema_migration.previous_version, 7)
-        self.assertEqual(app_store.schema_migration.applied_versions, (8,))
+        self.assertEqual(app_store.schema_migration.applied_versions, tuple(range(8, LATEST_SCHEMA_VERSION + 1)))
         self.assertTrue(self.EXPECTED_COLUMNS <= _columns(path, "encounters"))
         self.assertEqual(_user_version(path), LATEST_SCHEMA_VERSION)
 
