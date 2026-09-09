@@ -13,6 +13,7 @@ from typing import Any
 from . import session_schema
 from .defaults import WEEKDAY_NAMES
 from .memory import format_memory_lines
+from .prompt_layout import CHAT_SYSTEM_STATIC_RULES
 
 logger = logging.getLogger(__name__)
 
@@ -107,19 +108,6 @@ CHAT_INTIMATE_LANGUAGE_RULES = (
     "用更短、更准的语言体现性格。"
 )
 
-
-# 聊天静态规则块（messages[0]，跨角色共享）。只放每轮都需要、与角色无关的少量规则；
-# 工具触发细节在 tools schema，性爱语言/对话推进/事实优先级在动态尾部（见 _build_chat_messages）。
-CHAT_SYSTEM_STATIC_RULES = (
-    "工具：需要配图、换装、更新位置或联网查询时调用对应工具（何时调用见各工具说明），"
-    "不要在文字里描述工具、函数或内部指令。"
-    "\n照片记录：历史里以「照片记录」开头的 system 行是你之前发给用户的照片。"
-    "用户提到“刚才那张/照片/图/画面”时据此承接，不要主动复述记录内容。"
-    "\n回复格式（默认）：台词放中文直角引号「」，动作、神态、心理、环境描写放全角括号（），两者分段、用空行隔开。"
-    "允许只有台词、只有动作、或一句话的回复；不要每条都写成“动作—台词—动作—台词”的固定结构，短回复优于凑满结构。"
-    "示例一：\n（她抬眼看过来。）\n\n「怎么突然这么问？」\n示例二：\n「……你说真的？」\n"
-    "不要使用英文引号、冒号旁白或括号外裸叙述来表示动作状态。"
-)
 
 # 对话推进与事实优先级：关于「如何取舍上面所有背景」的元指令，放在动态尾部末段、紧贴 user。
 CHAT_FOCUS_RULES = (
@@ -504,7 +492,8 @@ class ChatContextMixin:
         if usage:
             prompt_tokens = int(usage.get("prompt_tokens") or 0)
             completion_tokens = int(usage.get("completion_tokens") or 0)
-            cached_tokens = self._cached_tokens_from_usage(usage, prompt_tokens=prompt_tokens)
+            cache = self._llm_usage_debug_summary(result)
+            cached_tokens = cache["cached_tokens"] if cache["cache_reported"] else "unknown"
             self._ulog(session_id, "USAGE", f"prompt={prompt_tokens} completion={completion_tokens} cached={cached_tokens}")
 
         assistant = result.get("choices", [{}])[0].get("message", {})
@@ -943,8 +932,6 @@ class ChatContextMixin:
                 f"{history_summary}"
             )
         life_context = self._life_plan_chat_context(session_id, now=now) if hasattr(self, "_life_plan_chat_context") else ""
-        if life_context:
-            durable_parts.append(life_context)
         memory_context = self._long_term_memory_context(session_id)
         if memory_context:
             durable_parts.append(
@@ -980,6 +967,9 @@ class ChatContextMixin:
         history = self._chat_prompt_history(state) if include_history else []
         if include_history:
             messages.extend(history)
+        # 当前时段底色不得插在稳定记忆之前；推送关闭聊天动态尾部时也保留该事实。
+        if life_context:
+            messages.append({"role": "system", "content": life_context})
         if include_dynamic_tail:
             messages.append({"role": "system", "content": system_dynamic})
         final_user_content: str | list[dict[str, Any]] = user_text
@@ -1000,9 +990,8 @@ class ChatContextMixin:
     def _build_chat_context_messages_for_push(self, session_id: str, marker: str = "【系统事件】后台上下文前缀占位") -> list[dict[str, Any]]:
         """复用聊天 prompt 前缀和 checkpoint 后历史，并去掉占位 user。
 
-        推送前 checkpoint 会把未折叠窗口收敛到最近一轮用户消息及之后；
-        这些保留下来的对话和照片记录应像正常聊天一样进入 planner 前缀，
-        这样用户继续对话或连续推送时都能共享同一段上下文前缀。
+        只在窗口超限时按配置折叠，保留 checkpoint 后历史与当前时段生活事实。
+        规划器在这些共享事实之前另放自己的固定规则，避免动态历史截断固定规则缓存。
         """
         messages = self._build_chat_messages(
             session_id,

@@ -1345,11 +1345,14 @@ class TelegramComfyUIService(
                 "避免复杂手势和多手互动；除非原文强制要求，尽量不强调手部。"
                 f"{translate_output_rule}"
             )
+        # 把视角/自由构图等本次分支规则后移，通用职责与输出协议保持同一前缀。
+        dynamic_rules = system[len(translate_common):].replace(translate_output_rule, "", 1)
+        system = translate_common + translate_output_rule
         if is_intimate:
             # 亲密场景翻译护栏：第二人称身体翻成“用户作为伴侣的局部身体”，按用户性别决定男/女，绝不能写成完整的第二个主角（双女根因）。
             ug = self._get_user_gender(session_id)
             body = "female" if ug == "female" else "male"
-            system += (
+            dynamic_rules += (
                 " Intimate scene override: the only fully drawn character is the role (one woman). "
                 f"The user appears only as an intimate partner's partial {body} body (hands, arms, chest, torso, back, thighs), "
                 "never as a complete second character with their own face, hair, or expression. "
@@ -1365,6 +1368,7 @@ class TelegramComfyUIService(
                 system,
                 f"动态天气与自然光约束: {weather_guard} {light_guard}\n请翻译: {natural}",
                 temp=float(self._get_llm_value("image", "temperature_translate", "0.3")),
+                system_tail=dynamic_rules,
                 tag="translate",
                 purpose="image",
                 session_id=session_id,

@@ -826,12 +826,12 @@ class SchedulerRuntimeMixin:
             "\"search_topic\":\"general|news|finance或空\",\"reason\":\"简短理由\"}"
         )
         user = (
-            f"当前推送模式: {mode}\n"
-            f"当前时间: {now.strftime('%Y-%m-%d %H:%M %A')}\n\n"
+            f"{context}\n\n"
             f"角色互动状态: {'可用' if interaction_available else '不可用'}；"
             f"候选非活动角色: {interaction_candidates or '无'}；"
             f"原因: {interaction_status.get('reason') or '-'}\n\n"
-            f"{context}\n\n"
+            f"当前推送模式: {mode}\n"
+            f"当前时间: {now.strftime('%Y-%m-%d %H:%M %A')}\n\n"
             "请输出 JSON（以 { 开头）。"
         )
         try:

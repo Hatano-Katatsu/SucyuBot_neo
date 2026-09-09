@@ -327,6 +327,21 @@ def _migration_v8_encounters(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_v9_llm_cache_observability(conn: sqlite3.Connection) -> None:
+    """旧零值无法区分未报告与未命中，保守标未知；旧正值保留来源标记。"""
+    for column, definition in (
+        ("cache_reported", "cache_reported INTEGER NOT NULL DEFAULT 0"),
+        ("cache_source", "cache_source TEXT NOT NULL DEFAULT ''"),
+        ("cache_anomaly", "cache_anomaly TEXT NOT NULL DEFAULT ''"),
+        ("endpoint", "endpoint TEXT NOT NULL DEFAULT ''"),
+        ("profile_scope", "profile_scope TEXT NOT NULL DEFAULT ''"),
+        ("request_meta", "request_meta TEXT NOT NULL DEFAULT '{}'"),
+    ):
+        _add_column_if_missing(conn, "llm_usage", column, definition)
+    conn.execute("UPDATE llm_usage SET cache_reported=1, cache_source='legacy_positive' "
+                 "WHERE cached_tokens>0 AND cached_tokens<=prompt_tokens AND cache_source=''")
+
+
 SCHEMA_MIGRATIONS: tuple[Migration, ...] = (
     (1, "base_schema", _migration_v1_base_schema),
     (2, "character_memories", _migration_v2_character_memories),
@@ -336,6 +351,7 @@ SCHEMA_MIGRATIONS: tuple[Migration, ...] = (
     (6, "model_thinking_settings", _migration_v6_model_thinking_settings),
     (7, "memory_organize_watermark", _migration_v7_memory_organize_watermark),
     (8, "encounters", _migration_v8_encounters),
+    (9, "llm_cache_observability", _migration_v9_llm_cache_observability),
 )
 LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS[-1][0]
 
@@ -425,6 +441,10 @@ def _validate_schema(conn: sqlite3.Connection, version: int) -> None:
             missing.append("table:encounters")
         elif absent:
             missing.append(f"encounters:[{','.join(sorted(absent))}]")
+    if version >= 9:
+        absent = {"cache_reported", "cache_source", "cache_anomaly", "endpoint", "profile_scope", "request_meta"} - _table_columns(conn, "llm_usage")
+        if absent:
+            missing.append(f"llm_usage:[{','.join(sorted(absent))}]")
     if missing:
         raise SchemaMigrationError("SQLite schema 校验失败：" + "; ".join(missing))
 

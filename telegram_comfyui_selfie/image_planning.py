@@ -28,6 +28,7 @@ from .generation import (
 )
 from .llm_runtime import _looks_like_llm_thinking
 from .memory import USER_PROFILE_KIND, format_memory_lines
+from .prompt_layout import build_image_planner_messages
 from .world_runtime import PLACE_TYPES
 
 logger = logging.getLogger(__name__)
@@ -1492,7 +1493,8 @@ async def plan_roleplay_image(
         stable_front += (
             "\n聊天模型已经给出文字回复，这张图只配画面、不需要任何台词或配文，不要输出 caption 字段。"
         )
-    system = stable_front + "\n\n" + role_context + "\n" + service._get_effective_persona(session_id, include_appearance=False) + "\n\n"
+    planner_persona = service._get_effective_persona(session_id, include_appearance=False)
+    system = stable_front + "\n\n" + role_context + "\n" + planner_persona + "\n\n"
     system += (
         f"当前可见外貌: {visible_appearance or '无'}\n"
         f"当前附加外貌: {dynamic or '无'}\n"
@@ -1751,11 +1753,11 @@ async def plan_roleplay_image(
         text = ""
         combined_push_dynamic = "\n".join(part for part in (push_dynamic_context, extra_push_dynamic) if part)
         if is_push and hasattr(service, "_build_chat_context_messages_for_push") and hasattr(service, "_call_llm_messages"):
-            planner_messages = service._build_chat_context_messages_for_push(session_id)
-            planner_messages.append({"role": "system", "content": system})
-            if combined_push_dynamic:
-                planner_messages.append({"role": "system", "content": combined_push_dynamic})
-            planner_messages.append({"role": "user", "content": user})
+            planner_messages = build_image_planner_messages(
+                stable_front, system[len(stable_front):], user,
+                context=service._build_chat_context_messages_for_push(session_id),
+                persona=planner_persona, memory=memory_context, extra_dynamic=combined_push_dynamic,
+            )
             result = await service._call_llm_messages(
                 planner_messages,
                 temp=float(service._get_llm_value("image", "temperature_scene", "0.95")),
@@ -2019,7 +2021,7 @@ async def plan_animaflow_slots(
     # schema 内容字段定义
     schema_text = json.dumps(
         {k: properties[k] for k in content_fields},
-        ensure_ascii=False, indent=2,
+        ensure_ascii=False, indent=2, sort_keys=True,
     ) if content_fields else "（无内容字段）"
 
     # 槽位信息：只传 AnimaFlow API 需要的语义槽位。
@@ -2132,25 +2134,15 @@ async def plan_animaflow_slots(
         f"## Schema 内容字段\n{schema_text}\n\n"
         f"## 必填字段: {', '.join(content_required) if content_required else '（未指定）'}\n\n"
         "## 槽位→字段\n"
-        + qmws_guidance
-        + ("- count: 只输出人数标签（1girl/2girls/1boy/1other），不要包含 solo 或其他标签。\n" if (slots.count or "").strip() else "- count: 槽位为空，不要输出 count 字段。\n")
-        + "- character → character（仅已知公开角色；OC 留空）\n"
+        "- character → character（仅已知公开角色；OC 留空）\n"
         "- series → series（仅已知公开角色；OC 留空）\n"
         "- effective_appearance + one_shot_appearance → appearance\n"
         "- style_artist → artist（@ 开头，为空留空）\n"
         "- style_general → style\n"
         "- scene → tags/nltag（改写成 3-5 句完整英文，把末尾的逗号标签堆融进句子，不要保留 Danbooru 逗号串）\n\n"
-        + neg_rule
-        + (
-            "## 系统终裁护栏（只可补充，不可删除）\n"
-            f"{guard_constraint}\n\n"
-            if guard_constraint else ""
-        )
-        + "selfie/portrait/pov 场景中，仍要在自然语言描述里避免手机、相机、UI 界面、取景框、快门按钮等拍摄设备元素；"
+        "selfie/portrait/pov 场景中，仍要在自然语言描述里避免手机、相机、UI 界面、取景框、快门按钮等拍摄设备元素；"
         "mirror 场景允许镜子和镜中反射，但不要写手机 UI。\n\n"
         "## 时间与光线（重要，必须体现）\n"
-        f"当前天气: {weather_text or '未知'}；当前时段: {time_period or '未知'}；光线参考: {time_light or '未知'}\n"
-        f"{light_guard}\n"
         "tags 必须自然体现当前天气。晴/少云可体现为清晰天光或柔和云影；雨、雪、雾、雷雨、大风等可见天气必须写进环境、窗外、地面、伞、衣物湿痕或空气质感中。"
         "不要把雨天写成晴朗阳光，也不要在室内完全抹掉窗外天气。\n"
         "tags 必须自然体现当前时段与光线（如黄昏金色斜光、夜晚人工灯光、正午自然光）；"
@@ -2168,12 +2160,22 @@ async def plan_animaflow_slots(
         user += f"\n用户意图: {intent}"
     if mood:
         user += f"\n情绪: {mood}"
+    # 只搬移状态与条件化规则，保留原有措辞和确定性终裁；固定模板不含本次取值。
+    system_tail = (
+        "## 本次字段规则\n" + qmws_guidance
+        + ("- count: 只输出人数标签（1girl/2girls/1boy/1other），不要包含 solo 或其他标签。\n" if (slots.count or "").strip() else "- count: 槽位为空，不要输出 count 字段。\n")
+        + neg_rule
+        + (f"## 系统终裁护栏（只可补充，不可删除）\n{guard_constraint}\n\n" if guard_constraint else "")
+        + f"当前天气: {weather_text or '未知'}；当前时段: {time_period or '未知'}；光线参考: {time_light or '未知'}\n"
+        + f"{light_guard}\n"
+    )
 
     try:
         text = await service._call_llm(
             system,
             user,
             temp=float(service._get_llm_value("image", "temperature_scene", "0.95")),
+            system_tail=system_tail,
             tag="animaflow-slots-plan",
             purpose="image",
             session_id=session_id,

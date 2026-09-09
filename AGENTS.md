@@ -31,6 +31,7 @@ node --check telegram_comfyui_selfie\static\app.js
 telegram_comfyui_selfie/
 ├── service.py               # 服务初始化与 mixin 组合
 ├── llm_runtime.py           # 模型 profile、LLM HTTP 调用、用量与调试日志
+├── llm_metrics.py           # 缓存三态、覆盖率与不含正文/凭据的请求指纹
 ├── model_thinking.py        # thinking 旧布尔值与 reasoning effort 的单字段规范化
 ├── state_runtime.py         # 配置、状态迁移、会话访问与活动日志
 ├── task_runtime.py          # 后台任务 registry、作用域取消、停机排空与失败退避
@@ -43,6 +44,7 @@ telegram_comfyui_selfie/
 ├── chat_context.py          # 聊天上下文、checkpoint、工具调用
 ├── generation.py            # PromptSlots 与生图后端
 ├── image_planning.py        # LLM 画面规划
+├── prompt_layout.py         # 聊天规则共享常量与生图任务上下文投影、精确去重
 ├── animaflow_runtime.py     # AnimaFlow 工作流发现、schema/knowledge 与默认参数
 ├── appearance.py            # 外观、衣柜与标签处理
 ├── prompt_intake.py         # 自然语言外观/角色输入分类
@@ -69,6 +71,7 @@ telegram_comfyui_selfie/
 - 日志统一使用模块级 `logger = logging.getLogger(__name__)`。
 - 注释与 docstring 使用中文，代码标识符使用英文。
 - 新行为必须补回归测试；测试采用 `unittest.TestCase`、`AsyncMock` 与测试方法内 `asyncio.run()`。
+- 测试优先验证实际请求、返回和持久化结果；不以源码中的文案、局部变量名、函数所在文件或 HTTP JSON 对象键顺序代替行为契约。提示词重要约束并入实际调用测试；已有行为覆盖的纯源码断言可删减，仍被运行时消费的旧格式迁移/兼容测试不能因名称旧而删除。
 - 运行时文件 `TODO.md` 不提交。
 - 更新本文件时只记录长期有效的架构、约束和命令，不维护提交记录、日期化变更流水或具体测试次数。
 
@@ -92,6 +95,8 @@ telegram_comfyui_selfie/
 
 - 默认第一条 system 是跨角色稳定规则，第二条才是角色身份与人格，以提高跨角色前缀复用；`chat_persona_first=true` 可恢复人格优先的兼容顺序。
 - 上下文按稳定度分层：全局规则、角色人格、低频记忆/历史、外观与世界半稳定槽、checkpoint、未折叠历史、精确时间与本轮输入动态尾部。
+- 当前时段生活底色位于未折叠历史之后，chat 与 push 都保留，不能插在稳定记忆之前。推送生图规划先放自身固定协议，再保留聊天事实与历史顺序；只把已知默认聊天工具/台词格式规则替换为照片历史解释，不删角色自定义规则。人设与长期记忆只有在系统事实中逐字存在时才消除重复副本。
+- AnimaFlow 条件化字段规则、天气光线以及翻译视角约束通过 `_call_llm(system_tail=...)` 保持 system 权限并后置；固定模板不插入这些本次取值。方向决策的模式与精确时间放在角色/历史材料之后。
 - 天气半稳定槽使用天气描述与温度区间；精确温度只放动态尾部，避免小幅温度变化破坏稳定前缀。
 - 稳定前缀（system_static、stable_front）必须不含会话级插值（用户性别、空间关系、intimate 预判等），这些值统一放动态尾部；location-extract 等 prompt 的地点枚举从 `PLACE_TYPES` 运行时推导，不得硬编码两遍。
 - chat system_static（`CHAT_SYSTEM_STATIC_RULES`）只保留回复格式默认、工具一句话和照片记录说明，目标 ≤ 700 字；工具「何时调用」以 tools schema 的 description 为单一来源，不在 system 里再写一份。回复格式是「默认」不是「必须」，允许纯台词/纯动作/单句，避免四段模板。
@@ -190,17 +195,22 @@ telegram_comfyui_selfie/
 - Web API 错误优先返回 JSON；前端也必须兼容非 JSON 错误体、401 跳转与可读错误摘要。
 - 首页模型测试直接读取原始 Chat Completions message，按 Unicode 字符数分别展示显式 `reasoning_content`/`reasoning`/`analysis`（以及 content 开头显式思考标签）与清理后正式回复的长度，同时显示实际 profile、模型和 effort。
 - 日志分为 INFO 与 DEBUG：INFO 沿用 `data/logs/telegram_<chat_id>.log`、`errors.log` 及既有分片命名，长期保留完整用户输入、实际发送给用户的 Bot 文本/图片说明、业务行为、行动逻辑和判断依据；既有历史文件不迁移，均视为 INFO。DEBUG 使用 `llm_debug.jsonl` 保存完整 LLM 请求/返回，仅保留当前块和最新一个历史分片。新的 LLM 失败在 INFO 只写状态、用途、错误与短响应摘要，禁止再复制完整 prompt；管理员可在 WebUI 日志页切换 INFO/DEBUG。
+- 缓存字段须区分已报告命中、显式零与未知，统一通过 `llm_metrics.cache_usage` 解析；命中率分母只取已报告样本，同时展示输入覆盖率。旧零值保守标未知，原始 DEBUG 只可唯一匹配后回填。`scripts/cache_usage_audit.py` 默认只读，显式 `--apply` 时先备份再回填，不调用模型。
+- LLM 出口在用量元数据及 INFO `LLM_METRICS` 保留实际端点、profile 范围、模板版本、消息/工具/设置指纹、路由键指纹、请求 ID、重试序号与耗时；禁止记录任意请求头、密钥和 prompt 正文到该指标项。HTTP 序列化共同前缀只是诊断代理，不等同于供应商真实 token 缓存。
 - 普通用户不可查看系统日志项或其他用户的数据；管理员才能维护全局模型和运维配置。
 - 管理员在 WebUI 设置页的独立面板维护全局模型 profile；角色页模型面板只管理当前用户私有 profile 和三类模型选择，避免混淆保存范围。
 - WebUI 命令下拉从 `/api/commands` 动态读取 `COMMAND_ALIAS_GROUPS`，避免前后端各维护一份命令列表。
 - 数值配置在前后端都校验为有限数；移动端输入字号至少 16px，主要触控目标至少 40px。
+- WebUI 共享响应式页面：桌面侧栏与双栏工作区，手机底部导航与单列工作区；角色资料、长期记忆、日记和用户模型用页签切换，日记默认折叠并分页。衣橱是独立一级入口。
+- 衣橱预览使用隔离的角色状态副本与既有生图队列，不发送 Telegram 或写入聊天记录。按会话、角色、实际外貌/穿搭/画风签名缓存到 `wardrobe_previews`，匹配时直接展示；刷新失败保留旧图，角色/会话删除时走统一文件清理事务。
 
 ## 验证要求
 
 功能完成后按改动范围执行：
 
 ```powershell
-py -3 -m unittest tests.test_core -q
+py -3 -m unittest discover -s tests -q
+node --test tests/frontend/*.test.cjs
 py -3 -m compileall -q telegram_comfyui_selfie tests
 node --check telegram_comfyui_selfie\static\app.js
 py -3 -m json.tool config.example.json > $null

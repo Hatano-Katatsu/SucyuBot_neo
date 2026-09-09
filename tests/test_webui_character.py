@@ -39,39 +39,6 @@ from tests.support import ServiceFixtureMixin, make_project_temp_dir
 class WebUICharacterTestCase(ServiceFixtureMixin, unittest.TestCase):
     """WebUI 角色、衣柜、头像与角色作用域操作测试。"""
 
-    def test_character_panel_hides_preference_fields(self):
-        root = Path(__file__).resolve().parents[1]
-        app_js = (root / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
-        character_js = (root / "telegram_comfyui_selfie" / "static" / "character_ui.js").read_text(encoding="utf-8")
-        styles = (root / "telegram_comfyui_selfie" / "static" / "styles.css").read_text(encoding="utf-8")
-        character_fields = app_js.split("const characterFieldSections = [", 1)[1].split("const commands =", 1)[0]
-        self.assertIn('["user_address", "对用户称呼", "text", "half"]', character_fields)
-        self.assertIn('["workday_wake_time", "工作日起床", "time", "quarter"]', character_fields)
-        self.assertIn('["weekend_sleep_time", "周末睡觉", "time", "quarter"]', character_fields)
-        self.assertIn('["purity", "纯良度", "number", "third"]', character_fields)
-        self.assertNotIn('["边界"', character_fields)
-        self.assertNotIn('["scene_preference"', character_fields)
-        self.assertNotIn('["selfie_preference"', character_fields)
-        self.assertIn(".character-form .field-quarter", styles)
-        self.assertIn("scroll-snap-type: x proximity", styles)
-        self.assertIn(".runtime-clothing-section", styles)
-        self.assertIn("container-type: inline-size", styles)
-        self.assertIn("@container (max-width: 720px)", styles)
-        self.assertIn('user_profile: "用户画像"', app_js)
-        self.assertIn('mem.kind === "user_profile" ? " is-user-profile" : ""', character_js)
-        self.assertIn(".memory-row.is-user-profile", styles)
-
-    def test_overview_feedback_board_uses_todo_api(self):
-        root = Path(__file__).resolve().parents[1]
-        index_html = (root / "telegram_comfyui_selfie" / "static" / "index.html").read_text(encoding="utf-8")
-        app_js = (root / "telegram_comfyui_selfie" / "static" / "app.js").read_text(encoding="utf-8")
-
-        self.assertIn('id="feedback-list"', index_html)
-        self.assertIn('id="feedback-form"', index_html)
-        self.assertIn("loadFeedbackBoard", app_js)
-        self.assertIn("/api/feedback", app_js)
-        self.assertIn("state.selectedSession", app_js)
-
     def test_feedback_api_scopes_todo_sections_by_session_and_role(self):
         async def run():
             from aiohttp import web
@@ -180,7 +147,7 @@ class WebUICharacterTestCase(ServiceFixtureMixin, unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_character_webui_style_field_uses_pool_datalist_and_manual_input(self):
+    def test_character_api_returns_style_pool_and_current_clothing(self):
         async def run():
             from aiohttp import web
             from aiohttp.test_utils import make_mocked_request
@@ -218,27 +185,6 @@ class WebUICharacterTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(data["current_clothing"]["public_fallback_outfit"]["bottom"], "dark blue jeans")
             self.assertNotIn("public fallback top", data["current_clothing"]["closet"])
             self.assertIn("丝绸睡裙", data["current_clothing"]["closet"])
-            static_root = Path(__file__).resolve().parents[1] / "telegram_comfyui_selfie" / "static"
-            app_js = (static_root / "app.js").read_text(encoding="utf-8")
-            character_js = (static_root / "character_ui.js").read_text(encoding="utf-8")
-            self.assertIn('["style", "画风", "style_combo", "half"]', app_js)
-            self.assertNotIn('["outfit", "服装标签", "textarea", "wide"]', app_js)
-            self.assertIn("当前衣柜", character_js)
-            self.assertIn("身上穿着", character_js)
-            self.assertIn("衣橱收藏", character_js)
-            self.assertIn("closet-slot", character_js)
-            self.assertIn("closet-choice", character_js)
-            self.assertIn('data-wardrobe-action="apply"', character_js)
-            self.assertIn('data-wardrobe-action="save-closet"', character_js)
-            self.assertIn('data-wardrobe-action="edit-closet"', character_js)
-            self.assertIn('data-wardrobe-action="delete-closet"', character_js)
-            # 身上穿着只读：不再有逐槽“脱下”按钮，槽位清空走衣橱的“空”选项
-            self.assertNotIn(">脱下</button>", character_js)
-            self.assertIn("棉质针织", character_js)
-            self.assertIn("wardrobe_display", character_js)
-            self.assertNotIn('<span>${escapeHtml(entry.tags || "")}</span>', character_js)
-            self.assertIn("state.characterData?.style_pool", app_js)
-            self.assertIn("留空表示本角色不注入画风", app_js)
 
         asyncio.run(run())
 

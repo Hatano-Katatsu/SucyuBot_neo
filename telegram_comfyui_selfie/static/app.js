@@ -7,7 +7,7 @@ const state = {
   selectedSession: null,
   selectedCharacter: null,
   characterData: null,
-  memoryDiaryTab: "wardrobe",
+  memoryDiaryTab: "profile",
   selectedWorldSession: null,
   worldPreview: null,
   logs: [],
@@ -29,6 +29,7 @@ const viewMeta = {
   overview: ["总览", "服务状态、连接测试和快捷入口"],
   settings: ["设置", "连接、模型、生图和推送参数"],
   characters: ["角色", "角色池、角色设定、长期记忆与日记"],
+  wardrobe: ["衣橱", "当前搭配、衣物收藏与专属预览"],
   world: ["动线", "按用户查看角色实时位置、后续去向、城市地点和用户位置"],
   logs: ["日志", "按用户查看活动日志"],
   usage: ["用量", "LLM 模型按任务维度的 token 消耗与缓存命中率"],
@@ -295,6 +296,7 @@ function delay(ms) {
 
 function switchView(name) {
   _stopOverviewPolling();
+  $("#mobile-more").open = false;
   $all(".nav").forEach(btn => btn.classList.toggle("active", btn.dataset.view === name));
   $all(".view").forEach(view => view.classList.toggle("active", view.id === `view-${name}`));
   $("#view-title").textContent = viewMeta[name][0];
@@ -304,6 +306,8 @@ function switchView(name) {
   if (name === "logs") loadLogs();
   if (name === "usage") loadUsage();
   if (name === "characters") loadCharacterPage();
+  if (name === "wardrobe") loadCharacters();
+  window.scrollTo({ top: 0, behavior: "instant" });
   if (name === "settings" && state.auth?.role === "admin") loadGlobalModels();
 }
 
@@ -365,9 +369,8 @@ async function loadAll() {
     await loadGlobalModels({ data: modelData });
   }
   renderWorldSessionList();
-  if (document.querySelector('.nav[data-view="characters"].active')) {
-    loadCharacterPage();
-  }
+  if (document.querySelector('.nav[data-view="characters"].active')) loadCharacterPage();
+  if (document.querySelector('.nav[data-view="wardrobe"].active')) loadCharacters();
   // 初始加载默认停在 overview，需在此启动轮询；switchView 只负责切换视图时的启停
   if (document.querySelector('.nav[data-view="overview"].active')) {
     _startOverviewPolling();
@@ -410,12 +413,16 @@ function renderSessionSelector() {
 
 async function selectSession(sessionId) {
   state.selectedSession = sessionId || null;
+  state.characterData = null;
+  state.selectedCharacter = null;
+  renderWardrobePanel();
   renderSessionSelector();
   if (!sessionId) return;
   loadFeedbackBoard();
   if (document.querySelector('.nav[data-view="characters"].active')) {
     await loadCharacterPage();
   }
+  if (document.querySelector('.nav[data-view="wardrobe"].active')) await loadCharacters();
 }
 
 function sessionLabel(sessionId) {
@@ -759,9 +766,10 @@ function renderConfig() {
   const form = $("#config-form");
   form.innerHTML = "";
   for (const [title, fields] of configSections) {
-    const fs = document.createElement("fieldset");
-    fs.className = "form-section";
-    fs.innerHTML = `<legend>${title}</legend>`;
+    const fs = document.createElement("details");
+    fs.className = "form-section config-section";
+    fs.open = !window.matchMedia("(max-width: 760px)").matches;
+    fs.innerHTML = `<summary>${title}</summary>`;
     const grid = document.createElement("div");
     grid.className = "field-grid";
     const samplingGrid = document.createElement("div");
@@ -788,6 +796,15 @@ function renderConfig() {
     form.appendChild(fs);
   }
   const samplingToggle = form.elements.namedItem("llm_sampling_params_enabled");
+  // 展开浏览器发现的无效字段，确保折叠设置仍可定位并修正。
+  form.oninvalid = null;
+  if (!form.dataset.revealInvalidBound) {
+    form.addEventListener("invalid", event => {
+      let section = event.target.closest("details");
+      while (section) { section.open = true; section = section.parentElement?.closest("details"); }
+    }, true);
+    form.dataset.revealInvalidBound = "true";
+  }
   const samplingPanel = form.querySelector('[data-config-details="sampling"]');
   const syncSamplingDetails = () => {
     const expanded = samplingToggle?.value === "true";
@@ -1513,12 +1530,18 @@ async function initEvents() {
   $all("#view-characters .tab").forEach(tab => {
     tab.onclick = () => switchMemoryDiaryTab(tab.dataset.tab);
   });
+  $("#wardrobe-refresh").onclick = () => loadCharacters();
+  $("#wardrobe-character-select").onchange = event => {
+    state.selectedCharacter = event.target.value;
+    renderWardrobePanel();
+  };
   $("#memory-diary-refresh").onclick = async (event) => {
     if (!state.selectedSession || !state.selectedCharacter) return;
     const btn = event.currentTarget;
     setBusy(btn, true);
     try {
-      if (state.memoryDiaryTab === "wardrobe") await loadCharacters();
+      if (state.memoryDiaryTab === "profile") await loadCharacters();
+      else if (state.memoryDiaryTab === "models") await loadModels();
       else if (state.memoryDiaryTab === "memory") await loadMemories();
       else await loadDiaries();
       toast("已刷新");

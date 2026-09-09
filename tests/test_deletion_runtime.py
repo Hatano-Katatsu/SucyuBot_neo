@@ -12,7 +12,7 @@ from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 
 from telegram_comfyui_selfie import session_schema
-from telegram_comfyui_selfie.character_artifacts import avatar_file_path
+from telegram_comfyui_selfie.character_artifacts import avatar_file_path, wardrobe_preview_dir
 from telegram_comfyui_selfie.deletion_runtime import DeletionForbiddenError
 from telegram_comfyui_selfie.webui import (
     api_delete_character,
@@ -111,7 +111,14 @@ class DeletionRuntimeTestCase(ServiceFixtureMixin, unittest.TestCase):
             avatar_path.parent.mkdir(parents=True, exist_ok=True)
             avatar_path.write_bytes(b"avatar")
 
+            previews = {}
+            for role in ("角色A", "角色B"):
+                previews[role] = wardrobe_preview_dir(service, session_id, role) / "cached.image"
+                previews[role].parent.mkdir(parents=True)
+                previews[role].write_bytes(b"preview")
             result = await service.delete_character(session_id, "角色A")
+            self.assertFalse(previews["角色A"].exists())
+            self.assertEqual(previews["角色B"].read_bytes(), b"preview")
 
             self.assertEqual(result["active_id"], "")
             self.assertNotIn("角色A", result["characters"])

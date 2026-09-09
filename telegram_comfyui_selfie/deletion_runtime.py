@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import session_schema
-from .character_artifacts import avatar_file_path, avatar_session_dir
+from .character_artifacts import avatar_file_path, avatar_session_dir, wardrobe_preview_dir
 
 
 logger = logging.getLogger(__name__)
@@ -102,13 +102,13 @@ class DeletionRuntimeMixin:
         character_id: str,
         character_key: str,
     ) -> list[Path]:
-        paths = [avatar_file_path(self, session_id, character_id)]
+        paths = [avatar_file_path(self, session_id, character_id), wardrobe_preview_dir(self, session_id, character_key)]
         if hasattr(self, "_character_checkpoint_dir"):
             paths.append(self._character_checkpoint_dir(session_id, character_key))
         return paths
 
     def _session_artifact_paths(self, session_id: str) -> list[Path]:
-        paths: list[Path] = [avatar_session_dir(self, session_id)]
+        paths: list[Path] = [avatar_session_dir(self, session_id), wardrobe_preview_dir(self, session_id)]
         if hasattr(self, "_character_checkpoint_root") and hasattr(self, "_safe_checkpoint_part"):
             paths.append(
                 self._character_checkpoint_root()

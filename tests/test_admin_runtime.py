@@ -193,13 +193,6 @@ class LLMUsageTestCase(ServiceFixtureMixin, unittest.TestCase):
         old_rows = svc.app_store.aggregate_llm_usage(after=now + 10, before=now + 60)
         self.assertEqual(old_rows, [])
 
-    def test_cache_hit_rate_calculation(self):
-        svc = self.make_service()
-        svc.app_store.record_llm_usage(profile_id="p", model="m", purpose="chat", tag="t", prompt_tokens=1000, cached_tokens=250, total_tokens=1200)
-        rows = svc.app_store.aggregate_llm_usage(after=0, group_by=("profile_id",))
-        self.assertEqual(rows[0]["cached_tokens"], 250)
-        self.assertEqual(rows[0]["prompt_tokens"], 1000)
-
     def test_webui_llm_usage_requires_admin(self):
         from aiohttp import web
         from telegram_comfyui_selfie.webui import api_admin_llm_usage

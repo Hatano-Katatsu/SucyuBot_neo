@@ -30,6 +30,10 @@
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
           角色
         </button>
+        <button class="nav" data-view="wardrobe">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5a3 3 0 0 1 6 0c0 2-3 2-3 4v2L3 17v2h18v-2l-9-6"/></svg>
+          衣橱
+        </button>
         <button class="nav" data-view="world">
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
           动线
@@ -165,12 +169,12 @@
       </section>
 
       <section class="view" id="view-settings">
-        <section class="panel admin-panel global-model-config-panel">
-          <div class="panel-head">
-            <div>
+        <details class="panel admin-panel global-model-config-panel">
+          <summary>
               <h3>全局模型配置</h3>
               <p class="muted">管理员在这里新增、修改或删除所有用户可选的全局模型 profile</p>
-            </div>
+          </summary>
+          <div class="panel-head">
             <button id="global-model-refresh" class="icon-btn" type="button" title="刷新全局模型配置">
               <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
             </button>
@@ -178,7 +182,7 @@
           <div id="global-model-manager" class="manager-box">
             <div class="empty-state">全局模型配置加载中...</div>
           </div>
-        </section>
+        </details>
         <form id="config-form" class="settings-form"></form>
       </section>
 
@@ -197,7 +201,7 @@
             <div id="character-pool" class="character-pool">
               <div class="empty-state">请从右上角选择会话。</div>
             </div>
-            <div class="character-pool-actions">
+            <details class="character-pool-tools"><summary>新建 / 导入角色</summary><div class="character-pool-actions">
               <select id="character-import-mode" title="导入模式">
                 <option value="basic">只导入基本字段</option>
                 <option value="memory">导入长期记忆</option>
@@ -207,7 +211,7 @@
               <button id="character-import" type="button">粘贴 JSON</button>
               <button id="character-import-file" type="button">上传 JSON</button>
               <input id="character-import-file-input" type="file" accept="application/json,.json" hidden>
-            </div>
+            </div></details>
           </section>
           <section class="panel character-editor-panel">
             <div class="panel-head">
@@ -219,17 +223,12 @@
                 <button id="character-activate" type="button" class="primary">设为当前</button>
               </div>
             </div>
-            <form id="character-form" class="character-form">
-              <div class="empty-state">请从左侧角色池选择一个角色。</div>
-            </form>
-          </section>
-        </div>
-        <section class="panel memory-diary-panel">
           <div class="panel-head">
             <div class="tab-bar">
-              <button class="tab active" data-tab="wardrobe" type="button">衣橱</button>
+              <button class="tab active" data-tab="profile" type="button">角色资料</button>
               <button class="tab" data-tab="memory" type="button">长期记忆</button>
               <button class="tab" data-tab="diary" type="button">日记</button>
+              <button class="tab" data-tab="models" type="button">用户模型</button>
             </div>
             <div class="panel-head-actions">
               <div class="dropdown-wrap">
@@ -253,11 +252,11 @@
               </button>
             </div>
           </div>
-          <div id="wardrobe-tab" class="tab-panel active">
-            <div id="wardrobe-manager" class="manager-box">
-              <div class="empty-state">选择角色后查看衣橱。</div>
+            <div id="profile-tab" class="tab-panel active">
+            <form id="character-form" class="character-form">
+              <div class="empty-state">请从左侧角色池选择一个角色。</div>
+            </form>
             </div>
-          </div>
           <div id="memory-tab" class="tab-panel">
             <div id="memory-manager" class="manager-box">
               <div class="empty-state">选择角色后查看记忆。</div>
@@ -268,7 +267,7 @@
               <div class="empty-state">选择角色后查看日记。</div>
             </div>
           </div>
-        </section>
+            <div id="models-tab" class="tab-panel">
         <section class="panel model-config-panel">
           <button class="panel-head collapsible" data-collapse="model-config" type="button" aria-expanded="true">
             <h3>用户模型配置</h3>
@@ -282,6 +281,16 @@
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
           </button>
         </section>
+            </div>
+          </section>
+        </div>
+      </section>
+      <section class="view" id="view-wardrobe">
+        <div class="wardrobe-page-head">
+          <div><span class="wardrobe-eyebrow">WARDROBE STUDIO</span><h3>搭配你的日常</h3><p class="muted">挑选衣物、调整状态，保存这一身的预览。</p></div>
+          <div class="button-row"><label for="wardrobe-character-select" class="sr-only">衣橱角色</label><select id="wardrobe-character-select" aria-label="衣橱角色"></select><button id="wardrobe-refresh" type="button">刷新衣橱</button></div>
+        </div>
+        <div id="wardrobe-manager"><div class="empty-state">选择会话后查看衣橱。</div></div>
       </section>
 
       <section class="view" id="view-world">
@@ -401,11 +410,11 @@
             <div class="metric"><span>Prompt Tokens</span><strong>-</strong></div>
             <div class="metric"><span>Completion Tokens</span><strong>-</strong></div>
             <div class="metric"><span>缓存命中</span><strong>-</strong></div>
-            <div class="metric"><span>缓存命中率</span><strong>-</strong></div>
+            <div class="metric"><span>已报告样本命中率</span><strong>-</strong></div>
             <div class="metric"><span>Total Tokens</span><strong>-</strong></div>
           </div>
           <div class="usage-filter-bar">
-            <input id="usage-filter-text" type="text" placeholder="搜索 Profile / Model / Purpose / Tag" title="搜索过滤">
+            <input id="usage-filter-text" type="text" placeholder="搜索 Profile / Model / Purpose / Tag / 端点" title="搜索过滤">
             <label for="usage-filter-profile" class="sr-only">Profile 过滤</label>
             <select id="usage-filter-profile" title="Profile 过滤"><option value="">全部 Profile</option></select>
             <label for="usage-filter-model" class="sr-only">Model 过滤</label>
@@ -438,7 +447,7 @@
                   <th>Prompt</th>
                   <th>Completion</th>
                   <th>Cached</th>
-                  <th>命中率</th>
+                  <th>样本命中率 / 覆盖率</th>
                   <th>Total</th>
                 </tr>
               </thead>
@@ -534,6 +543,18 @@
       <datalist id="chat-id-options"></datalist>
     </main>
   </div>
+  <nav class="mobile-nav" aria-label="手机主导航">
+    <button class="nav" data-view="overview" type="button"><span aria-hidden="true">⌂</span>总览</button>
+    <button class="nav" data-view="characters" type="button"><span aria-hidden="true">♙</span>角色</button>
+    <button class="nav" data-view="wardrobe" type="button"><span aria-hidden="true">♧</span>衣橱</button>
+    <button class="nav" data-view="world" type="button"><span aria-hidden="true">◎</span>动线</button>
+    <details id="mobile-more"><summary><span aria-hidden="true">•••</span>更多</summary><div class="mobile-more-panel">
+      <button class="nav" data-view="settings" type="button">设置</button>
+      <button class="nav" data-view="logs" type="button">日志</button>
+      <button class="nav" data-view="usage" type="button">用量</button>
+      <button class="nav" data-view="actions" type="button">操作</button>
+    </div></details>
+  </nav>
   <script src="/static/admin_logs.js"></script>
   <script src="/static/world_ui.js"></script>
   <script src="/static/character_ui.js"></script>

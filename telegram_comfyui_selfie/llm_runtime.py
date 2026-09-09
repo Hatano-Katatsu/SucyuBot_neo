@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 
+from .llm_metrics import cache_usage, endpoint_identity, request_observation, token_count
 from .http_limits import read_limited_json, read_limited_text, response_limit
 from .model_security import PublicOnlyResolver, validate_public_model_base_url
 from .model_thinking import is_kimi_k27_model, normalize_profile_thinking_effort, resolve_thinking_setting
@@ -505,51 +507,30 @@ class LLMRuntimeMixin:
         }
 
     def _record_llm_usage_from_response(
-        self,
-        data: dict[str, Any],
-        resolved: dict[str, Any],
-        *,
-        tag: str = "",
-        purpose: str = "",
-        session_id: str = "",
+        self, data: dict[str, Any], resolved: dict[str, Any], *,
+        tag: str = "", purpose: str = "", session_id: str = "",
+        request_meta: dict[str, Any] | None = None,
     ):
-        """从 LLM 返回的 usage 字段提取 token 消耗并写入数据库。"""
-        usage = data.get("usage") or {} if isinstance(data, dict) else {}
+        """用量只记录供应商已报告的消耗，缓存字段缺失保持未知。"""
+        usage = (data.get("usage") or {}) if isinstance(data, dict) else {}
         if not usage:
             return
         prompt_tokens = int(usage.get("prompt_tokens") or 0)
         completion_tokens = int(usage.get("completion_tokens") or 0)
-        total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
-        cached_tokens = self._cached_tokens_from_usage(usage, prompt_tokens=prompt_tokens)
         self.app_store.record_llm_usage(
             profile_id=str(resolved.get("profile_id") or ""),
-            model=str(resolved.get("model") or ""),
-            purpose=str(purpose or ""),
-            tag=str(tag or ""),
-            session_id=str(session_id or ""),
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            cached_tokens=cached_tokens,
-            total_tokens=total_tokens or prompt_tokens + completion_tokens,
+            profile_scope=str(resolved.get("profile_scope") or ""),
+            endpoint=endpoint_identity(_openai_chat_completions_url(resolved.get("api_base") or "")),
+            model=str(resolved.get("model") or ""), purpose=purpose, tag=tag, session_id=session_id,
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            total_tokens=int(usage.get("total_tokens") or (prompt_tokens + completion_tokens)),
+            request_meta=request_meta, **cache_usage(usage, prompt_tokens=prompt_tokens),
         )
 
     @staticmethod
     def _cached_tokens_from_usage(usage: dict[str, Any] | None, *, prompt_tokens: int = 0) -> int:
-        """兼容不同 OpenAI-compatible provider 的缓存命中字段。"""
-        usage = usage if isinstance(usage, dict) else {}
-        details = usage.get("prompt_tokens_details")
-        details = details if isinstance(details, dict) else {}
-        cached_tokens = int(
-            usage.get("prompt_cache_hit_tokens")
-            or usage.get("prompt_cached_tokens")
-            or usage.get("cached_tokens")
-            or details.get("cached_tokens")
-            or 0
-        )
-        miss_tokens = int(usage.get("prompt_cache_miss_tokens") or usage.get("cache_miss_tokens") or 0)
-        if not cached_tokens and miss_tokens and prompt_tokens:
-            cached_tokens = max(0, int(prompt_tokens or 0) - miss_tokens)
-        return max(0, cached_tokens)
+        """旧调用者的数值兼容入口；统计与界面必须同时消费 cache_reported。"""
+        return cache_usage(usage, prompt_tokens=prompt_tokens or None)["cached_tokens"]
 
     @staticmethod
     def _redact_base64(value: Any) -> Any:
@@ -589,19 +570,19 @@ class LLMRuntimeMixin:
     def _llm_usage_debug_summary(data: dict[str, Any] | None) -> dict[str, Any]:
         usage = (data or {}).get("usage") if isinstance(data, dict) else {}
         usage = usage if isinstance(usage, dict) else {}
-        prompt_tokens = int(usage.get("prompt_tokens") or 0)
-        completion_tokens = int(usage.get("completion_tokens") or 0)
-        total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
-        cached_tokens = LLMRuntimeMixin._cached_tokens_from_usage(usage, prompt_tokens=prompt_tokens)
-        miss_tokens = int(usage.get("prompt_cache_miss_tokens") or usage.get("cache_miss_tokens") or 0)
+        prompt_tokens = (token_count(usage.get("prompt_tokens")) or 0)
+        completion_tokens = (token_count(usage.get("completion_tokens")) or 0)
+        total_tokens = (token_count(usage.get("total_tokens")) or (prompt_tokens + completion_tokens))
+        cache = cache_usage(usage, prompt_tokens=prompt_tokens)
+        miss_tokens = (token_count(usage.get("prompt_cache_miss_tokens", usage.get("cache_miss_tokens"))) or 0)
         return {
             "raw": dict(usage),
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
-            "cached_tokens": cached_tokens,
+            **cache,
             "cache_miss_tokens": miss_tokens,
-            "cache_hit_rate": round(cached_tokens / prompt_tokens, 4) if prompt_tokens else 0,
+            "cache_hit_rate": round(cache["cached_tokens"] / prompt_tokens, 4) if cache["cache_reported"] and prompt_tokens else None,
         }
 
     @staticmethod
@@ -702,6 +683,7 @@ class LLMRuntimeMixin:
         response: Any,
         status: int | None = None,
         error: str = "",
+        request_meta: dict[str, Any] | None = None,
     ) -> None:
         """按 JSONL 追加完整 LLM 请求/返回，读取端按游标分页。"""
         key = f"{purpose or 'unknown'}:{tag or 'untagged'}"
@@ -728,6 +710,20 @@ class LLMRuntimeMixin:
             "response": self._json_safe(response),
             "usage": usage_summary,
         }
+        if request_meta:
+            meta = dict(request_meta)
+            meta["finished_at"] = now
+            meta["duration_ms"] = round(max(0, now - float(meta["started_at"])) * 1000, 1)
+            entry["request_meta"] = meta
+            # INFO 长期保留小型指纹与三态用量，完整正文仍只进入轮转 DEBUG。
+            try:
+                self._ulog(session_id, "LLM_METRICS", json.dumps({
+                    **meta, "tag": tag, "purpose": purpose, "model": resolved.get("model"),
+                    "profile_id": resolved.get("profile_id"), "profile_scope": resolved.get("profile_scope"),
+                    "status": status, "usage": {k: v for k, v in usage_summary.items() if k != "raw"},
+                }, ensure_ascii=False, separators=(",", ":")))
+            except Exception:
+                logger.debug("record LLM metrics failed", exc_info=True)
         if error:
             entry["error"] = error
         self._llm_debug_buffer.append(entry)
@@ -982,7 +978,10 @@ class LLMRuntimeMixin:
             "Accept-Encoding": "gzip, deflate",
         }
         request_headers.update(_opencode_extra_headers(api_base, session_id))
+        observation = request_observation(body, request_url, request_headers)
+        logical_request_id = uuid.uuid4().hex
         for attempt in range(2):
+            request_meta = {**observation, "request_id": logical_request_id, "attempt": attempt + 1, "started_at": time.time()}
             connector = aiohttp.TCPConnector(resolver=PublicOnlyResolver()) if private_profile else None
             async with aiohttp.ClientSession(
                 trust_env=not private_profile,
@@ -1010,6 +1009,7 @@ class LLMRuntimeMixin:
                                 resolved=resolved,
                                 request_url=request_url,
                                 request_body=body,
+                                request_meta=request_meta,
                                 response={"status": resp.status, "text": text},
                                 status=resp.status,
                                 error=f"LLM request failed: {resp.status}",
@@ -1053,6 +1053,7 @@ class LLMRuntimeMixin:
                         resolved=resolved,
                         request_url=request_url,
                         request_body=body,
+                        request_meta=request_meta,
                         response=None,
                         status=None,
                         error=transport_error,
@@ -1080,6 +1081,7 @@ class LLMRuntimeMixin:
                         resolved=resolved,
                         request_url=request_url,
                         request_body=body,
+                        request_meta=request_meta,
                         response=None,
                         status=None,
                         error=response_error,
@@ -1094,9 +1096,11 @@ class LLMRuntimeMixin:
                     raise RuntimeError(response_error) from exc
         else:
             raise last_error
+        request_meta["finished_at"] = time.time()
+        request_meta["duration_ms"] = round(max(0, request_meta["finished_at"] - request_meta["started_at"]) * 1000, 1)
         # 记录 token 消耗（不阻塞主链路，解析失败仅记录日志）。
         try:
-            self._record_llm_usage_from_response(data, resolved, tag=tag, purpose=purpose, session_id=session_id)
+            self._record_llm_usage_from_response(data, resolved, tag=tag, purpose=purpose, session_id=session_id, request_meta=request_meta)
         except Exception as exc:
             logger.debug("record llm usage failed: %s", exc)
         self._record_llm_debug(
@@ -1106,17 +1110,21 @@ class LLMRuntimeMixin:
             resolved=resolved,
             request_url=request_url,
             request_body=body,
+            request_meta=request_meta,
             response=data,
             status=200,
         )
         return data
 
-    async def _call_llm(self, system: str, user: str, temp: float = 0.3, tag: str = "", purpose: str = "image", disable_thinking: bool | None = None, session_id: str = "", max_tokens: int | None = None, timeout: float | None = None) -> str:
+    async def _call_llm(self, system: str, user: str, temp: float = 0.3, tag: str = "", purpose: str = "image", disable_thinking: bool | None = None, session_id: str = "", max_tokens: int | None = None, timeout: float | None = None, system_tail: str = "") -> str:
         anchor = _SIMPLE_LLM_CACHE_ANCHORS.get(tag or "")
         messages = []
         if anchor:
             messages.append({"role": "system", "content": anchor})
-        messages.extend([{"role": "system", "content": system}, {"role": "user", "content": user}])
+        messages.append({"role": "system", "content": system})
+        if system_tail:
+            messages.append({"role": "system", "content": system_tail})
+        messages.append({"role": "user", "content": user})
         request_max_tokens = max_tokens
         for attempt in range(2):
             data = await self._call_llm_messages(
