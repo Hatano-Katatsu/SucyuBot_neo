@@ -1538,19 +1538,21 @@ async function initEvents() {
 
   $("#config-form").onsubmit = async (event) => {
     event.preventDefault();
+    // currentTarget 只在事件分发期间有效，await 之后为 null，必须先捕获
+    const form = event.currentTarget;
     const btn = event.submitter;
     setBusy(btn, true);
     try {
       const invalid = frontendCore.firstInvalidNumberField(
-        event.currentTarget.querySelectorAll('input[type="number"]'),
+        form.querySelectorAll('input[type="number"]'),
       );
       if (invalid) {
         invalid.focus();
         throw new Error("字段「" + (invalid.closest("label")?.textContent?.trim() || invalid.name) + "」必须是有效数字");
       }
-      await api("/api/config", { method: "POST", body: { values: formValues(event.currentTarget) } });
+      await api("/api/config", { method: "POST", body: { values: formValues(form) } });
       // 保存成功后先清 dirty，随后的全量加载才能用新配置重建表单
-      event.currentTarget.dataset.dirty = "false";
+      form.dataset.dirty = "false";
       await loadAll();
       toast("设置已保存");
     } catch (err) {
