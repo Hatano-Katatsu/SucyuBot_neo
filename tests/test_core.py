@@ -4158,6 +4158,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             prompt = svc._call_llm.await_args.args[0]
             self.assertIn("1-3", prompt)
             self.assertIn("具体话题引导", prompt)
+            self.assertIn("不超过 40 字", prompt)
+            self.assertIn("采访提纲", prompt)
             self.assertEqual(svc._call_llm.await_args.kwargs["purpose"], "fast")
             self.assertNotIn("max_tokens", svc._call_llm.await_args.kwargs)
         asyncio.run(run())
@@ -4514,6 +4516,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("independent", joined)
             self.assertIn("本次具体话题引导", joined)
             self.assertIn("摄影集里一张雨夜街景", joined)
+            self.assertIn("话题锚点", joined)
+            self.assertIn("一般不超过 60 字", joined)
         asyncio.run(run())
 
     def test_scheduled_push_planner_injects_today_life_candidates(self):

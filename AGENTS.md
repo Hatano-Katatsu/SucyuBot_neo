@@ -174,6 +174,7 @@ telegram_comfyui_selfie/
 - 推送话题日志 `recent_push_topics` 跨 `/新场景` 保留（`reset_preserved=True`），切角色才清；专门堵 `/新场景` 后 `sent_photos_history` 被 `since=reset_time` 过滤导致避重失效的缺口。每条记录 ts/caption/scene/topic 签名/direction，保留最近 8 条；`_pushes_since_last_user_message` 据此统计用户上次发言后的推送间隔，间隔超过 1-2 次后 dialogue 方向应大幅减少。
 - 推送 caption 优先展现角色自己的生活片段、看到想到的事或感兴趣的话题，避免写成对用户的询问式开场或催促回复；冷启动（用户长时间无互动）时非 dialogue 方向强制不带问句主旨。
 - 主动推送 caption 必须以单段单行发送；即使模型返回多行，也要在发送前归一化为空格分隔的单行。
+- 推送话题 guide 与 caption 都按「一个具体细节 + 一个态度/反应」的单点短消息约束：guide 一条一个切入点、≤40 字，禁止采访提纲式并列子问题和「是A还是B」追问；caption 通常一句、最多两句、一般 ≤60 字，禁止动作流水账和天气收尾凑句。guide 只作话题锚点，caption 不沿用其句式与长度。
 - 短英文关键词使用单词边界匹配，避免 `bed` 命中 `bedroom` 等子串。
 - 天气缓存必须绑定城市；城市变化不能复用旧城市数据。外部天气请求复用统一代理配置。
 - 地点匹配优先识别路线、街道等动线提示，再匹配普通地点标签。
