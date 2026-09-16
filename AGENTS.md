@@ -153,6 +153,7 @@ telegram_comfyui_selfie/
 - AnimaFlow 请求只发送规划器选出的 `aspect_ratio`，不发送 `width`/`height`；实际尺寸由 AnimaFlow 按服务端 `target_megapixels`（默认约 1MP）换算并对齐。WebUI 的宽高只属于原生 ComfyUI 后端，启用 AnimaFlow 时折叠。
 - 任何场景都不自动追加性/裸露类反词（`no panties`、`bottomless`、`nsfw`、`nude` 等）；只有「公开场景且 purity>2」的护栏路径按最精简集追加防走光反词（`nude, topless, bottomless`，各表一种裸露程度、无同义重复），其余场景完全靠正向提示控制。
 - AnimaFlow 源码不随 Bot 仓库分发；运行时以 `/anima/workflows` 为工作流单一来源，再按目录动态加载选中工作流的 schema、knowledge 与 generate 端点，禁止维护本地工作流清单。管理员开关默认关闭；每次开启都重新发现目录，切换工作流时用其动态默认值重置 cfg/steps。发现目录或工作流资源失败时，只通过外部 HTTP 接口回退到旧 `turbo_v1` 协议，不重新内置插件源码。cfg=1 时不构造任何负面字段，仅在 nsfw/explicit 的正面 tags 末尾追加 `no mosaic, uncensored`。
+- AnimaFlow slots 规划（`plan_animaflow_slots`）在 LLM 输出后有确定性身份终裁（`_enforce_animaflow_identity`）：源槽位（effective/one_shot appearance）里的发/瞳标签必须逐字保留在 appearance 字段，输出中与源冲突的发色/瞳色（含 tags 自然语言）一律改回源颜色；`white hair ribbon` 等发饰不算发色，源无颜色信息时不做颜色裁决。
 
 ## 调度与世界状态
 

@@ -8,7 +8,13 @@ from datetime import datetime
 from typing import Any
 
 from . import session_schema
-from .appearance import WARDROBE_CLOTHING_SLOTS, seed_wardrobe_from_text
+from .appearance import (
+    _EYES_TAG_RE,
+    _HAIR_TAG_RE,
+    WARDROBE_CLOTHING_SLOTS,
+    normalize_appearance_tag,
+    seed_wardrobe_from_text,
+)
 from .animaflow_runtime import (
     ANIMAFLOW_NEGATIVE_FIELDS,
     ANIMAFLOW_NLTAG_FIELDS,
@@ -1958,6 +1964,115 @@ async def plan_roleplay_image(
     }
 
 
+# ── AnimaFlow 身份标签终裁 ───────────────────────────────────────────────
+# 发色/发型/瞳色是角色身份。slots 规划 LLM 压缩 appearance 时可能丢掉它们，
+# 或把配饰（white hair ribbon）误读成发色（white hair）。这里做确定性保底：
+# 源槽位的发/瞳标签必须逐字出现在 appearance；输出里与源冲突的发色/瞳色一律改回源颜色。
+_IDENTITY_COLOR_WORDS = (
+    "black", "brown", "blonde", "blond", "white", "silver", "grey", "gray", "red",
+    "blue", "pink", "purple", "violet", "green", "orange", "aqua", "gold", "golden", "amber",
+)
+# “颜色 + hair”后接这些词时是发饰而不是发色（white hair ribbon ≠ 白发）。
+_HAIR_ACCESSORY_FOLLOW = (
+    "ribbon", "band", "clip", "pin", "tie", "bow", "ornament", "flower",
+    "scrunchie", "bobble", "accessory", "accessories",
+)
+_HAIR_COLOR_RE = re.compile(
+    r"\b(" + "|".join(_IDENTITY_COLOR_WORDS) + r")((?:[ -][a-z]+){0,1}[ -])(hairs?|haired)\b"
+    r"(?!\s*(?:" + "|".join(_HAIR_ACCESSORY_FOLLOW) + r")\b)",
+    re.IGNORECASE,
+)
+_EYE_COLOR_RE = re.compile(
+    r"\b(" + "|".join(_IDENTITY_COLOR_WORDS) + r")((?:[ -][a-z]+){0,1}[ -])(eyes?|pupils?)\b",
+    re.IGNORECASE,
+)
+_IDENTITY_COLOR_CANON = {"gray": "grey", "blond": "blonde", "golden": "gold"}
+
+
+def _identity_appearance_tags(*texts: str) -> list[str]:
+    """从外貌槽位文本提取发/瞳身份标签（保持原文，去重）。"""
+    tags: list[str] = []
+    seen: set[str] = set()
+    for text in texts:
+        for raw in str(text or "").split(","):
+            tag = normalize_appearance_tag(raw)
+            low = tag.lower()
+            if not low or low in seen:
+                continue
+            if _HAIR_TAG_RE.search(low) or _EYES_TAG_RE.search(low):
+                seen.add(low)
+                tags.append(tag)
+    return tags
+
+
+def _identity_source_colors(tags: list[str], color_re: re.Pattern) -> set[str]:
+    """从身份标签中提取源发色/瞳色（规范化同义词后）。"""
+    colors: set[str] = set()
+    for tag in tags:
+        for m in color_re.finditer(tag.lower()):
+            colors.add(_IDENTITY_COLOR_CANON.get(m.group(1), m.group(1)))
+    return colors
+
+
+def _replace_conflicting_identity_colors(text: str, color_re: re.Pattern, source_colors: set[str]) -> str:
+    """把文本里与源冲突的发色/瞳色改回源颜色；源没有颜色信息时不做判断。"""
+    if not text or not source_colors:
+        return text
+    canonical = sorted(source_colors)[0]
+
+    def repl(m: re.Match) -> str:
+        color = _IDENTITY_COLOR_CANON.get(m.group(1).lower(), m.group(1).lower())
+        if color in source_colors:
+            return m.group(0)
+        return f"{canonical}{m.group(2)}{m.group(3)}"
+
+    return color_re.sub(repl, text)
+
+
+def _dedupe_tag_text(text: str) -> str:
+    parts = [p.strip() for p in str(text or "").split(",") if p.strip()]
+    seen: set[str] = set()
+    out: list[str] = []
+    for part in parts:
+        key = re.sub(r"\s+", " ", part.lower())
+        if key not in seen:
+            seen.add(key)
+            out.append(part)
+    return ", ".join(out)
+
+
+def _enforce_animaflow_identity(
+    parsed: dict[str, Any],
+    slots: "PromptSlots",
+    properties: dict[str, Any],
+    nltag_field: str,
+) -> None:
+    """对 AnimaFlow 规划结果做身份终裁：appearance 逐字补齐发/瞳标签，发色/瞳色冲突改回源颜色。"""
+    identity_tags = _identity_appearance_tags(slots.effective_appearance, slots.one_shot_appearance)
+    if not identity_tags:
+        return
+    hair_colors = _identity_source_colors(identity_tags, _HAIR_COLOR_RE)
+    eye_colors = _identity_source_colors(identity_tags, _EYE_COLOR_RE)
+    if "appearance" in properties:
+        appearance = str(parsed.get("appearance") or "")
+        appearance = _replace_conflicting_identity_colors(appearance, _HAIR_COLOR_RE, hair_colors)
+        appearance = _replace_conflicting_identity_colors(appearance, _EYE_COLOR_RE, eye_colors)
+        lowered = appearance.lower()
+        missing = [tag for tag in identity_tags if tag.lower() not in lowered]
+        if missing:
+            appearance = (
+                f"{appearance.rstrip(' ,')}, {', '.join(missing)}" if appearance.strip() else ", ".join(missing)
+            )
+        appearance = _dedupe_tag_text(appearance)
+        if appearance:
+            parsed["appearance"] = appearance
+    if nltag_field and str(parsed.get(nltag_field) or "").strip():
+        value = str(parsed[nltag_field])
+        value = _replace_conflicting_identity_colors(value, _HAIR_COLOR_RE, hair_colors)
+        value = _replace_conflicting_identity_colors(value, _EYE_COLOR_RE, eye_colors)
+        parsed[nltag_field] = value
+
+
 async def plan_animaflow_slots(
     service: Any,
     session_id: str,
@@ -2139,7 +2254,9 @@ async def plan_animaflow_slots(
         "## 槽位→字段\n"
         "- character → character（仅已知公开角色；OC 留空）\n"
         "- series → series（仅已知公开角色；OC 留空）\n"
-        "- effective_appearance + one_shot_appearance → appearance\n"
+        "- effective_appearance + one_shot_appearance → appearance"
+        "（发色/发型/瞳色等身份标签必须逐字保留，不得省略或改色；"
+        "white hair ribbon 这类发饰不是发色，不得据此臆造头发颜色）\n"
         "- style_artist → artist（@ 开头，为空留空）\n"
         "- style_general → style\n"
         "- scene → tags/nltag（改写成 3-5 句完整英文，把末尾的逗号标签堆融进句子，不要保留 Danbooru 逗号串）\n\n"
@@ -2247,6 +2364,10 @@ async def plan_animaflow_slots(
                 "",
                 [],
             )
+
+    # 身份终裁：发色/发型/瞳色不允许被规划 LLM 丢弃或改色（在全裸终裁之后执行，
+    # 确保 clothing_off 清理不会意外带走身份标签）。
+    _enforce_animaflow_identity(parsed, slots, properties, nltag_field)
 
     for field in ANIMAFLOW_NLTAG_FIELDS:
         if str(parsed.get(field) or "").strip():

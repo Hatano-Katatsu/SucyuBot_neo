@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -361,6 +362,129 @@ class AnimaFlowGuardContractTestCase(unittest.TestCase):
             self.assertIn("cfg=1 提示词规则", service._call_llm.await_args.kwargs["system_tail"])
 
         asyncio.run(run())
+
+
+class AnimaFlowIdentityGuardTestCase(unittest.TestCase):
+    """slots 规划 LLM 丢掉/编造发色时，身份终裁必须补回身份标签并改回源发色。"""
+
+    @staticmethod
+    def _schema() -> dict:
+        return {
+            "parameters": {
+                "properties": {
+                    "quality_meta_year_safe": {"type": "string"},
+                    "count": {"type": "string"},
+                    "appearance": {"type": "string"},
+                    "tags": {"type": "string"},
+                },
+                "required": ["quality_meta_year_safe", "count", "appearance", "tags"],
+            }
+        }
+
+    @staticmethod
+    def _service(llm_json: dict) -> SimpleNamespace:
+        return SimpleNamespace(
+            config={"animaflow_workflow": "anima29", "animaflow_cfg": "1.0"},
+            has_llm_config=lambda purpose, session_id="": True,
+            _get_session_state=lambda session_id: {},
+            _get_effective_safety=lambda session_id: {"level": 8},
+            _get_purity=lambda session_id: 8,
+            _get_time_context=lambda session_id: {},
+            _format_time_context=lambda session_id: "",
+            _format_light_guard=lambda session_id: "",
+            _get_llm_value=lambda *args: "0.1",
+            _weather_caches={},
+            _call_llm=AsyncMock(return_value=json.dumps(llm_json)),
+        )
+
+    @staticmethod
+    def _slots() -> PromptSlots:
+        return PromptSlots(
+            scene="A young woman sits by a rainy window, sketching.",
+            safety="safe",
+            count="1girl",
+            effective_appearance=(
+                "pale skin, black straight hair, low ponytail, loose side bangs, "
+                "gentle half-lidded eyes, purple eyes, white hair ribbon, white blouse"
+            ),
+            negative="",
+        )
+
+    async def _plan(self, llm_json: dict) -> dict:
+        payload = await plan_animaflow_slots(
+            self._service(llm_json),
+            "telegram:identity",
+            self._slots(),
+            workflow="anima29",
+            schema=self._schema(),
+            knowledge={},
+        )
+        self.assertIsInstance(payload, dict)
+        return payload
+
+    def test_hallucinated_hair_color_is_reverted_and_identity_tags_restored(self):
+        async def run():
+            return await self._plan({
+                "quality_meta_year_safe": "masterpiece, best quality, safe",
+                "count": "1girl",
+                # LLM 丢掉 black straight hair/low ponytail，并从 white hair ribbon 臆造 white hair。
+                "appearance": "pale skin, half-lidded eyes, white blouse, white hair, blue eyes",
+                "tags": "Her damp loose white hair falls over the pillow as her blue eyes wander.",
+            })
+
+        payload = asyncio.run(run())
+        appearance = payload["appearance"]
+        tags = payload["tags"]
+        self.assertIn("black straight hair", appearance)
+        self.assertIn("low ponytail", appearance)
+        self.assertIn("white hair ribbon", appearance)
+        self.assertIsNone(re.search(r"\bwhite\s+hair\b(?!\s*ribbon)", appearance))
+        self.assertIsNone(re.search(r"\bblue\s+eyes\b", appearance))
+        self.assertIn("purple eyes", appearance)
+        self.assertIn("black hair", tags)
+        self.assertNotIn("white hair", tags)
+        self.assertNotIn("blue eyes", tags)
+
+    def test_correct_identity_tags_pass_through_without_duplication(self):
+        async def run():
+            return await self._plan({
+                "quality_meta_year_safe": "masterpiece, best quality, safe",
+                "count": "1girl",
+                "appearance": "pale skin, black straight hair, low ponytail, purple eyes, white blouse",
+                "tags": "Her black hair catches the window light.",
+            })
+
+        payload = asyncio.run(run())
+        appearance = payload["appearance"]
+        lowered = [t.strip().lower() for t in appearance.split(",")]
+        self.assertEqual(lowered.count("black straight hair"), 1)
+        self.assertEqual(lowered.count("low ponytail"), 1)
+        self.assertIn("black hair", payload["tags"])
+
+    def test_no_source_color_means_no_color_judgement(self):
+        async def run():
+            slots = self._slots()
+            slots.effective_appearance = "pale skin, low ponytail, white blouse"
+            payload = await plan_animaflow_slots(
+                self._service({
+                    "quality_meta_year_safe": "masterpiece, best quality, safe",
+                    "count": "1girl",
+                    "appearance": "pale skin, white blouse, silver hair",
+                    "tags": "Silver hair glows in the dusk.",
+                }),
+                "telegram:identity",
+                slots,
+                workflow="anima29",
+                schema=self._schema(),
+                knowledge={},
+            )
+            return payload
+
+        payload = asyncio.run(run())
+        # 源槽位没有发色信息时不做颜色裁决，只补齐丢失的发型标签。
+        self.assertIn("silver hair", payload["appearance"])
+        self.assertIn("low ponytail", payload["appearance"])
+        self.assertIn("Silver hair", payload["tags"])
 
 
 if __name__ == "__main__":
