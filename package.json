@@ -5,8 +5,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test tests/frontend/frontend_core.test.cjs",
-    "test:frontend": "node --test tests/frontend/frontend_core.test.cjs",
+    "test": "node --test tests/frontend/*.test.cjs",
+    "test:frontend": "node --test tests/frontend/*.test.cjs",
     "check:frontend": "node scripts/check_frontend.mjs"
   }
 }

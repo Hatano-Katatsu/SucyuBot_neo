@@ -3834,6 +3834,20 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         topics = session_schema.get_recent_push_topics(state)
         self.assertEqual(len(topics), 2, "recent_push_topics 应跨场景重置保留")
 
+    def test_photo_topic_controls_survive_scene_reset_without_cross_session_leak(self):
+        svc = self.make_service()
+        state = svc._get_session_state("telegram:123")
+        controls = [{"topic_key": "coffee", "needle": "咖啡", "until": 0, "source": "别再提咖啡"}]
+        state["photo_topic_controls"] = copy.deepcopy(controls)
+
+        svc._clear_conversation_context(state)
+
+        self.assertEqual(state["photo_topic_controls"], controls)
+        other = svc._get_session_state("telegram:456")
+        self.assertEqual(other["photo_topic_controls"], [])
+        other["photo_topic_controls"].append({"topic_key": "tea"})
+        self.assertEqual(state["photo_topic_controls"], controls)
+
     def test_push_web_topic_pool_accessor_and_reset_preserved(self):
         svc = self.make_service()
         state = svc._get_session_state("telegram:123")
@@ -4432,21 +4446,54 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc._fetch_push_topic_seed.assert_not_awaited()
         asyncio.run(run())
 
-    def test_append_push_topic_bounded_to_eight(self):
+    def test_append_push_topic_bounded_to_thirty_two(self):
         svc = self.make_service()
         sid = "telegram:123"
-        # 填 10 条，应只保留最后 8 条
-        for i in range(10):
+        # 存储最多 32 条，规划器另取最近 8 条作避重参考。
+        for i in range(40):
             svc._append_push_topic(sid, f"caption{i}", f"scene{i}", "life")
         topics = session_schema.get_recent_push_topics(svc._get_session_state(sid))
-        self.assertEqual(len(topics), 8)
-        self.assertEqual(topics[-1]["caption"], "caption9")
-        self.assertEqual(topics[0]["caption"], "caption2")
+        self.assertEqual(len(topics), 32)
+        self.assertEqual([entry["caption"] for entry in topics], [f"caption{i}" for i in range(8, 40)])
         # 每条都带 direction 和 topic 签名
         self.assertEqual(topics[-1]["direction"], "life")
         self.assertTrue(topics[-1]["topic"])
         # search_query 默认空串
         self.assertEqual(topics[-1].get("search_query"), "")
+
+    def test_append_push_topic_prunes_records_older_than_seven_days(self):
+        svc = self.make_service()
+        sid = "telegram:123"
+        state = svc._get_session_state(sid)
+        now = 2_000_000_000.0
+        cutoff = now - 7 * 86400
+        session_schema.set_recent_push_topics(state, [
+            {"ts": cutoff - 1, "caption": "expired"},
+            {"ts": cutoff, "caption": "boundary"},
+            {"ts": now - 1, "caption": "recent"},
+        ])
+
+        with patch("telegram_comfyui_selfie.scheduler_runtime.time.time", return_value=now):
+            svc._append_push_topic(sid, "new", "new scene", "life", message_id=123)
+
+        topics = session_schema.get_recent_push_topics(state)
+        self.assertEqual([entry["caption"] for entry in topics], ["boundary", "recent", "new"])
+        self.assertEqual(topics[-1]["ts"], now)
+        self.assertEqual(topics[-1]["message_id"], 123)
+
+    def test_photo_history_context_uses_only_eight_most_recent_records(self):
+        from telegram_comfyui_selfie.photo_sharing import photo_history_context
+
+        svc = self.make_service()
+        state = svc._get_session_state("telegram:123")
+        session_schema.set_recent_push_topics(state, [
+            {"ts": time.time(), "photo_brief": {"topic_key": f"topic{i}"}}
+            for i in range(32)
+        ])
+
+        context = photo_history_context(state)
+        records = json.loads(context.split("\n")[1])
+        self.assertEqual([entry["topic_key"] for entry in records], [f"topic{i}" for i in range(24, 32)])
 
     def test_append_push_topic_records_search_query_for_external(self):
         svc = self.make_service()
@@ -8334,9 +8381,9 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(set(ss.CHARACTER_CONFIG_EXTRA_KEYS),
                          {"character", "purity", "purity_user_set", "persona_user_set"})
         # clothing 三字段已收进 clothing 盒；reset 保留的短期态单元现为
-        # clothing + life_profile + life_plan + 推送话题日志/网络话题池（跨场景重置保留）。
+        # clothing + life_profile + life_plan + 推送话题日志/网络话题池/用户话题边界。
         self.assertEqual(set(ss.RESET_PRESERVED_TRANSIENT_KEYS),
-                         {"clothing", "life_profile", "life_plan", "recent_push_topics", "push_web_topic_pool"})
+                         {"clothing", "life_profile", "life_plan", "recent_push_topics", "push_web_topic_pool", "photo_topic_controls"})
         # 默认值表：代表性字段 + 无默认字段不进表
         defaults = ss.state_defaults()
         self.assertIn("last_interaction", defaults)          # 动态时间戳
@@ -8345,6 +8392,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIsNone(defaults["purity"])
         self.assertEqual(defaults["clothing"]["wardrobe"], {})  # 衣柜在 clothing 盒内
         self.assertEqual(defaults["life_plan"], {})
+        self.assertEqual(defaults["photo_topic_controls"], [])
         self.assertNotIn("ntr_affection_reset", defaults)    # 动态产生，无默认
         self.assertNotIn("life_profile", defaults)
         # 每次调用产生独立可变对象，不跨会话共享引用
