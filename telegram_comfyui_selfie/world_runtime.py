@@ -46,7 +46,7 @@ VALID_AGE_STAGES = {"minor", "adult"}
 VALID_DAY_ANCHORS = set(OCCUPATION_ANCHORS)
 CHARACTER_VERSION_FIELDS = (
     "character", "series", "role_name", "bot_name", "bot_self_name",
-    "persona", "age_stage", "occupation", "day_anchor", "relationship",
+    "persona", "age_stage", "occupation", "day_anchor", "relationship", "world_id",
 )
 LOCATION_EXTRACT_TRIGGER_RE = re.compile(
     r"(我(?:现在|刚刚|刚|还|已经|正在)?(?:在|到|到了|回到|来到|坐在|躺在|站在|待在|留在|走到|进了).{0,12}(?:家|客厅|卧室|房间|门口|楼下|车里|公司|学校|餐厅|咖啡|星巴克|商场|车站|地铁|机场|医院|酒店|图书馆|电影院|公园|便利店|超市|海边|博物馆|店|街|路)|"
@@ -422,6 +422,9 @@ class WorldRuntimeMixin:
         base = self._get_session_cfg(session_id, "location", self.config.get("location", "上海"))
         if not session_id:
             return base
+        world = self._imported_world(session_id) if hasattr(self, "_imported_world") else {}
+        if world:
+            base = str(world.get("name") if world.get("kind") == "fictional" else world.get("city") or base)
         try:
             override = session_schema.get_travel_override(self._get_session_state(session_id))
             city = str(override.get("city") or "").strip()
@@ -625,6 +628,11 @@ class WorldRuntimeMixin:
             "exists": exists,
             "card": {field: card.get(field) for field in CHARACTER_VERSION_FIELDS},
         }
+        if card.get("world_id"):
+            world_row = self.app_store.get_world_profile(self._user_id_for_session(session_id), card["world_id"])
+            payload["world_revision"] = world_row["revision"] if world_row else 0
+        elif card.get("world_snapshot"):
+            payload["world_snapshot"] = card["world_snapshot"]
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -1121,7 +1129,10 @@ class WorldRuntimeMixin:
         place = (place or "").strip()
         if not place:
             return "未提供地点。"
-        key = self._match_place_key(place)
+        imported_place = self._imported_place_named(session_id, place) if hasattr(self, "_imported_place_named") else None
+        key = imported_place["place_key"] if imported_place else self._match_place_key(place)
+        if imported_place:
+            place = imported_place["name"]
         if not key:
             return f"无法识别地点「{place[:30]}」，位置未更新。可用：家/公司/学校/商场/咖啡店/餐厅/公园/街道/车站/便利店等。"
         # place 是模型给的完整地名（如"上海海军博物馆"），整段存为具体地名；key 仅作类别用于动线规则。
@@ -1306,6 +1317,18 @@ class WorldRuntimeMixin:
         place_history = session_schema.get_character_place_history(state)
         catalog = getattr(self, "city_place_catalogs", {}).get(self._city_catalog_key(city), {})
         enhanced = bool(isinstance(catalog, dict) and catalog.get("places"))
+        imported = self._imported_world(session_id) if hasattr(self, "_imported_world") else {}
+        if imported:
+            mapped = [e for e in imported.get("entries", []) if e.get("type") == "place" and e.get("enabled", True) and e.get("known") and e.get("place_key") in PLACE_TYPES]
+            for place in [character_place, next_place, *candidates]:
+                if not isinstance(place, dict):
+                    continue
+                matching = [e for e in mapped if e["place_key"] == place.get("key")]
+                selected = next((e for e in matching if e["name"] == place.get("name")), matching[0] if matching else None)
+                if selected:
+                    place.update(name=selected["name"], world_place_id=selected["id"], description=selected["content"])
+                elif imported.get("kind") == "fictional":
+                    place["name"] = place.get("label", "当前场所")
         return {
             "city": city,
             "now": now,
@@ -1325,7 +1348,7 @@ class WorldRuntimeMixin:
             "relation": self._world_relation_text(character_place, user_place),
             "constraints": self._world_constraints(character_place, weather),
             "spatial_override": self._get_session_cfg(session_id, "spatial_relationship", ""),
-            "catalog_source": "城市增强目录" if enhanced else "基础场所目录",
+            "catalog_source": "导入世界背景" if imported else ("城市增强目录" if enhanced else "基础场所目录"),
         }
 
     @staticmethod
@@ -1719,7 +1742,9 @@ class WorldRuntimeMixin:
         self.city_place_catalogs[key] = catalog
         self.app_store.save_city_catalog(key, catalog)
 
-    async def _ensure_city_place_catalog(self, city: str, force: bool = False) -> dict[str, Any]:
+    async def _ensure_city_place_catalog(self, city: str, force: bool = False, *, session_id: str = "") -> dict[str, Any]:
+        if session_id and hasattr(self, "_imported_world") and self._imported_world(session_id).get("kind") == "fictional":
+            return {"status": "fictional", "city": city, "places": {}}
         city = (city or "").strip()
         key = self._city_catalog_key(city)
         if not city or not self._world_city_places_enabled():

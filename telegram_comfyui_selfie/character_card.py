@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from typing import Any
+import copy
 
 from . import session_schema
 
@@ -46,14 +47,19 @@ CARD_STRING_FIELDS: tuple[tuple[str, str], ...] = (
     ("scene_preference", "custom_scene_preference"),
     ("selfie_preference", "custom_selfie_preference"),
     ("style", "custom_current_style"),
+    ("world_id", "custom_world_id"),
+    ("dialogue_examples", "custom_dialogue_examples"),
+    ("opening_message", "custom_opening_message"),
 )
+
+CARD_OBJECT_FIELDS = {"world_snapshot": ("custom_world_snapshot", dict), "import_source": ("custom_import_source", dict), "alternate_greetings": ("custom_alternate_greetings", list)}
 
 # 自动换装开关的 state 键；三态（None=跟随全局 / True / False），单独处理。
 ALLOW_KEY = "custom_allow_llm_change_appearance"
 
 # 卡片字段全集（含 outfit 及两个特殊字段）：默认角色卡用它做一致性校验。
 CARD_KEYS: tuple[str, ...] = tuple(
-    [card_key for card_key, _ in CARD_STRING_FIELDS] + ["outfit", "allow_change_appearance", "purity"]
+    [card_key for card_key, _ in CARD_STRING_FIELDS] + list(CARD_OBJECT_FIELDS) + ["outfit", "allow_change_appearance", "purity"]
 )
 
 # 默认角色卡（蕾伊）字段 → 全局 config 键：卡编辑器改默认角色即写回这些 config 键。
@@ -94,6 +100,9 @@ def card_from_state(state: dict[str, Any]) -> dict[str, Any]:
         for card_key, state_key in CARD_STRING_FIELDS
     }
     card["outfit"] = session_schema.get_outfit(state)  # 当前穿搭来自 clothing box
+    for key, (state_key, kind) in CARD_OBJECT_FIELDS.items():
+        value = session_schema.get_character_value(state, state_key, kind())
+        card[key] = copy.deepcopy(value) if isinstance(value, kind) else kind()
     card["allow_change_appearance"] = session_schema.get_character_value(state, ALLOW_KEY)
     card["purity"] = session_schema.get_character_value(state, "purity")
     return card
@@ -101,6 +110,9 @@ def card_from_state(state: dict[str, Any]) -> dict[str, Any]:
 
 def apply_card_to_state(state: dict[str, Any], data: dict[str, Any]) -> None:
     """把角色卡 payload 写回 state（导入 / 修改角色）。只写 data 里出现的字段。"""
+    for key, (state_key, kind) in CARD_OBJECT_FIELDS.items():
+        if key in data:
+            session_schema.set_character_value(state, state_key, copy.deepcopy(data[key]) if isinstance(data[key], kind) else kind())
     for card_key, state_key in CARD_STRING_FIELDS:
         if card_key in data:
             session_schema.set_character_value(

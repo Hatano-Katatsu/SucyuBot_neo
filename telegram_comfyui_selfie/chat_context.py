@@ -189,6 +189,10 @@ class ChatContextMixin:
         if not clean:
             return
         history.extend(clean)
+        from .photo_sharing import record_topic_control
+        for message in clean:
+            if message["role"] == "user":
+                record_topic_control(state, message["content"])
         try:
             self.app_store.append_messages(session_id, self._context_character_key(session_id), clean)
         except Exception:
@@ -742,6 +746,8 @@ class ChatContextMixin:
 
         history = session_schema.get_chat_history(state)
         stored_user_text = self._sanitize_user_history_text(history_user_text if history_user_text is not None else user_text)
+        from .photo_sharing import record_topic_control
+        record_topic_control(state, stored_user_text)
         new_messages = [{"role": "user", "content": stored_user_text}]
         if content:
             new_messages.append({"role": "assistant", "content": content})
@@ -909,7 +915,6 @@ class ChatContextMixin:
         )
         if intimate_scene:
             system_dynamic += f"\n{CHAT_INTIMATE_LANGUAGE_RULES.strip()}\n"
-        system_dynamic += f"\n{CHAT_FOCUS_RULES}\n"
         dynamic_signature = "\n".join([
             f"scene_stale={int(scene_stale)}",
             f"intimate={int(intimate_scene)}",
@@ -922,6 +927,15 @@ class ChatContextMixin:
         # ── 天级/低频稳定上下文（角色历史、长期记忆、配置控制）──
         # 这些比半稳定外型更低频，放在半稳定状态快照之前。
         durable_parts: list[str] = []
+        if hasattr(self, "_imported_world_context"):
+            imported_world = self._imported_world_context(session_id, stable=True)
+            if imported_world:
+                durable_parts.append(imported_world)
+            style = self._imported_role_style(session_id, first_turn=not bool(active_history), input_text=user_text)
+            if style:
+                durable_parts.append(style)
+            system_dynamic += "\n" + self._imported_world_context(session_id, f"{recent_text}\n{user_text}")
+        system_dynamic += f"\n{CHAT_FOCUS_RULES}\n"
         control_context = self._chat_low_frequency_context(session_id, state=state)
         if control_context:
             durable_parts.append(control_context)

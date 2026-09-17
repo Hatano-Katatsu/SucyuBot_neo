@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .photo_sharing import PhotoContentSkipped, normalize_photo_brief, photo_repeat_reason, recent_photo_entries
+
 import asyncio
 import json
 import logging
@@ -812,6 +814,9 @@ class SchedulerRuntimeMixin:
             "- character_interaction：让当前活动角色与系统列出的一个非活动角色按各自今日动线相遇。"
             "只有状态明确标为可用时才能选择；具体对象和事件由后续编排器决定，此模式 topic_guides 可以为空。\n"
             "关键规则：\n"
+            "以此刻值得拍的一件事为中心，优先当前对话的实际对象、动线内生活或眼前细节；引导是候选，最终只分享一个点。"
+            "没人回复时继续自己的生活，别换着道具等待用户。网络信息只作兴趣补充，不能把看到的新闻说成自己亲历。"
+            "用户建议不等于采纳，计划不等于完成；有真实新结果才再次提起。照片可以无人入镜，不必每次正脸半身。\n"
             "1) dialogue/independent 的 topic_guides 必须有 1-3 条具体话题引导，每条含 source 和 guide。"
             "每条 guide 只锁定一个小切入点：一件物品、一个动作、一件刚发生或即将发生的事，"
             "用一句不超过 40 字的话点明聊什么，像角色顺口提起一件事那样写。"
@@ -1029,29 +1034,37 @@ class SchedulerRuntimeMixin:
         search_query: str = "",
         *,
         topic_guides: list[str] | None = None,
+        photo_brief: dict[str, Any] | None = None,
+        message_id: int | None = None,
     ) -> None:
         """推送成功后追加话题日志（跨 /新场景 保留）。"""
         from .image_planning import _push_topic_signature
         state = self._get_session_state(session_id)
-        topics = session_schema.get_recent_push_topics(state)
+        topics = recent_photo_entries(state)
         topic_sig = _push_topic_signature(caption, scene)
         topics.append({
             "ts": time.time(),
+            "photo_brief": photo_brief or {},
+            "message_id": message_id,
             "caption": (caption or "").strip()[:200],
-            "scene": (scene or "").strip()[:160],
+            "scene": (scene or "").strip()[:700],
             "topic": topic_sig,
             "direction": (direction or "").strip().lower(),
             "search_query": (search_query or "").strip()[:120],
             "topic_guides": self._normalize_push_topic_guides(topic_guides or [], limit=3),
         })
-        # 保留最近 8 条
-        session_schema.set_recent_push_topics(state, topics[-8:])
+        # 保留至多七天、32 条；规划只消费紧凑最近记录。
+        session_schema.set_recent_push_topics(state, topics[-32:])
         self._save_session_state(session_id, state)
 
     # ---------------------------------------------------------------------
     # Weather / scheduler
     # ---------------------------------------------------------------------
     async def _fetch_weather(self, location: str = "", session_id: str = ""):
+        imported = self._imported_world(session_id) if session_id and hasattr(self, "_imported_world") else {}
+        if imported.get("kind") == "fictional":
+            self._weather_caches.pop(session_id, None)
+            return None
         retry_scope = "weather"
         retry_key = session_id or "__default__"
         if (
@@ -2739,6 +2752,12 @@ class SchedulerRuntimeMixin:
                 if trigger_time:
                     self._clear_scheduled_push_retry(session_id, local_dt, trigger_time)
                 raise
+            except PhotoContentSkipped as exc:
+                if trigger_time:
+                    self._clear_scheduled_push_retry(session_id, local_dt, trigger_time)
+                    self._mark_daily_triggered_time(session_id, trigger_time, reason="content-skipped")
+                self._ulog(session_id, "PUSH", str(exc))
+                return
             except Exception as exc:
                 ok = False
                 failure_error = str(exc)
@@ -3121,6 +3140,38 @@ class SchedulerRuntimeMixin:
             if not plan or not plan.get("scene"):
                 self._ulog(session_id, "PUSH", f"推送规划为空 mode={mode}")
                 return False
+            # 重复和工作流能力共用最多一次重规划，不在生成失败后无限追加调用。
+            for correction in range(2):
+                if hasattr(self, "_validate_life_photo_source"):
+                    plan = self._validate_life_photo_source(session_id, plan)
+                constraint = ""
+                if normalize_photo_brief(plan)["subject_mode"] != "character":
+                    from .animaflow_runtime import animaflow_enabled, load_animaflow_workflow_resources
+                    from .generation import PromptSlots, apply_photo_subject_contract
+                    if animaflow_enabled(self.config):
+                        _workflow, _meta, _, schema, _ = await load_animaflow_workflow_resources(self)
+                        try:
+                            apply_photo_subject_contract({}, PromptSlots(subject_mode="environment"), schema)
+                        except ValueError as exc:
+                            constraint = str(exc) + "；改为同一地点合理的人物照片，subject_mode 必须为 character。"
+                repeat_reason = photo_repeat_reason(plan, state) if mode == "normal" and not local_interaction and not temporary_system_prompt else ""
+                reason = constraint or repeat_reason
+                if not reason:
+                    break
+                if correction:
+                    raise PhotoContentSkipped("推送本窗口跳过：" + reason)
+                self._ulog(session_id, "PUSH", "照片候选修正：" + reason)
+                if reason:
+                    plan = await self._llm_write_scene(
+                        mode, weather, WEEKDAY_NAMES[local_dt.weekday()], time_period, None,
+                        session_id, now=local_dt, weather_data=w,
+                        push_topic_direction=topic_direction, push_topic_guides=push_topic_guides,
+                        temporary_system_prompt=(effective_system_prompt or "") + "\n本次候选未发送。请在当前合理动线内换一个拍摄对象或取景：" + reason,
+                    )
+                    if not plan or not plan.get("scene"):
+                        return False
+            photo_brief = normalize_photo_brief(plan)
+            subject_mode = photo_brief["subject_mode"]
             scene = plan.get("scene") or ""
             caption = self._single_line_push_caption(
                 local_interaction.get("push_caption") if local_interaction else (plan.get("caption") or "")
@@ -3147,6 +3198,8 @@ class SchedulerRuntimeMixin:
                 view=view,
                 is_intimate=is_intimate,
                 free_composition=False,
+                subject_mode=subject_mode,
+                photo_brief=photo_brief,
             )
             generation_kwargs = {
                 "is_ntr": mode == "ntr",
@@ -3159,11 +3212,14 @@ class SchedulerRuntimeMixin:
                 "clothing_off": clothing_off,
                 "view": view,
             }
+            if subject_mode != "character":
+                generation_kwargs["subject_mode"] = subject_mode
             if state_mutation.get("clear_undress_state"):
                 generation_kwargs["ignore_wardrobe_item_states"] = True
             ok, imgs, err = await self._do_generate(english, **generation_kwargs)
             if ok and imgs:
-                await self.send_photo(chat_id, imgs[0], caption or "")
+                receipt = await self.send_photo(chat_id, imgs[0], caption or "")
+                message_id = receipt.get("message_id") if isinstance(receipt, dict) else None
                 source_kind = "followup_push" if mode == "followup" else ("manual_push" if skip_active_check else "scheduled_push")
                 self._record_sent_photo(
                     session_id,
@@ -3173,6 +3229,8 @@ class SchedulerRuntimeMixin:
                     view=view,
                     source_description=source,
                     source_kind=source_kind,
+                    photo_brief=photo_brief,
+                    message_id=message_id,
                 )
                 # 推送文案在用户眼里就是角色说的一段话；作为 assistant 消息进历史，
                 # 用户回复推送时模型才能看到"我刚说了什么"，而不是只有一条低权重照片记录。
@@ -3196,6 +3254,8 @@ class SchedulerRuntimeMixin:
                 self._append_push_topic(
                     session_id, caption or "", scene, topic_direction, used_query,
                     topic_guides=push_topic_guides,
+                    photo_brief=photo_brief,
+                    message_id=message_id,
                 )
                 if mode == "normal" and post_push_search_query:
                     try:
@@ -3220,6 +3280,8 @@ class SchedulerRuntimeMixin:
                 self._ulog(session_id, "PUSH", f"生图失败 mode={mode}: {err}")
                 logger.error("scheduled generate failed: %s", err)
                 return False
+        except PhotoContentSkipped:
+            raise
         except Exception as exc:
             self._ulog(session_id, "PUSH", f"推送异常 mode={mode_override or 'normal'}: {exc}")
             logger.error("scheduled push failed: %s", exc, exc_info=True)

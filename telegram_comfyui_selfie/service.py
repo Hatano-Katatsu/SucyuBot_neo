@@ -48,6 +48,7 @@ from .telegram_io import TelegramIOMixin
 from .telegram_update_runtime import TelegramUpdateRuntimeMixin
 from .time_context import build_time_context, format_light_guard, format_time_context, rough_time_period
 from .world_runtime import WorldRuntimeMixin
+from .world_profile_runtime import WorldProfileRuntimeMixin
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,7 @@ class TelegramComfyUIService(
     LifePlanMixin,
     SchedulerRuntimeMixin,
     WorldRuntimeMixin,
+    WorldProfileRuntimeMixin,
     EncounterRuntimeMixin,
     GitUpdateMixin,
 ):
@@ -147,6 +149,7 @@ class TelegramComfyUIService(
         self._checkpoint_locks: dict[str, asyncio.Lock] = {}
         self._dream_tasks: dict[str, asyncio.Task] = {}
         self._life_plan_tasks: dict[str, asyncio.Task] = {}
+        self._tavern_import_tasks: dict[str, asyncio.Task] = {}
         self._post_chat_push_tasks: dict[str, asyncio.Task] = {}
         self._interruptible_tasks: dict[str, set[asyncio.Task]] = {}
         self._pending_photo_inputs: dict[str, dict[str, Any]] = {}
@@ -219,6 +222,7 @@ class TelegramComfyUIService(
         self.http = aiohttp.ClientSession(timeout=timeout, trust_env=(connector is None), connector=connector)
         me = await self.tg_api("getMe")
         self._bot_username = (me.get("result") or {}).get("username", "")
+        await self._setup_telegram_commands()
         await self._start_telegram_update_runtime()
         self._bot_tasks = [
             self._spawn_background(
@@ -527,6 +531,8 @@ class TelegramComfyUIService(
         nltag: str = "",
         source_kind: str = "",
         defer_history_message: bool = False,
+        photo_brief: dict[str, Any] | None = None,
+        message_id: int | None = None,
     ):
         state = self._get_session_state(session_id)
         history = session_schema.get_sent_photos_history(state)
@@ -539,9 +545,13 @@ class TelegramComfyUIService(
                 appearance_snapshot = self._effective_visual_prompt_tags(session_id)
             except Exception:
                 appearance_snapshot = session_schema.get_outfit(state)
+        if photo_brief and photo_brief.get("subject_mode") in {"detail", "environment"}:
+            appearance_snapshot = ""
         visual_state = self._compact_photo_visual_state(scene, nltag_text, appearance_snapshot)
         photo = {
             "timestamp": time.time(),
+            "message_id": message_id,
+            "photo_brief": photo_brief or {},
             "scene": scene,
             "caption": caption,
             "appearance": appearance_snapshot,
@@ -1104,12 +1114,14 @@ class TelegramComfyUIService(
         device_in_frame: bool = False,
         clothing_off: str = "",
         ignore_wardrobe_item_states: bool = False,
+        subject_mode: str = "character",
     ) -> tuple[str, str]:
         return image_generation.build_prompt(
             self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
             is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
             clothing_off=clothing_off,
             ignore_wardrobe_item_states=ignore_wardrobe_item_states,
+            subject_mode=subject_mode,
         )
 
     def _format_last_prompt_slots(self, session_id: str = "") -> str:
@@ -1268,6 +1280,8 @@ class TelegramComfyUIService(
         view: str = "",
         is_intimate: bool = False,
         free_composition: bool = False,
+        subject_mode: str = "character",
+        photo_brief: dict[str, Any] | None = None,
     ) -> str:
         if not self.has_llm_config("image", session_id):
             return natural
@@ -1278,7 +1292,11 @@ class TelegramComfyUIService(
         state = self._get_session_state(session_id) if session_id else {}
         persisted_count = (session_schema.get_character_value(state, "custom_count", "") or "").strip()
         gender = appearance_rules.infer_gender_from_count(persisted_count) if persisted_count else self._infer_gender_from_prefix(char_prefix)
-        opener = self._view_opener(view, gender) if view and not free_composition else ""
+        opener = self._view_opener(view, gender) if view and not free_composition and subject_mode == "character" else ""
+        if photo_brief and opener:
+            framing = {"close": "close framing", "wide": "wide background framing", "full": "full body framing"}.get(photo_brief.get("framing"))
+            if framing:
+                opener = opener.replace("upper body framing", framing)
         light_guard = self._format_light_guard(session_id)
         weather_text = ""
         cached = self._weather_caches.get(session_id or "__default__")
@@ -1306,7 +1324,12 @@ class TelegramComfyUIService(
         translate_output_rule = (
             "自然语言句子尽量不要使用逗号。输出格式: English visual sentence. key tag, key tag, key tag"
         )
-        if free_composition:
+        if subject_mode in {"detail", "environment"}:
+            system = (f"{translate_common}"
+                      "The subject is an object or environment photographed by the character, not a portrait or user POV. "
+                      "Do not add a face, full body, identity, outfit or phone UI. Preserve requested framing and any explicitly visible hand. "
+                      f"{translate_output_rule}")
+        elif free_composition:
             system = (
                 f"{translate_common}"
                 "Visual subject rule: the image subject remains the roleplay scene, usually the character, "
@@ -1348,6 +1371,9 @@ class TelegramComfyUIService(
         # 把视角/自由构图等本次分支规则后移，通用职责与输出协议保持同一前缀。
         dynamic_rules = system[len(translate_common):].replace(translate_output_rule, "", 1)
         system = translate_common + translate_output_rule
+        imported_world = self._imported_world(session_id) if session_id else {}
+        if imported_world.get("photography") == "scene":
+            dynamic_rules += " 保留原世界技术设定；这是场景画面，不是角色使用手机拍摄，不添加手机、相机或现代设备。"
         if is_intimate:
             # 亲密场景翻译护栏：第二人称身体翻成“用户作为伴侣的局部身体”，按用户性别决定男/女，绝不能写成完整的第二个主角（双女根因）。
             ug = self._get_user_gender(session_id)
@@ -1479,12 +1505,13 @@ class TelegramComfyUIService(
         orientation: str = "",
         view: str = "",
         ignore_wardrobe_item_states: bool = False,
+        subject_mode: str = "character",
     ) -> tuple[bool, list[bytes], str]:
         return await image_generation.do_generate(
             self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
             is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
             clothing_off=clothing_off, orientation=orientation, view=view,
-            ignore_wardrobe_item_states=ignore_wardrobe_item_states,
+            ignore_wardrobe_item_states=ignore_wardrobe_item_states, subject_mode=subject_mode,
         )
 
     async def _do_generate_locked(
@@ -1500,12 +1527,13 @@ class TelegramComfyUIService(
         orientation: str = "",
         view: str = "",
         ignore_wardrobe_item_states: bool = False,
+        subject_mode: str = "character",
     ) -> tuple[bool, list[bytes], str]:
         return await image_generation.do_generate_locked(
             self, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
             is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
             clothing_off=clothing_off, orientation=orientation, view=view,
-            ignore_wardrobe_item_states=ignore_wardrobe_item_states,
+            ignore_wardrobe_item_states=ignore_wardrobe_item_states, subject_mode=subject_mode,
         )
 
     async def _await_protected_image_task(

@@ -605,6 +605,12 @@ class ServiceStateMixin:
             "outfit": str(cfg.get("dynamic_appearance", "") or "").strip(),
             "allow_change_appearance": bool(cfg.get("allow_llm_change_appearance", True)),
             "purity": None,
+            "world_id": "",
+            "world_snapshot": {},
+            "import_source": {},
+            "dialogue_examples": "",
+            "opening_message": "",
+            "alternate_greetings": [],
         }
 
     # 卡片字段 → config 键的映射：默认角色以 config 为存储，编辑卡片即写回 config。

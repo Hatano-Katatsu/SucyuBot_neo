@@ -512,6 +512,7 @@ function bindRuntimeClothingHandlers(container) {
 function renderWardrobePanel() {
   const box = $("#wardrobe-manager");
   if (!box) return;
+  showCachedRecord(box, false);
   if (!state.selectedSession || !state.selectedCharacter || !state.characterData) {
     if ($("#wardrobe-character-select")) $("#wardrobe-character-select").innerHTML = "";
     box.innerHTML = `<div class="empty-state">选择角色后查看衣橱。</div>`;
@@ -529,6 +530,11 @@ function renderWardrobePanel() {
     return;
   }
   const isActive = charId === state.characterData.active_id;
+  if (state.characterDataCached) {
+    box.innerHTML = `<p>${escapeHtml(char.dynamic_appearance || char.appearance || "正在读取衣橱…")}</p>`;
+    showCachedRecord(box, true);
+    return;
+  }
   if (!isActive) {
     box.innerHTML = `<div class="empty-state">该角色尚未激活。<button id="wardrobe-activate" class="primary" type="button">设为当前并打开衣橱</button></div>`;
     $("#wardrobe-activate").onclick = () => activateSelectedCharacter();
@@ -579,8 +585,16 @@ async function loadCharacterPage() {
     if ($("#diary-manager")) $("#diary-manager").innerHTML = `<div class="empty-state">请选择会话与角色。</div>`;
     return;
   }
-  await loadCharacters();
-  switchMemoryDiaryTab(state.memoryDiaryTab || "profile");
+  const session = state.selectedSession;
+  let earlyCharacter = "";
+  await loadCharacters({ onCachedReady: () => {
+    earlyCharacter = state.selectedCharacter;
+    switchMemoryDiaryTab(state.memoryDiaryTab || "profile");
+  }});
+  if (state.selectedSession === session && state.characterData
+      && (!earlyCharacter || earlyCharacter !== state.selectedCharacter)) {
+    switchMemoryDiaryTab(state.memoryDiaryTab || "profile");
+  }
 }
 
 function renderCharacterPool() {
@@ -617,6 +631,7 @@ function renderCharacterPool() {
   pool.querySelectorAll(".character-card").forEach(btn => {
     btn.onclick = () => selectCharacter(btn.dataset.characterId);
   });
+  showCachedRecord(pool, Boolean(state.characterDataCached));
 }
 
 function selectCharacter(characterId) {
@@ -639,6 +654,7 @@ function renderCharacterForm() {
   const form = $("#character-form");
   const activateBtn = $("#character-activate");
   if (!form) return;
+  showCachedRecord(form, false);
   if (!state.selectedCharacter || !state.characterData) {
     title.textContent = "角色设定";
     subtitle.textContent = "从左侧角色池选择一个角色";
@@ -650,6 +666,19 @@ function renderCharacterForm() {
   const char = characters[state.selectedCharacter] || {};
   const isActive = state.characterData.active_id === state.selectedCharacter;
   const isDefault = char.is_default === true;
+  if (state.characterDataCached) {
+    title.textContent = char.character || char.bot_name || state.selectedCharacter;
+    subtitle.textContent = `会话: ${state.selectedSession}`;
+    if (activateBtn) activateBtn.disabled = true;
+    form.onsubmit = event => event.preventDefault();
+    form.innerHTML = characterFieldSections.map(([label, fields]) => `<section class="form-section">
+      <h4>${escapeHtml(label)}</h4>${fields.filter(([key]) => char[key] != null && char[key] !== "")
+        .map(([key, name]) => `<p><strong>${escapeHtml(name)}</strong></p><div class="cached-text">${escapeHtml(String(char[key]))}</div>`).join("")}</section>`).join("");
+    form.dataset.modified = "false";
+    showCachedRecord(form, true);
+    renderWardrobePanel();
+    return;
+  }
   title.textContent = isActive ? `${char.character || state.selectedCharacter}（当前）` : (char.character || state.selectedCharacter);
   if (isDefault) {
     subtitle.textContent = `会话: ${state.selectedSession} · 系统默认角色（不可删除）`;
@@ -875,13 +904,21 @@ async function loadHistorySummary() {
   const rawCharKey = state.selectedCharacter || "";
   const charKey = characterApiKey(rawCharKey);
   const loadToken = characterLoadToken();
+  editor.disabled = true;
+  if (saveBtn) saveBtn.disabled = true;
+  const current = () => isCharacterLoadCurrent(loadToken) && editor === $("#history-summary-editor");
   try {
-    const data = await api(`/api/sessions/${sid}/history-summary?character_key=${encodeURIComponent(charKey)}`);
-    if (!isCharacterLoadCurrent(loadToken)) return;
+    const data = await api(`/api/sessions/${sid}/history-summary?character_key=${encodeURIComponent(charKey)}`, {
+      onCached: cached => { if (current()) editor.value = cached.summary || ""; },
+    });
+    if (!current()) return;
     editor.value = data.summary || "";
+    editor.disabled = false;
+    if (saveBtn) saveBtn.disabled = false;
   } catch (_) {
-    if (!isCharacterLoadCurrent(loadToken)) return;
+    if (!current()) return;
     editor.value = "";
+    return;
   }
   if (saveBtn) {
     saveBtn.onclick = async () => {
@@ -911,26 +948,55 @@ async function refreshSessionsUi() {
   renderWorldSessionList();
 }
 
-async function loadCharacters() {
+async function loadCharacters({ onCachedReady } = {}) {
   const pool = $("#character-pool");
   if (!pool || !state.selectedSession) {
     if (pool) pool.innerHTML = `<div class="empty-state">请选择会话。</div>`;
     return;
   }
   const sid = encodeURIComponent(state.selectedSession);
-  try {
-    const data = await api(`/api/sessions/${sid}/characters`);
-    if (encodeURIComponent(state.selectedSession) !== sid) return;
+  const sequence = loadCharacters.sequence = (loadCharacters.sequence || 0) + 1;
+  const current = () => sequence === loadCharacters.sequence && encodeURIComponent(state.selectedSession) === sid;
+  const originalCharacter = state.selectedCharacter;
+  // 切用户后的空档不保留上一人的可编辑表单。
+  for (const selector of ["#character-form", "#wardrobe-manager", "#memory-manager", "#diary-manager"]) {
+    const box = $(selector);
+    if (box) box.innerHTML = `<div class="empty-state">正在读取记录…</div>`;
+  }
+  const form = $("#character-form");
+  if (form) form.onsubmit = event => event.preventDefault();
+  if ($("#character-activate")) $("#character-activate").disabled = true;
+  const render = (data, cached) => {
+    if (!current()) return;
     state.characterData = data;
-    renderCharacterPool();
+    state.characterDataCached = cached;
     const characters = data.characters || {};
     const ids = Object.keys(characters);
-    if (!state.selectedCharacter || !characters[state.selectedCharacter]) {
-      state.selectedCharacter = data.active_id || ids[0] || "";
+    if ((!cached && !originalCharacter) || !state.selectedCharacter || !characters[state.selectedCharacter]) {
+      state.selectedCharacter = characters[data.active_id] ? data.active_id : (ids[0] || "");
     }
+    renderCharacterPool();
     renderCharacterForm();
+  };
+  try {
+    const data = await api(`/api/sessions/${sid}/characters`, { onCached: cached => {
+      render(cached, true);
+      if (current() && onCachedReady) onCachedReady();
+    }});
+    render(data, false);
   } catch (err) {
+    if (!current()) return;
+    state.characterData = null;
+    state.characterDataCached = false;
+    state.selectedCharacter = null;
+    renderCharacterForm();
+    renderWardrobePanel();
+    for (const selector of ["#memory-manager", "#diary-manager"]) {
+      const box = $(selector);
+      if (box) box.innerHTML = "";
+    }
     pool.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
+    showCachedRecord(pool, false);
     toast(err.message, "error");
   }
 }
@@ -956,120 +1022,130 @@ async function loadMemories() {
   const rawCharKey = state.selectedCharacter;
   const charKey = encodeURIComponent(characterApiKey(rawCharKey));
   const loadToken = characterLoadToken();
+  const sequence = loadMemories.sequence = (loadMemories.sequence || 0) + 1;
+  const current = () => sequence === loadMemories.sequence && isCharacterLoadCurrent(loadToken);
   try {
     // 重建前记住条数选择与搜索词，操作后的重渲染不丢失用户的筛选状态
     const limitEl = document.getElementById("memory-limit");
     const limit = limitEl ? Number(limitEl.value || "60") : 60;
     const searchText = document.getElementById("memory-search")?.value || "";
-    const data = await api(`/api/sessions/${sid}/memories?character_key=${charKey}&limit=${limit}`);
-    if (!isCharacterLoadCurrent(loadToken)) return;
-    const rows = (data.memories || []).map(mem => `
-      <div class="manager-row memory-row${mem.kind === "user_profile" ? " is-user-profile" : ""}">
-        ${mem.kind === "user_profile" ? `<div class="memory-row-label">置顶用户画像</div>` : ""}
-        <textarea data-memory-summary="${mem.id}" rows="2" placeholder="记忆内容">${escapeHtml(mem.summary || "")}</textarea>
-        <select data-memory-kind="${mem.id}" title="类型" aria-label="记忆类型">${memoryKindOptions(mem.kind || "manual")}</select>
-        <div class="range-wrap" title="重要度 1-5">
-          <input type="range" data-memory-importance="${mem.id}" min="1" max="5" step="1" value="${escapeHtml(String(mem.importance ?? 3))}" aria-label="重要度 1-5">
-          <span class="range-value">${escapeHtml(String(mem.importance ?? 3))}</span>
+    box.innerHTML = `<div class="empty-state">正在读取记忆…</div>`;
+    const render = (data, cached = false) => {
+      if (!current()) return;
+      const rows = (data.memories || []).map(mem => `
+        <div class="manager-row memory-row${mem.kind === "user_profile" ? " is-user-profile" : ""}">
+          ${mem.kind === "user_profile" ? `<div class="memory-row-label">置顶用户画像</div>` : ""}
+          <textarea data-memory-summary="${mem.id}" rows="2" placeholder="记忆内容">${escapeHtml(mem.summary || "")}</textarea>
+          <select data-memory-kind="${mem.id}" title="类型" aria-label="记忆类型">${memoryKindOptions(mem.kind || "manual")}</select>
+          <div class="range-wrap" title="重要度 1-5">
+            <input type="range" data-memory-importance="${mem.id}" min="1" max="5" step="1" value="${escapeHtml(String(mem.importance ?? 3))}" aria-label="重要度 1-5">
+            <span class="range-value">${escapeHtml(String(mem.importance ?? 3))}</span>
+          </div>
+          <button class="btn" data-memory-save="${mem.id}" type="button">保存</button>
+          <button class="btn danger" data-memory-delete="${mem.id}" type="button">删除</button>
+          ${mem.source ? `<div class="memory-source" title="${escapeHtml(String(mem.source))}">来源：${escapeHtml(String(mem.source))}</div>` : ""}
         </div>
-        <button class="btn" data-memory-save="${mem.id}" type="button">保存</button>
-        <button class="btn danger" data-memory-delete="${mem.id}" type="button">删除</button>
-        ${mem.source ? `<div class="memory-source" title="${escapeHtml(String(mem.source))}">来源：${escapeHtml(String(mem.source))}</div>` : ""}
-      </div>
-    `).join("");
-    box.innerHTML = `
-      <div class="memory-toolbar">
-        <input id="memory-search" type="search" placeholder="搜索记忆…" autocomplete="off" aria-label="搜索记忆">
-        <select id="memory-limit" title="显示条数" aria-label="显示条数">
-          <option value="30">30 条</option>
-          <option value="60" selected>60 条</option>
-          <option value="120">120 条</option>
-          <option value="200">全部</option>
-        </select>
-      </div>
-      <form id="memory-add-form" class="inline-manager-form memory-add-form">
-        <textarea name="summary" placeholder="新增一条手动记忆" rows="2"></textarea>
-        <select name="kind">${memoryKindOptions("manual")}</select>
-        <div class="range-wrap">
-          <input type="range" name="importance" min="1" max="5" step="1" value="3" aria-label="重要度 1-5">
-          <span class="range-value">3</span>
+      `).join("");
+      box.innerHTML = `
+        <div class="memory-toolbar">
+          <input id="memory-search" type="search" placeholder="搜索记忆…" autocomplete="off" aria-label="搜索记忆">
+          <select id="memory-limit" title="显示条数" aria-label="显示条数">
+            <option value="30">30 条</option>
+            <option value="60" selected>60 条</option>
+            <option value="120">120 条</option>
+            <option value="200">全部</option>
+          </select>
         </div>
-        <button class="btn primary" type="submit">新增记忆</button>
-      </form>
-      <div id="memory-list" class="manager-list">${rows || `<div class="empty-state">暂无记忆。</div>`}</div>
-    `;
-    bindRangeInputs(box);
-    // 记忆搜索过滤
-    const searchInput = $("#memory-search");
-    const applyMemoryFilter = () => {
-      const q = (searchInput.value || "").toLowerCase();
-      $all("#memory-list .memory-row").forEach(row => {
-        const text = (row.textContent || "").toLowerCase();
-        row.style.display = q && !text.includes(q) ? "none" : "";
-      });
-    };
-    searchInput.oninput = applyMemoryFilter;
-    if (searchText) {
-      searchInput.value = searchText;
-      applyMemoryFilter();
-    }
-    // 记忆 limit 变化重新加载；先恢复重建前的选择（模板默认选中 60）
-    const limitSelect = $("#memory-limit");
-    if (limitSelect) {
-      limitSelect.value = String(limit);
-      limitSelect.onchange = () => loadMemories();
-    }
-    // textarea auto-grow
-    box.querySelectorAll(".memory-row textarea").forEach(ta => {
-      ta.style.resize = "vertical";
-      ta.addEventListener("input", () => {
-        ta.style.height = "auto";
-        ta.style.height = ta.scrollHeight + "px";
-      });
-    });
-    // 新增记忆 textarea auto-grow
-    const addTa = box.querySelector("#memory-add-form textarea");
-    if (addTa) {
-      addTa.style.resize = "vertical";
-      addTa.addEventListener("input", () => {
-        addTa.style.height = "auto";
-        addTa.style.height = addTa.scrollHeight + "px";
-      });
-    }
-    $("#memory-add-form").onsubmit = async event => {
-      event.preventDefault();
-      await api(`/api/sessions/${sid}/memories?character_key=${charKey}`, { method: "POST", body: formValues(event.currentTarget) });
-      await loadMemories();
-      toast("记忆已新增");
-    };
-    box.querySelectorAll("[data-memory-save]").forEach(btn => {
-      btn.onclick = async () => {
-        const id = btn.dataset.memorySave;
-        await api(`/api/sessions/${sid}/memories/${id}?character_key=${charKey}`, {
-          method: "PATCH",
-          body: {
-            summary: box.querySelector(`[data-memory-summary="${id}"]`).value,
-            kind: box.querySelector(`[data-memory-kind="${id}"]`).value,
-            importance: box.querySelector(`[data-memory-importance="${id}"]`).value,
-          },
+        <form id="memory-add-form" class="inline-manager-form memory-add-form">
+          <textarea name="summary" placeholder="新增一条手动记忆" rows="2"></textarea>
+          <select name="kind">${memoryKindOptions("manual")}</select>
+          <div class="range-wrap">
+            <input type="range" name="importance" min="1" max="5" step="1" value="3" aria-label="重要度 1-5">
+            <span class="range-value">3</span>
+          </div>
+          <button class="btn primary" type="submit">新增记忆</button>
+        </form>
+        <div id="memory-list" class="manager-list">${rows || `<div class="empty-state">暂无记忆。</div>`}</div>
+      `;
+      bindRangeInputs(box);
+      // 记忆搜索过滤
+      const searchInput = $("#memory-search");
+      const applyMemoryFilter = () => {
+        const q = (searchInput.value || "").toLowerCase();
+        $all("#memory-list .memory-row").forEach(row => {
+          const text = (row.textContent || "").toLowerCase();
+          row.style.display = q && !text.includes(q) ? "none" : "";
         });
-        await loadMemories();
-        toast("记忆已保存");
       };
-    });
-    box.querySelectorAll("[data-memory-delete]").forEach(btn => {
-      btn.onclick = async () => {
-        const id = btn.dataset.memoryDelete;
-        const summary = box.querySelector(`[data-memory-summary="${id}"]`).value.trim();
-        if (!window.confirm(`确定删除这条记忆吗？\n\n${summary || "(空)"}`)) return;
-        await api(`/api/sessions/${sid}/memories/${id}?character_key=${charKey}`, { method: "DELETE" });
+      searchInput.oninput = applyMemoryFilter;
+      if (searchText) {
+        searchInput.value = searchText;
+        applyMemoryFilter();
+      }
+      // 记忆 limit 变化重新加载；先恢复重建前的选择（模板默认选中 60）
+      const limitSelect = $("#memory-limit");
+      if (limitSelect) {
+        limitSelect.value = String(limit);
+        limitSelect.onchange = () => loadMemories();
+      }
+      // textarea auto-grow
+      box.querySelectorAll(".memory-row textarea").forEach(ta => {
+        ta.style.resize = "vertical";
+        ta.addEventListener("input", () => {
+          ta.style.height = "auto";
+          ta.style.height = ta.scrollHeight + "px";
+        });
+      });
+      // 新增记忆 textarea auto-grow
+      const addTa = box.querySelector("#memory-add-form textarea");
+      if (addTa) {
+        addTa.style.resize = "vertical";
+        addTa.addEventListener("input", () => {
+          addTa.style.height = "auto";
+          addTa.style.height = addTa.scrollHeight + "px";
+        });
+      }
+      $("#memory-add-form").onsubmit = async event => {
+        event.preventDefault();
+        await api(`/api/sessions/${sid}/memories?character_key=${charKey}`, { method: "POST", body: formValues(event.currentTarget) });
         await loadMemories();
-        toast("记忆已删除");
+        toast("记忆已新增");
       };
+      box.querySelectorAll("[data-memory-save]").forEach(btn => {
+        btn.onclick = async () => {
+          const id = btn.dataset.memorySave;
+          await api(`/api/sessions/${sid}/memories/${id}?character_key=${charKey}`, {
+            method: "PATCH",
+            body: {
+              summary: box.querySelector(`[data-memory-summary="${id}"]`).value,
+              kind: box.querySelector(`[data-memory-kind="${id}"]`).value,
+              importance: box.querySelector(`[data-memory-importance="${id}"]`).value,
+            },
+          });
+          await loadMemories();
+          toast("记忆已保存");
+        };
+      });
+      box.querySelectorAll("[data-memory-delete]").forEach(btn => {
+        btn.onclick = async () => {
+          const id = btn.dataset.memoryDelete;
+          const summary = box.querySelector(`[data-memory-summary="${id}"]`).value.trim();
+          if (!window.confirm(`确定删除这条记忆吗？\n\n${summary || "(空)"}`)) return;
+          await api(`/api/sessions/${sid}/memories/${id}?character_key=${charKey}`, { method: "DELETE" });
+          await loadMemories();
+          toast("记忆已删除");
+        };
+      });
+      showCachedRecord(box, cached);
+    };
+    const data = await api(`/api/sessions/${sid}/memories?character_key=${charKey}&limit=${limit}`, {
+      onCached: cached => render(cached, true),
     });
+    render(data);
   } catch (err) {
-    if (!isCharacterLoadCurrent(loadToken)) return;
+    if (!current()) return;
     box.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
+    showCachedRecord(box, false);
     toast(err.message, "error");
   }
 }
@@ -1084,13 +1160,22 @@ async function loadDiaries() {
   const rawCharKey = state.selectedCharacter;
   const charKey = encodeURIComponent(characterApiKey(rawCharKey));
   const loadToken = characterLoadToken();
+  const sequence = loadDiaries.sequence = (loadDiaries.sequence || 0) + 1;
+  const current = () => sequence === loadDiaries.sequence && isCharacterLoadCurrent(loadToken);
+  box.innerHTML = `<div class="empty-state">正在读取日记…</div>`;
   try {
-    const data = await api(`/api/sessions/${sid}/diaries?character_key=${charKey}&limit=30`);
-    if (!isCharacterLoadCurrent(loadToken)) return;
+    const data = await api(`/api/sessions/${sid}/diaries?character_key=${charKey}&limit=30`, { onCached: cached => {
+      if (!current()) return;
+      renderDiaries(cached.diaries || [], sid, charKey);
+      showCachedRecord(box, true);
+    }});
+    if (!current()) return;
     renderDiaries(data.diaries || [], sid, charKey);
+    showCachedRecord(box, false);
   } catch (err) {
-    if (!isCharacterLoadCurrent(loadToken)) return;
+    if (!current()) return;
     box.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
+    showCachedRecord(box, false);
     toast(err.message, "error");
   }
 }
@@ -1320,6 +1405,10 @@ function selectedCharacterImportMode() {
 
 async function importCharacterPayload(payload) {
   if (!state.selectedSession) return;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("角色 JSON 必须是对象");
+  if (payload.spec || payload.entries || (payload.name && ["description", "personality", "first_mes", "scenario", "character_book"].some(key => key in payload)) || (!payload.schema && !payload.id && !payload.character && !payload.bot_name)) {
+    return uploadTavernFile(new File([JSON.stringify(payload)], "角色.json", {type: "application/json"}), state.selectedSession);
+  }
   const sid = encodeURIComponent(state.selectedSession);
   const mode = selectedCharacterImportMode();
   const result = await api(`/api/sessions/${sid}/characters?import_mode=${encodeURIComponent(mode)}`, {
@@ -1346,6 +1435,14 @@ function importCharacterFile() {
 async function handleCharacterImportFile(event) {
   const file = event.currentTarget.files?.[0];
   if (!file) return;
+  if (file.size > 12 * 1024 * 1024) return toast("文件不能超过 12 MiB", "error");
+  const signature = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+  const png = [137, 80, 78, 71, 13, 10, 26, 10].every((byte, index) => signature[index] === byte);
+  if (png || file.name.toLowerCase().endsWith(".png") || file.type === "image/png") {
+    try { await uploadTavernFile(file, state.selectedSession); }
+    catch (err) { toast(err.message, "error"); }
+    return;
+  }
   let payload;
   try {
     const text = await file.text();

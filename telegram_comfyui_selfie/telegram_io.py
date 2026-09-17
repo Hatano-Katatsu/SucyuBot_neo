@@ -2,20 +2,59 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import mimetypes
 from typing import Any
 
 import aiohttp
 
-from .command_aliases import BARE_COMMAND_ALIASES, resolve_command_alias
+from .command_aliases import BARE_COMMAND_ALIASES, resolve_command_alias, telegram_bot_commands
 from .http_limits import read_limited_bytes, read_limited_json, read_limited_text, response_limit
 from . import session_schema
 
 logger = logging.getLogger(__name__)
 
+# 普通文本按钮由 Telegram 以真实用户消息发送，复用原有聊天、历史与记忆入口。
+QUICK_REPLY_ROWS = (
+    ("早上好呀", "晚安，做个好梦"),
+    ("我回来啦", "我先忙一会儿"),
+    ("抱抱你", "陪我聊会儿吧"),
+    ("今天过得怎么样？", "给我看看你现在的样子吧"),
+    ("菜单", "隐藏键盘"),
+)
+
+
+def quick_reply_keyboard() -> dict[str, Any]:
+    """每次生成独立键盘对象，避免调用方意外修改共享按钮。"""
+    return {
+        "keyboard": [[{"text": text} for text in row] for row in QUICK_REPLY_ROWS],
+        "resize_keyboard": True,
+        "is_persistent": True,
+        "one_time_keyboard": False,
+        "input_field_placeholder": "输入消息，或点击按钮直接发送",
+    }
+
 
 class TelegramIOMixin:
+    async def _setup_telegram_commands(self) -> bool:
+        """启动时同步私聊命令；菜单故障不得阻止消息收发，且不记录含 token 的异常正文。"""
+        ok = True
+        for method, data in (
+            ("setMyCommands", {
+                "commands": json.dumps(telegram_bot_commands(), ensure_ascii=False),
+                "scope": json.dumps({"type": "all_private_chats"}),
+                "language_code": "",
+            }),
+            ("setChatMenuButton", {"menu_button": json.dumps({"type": "commands"})}),
+        ):
+            try:
+                await asyncio.wait_for(self.tg_api(method, data), timeout=15)
+            except Exception as exc:
+                ok = False
+                logger.warning("Telegram 菜单同步失败 method=%s error=%s；下次启动重试", method, type(exc).__name__)
+        return ok
+
     def _caption_wait_seconds(self) -> float:
         try:
             raw = self.config.get("photo_caption_wait_seconds", 30)
@@ -96,7 +135,8 @@ class TelegramIOMixin:
                 raise RuntimeError(f"Telegram {method} failed: {payload}")
             return payload
 
-    async def send_message(self, chat_id: int | str, text: str, *, split_paragraphs: bool = False):
+    async def send_message(self, chat_id: int | str, text: str, *, split_paragraphs: bool = False,
+                           reply_markup: dict[str, Any] | None = None):
         if split_paragraphs:
             paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
         else:
@@ -107,7 +147,11 @@ class TelegramIOMixin:
                 if i > 0:
                     await asyncio.sleep(1)
                 for chunk in self._split_text(para, 3900):
-                    await self.tg_api("sendMessage", {"chat_id": str(chat_id), "text": chunk})
+                    data = {"chat_id": str(chat_id), "text": chunk}
+                    # 表单请求里的对象字段须编码成 JSON；一条长消息只附带一次键盘。
+                    if reply_markup is not None and not sent_messages:
+                        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+                    await self.tg_api("sendMessage", data)
                     sent_messages.append(chunk)
         finally:
             if sent_messages and hasattr(self, "_ulog"):
@@ -144,6 +188,7 @@ class TelegramIOMixin:
                 "BOT_PHOTO",
                 f"bytes={len(image_bytes)}" + (f" caption={sent_caption}" if sent_caption else ""),
             )
+        return payload.get("result") or {}
 
     async def send_action(self, chat_id: int | str, action: str):
         try:
@@ -622,6 +667,14 @@ class TelegramIOMixin:
             reply_text = self._message_plain_text(reply)
             if reply_text:
                 chunks.append(f"回复的{self._message_author_label(reply)}: {reply_text}")
+            chat_id = (msg.get("chat") or {}).get("id")
+            if chat_id is not None and reply.get("message_id"):
+                state = self._get_session_state(self.session_id_for_chat(chat_id))
+                photos = session_schema.get_sent_photos_history(state) + session_schema.get_recent_push_topics(state)
+                for photo in reversed(photos):
+                    if photo.get("message_id") == reply["message_id"]:
+                        chunks.append("回复的已发照片: " + str(photo.get("scene") or "")[:300])
+                        break
         external = msg.get("external_reply") or {}
         if isinstance(external, dict):
             external_text = str(external.get("text") or external.get("caption") or "").strip()

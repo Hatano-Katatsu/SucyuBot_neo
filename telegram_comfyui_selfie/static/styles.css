@@ -3504,3 +3504,13 @@ button:disabled .spinner {
 }
 .outfit-preview-image img[role="button"] { cursor: zoom-in; }
 [hidden] { display: none !important; }
+/* 世界背景与导入预览沿用移动端单列布局。 */
+.import-dialog { width: min(760px, 94vw); max-height: 88vh; overflow: auto; }
+.import-form .field, #world-profiles .field { display: grid; gap: 6px; margin: 12px 0; }
+.import-dialog input, .import-dialog textarea, .import-dialog select, #world-profiles input:not([type="checkbox"]), #world-profiles textarea, #world-profiles select { width: 100%; box-sizing: border-box; font-size: 16px; min-height: 40px; }
+.import-summary { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; }
+.world-background-panel { padding: 16px; border-bottom: 1px solid var(--border, #ddd); }
+#world-profiles > details { margin: 12px 0; padding: 12px; border: 1px solid var(--border, #ddd); border-radius: 10px; }
+.world-entry { padding: 12px 0; border-top: 1px solid var(--border, #ddd); }
+.cached-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.cache-notice { padding: 8px 12px; border-left: 3px solid var(--accent, #729f91); }

@@ -16,6 +16,7 @@ from . import prompt_intake
 from . import session_schema
 from .animaflow_runtime import animaflow_enabled, configured_animaflow_workflow
 from .command_aliases import resolve_command_alias
+from .telegram_io import quick_reply_keyboard
 from .defaults import INIT_GUIDE, MENU_BODY, MENU_TOPICS, MENU_TOPIC_ALIASES, OC_CREATE_HELP, SCENES, WEEKDAY_NAMES
 from .deletion_runtime import (
     DeletionBusyError,
@@ -248,6 +249,8 @@ class CommandHandlersMixin:
         handlers = {
             "初始化": self.cmd_init_guide,
             "菜单": self.cmd_menu,
+            "快捷回复": self.cmd_quick_reply,
+            "隐藏键盘": self.cmd_hide_keyboard,
             "创建OC": self.cmd_create_oc,
             "自拍": self.cmd_selfie,
             "配图": self.cmd_scene_image,
@@ -463,7 +466,8 @@ class CommandHandlersMixin:
     async def cmd_menu(self, chat_id, session_id, arg):
         topic = (arg or "").strip()
         if not topic:
-            await self.send_message(chat_id, "ComfyUI 自拍服务 - 快速菜单\n\n" + MENU_BODY)
+            await self.send_message(chat_id, "ComfyUI 自拍服务 - 快速菜单\n\n" + MENU_BODY,
+                                    reply_markup=quick_reply_keyboard())
             return
 
         key = MENU_TOPIC_ALIASES.get(topic.lower(), MENU_TOPIC_ALIASES.get(topic, topic))
@@ -473,6 +477,20 @@ class CommandHandlersMixin:
             await self.send_message(chat_id, f"没有这个菜单分区: {topic}\n可用分区: {available}\n例如: /菜单 设置")
             return
         await self.send_message(chat_id, f"菜单 - {key}\n\n{body}")
+
+    async def cmd_quick_reply(self, chat_id, session_id, arg):
+        if (arg or "").strip().lower() in {"off", "hide", "关闭", "隐藏", "收起"}:
+            await self.cmd_hide_keyboard(chat_id, session_id, "")
+            return
+        await self.send_message(
+            chat_id, "快捷回复已打开。点击按钮会直接发送对应文字；也可以照常打字。\n"
+            "点击“隐藏键盘”或发送 /hidekeyboard 可关闭，/quickreply 可重新打开。",
+            reply_markup=quick_reply_keyboard(),
+        )
+
+    async def cmd_hide_keyboard(self, chat_id, session_id, arg):
+        await self.send_message(chat_id, "快捷回复键盘已隐藏。发送 /quickreply 或 /快捷回复 可重新打开。",
+                                reply_markup={"remove_keyboard": True})
 
     @staticmethod
     def _parse_oc_fields(text: str) -> dict[str, str]:
@@ -664,7 +682,7 @@ class CommandHandlersMixin:
         self._save_session_state(session_id, state)
         if hasattr(self, "_ensure_city_place_catalog"):
             try:
-                await self._ensure_city_place_catalog(city)
+                await self._ensure_city_place_catalog(city, session_id=session_id)
             except Exception as exc:
                 self._ulog(session_id, "WARN", f"OC 城市地点目录生成失败: {exc}")
         return note
@@ -1403,7 +1421,7 @@ class CommandHandlersMixin:
         catalog_note = ""
         if hasattr(self, "_ensure_city_place_catalog"):
             try:
-                catalog = await self._ensure_city_place_catalog(city)
+                catalog = await self._ensure_city_place_catalog(city, session_id=session_id)
                 status = catalog.get("status")
                 count = sum(len(v) for v in (catalog.get("places") or {}).values())
                 if status == "generated":
@@ -1943,6 +1961,11 @@ class CommandHandlersMixin:
 
     def _apply_selected_character_payload(self, state: dict[str, Any], payload: dict[str, Any]) -> None:
         """应用切换目标；系统默认角色保持隐式 config 态，不烘焙为会话覆盖。"""
+        # 旧卡没有导入字段；切换时清空，普通编辑仍保留未提交的字段。
+        for key in ("custom_world_id", "custom_dialogue_examples", "custom_opening_message"):
+            session_schema.set_character_value(state, key, "")
+        for _key, (state_key, kind) in character_card.CARD_OBJECT_FIELDS.items():
+            session_schema.set_character_value(state, state_key, kind())
         if not payload.get("is_default"):
             self._apply_character_payload(state, payload)
             return
@@ -2134,7 +2157,7 @@ class CommandHandlersMixin:
                 return
             self._save_current_character_context(state)
             self._snapshot_character(state)
-            self._apply_character_payload(state, payload)
+            self._apply_selected_character_payload(state, payload)
             if not session_schema.get_character_value(state, "custom_character", ""):
                 session_schema.set_character_value(state, "custom_character", key)
             saved[key] = {k: v for k, v in payload.items() if k != "id"}

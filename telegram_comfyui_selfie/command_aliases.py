@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 
 # 命令同义词统一维护在这里：每组第一项是规范命令，后面是所有可接受写法。
 # 同一概念尽量同时放入「动宾」和「主谓倒装」写法，后续新增别名只改这张表。
@@ -12,6 +13,12 @@ COMMAND_ALIAS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("菜单", (
         "help", "menu", "menyu", "帮助", "目录", "指令", "命令",
         "查看菜单", "菜单查看", "打开菜单", "菜单打开",
+    )),
+    ("快捷回复", (
+        "quickreply", "keyboard", "快捷键盘", "打开键盘",
+    )),
+    ("隐藏键盘", (
+        "hidekeyboard", "收起键盘", "关闭键盘",
     )),
     ("创建OC", (
         "oc", "OC", "创建oc", "创建OC", "原创角色",
@@ -151,6 +158,8 @@ COMMAND_ALIAS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 BARE_COMMAND_CANONICALS = {
     "初始化",
     "菜单",
+    "快捷回复",
+    "隐藏键盘",
     "创建OC",
     "自拍",
     "配图",
@@ -183,3 +192,48 @@ BARE_COMMAND_ALIASES = build_alias_map(BARE_COMMAND_CANONICALS)
 def resolve_command_alias(command: str) -> str:
     key = (command or "").strip()
     return COMMAND_ALIAS_MAP.get(key) or COMMAND_ALIAS_MAP.get(key.lower()) or key
+
+
+# 展示顺序与中文说明；实际命令名仍从上面的同义词表选择，避免产生第二套路由。
+TELEGRAM_COMMAND_DESCRIPTIONS = {
+    "菜单": "查看常用命令和快捷回复键盘",
+    "快捷回复": "打开固定聊天回复按钮（点击直接发送）",
+    "隐藏键盘": "隐藏快捷回复键盘",
+    "自拍": "按当前聊天场景拍一张照片，可附加要求",
+    "配图": "自由配图，可指定场景、视角和特写",
+    "角色": "查看角色；list 列出角色，load 名称 切换角色",
+    "衣橱": "查看和管理衣橱收藏",
+    "外型": "查看外型，或输入换装要求",
+    "修改角色": "用自然语言修改当前角色设定",
+    "人格": "查看或设置角色人格",
+    "记忆": "查看和管理当前角色的长期记忆",
+    "记住": "记住后面输入的内容",
+    "生活主线": "查看角色生活目标和主线",
+    "天气": "查看当前城市天气",
+    "天气设置": "设置城市：在命令后输入城市名",
+    "画风": "查看可用画风",
+    "切换画风": "切换画风：在命令后输入名称或序号",
+    "关系": "查看或设置与角色的空间关系",
+    "推送频率": "设置每日推送次数，0 为关闭",
+    "调度": "查看推送时间安排",
+    "生图状态": "查看生图服务状态",
+    "重答": "撤回上一轮角色回复并重新回答",
+    "回滚": "回滚最近对话，可指定轮数",
+    "新场景": "开启新场景，重置短期上下文",
+    "webui": "打开 Web 控制台",
+    "初始化": "通过分步向导创建新角色",
+    "完整菜单": "查看全部命令和详细用法",
+}
+
+
+def telegram_bot_commands() -> list[dict[str, str]]:
+    """Telegram 原生命令只接受小写英文、数字和下划线；中文命令仍可手动输入。"""
+    groups = dict(COMMAND_ALIAS_GROUPS)
+    return [
+        {
+            "command": next(alias for alias in (canonical, *groups[canonical])
+                            if re.fullmatch(r"[a-z0-9_]{1,32}", alias)),
+            "description": description,
+        }
+        for canonical, description in TELEGRAM_COMMAND_DESCRIPTIONS.items()
+    ]

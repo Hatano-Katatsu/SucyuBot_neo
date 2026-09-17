@@ -146,10 +146,12 @@ class LifePlanMixin:
             "persona": persona,
             "life_profile": copy.deepcopy(life_profile),
             "character_card": copy.deepcopy(card),
+            "imported_world": copy.deepcopy(self._imported_world(session_id, card)) if hasattr(self, "_imported_world") else {},
             "history_summary": history_summary,
             "recent_context": recent_context,
             "diaries": diaries,
             "memories": memories,
+            "topic_controls": copy.deepcopy(context.get("photo_topic_controls") or []),
         }
         return {
             "character_key": key,
@@ -797,6 +799,11 @@ class LifePlanMixin:
         materials.setdefault("recent_context", [])
         materials.setdefault("diaries", [])
         materials.setdefault("memories", [])
+        if materials.get("imported_world"):
+            world = materials["imported_world"]
+            if world:
+                materials["persona"] += "\n世界背景（非经历）:\n" + str(world.get("summary") or "")[:1600]
+                materials["persona"] += "\n" + "\n".join(str(e.get("content") or "") for e in world.get("entries", []) if e.get("enabled", True) and e.get("known"))[:2400]
         return materials
 
     def _format_life_plan_materials(self, materials: dict[str, Any]) -> str:
@@ -820,6 +827,7 @@ class LifePlanMixin:
             f"{json.dumps(materials.get('recent_context') or [], ensure_ascii=False, indent=2)}\n\n"
             f"Recent diaries:\n{chr(10).join(diary_lines) or 'none'}\n\n"
             f"High-importance memories:\n{chr(10).join(memory_lines) or 'none'}"
+            f"\n用户明确结束或暂缓的话题（不是待完成任务）:\n{json.dumps(materials.get('topic_controls') or [], ensure_ascii=False)}"
         )
 
     async def _call_life_plan_json(
@@ -927,6 +935,11 @@ class LifePlanMixin:
             "At least 1 today event should relate to a mid goal when any active mid goal exists. "
             "If an event did not happen, that is normal; mark yesterday as derailed/skipped only when diary evidence says so. "
             "Do not carry derailed events forward as debt. Do not invent facts that contradict diaries, memories, or history.\n"
+            "A user's suggestion is not an adopted plan; a short acknowledgment or silence is not consent to joint activities. "
+            "Keep casual interests as tentative context, not permanent traits. Build habits and recurring relationships only from repeated evidence. "
+            "A generated photo or a planned event does not prove completion. Do not mark goals achieved from a photo alone. "
+            "Honor explicit topic closures and unexpired pauses; never reopen the same subject with synonyms. "
+            "Ordinary independent daily activities are enough; do not manufacture dramatic history, fixed NPCs or chores waiting for the user.\n"
             f"Allowed place_key values: {place_keys}."
         )
         if rewrite_goals:
@@ -1452,6 +1465,7 @@ class LifePlanMixin:
             place_label = PLACE_TYPES.get(place_key, {}).get("label", place_key) if place_key else ""
             time_hint = str(event.get("time_hint") or "").strip()
             parts = []
+            parts.append("source_ref=" + self._life_photo_source_ref(session_id, today.get("date", ""), event.get("id", "")))
             if time_hint or place_label:
                 parts.append(f"{time_hint or '当前'} @ {place_label or '未指定'}")
             if event_text:
@@ -1461,10 +1475,34 @@ class LifePlanMixin:
             if parts:
                 lines.append(f"- 候选{idx}: " + "；".join(parts))
         lines.append(
-            "处理规则: 这些片段只提供角色今天可能流露的生活方向。推送可以选择其中一个、混合几个，"
+            "处理规则: 这些片段只是计划，不是已发生事实。推送选一个具体可见对象，保留 source_ref；没有真正新结果就不重讲。"
             "或按当前动线/天气自然发散；不要逐条播报，不要写成进度汇报。"
         )
         return "\n".join(lines)
+
+    def _life_photo_source_ref(self, session_id: str, date: str, event_id: str) -> str:
+        return f"life:{self._life_plan_character_key(session_id)}:{date}:{event_id}"
+
+    def _validate_life_photo_source(self, session_id: str, plan: dict[str, Any]) -> dict[str, Any]:
+        """生活来源按角色、日期和事件校验；候选图片不修改事件或目标状态。"""
+        from .photo_sharing import normalize_photo_brief
+        import hashlib
+        result = copy.deepcopy(plan)
+        brief = normalize_photo_brief(plan)
+        row = self._load_life_plan_row(session_id) or {}
+        today = (row.get("payload") or {}).get("today") or {}
+        sources = {self._life_photo_source_ref(session_id, today.get("date", ""), e.get("id", "")): e
+                   for e in today.get("events", []) if isinstance(e, dict) and e.get("id")}
+        source = sources.get(brief["source_ref"])
+        brief["source_version"] = ""
+        if source and today.get("date") == self._life_today_date(session_id):
+            state = self._get_session_state(session_id)
+            evidence = {"event": source, "last_user": session_schema.get_last_message_time(state)}
+            brief["source_version"] = hashlib.sha256(json.dumps(evidence, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+        else:
+            brief["source_ref"] = ""
+        result["photo_brief"] = brief
+        return result
 
     def _format_life_plan_diary_context(self, session_id: str, character_key: str, diary_date: str) -> str:
         row = self._load_life_plan_row(session_id, character_key)

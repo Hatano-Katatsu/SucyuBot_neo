@@ -65,6 +65,12 @@ T = CHARACTER_TRANSIENT
 
 # ── 唯一字段表 ──（新增 state 字段只在这里加一行；漏加也会按前缀/兜底正确归类）
 STATE_SCHEMA: dict[str, Field] = {
+    "custom_world_id": Field(C, default=""),
+    "custom_world_snapshot": Field(C, default={}),
+    "custom_import_source": Field(C, default={}),
+    "custom_dialogue_examples": Field(C, default=""),
+    "custom_opening_message": Field(C, default=""),
+    "custom_alternate_greetings": Field(C, default=[]),
     # —— 会话全局：计时 / 早安 / 推送调度 ——
     "last_interaction": Field(G, factory=time.time),
     "last_morning_greet_date": Field(G, default=""),
@@ -178,6 +184,7 @@ STATE_SCHEMA: dict[str, Field] = {
     # 推送话题日志：跨 /新场景 保留（reset_preserved），切角色才清。
     # 用于话题级避重，避免短期上下文重置后推送复述上一次话题。
     "recent_push_topics": Field(T, default=[], reset_preserved=True),
+    "photo_topic_controls": Field(T, default=[], reset_preserved=True),
     # 角色维度的网络推送话题池。每日首次 normal 独立话题推送结束后刷新；旧池参与时效性筛选。
     "push_web_topic_pool": Field(T, default={
         "date": "", "refresh_attempt_date": "", "search_query": "", "search_topic": "", "topics": [],

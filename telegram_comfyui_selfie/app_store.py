@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .model_thinking import normalize_thinking_setting
+from .import_store import ImportStoreMixin
 from .sqlite_migrations import SchemaMigrationResult, migrate_database
 
 
@@ -60,7 +61,7 @@ def verify_password(password: str, encoded: str) -> bool:
     return secrets.compare_digest(hash_password(password, salt=salt), f"sha256${salt}${digest}")
 
 
-class AppStateStore:
+class AppStateStore(ImportStoreMixin):
     """SQLite 状态库：承载会话状态、上下文、checkpoint、dream、Web 凭据和模型设置。
 
     state.json 已弃用，所有运行态以这里为准。
@@ -1091,8 +1092,10 @@ class AppStateStore:
                     (user_id, session_id),
                 )
                 deleted["telegram_update_inbox"] = int(cursor.rowcount or 0)
+                conn.execute("DELETE FROM import_drafts WHERE session_id=?", (session_id,))
                 if purge_identity:
                     for table in (
+                        "world_profiles",
                         "web_credentials",
                         "model_profiles",
                         "user_model_settings",

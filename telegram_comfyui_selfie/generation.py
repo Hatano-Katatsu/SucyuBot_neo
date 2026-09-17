@@ -132,6 +132,7 @@ class PromptSlots:
     negative: str = ""
     positive: str = ""
     session_id: str = ""
+    subject_mode: str = "character"
 
     def compact(self, limit: int = 420) -> str:
         parts = []
@@ -1497,7 +1498,10 @@ def build_prompt(
     clothing_off: str = "",
     view: str = "",
     ignore_wardrobe_item_states: bool = False,
+    subject_mode: str = "character",
 ) -> tuple[str, str]:
+    if subject_mode in {"detail", "environment"}:
+        return _build_life_photo_prompt(service, scene_desc, session_id, subject_mode)
     raw_scene_desc = scene_desc
     state = service._get_session_state(session_id) if session_id else {}
     # 伴侣/性爱信号要在二人称归一化之前判："straddles your waist" 里的用户身体是合法入画内容，
@@ -1887,6 +1891,60 @@ def build_prompt(
     except Exception:
         logger.debug("failed to store prompt slots", exc_info=True)
     return positive, neg
+
+
+def _build_life_photo_prompt(service: Any, scene: str, session_id: str, subject_mode: str) -> tuple[str, str]:
+    """无人生活照不经过人物、裸体或衣柜补全，角色状态保持不变。"""
+    style = service._get_current_style(session_id)
+    scene = _strip_conflicting_scene_light(service, session_id, scene)
+    scene += ", no humans" if subject_mode == "environment" else ", object detail, no face, no full body"
+    slots = PromptSlots(
+        subject_mode=subject_mode, raw_scene=scene, scene=scene,
+        quality="masterpiece, best quality, highres, detailed illustration",
+        style_artist=style if style.startswith("@") else "",
+        style_general=style if not style.startswith("@") else "",
+        safety="safe",
+        negative="split screen, grid, multiple panels, collage, portrait, face, full body, phone UI",
+        session_id=session_id,
+    )
+    slots.positive = slots.render_positive()
+    service._last_prompt_slots = slots
+    cache = getattr(service, "_last_prompt_slots_by_session", {})
+    cache[session_id] = slots
+    service._last_prompt_slots_by_session = cache
+    _remember_generated_nltag(service, session_id, scene)
+    return slots.positive, slots.negative
+
+
+def apply_photo_subject_contract(payload: dict[str, Any], slots: Any, schema: dict[str, Any]) -> dict[str, Any]:
+    """所有 AnimaFlow 出口共用终裁，避免服务端默认人数把生活照还原成人像。"""
+    if getattr(slots, "subject_mode", "character") == "character":
+        return payload
+    properties = _schema_properties(schema)
+    result = dict(payload)
+    for key in ("character", "series", "appearance", "count"):
+        if key not in properties:
+            result.pop(key, None)
+            continue
+        prop = properties[key]
+        allowed = prop.get("enum")
+        value = ""
+        if key == "count" and prop.get("type") in {"integer", "number"}:
+            value = 0
+        if allowed and value not in allowed:
+            value = next((v for v in allowed if v in (0, "0", "no humans", "none")), None)
+            if value is None:
+                raise ValueError("photo-subject: 当前工作流不支持无人生活照片")
+        if (isinstance(value, (int, float)) and float(prop.get("minimum", 0)) > value) or (isinstance(value, str) and int(prop.get("minLength", 0)) > len(value)):
+            raise ValueError("photo-subject: 当前工作流不支持无人生活照片")
+        result[key] = value
+    # 使用已校验的场景，防止 slots 规划器自行补回脸和全身人物。
+    field = _preferred_animatool_nltag_field(properties, (schema.get("parameters") or schema).get("required", []))
+    if field:
+        result[field] = slots.scene
+    elif "positive" in properties:
+        result["positive"] = slots.positive
+    return result
 
 
 def _replace_workflow_placeholders(value: Any, replacements: dict[str, str]) -> Any:
@@ -2448,7 +2506,7 @@ def _build_animaflow_payload(
             cleaned[k] = _schema_type_convert(k, v, properties[k])
         else:
             cleaned[k] = v
-    return cleaned
+    return apply_photo_subject_contract(cleaned, slots, schema)
 
 
 def _build_animatool_turbo_payload(
@@ -2518,6 +2576,7 @@ async def _do_generate_animaflow(
             safety=_animaflow_safety_tag(slots),
             schema=schema,
         )
+        llm_payload = apply_photo_subject_contract(llm_payload, slots, schema)
         _remember_generated_nltag(service, session_id, _payload_nltag(llm_payload))
         return await _post_animaflow(
             service,
@@ -2718,6 +2777,7 @@ async def do_generate(
     orientation: str = "",
     view: str = "",
     ignore_wardrobe_item_states: bool = False,
+    subject_mode: str = "character",
 ) -> tuple[bool, list[bytes], str]:
     async with service._gen_lock:
         service._generating = True
@@ -2726,7 +2786,7 @@ async def do_generate(
                 service, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
                 is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
                 clothing_off=clothing_off, orientation=orientation, view=view,
-                ignore_wardrobe_item_states=ignore_wardrobe_item_states,
+                ignore_wardrobe_item_states=ignore_wardrobe_item_states, subject_mode=subject_mode,
             )
         finally:
             service._generating = False
@@ -2745,13 +2805,14 @@ async def do_generate_locked(
     orientation: str = "",
     view: str = "",
     ignore_wardrobe_item_states: bool = False,
+    subject_mode: str = "character",
 ) -> tuple[bool, list[bytes], str]:
     ensure_comfy_session(service)
     positive, negative = build_prompt(
         service, scene_desc, is_ntr, session_id, one_shot_appearance=one_shot_appearance,
         is_intimate=is_intimate, partner_in_frame=partner_in_frame, device_in_frame=device_in_frame,
         clothing_off=clothing_off, view=view,
-        ignore_wardrobe_item_states=ignore_wardrobe_item_states,
+        ignore_wardrobe_item_states=ignore_wardrobe_item_states, subject_mode=subject_mode,
     )
     seed = random.randint(0, 2**63 - 1)
     if session_id and hasattr(service, "_ulog"):

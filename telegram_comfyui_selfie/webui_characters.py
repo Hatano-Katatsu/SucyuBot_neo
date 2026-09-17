@@ -284,6 +284,13 @@ async def _save_character_locked(service, sid: str, payload: dict[str, Any], req
             "characters": saved,
             "default": service._default_character_payload(),
         })
+    if payload.get("world_snapshot"):
+        payload["world_id"] = ""  # 文件导入使用快照，不意外重连已有共享世界。
+    if isinstance(existing, dict):
+        # 基础表单不展示的导入字段，编辑姓名/衣柜时不能丢失。
+        for field in ("world_id", "world_snapshot", "import_source", "dialogue_examples", "opening_message", "alternate_greetings"):
+            if field not in payload and field in existing:
+                payload[field] = copy.deepcopy(existing[field])
     # 自定义角色卡的 character 字段必须与存档键一致，防止 id≠character 键分裂。
     payload["character"] = key
     active_id = active_character_id(state)
@@ -295,7 +302,7 @@ async def _save_character_locked(service, sid: str, payload: dict[str, Any], req
                 service._save_current_character_context(state)
             if hasattr(service, "_snapshot_character"):
                 service._snapshot_character(state)
-            service._apply_character_payload(state, payload)
+            service._apply_selected_character_payload(state, payload)
             if not character_value(state, "custom_character", ""):
                 session_schema.set_character_value(state, "custom_character", key)
             has_clothing_context = False
@@ -375,7 +382,9 @@ def _switch_state_to_selected_character(service, session_id: str, state: dict[st
         next_payload.pop("style", None)
     if "purity" not in next_payload:
         next_payload["purity"] = None
-    if payload.get("is_default"):
+    if hasattr(service, "_apply_selected_character_payload"):
+        service._apply_selected_character_payload(state, next_payload)
+    elif payload.get("is_default"):
         # 系统默认角色由 config 实时提供，不能把默认值写成会话 custom_* 覆盖。
         for key in SESSION_CUSTOM_RESET_KEYS:
             session_schema.set_character_value(state, key, "")

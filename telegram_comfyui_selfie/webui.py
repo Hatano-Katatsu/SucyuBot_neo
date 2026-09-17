@@ -101,6 +101,8 @@ from .webui_models import (
     resolved_model_summary,
 )
 from .world_runtime import PLACE_TYPES
+from .webui_imports import (api_import_upload, api_import_status, api_import_retry, api_import_commit,
+                            api_world_profiles, api_world_profile_update, api_world_profile_bind)
 
 
 FEEDBACK_MAX_LENGTH = 6000
@@ -155,7 +157,7 @@ async def _auth_middleware(request: web.Request, handler):
 
 
 def create_web_app(service) -> web.Application:
-    app = web.Application(client_max_size=2 * 1024 * 1024, middlewares=[_auth_middleware, _no_cache_assets])
+    app = web.Application(client_max_size=12 * 1024 * 1024, middlewares=[_auth_middleware, _no_cache_assets])
     app["service"] = service
     static_dir = Path(__file__).with_name("static")
 
@@ -166,6 +168,13 @@ def create_web_app(service) -> web.Application:
     app.router.add_static("/static/", static_dir)
     app.router.add_get("/api/status", api_status)
     app.router.add_get("/api/commands", api_commands)
+    app.router.add_post("/api/sessions/{session_id:[^/]+}/imports", api_import_upload)
+    app.router.add_get("/api/sessions/{session_id:[^/]+}/imports/{draft_id}", api_import_status)
+    app.router.add_post("/api/sessions/{session_id:[^/]+}/imports/{draft_id}/retry", api_import_retry)
+    app.router.add_post("/api/sessions/{session_id:[^/]+}/imports/{draft_id}/commit", api_import_commit)
+    app.router.add_get("/api/sessions/{session_id:[^/]+}/worlds", api_world_profiles)
+    app.router.add_put("/api/sessions/{session_id:[^/]+}/worlds/{world_id}", api_world_profile_update)
+    app.router.add_post("/api/sessions/{session_id:[^/]+}/world-binding", api_world_profile_bind)
     app.router.add_get("/api/feedback", api_feedback)
     app.router.add_post("/api/feedback", api_submit_feedback)
     app.router.add_get("/api/config", api_config)
@@ -1463,6 +1472,9 @@ async def api_world_refresh_places(request: web.Request):
     sid = request.match_info["session_id"]
     if not _session_allowed(request, sid):
         return json_error("无权访问此会话", status=403)
+    imported = service._imported_world(sid)
+    if imported.get("kind") == "fictional":
+        return json_ok({"catalog": {"status": "world", "places": {}}, "world": build_world_route_preview(service, sid)})
     city = service._get_session_cfg(sid, "location", service.config.get("location", ""))
     try:
         catalog = await service._ensure_city_place_catalog(city, force=True)

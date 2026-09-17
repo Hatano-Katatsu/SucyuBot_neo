@@ -168,7 +168,7 @@ class WorldLifePlanTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("去咖啡店把草稿", ctx)
         self.assertIn("新的便签纸", ctx)
         self.assertNotIn("晨跑", ctx)
-        self.assertIn("可以选择其中一个、混合几个", ctx)
+        self.assertIn("source_ref=life::2026-07-02:e1", ctx)
 
     def test_life_plan_ops_apply_caps_and_ignore_unknown_ids(self):
         svc = self.make_service()

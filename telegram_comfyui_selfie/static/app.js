@@ -4,9 +4,11 @@ const state = {
   config: null,
   secretPresent: {},
   sessions: [],
+  sessionsCached: false,
   selectedSession: null,
   selectedCharacter: null,
   characterData: null,
+  characterDataCached: false,
   memoryDiaryTab: "profile",
   selectedWorldSession: null,
   currentView: "overview",
@@ -25,6 +27,33 @@ const state = {
 
 const frontendCore = window.SucyuFrontendCore;
 if (!frontendCore) throw new Error("frontend_core.js 未在 app.js 前加载");
+const browserCache = window.SucyuBrowserCache.create({
+  request: (path, options) => frontendCore.requestApi(fetch, path, { cache: "no-store", ...options }),
+});
+
+function rememberSessionSelection() {
+  browserCache.rememberSelection(state.selectedSession, state.selectedWorldSession);
+}
+
+// 缓存先显示为只读，拿到本次服务端响应后重建为可编辑记录。
+function showCachedRecord(container, cached) {
+  if (!container) return;
+  const previous = container.querySelector(":scope > .cache-notice");
+  if (previous) previous.remove();
+  container.querySelectorAll("[data-cache-disabled]").forEach(el => {
+    el.disabled = false;
+    delete el.dataset.cacheDisabled;
+  });
+  container.setAttribute("aria-busy", cached ? "true" : "false");
+  if (!cached) return;
+  const notice = document.createElement("p");
+  notice.className = "cache-notice muted";
+  notice.textContent = "已显示上次记录，正在同步最新内容…";
+  container.prepend(notice);
+  container.querySelectorAll("input, textarea, select, button").forEach(el => {
+    if (!el.disabled) { el.dataset.cacheDisabled = "true"; el.disabled = true; }
+  });
+}
 
 const viewMeta = {
   overview: ["总览", "服务状态、连接测试和快捷入口"],
@@ -236,12 +265,13 @@ function $(selector) { return document.querySelector(selector); }
 function $all(selector) { return [...document.querySelectorAll(selector)]; }
 
 async function api(path, options = {}) {
-  const res = await fetch(path, frontendCore.buildRequestOptions(options));
-  const raw = await res.text();
   try {
-    return frontendCore.parseApiResponse(res, raw);
+    return await browserCache.api(path, options);
   } catch (err) {
-    if (err?.authExpired) window.location.href = "/";
+    if (err?.authExpired) {
+      browserCache.setIdentity(null);
+      window.location.href = "/";
+    }
     throw err;
   }
 }
@@ -363,6 +393,15 @@ async function loadAll({ forceConfig = false } = {}) {
     state.auth = me.auth || {};
   } catch (err) {
     state.auth = {};
+    browserCache.setIdentity(null);
+    throw err;
+  }
+  if (browserCache.setIdentity(state.auth)) {
+    const saved = browserCache.restoreSelection();
+    state.selectedSession = saved.sessionId || null;
+    state.selectedWorldSession = saved.worldSessionId || null;
+    state.selectedCharacter = null;
+    state.characterData = null;
   }
   const isAdmin = state.auth.role === "admin";
   const userId = state.auth.user_id || "";
@@ -375,8 +414,32 @@ async function loadAll({ forceConfig = false } = {}) {
   });
 
   // 管理员才请求 /api/config（非 admin 调用会 403）
-  // 模型 profile 列表与上面三个请求并行发起，避免串行等待拖慢首屏渲染。
-  const tasks = [api("/api/status"), api("/api/sessions"), api(modelApiUrl())];
+  let earlyView = "", earlySession = "";
+  const sessionsTask = api("/api/sessions", { onCached: cached => {
+    // 缓存不含上次选中用户时等待新列表，不能把仍然有效的选择提前改成第一人。
+    if (state.selectedSession && !(cached.sessions || []).some(s => s.session_id === state.selectedSession)) return;
+    state.sessions = cached.sessions || [];
+    state.sessionsCached = true;
+    renderSessionSelector();
+    renderChatIdOptions();
+    renderWorldSessionList();
+    const previousView = state.currentView;
+    applyHashRoute();
+    if (previousView !== state.currentView) {
+      earlyView = state.currentView;
+      earlySession = state.selectedSession;
+    }
+  }}).then(data => {
+    state.sessions = data.sessions || [];
+    state.sessionsCached = false;
+    renderSessionSelector();
+    state.selectedWorldSession = frontendCore.resolveSelectedSession(
+      state.sessions, state.selectedWorldSession || state.selectedSession, state.auth) || null;
+    rememberSessionSelection();
+    return data;
+  });
+  // 先校验恢复的用户仍然存在，再请求该用户的模型配置。
+  const tasks = [api("/api/status"), sessionsTask, sessionsTask.then(() => api(modelApiUrl()))];
   if (isAdmin) tasks.push(api("/api/config"));
   const results = await Promise.all(tasks);
   const status = results[0];
@@ -414,8 +477,11 @@ async function loadAll({ forceConfig = false } = {}) {
     await loadGlobalModels({ data: modelData });
   }
   renderWorldSessionList();
-  if (document.querySelector('.nav[data-view="characters"].active')) loadCharacterPage();
-  if (document.querySelector('.nav[data-view="wardrobe"].active')) loadCharacters();
+  rememberSessionSelection();
+  if (earlyView !== state.currentView || earlySession !== state.selectedSession) {
+    if (document.querySelector('.nav[data-view="characters"].active')) loadCharacterPage();
+    if (document.querySelector('.nav[data-view="wardrobe"].active')) loadCharacters();
+  }
   // 初始加载默认停在 overview，需在此启动轮询；switchView 只负责切换视图时的启停
   if (document.querySelector('.nav[data-view="overview"].active')) {
     _startOverviewPolling();
@@ -461,9 +527,11 @@ function renderSessionSelector() {
 async function selectSession(sessionId) {
   state.selectedSession = sessionId || null;
   state.characterData = null;
+  state.characterDataCached = false;
   state.selectedCharacter = null;
   renderWardrobePanel();
   renderSessionSelector();
+  rememberSessionSelection();
   if (!sessionId) return;
   loadFeedbackBoard();
   if (document.querySelector('.nav[data-view="characters"].active')) {
@@ -1138,7 +1206,9 @@ async function loadGlobalModels({ selectedProfileId = "", data = null } = {}) {
 async function loadModels() {
   const box = $("#model-manager");
   if (!box) return;
-  const data = await api(modelApiUrl());
+  const url = modelApiUrl();
+  const data = await api(url);
+  if (url !== modelApiUrl()) return;
   const globalProfiles = data.global_profiles || {};
   const userProfiles = data.user_profiles || {};
   const allProfiles = { ...globalProfiles, ...userProfiles };
@@ -1368,7 +1438,10 @@ async function initEvents() {
     setNavOpen(false);
   });
   window.addEventListener("hashchange", () => applyHashRoute());
-  $("#refresh-btn").onclick = () => loadAll().then(() => toast("已刷新"));
+  $("#refresh-btn").onclick = () => {
+    browserCache.invalidate();
+    return loadAll().then(() => toast("已刷新"));
+  };
   $("#restart-btn").onclick = async () => {
     if (!confirm("确认重启服务？\n\n服务将短暂中断后自动恢复。")) return;
     const btn = $("#restart-btn");
@@ -1614,6 +1687,7 @@ async function initEvents() {
   $("#character-import").onclick = () => importCharacter();
   $("#character-import-file").onclick = () => importCharacterFile();
   $("#character-import-file-input").onchange = handleCharacterImportFile;
+  $("#world-import").onclick = chooseWorldImport;
   $("#character-activate").onclick = async (event) => {
     const btn = event.currentTarget;
     setBusy(btn, true);
@@ -1863,5 +1937,8 @@ async function runTest(path, body = undefined) {
 }
 
 loadCommandSelect();
+window.addEventListener("storage", event => {
+  if (browserCache.storageChanged(event)) loadAll().catch(err => toast(err.message, "error"));
+});
 initEvents();
 loadAll().catch(err => toast(err.message, "error"));

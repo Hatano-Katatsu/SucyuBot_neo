@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .photo_sharing import PHOTO_RULES, normalize_photo_brief, photo_history_context
+
 import json
 import logging
 import re
@@ -1629,6 +1631,10 @@ async def plan_roleplay_image(
         )
     if life_push_context:
         push_dynamic_parts.append(life_push_context)
+    if is_push and not is_ntr:
+        push_dynamic_parts.extend((PHOTO_RULES, photo_history_context(state)))
+    if hasattr(service, "_imported_world_context"):
+        push_dynamic_parts.append(service._imported_world_context(session_id, " ".join(push_topic_guides or [])))
     push_dynamic_context = "\n".join(part for part in push_dynamic_parts if part)
     public_outfit_context = "" if purity <= 2 else public_outfit_guard_context(
         service, session_id, dynamic,
@@ -1856,7 +1862,9 @@ async def plan_roleplay_image(
             logger.warning("roleplay image plan anchor retry failed; keeping first plan: %s", exc)
 
     scene = _normalize_image_plan_scene(parsed, fallback_scene, strong_pin)
-    if not free_composition:
+    photo_brief = normalize_photo_brief(parsed)
+    subject_mode = photo_brief["subject_mode"] if is_push and not is_ntr and not intimate_hint else "character"
+    if not free_composition and subject_mode == "character":
         scene = _merge_spatial_constraint_into_scene(scene, spatial_context)
     planned_view = normalize_view(parsed.get("view"))
     # co_located 从 user_location 推导，不靠 LLM 单独判断。
@@ -1940,9 +1948,23 @@ async def plan_roleplay_image(
             for slot, tags in one_shot_seed.items()
             if slot in WARDROBE_CLOTHING_SLOTS or slot == "accessory"
         }
+    if subject_mode != "character":
+        final_view = "scene"
+        is_intimate = partner_in_frame = device_in_frame = False
+        new_appearance_tags = clothing_off = ""
+        outfit_commit = {}
+        clear_undress_state_after_success = False
+        raw_user_loc = ""
+    photo_brief.update(subject_mode=subject_mode, view=final_view, aspect_ratio=aspect_ratio)
+    imported_world = service._imported_world(session_id) if hasattr(service, "_imported_world") else {}
+    if imported_world and imported_world.get("photography") == "scene" and subject_mode == "character":
+        final_view = "third"
+        photo_brief.update(view=final_view, capture_source="scene")
     return {
         "scene": scene,
         "view": final_view,
+        "subject_mode": subject_mode,
+        "photo_brief": photo_brief,
         "aspect_ratio": aspect_ratio,
         "caption": (parsed.get("caption") or "").strip(),
         "new_appearance_tags": new_appearance_tags,
@@ -2149,6 +2171,7 @@ async def plan_animaflow_slots(
     # LLM 应按 schema 的 default/description 和 knowledge 构造这两个字段，只用 safety_tag 控制安全等级。
     prompt_view = _infer_prompt_view(slots.scene or "")
     slot_info = {
+        "subject_mode": getattr(slots, "subject_mode", "character"),
         "count": slots.count or "",
         "character": slots.character or "",
         "series": slots.series or "",
@@ -2176,6 +2199,8 @@ async def plan_animaflow_slots(
     elif level <= 5:
         safety_tag = "sensitive"
     else:
+        safety_tag = "safe"
+    if getattr(slots, "subject_mode", "character") != "character":
         safety_tag = "safe"
 
     # 时间、天气与光线：在最终写 tags 的这步重新注入。scene 经过多次 LLM 改写后时段/光线易丢，
@@ -2252,6 +2277,7 @@ async def plan_animaflow_slots(
         f"## Schema 内容字段\n{schema_text}\n\n"
         f"## 必填字段: {', '.join(content_required) if content_required else '（未指定）'}\n\n"
         "## 槽位→字段\n"
+        "subject_mode=detail/environment 时，主体是物件/环境，count/character/series/appearance 留空，禁止用工作流默认人物补齐；场景不增加脸、全身或衣柜。\n"
         "- character → character（仅已知公开角色；OC 留空）\n"
         "- series → series（仅已知公开角色；OC 留空）\n"
         "- effective_appearance + one_shot_appearance → appearance"

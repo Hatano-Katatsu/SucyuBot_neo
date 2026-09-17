@@ -254,7 +254,7 @@ class CharacterCheckpointMixin:
             "reason": reason,
             "session_id": session_id,
             "character_key": character_key,
-            "character_card": self._checkpoint_card_for_character(state, character_key),
+            "character_card": self._world_card_snapshot(session_id, self._checkpoint_card_for_character(state, character_key)),
             "state": self._checkpoint_state_for_character(state, character_key),
             "background": {
                 "sqlite_checkpoint": checkpoint,
@@ -772,6 +772,9 @@ class CharacterCheckpointMixin:
             raise ValueError("不是有效的角色检查点 JSON")
         mode = self._normalize_checkpoint_import_mode(mode)
         character_key, card, state_part = self._checkpoint_restore_payload(payload)
+        # 外部检查点携带背景快照，不重新连接同名/旧 ID 的共享世界。
+        card["world_id"] = ""
+        state_part["custom_world_id"] = ""
         if mode == "full":
             return self._import_full_character_checkpoint(
                 session_id,

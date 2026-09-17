@@ -44,6 +44,11 @@ telegram_comfyui_selfie/
 ├── chat_context.py          # 聊天上下文、checkpoint、工具调用
 ├── generation.py            # PromptSlots 与生图后端
 ├── image_planning.py        # LLM 画面规划
+├── photo_sharing.py         # 生活照片特征、成功曝光避重与用户话题边界
+├── tavern_import.py         # 酒馆 PNG/JSON 解码、资料分批与转换校验
+├── import_store.py          # 导入草稿与所有者隔离的世界背景存储
+├── webui_imports.py         # LLM 转换、预览、新建/合并和世界编辑 API
+├── world_profile_runtime.py # 导入背景、地点和示例的角色级投影
 ├── prompt_layout.py         # 聊天规则共享常量与生图任务上下文投影、精确去重
 ├── animaflow_runtime.py     # AnimaFlow 工作流发现、schema/knowledge 与默认参数
 ├── appearance.py            # 外观、衣柜与标签处理
@@ -142,6 +147,9 @@ telegram_comfyui_selfie/
 
 ## 生图与 PromptSlots
 
+- 自动生活分享的 `subject_mode=character/detail/environment` 与 view 分开。detail/environment 不添加人物人数、身份、稳定外貌或衣柜，不改角色穿搭；角色拍眼前事物使用 scene，不能冒充用户 POV。原生与 AnimaFlow 两条出口都遵守主体约束；远端 schema 限制无人图时与重复修正共享最多一次重规划。
+- `photo_brief` 和 Telegram message_id 只在图片确认发送后写入照片/推送历史。生活 source_ref 包含角色、日期、事件 ID，source_version 由当前事件和用户证据计算，不接受模型自报。图片不自动完成目标。最近 8 次成功推送参与避重，紧凑记录最多 32 条/7 天；内容不足抛 PhotoContentSkipped 消耗本窗口，不进入故障退避。
+
 - `PromptSlots` 是最终正向提示词来源，顺序为 `quality -> count -> identity -> style_artist -> effective_appearance -> style_general -> safety -> scene -> one_shot_appearance`。
 - `scene` 只描述镜头、地点、动作、光线、道具和氛围，不重复稳定外貌与穿搭。
 - `view=selfie` 是前摄自拍但画面不得出现手机本体/UI；`portrait` 是画外人拍摄且画面只有角色；只有 `mirror` 可同时出现镜子和手机。
@@ -172,7 +180,7 @@ telegram_comfyui_selfie/
 - 网络话题扩展的兴趣点、query 和整理结果都必须避开上一轮搜索、旧话题池与最近实际推送；同义改写按重复处理，最近已用条目不得作为历史话题保留。
 - 网络话题列表整理属于结构化任务，必须关闭 thinking 并约束短 guide；首次拿到响应但 JSON 语法/根结构无效时使用独立 tag 低温重生成一次，请求失败不额外重试，第二次仍失败才从搜索摘要确定性兜底。不得为此放宽全局 JSON 保守修复边界。
 - 聊天与推送侧 Tavily 搜索统一使用 `search_depth=basic`、`max_results=10`、`include_answer=advanced`；模型必须按用途显式选择 `general/news/finance` topic。
-- 推送话题日志 `recent_push_topics` 跨 `/新场景` 保留（`reset_preserved=True`），切角色才清；专门堵 `/新场景` 后 `sent_photos_history` 被 `since=reset_time` 过滤导致避重失效的缺口。每条记录 ts/caption/scene/topic 签名/direction，保留最近 8 条；`_pushes_since_last_user_message` 据此统计用户上次发言后的推送间隔，间隔超过 1-2 次后 dialogue 方向应大幅减少。
+- 推送话题日志 `recent_push_topics` 跨 `/新场景` 保留（`reset_preserved=True`），切角色才清；专门堵 `/新场景` 后 `sent_photos_history` 被 `since=reset_time` 过滤导致避重失效的缺口。每条记录 ts/caption/scene/topic 签名/direction/photo_brief/message_id，保留最多 32 条且不超过 7 天；`_pushes_since_last_user_message` 据此统计用户上次发言后的推送间隔，间隔超过 1-2 次后 dialogue 方向应大幅减少。
 - 推送 caption 优先展现角色自己的生活片段、看到想到的事或感兴趣的话题，避免写成对用户的询问式开场或催促回复；冷启动（用户长时间无互动）时非 dialogue 方向强制不带问句主旨。
 - 主动推送 caption 必须以单段单行发送；即使模型返回多行，也要在发送前归一化为空格分隔的单行。
 - 推送话题 guide 与 caption 都按「一个具体细节 + 一个态度/反应」的单点短消息约束：guide 一条一个切入点、≤40 字，禁止采访提纲式并列子问题和「是A还是B」追问；caption 通常一句、最多两句、一般 ≤60 字，禁止动作流水账和天气收尾凑句。guide 只作话题锚点，caption 不沿用其句式与长度。
@@ -191,6 +199,10 @@ telegram_comfyui_selfie/
 
 ## Telegram 与 WebUI
 
+- 酒馆导入默认经现有结构化模型转换，解析和预览不修改 live 角色；草稿按会话隔离，世界按用户隔离。草稿创建提交与角色、世界同事务，重复提交幂等；合并需比对角色资料版本，头像失败须回滚。转换缓存含文件、协议和实际模型配置摘要，不保存配置密钥。
+- 导入世界是初始背景，聊天/记忆/日记仍保存个人经历；示例与开场不能写入真实历史。禁用/条件/未知宏资料保留原文和待定原因，不执行脚本或任意消息深度注入。角色字段统一由 character_card/session_schema 保存；切旧卡清空导入字段，普通资料编辑保留未提交的导入字段，检查点导出带背景快照、导入断开原共享世界 ID。
+- 世界地点按独立 ID 保存并映射现有 PLACE_TYPES，不写入全局现实 POI 缓存。虚构世界跳过现实天气/地点查询；核心背景低频注入，已知相关实体后置，生活任务使用角色/世界版本快照防止异步回写旧背景。关联世界不自动开启角色互动或跨会话配对。
+
 - Telegram 用户图片、相册及显式回复/外部引用中的图片，在 chat 与 vision 解析到同一 `api_base + model` 时直接作为原生多模态 user content 进入 chat；两者不同时仍先由 vision 转为文本描述。bot 已发送图片继续只以照片历史文字摘要进入上下文；未配置 vision profile 时跳过图片理解。辅助模型复用消息时，若其与 vision 不是同一实际模型，必须在统一 LLM 请求出口移除图片 part、保留文字内容。
 - Telegram update 必须先与确认 offset 一起写入 SQLite inbox，再进入按会话有序的有界 worker；跨会话受全局并发上限控制，停机先停止拉取并排空，超时待办由下次启动恢复。
 - 同会话新消息可取消旧文字生成，但已进入生图/发图阶段的受保护任务不能被取消。
@@ -202,8 +214,10 @@ telegram_comfyui_selfie/
 - 普通用户不可查看系统日志项或其他用户的数据；管理员才能维护全局模型和运维配置。
 - 管理员在 WebUI 设置页的独立面板维护全局模型 profile；角色页模型面板只管理当前用户私有 profile 和三类模型选择，避免混淆保存范围。
 - WebUI 命令下拉从 `/api/commands` 动态读取 `COMMAND_ALIAS_GROUPS`，避免前后端各维护一份命令列表。
+- Telegram 启动时通过 `setMyCommands` 注册私聊斜杠菜单，英文命令名从 `COMMAND_ALIAS_GROUPS` 选择合法别名并配中文说明；注册超时或失败不阻止 Bot 启动。`/菜单`、`/快捷回复` 展示固定文字回复键盘，`/隐藏键盘` 移除；普通文字按钮复用真实用户消息入口，不另建回调对话或伪造用户历史。`send_message(reply_markup=...)` 在表单里序列化 JSON，分片只附带一次键盘。
 - 数值配置在前后端都校验为有限数；移动端输入字号至少 16px，主要触控目标至少 40px。
 - WebUI 共享响应式页面：桌面侧栏与双栏工作区，手机底部导航与单列工作区；角色资料、长期记忆、日记和用户模型用页签切换，日记默认折叠并分页。衣橱是独立一级入口。
+- `static/browser_cache.js` 在在线确认身份后按登录账号及完整 API 路径缓存用户列表、角色、记忆、日记和历史提要（24 小时、最多 32 项、约 2 MiB）；先只读展示旧记录再同步服务端。凭据、模型配置、日志与实时动线不落该缓存；写操作、认证失败和账号切换使旧记录失效，在途旧 GET 不得回填。管理员的角色页/动线页用户选择按登录身份独立保存，恢复后必须校验用户仍在可见列表，普通用户固定自己的会话。浏览器存储不可用时保持正常在线功能。
 - 衣橱预览使用隔离的角色状态副本与既有生图队列，不发送 Telegram 或写入聊天记录。按会话、角色、实际外貌/穿搭/画风签名缓存到 `wardrobe_previews`，匹配时直接展示；刷新失败保留旧图，角色/会话删除时走统一文件清理事务。
 
 ## 验证要求

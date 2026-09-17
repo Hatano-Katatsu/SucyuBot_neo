@@ -27,6 +27,7 @@ function renderWorldSessionList() {
 
     const toggle = document.createElement("button");
     toggle.type = "button";
+    toggle.disabled = Boolean(state.sessionsCached);
     toggle.className = "session-freeze-toggle";
     toggle.textContent = item.frozen ? "解冻" : "冻结";
     toggle.setAttribute("aria-label", `${item.frozen ? "解冻" : "冻结"} ${item.character || item.chat_id || item.session_id}`);
@@ -53,11 +54,17 @@ function renderWorldSessionList() {
 
 async function loadWorldSessions() {
   try {
-    const data = await api("/api/sessions");
+    const data = await api("/api/sessions", { onCached: cached => {
+      state.sessions = cached.sessions || [];
+      state.sessionsCached = true;
+      renderWorldSessionList();
+    }});
     state.sessions = data.sessions || [];
+    state.sessionsCached = false;
     renderWorldSessionList();
     if (!state.sessions.length) {
       state.selectedWorldSession = null;
+      rememberSessionSelection();
       state.worldPreview = null;
       $("#world-title").textContent = "实时动线";
       $("#world-subtitle").textContent = "暂无用户";
@@ -65,7 +72,10 @@ async function loadWorldSessions() {
       return;
     }
     const exists = state.sessions.some(item => item.session_id === state.selectedWorldSession);
-    if (!state.selectedWorldSession || !exists) state.selectedWorldSession = state.sessions[0].session_id;
+    if (!state.selectedWorldSession || !exists) {
+      state.selectedWorldSession = frontendCore.resolveSelectedSession(state.sessions, state.selectedSession, state.auth);
+    }
+    rememberSessionSelection();
     await loadWorldRoute();
   } catch (err) {
     toast(err.message, "error");
@@ -74,6 +84,7 @@ async function loadWorldSessions() {
 
 async function selectWorldSession(sessionId) {
   state.selectedWorldSession = sessionId;
+  rememberSessionSelection();
   renderWorldSessionList();
   await loadWorldRoute();
 }
@@ -81,13 +92,19 @@ async function selectWorldSession(sessionId) {
 async function loadWorldRoute({ refreshPlaces = false } = {}) {
   if (!state.selectedWorldSession) return;
   const box = $("#world-content");
+  const session = state.selectedWorldSession;
+  const sequence = loadWorldRoute.sequence = (loadWorldRoute.sequence || 0) + 1;
+  const current = () => state.selectedWorldSession === session && sequence === loadWorldRoute.sequence;
   box.innerHTML = `<div class="empty-state">正在读取动线...</div>`;
   try {
     const sid = encodeURIComponent(state.selectedWorldSession);
     const data = await api(refreshPlaces ? `/api/world/${sid}/places/refresh` : `/api/world/${sid}`, refreshPlaces ? { method: "POST" } : {});
+    if (!current()) return;
     state.worldPreview = data.world;
     renderWorldRoute(data.world);
+    if (typeof loadWorldProfiles === "function") await loadWorldProfiles(session);
   } catch (err) {
+    if (!current()) return;
     box.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
     toast(err.message, "error");
   } finally {

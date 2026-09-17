@@ -342,6 +342,14 @@ def _migration_v9_llm_cache_observability(conn: sqlite3.Connection) -> None:
                  "WHERE cached_tokens>0 AND cached_tokens<=prompt_tokens AND cache_source=''")
 
 
+def _migration_v10_world_imports(conn: sqlite3.Connection) -> None:
+    """世界背景与异步导入草稿；草稿不参与运行时上下文。"""
+    conn.execute("CREATE TABLE IF NOT EXISTS world_profiles (world_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, data TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1, updated_at REAL NOT NULL)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_world_owner ON world_profiles(user_id)")
+    conn.execute("CREATE TABLE IF NOT EXISTS import_drafts (draft_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL, result TEXT NOT NULL DEFAULT '{}', expires_at REAL NOT NULL, updated_at REAL NOT NULL)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_import_session ON import_drafts(session_id)")
+
+
 SCHEMA_MIGRATIONS: tuple[Migration, ...] = (
     (1, "base_schema", _migration_v1_base_schema),
     (2, "character_memories", _migration_v2_character_memories),
@@ -352,6 +360,7 @@ SCHEMA_MIGRATIONS: tuple[Migration, ...] = (
     (7, "memory_organize_watermark", _migration_v7_memory_organize_watermark),
     (8, "encounters", _migration_v8_encounters),
     (9, "llm_cache_observability", _migration_v9_llm_cache_observability),
+    (10, "world_imports", _migration_v10_world_imports),
 )
 LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS[-1][0]
 
@@ -445,6 +454,13 @@ def _validate_schema(conn: sqlite3.Connection, version: int) -> None:
         absent = {"cache_reported", "cache_source", "cache_anomaly", "endpoint", "profile_scope", "request_meta"} - _table_columns(conn, "llm_usage")
         if absent:
             missing.append(f"llm_usage:[{','.join(sorted(absent))}]")
+    if version >= 10:
+        for table, expected in {
+            "world_profiles": {"world_id", "user_id", "data", "revision", "updated_at"},
+            "import_drafts": {"draft_id", "session_id", "status", "data", "result", "expires_at", "updated_at"},
+        }.items():
+            if expected - _table_columns(conn, table):
+                missing.append(table)
     if missing:
         raise SchemaMigrationError("SQLite schema 校验失败：" + "; ".join(missing))
 
