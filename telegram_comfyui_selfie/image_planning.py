@@ -283,6 +283,7 @@ def _parse_image_plan_json(raw_text: str) -> tuple[dict[str, Any], str, bool]:
     text = re.sub(r"^\s*<thinking>.*?</thinking>\s*", "", raw_text or "", flags=re.DOTALL).strip()
     text = re.sub(r"^\s*<reasoning>.*?</reasoning>\s*", "", text, flags=re.DOTALL).strip()
     text = re.sub(r"^\s*<analysis>.*?</analysis>\s*", "", text, flags=re.DOTALL).strip()
+    text = re.sub(r"^\s*<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
     text = re.sub(r"^```[a-zA-Z]*\n?", "", text).strip()
     text = re.sub(r"\n?```\s*$", "", text).strip()
     try:

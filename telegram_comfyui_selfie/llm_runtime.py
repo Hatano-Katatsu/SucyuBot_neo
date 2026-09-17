@@ -88,10 +88,11 @@ def _openai_models_url(value: Any) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
 
 
-# 思考文本泄漏清洗：只处理显式的思考标签 <thinking>/<reasoning>/<analysis>。
+# 思考文本泄漏清洗：只处理显式的思考标签 <thinking>/<reasoning>/<analysis>/<think>。
+# （MiniMax 等端点把思考以 <think> 块直接混进 content。）
 # 不做关键词启发式判断（如 "we need to"），避免误判正常输出。
 _THINKING_TAG_RE = re.compile(
-    r"^\s*<(?P<tag>thinking|reasoning|analysis)>(?P<body>.*?)</(?P=tag)>\s*",
+    r"^\s*<(?P<tag>thinking|reasoning|analysis|think)>(?P<body>.*?)</(?P=tag)>\s*",
     flags=re.DOTALL | re.IGNORECASE,
 )
 
@@ -115,7 +116,7 @@ def _looks_like_llm_thinking(text: str) -> bool:
     只按显式思考标签判断，不依赖关键词启发式。
     """
     return bool(re.search(
-        r"<(?:thinking|reasoning|analysis)>.*?</(?:thinking|reasoning|analysis)>",
+        r"<(?:thinking|reasoning|analysis|think)>.*?</(?:thinking|reasoning|analysis|think)>",
         str(text or ""),
         flags=re.DOTALL | re.IGNORECASE,
     ))

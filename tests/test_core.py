@@ -10216,6 +10216,11 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertTrue(_looks_like_llm_thinking(tagged))
         self.assertEqual(_strip_llm_thinking_prefixes(tagged), "She sits by the window. soft light")
 
+        # MiniMax 等端点使用 <think> 标签，同样按思考块处理
+        think_tagged = "<think>The user greeted me, I should reply in character.</think>She waves back. sunny street"
+        self.assertTrue(_looks_like_llm_thinking(think_tagged))
+        self.assertEqual(_strip_llm_thinking_prefixes(think_tagged), "She waves back. sunny street")
+
         # 无标签的 "we need to" 等关键词不算思考（不启发式判断）
         keyword_only = (
             "A selfie of a woman, upper body framing, looking at viewer, "
@@ -10601,6 +10606,50 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertTrue(any("chat-final returned tool_calls without content; retried text-only" in text for text in warn_logs))
 
         asyncio.run(run())
+
+    def test_chat_strips_minimax_think_tag_from_reply(self):
+        """MiniMax 类端点把 <think> 思考块混进 content 时，chat 回复必须剥离思考再发。"""
+        async def run():
+            svc = self.make_service()
+            svc.config.update({
+                "chat_llm_api_key": "k",
+                "chat_llm_model": "MiniMax-M3",
+                "chat_llm_api_base": "http://x",
+                "selfie_frequency": "关闭",
+            })
+            sid = "telegram:1"
+            leaked = (
+                "<think>The user said hi. I need to stay in character and reply with action plus dialogue. "
+                "Keep it short and teasing.</think>"
+                "（她抬眼看你。）\n\n「来了？坐。」"
+            )
+
+            async def fake_msgs(messages, tools=None, tool_choice=None, **kw):
+                return {"choices": [{"message": {"content": leaked}}]}
+
+            svc._call_llm_messages = fake_msgs
+            svc._ensure_life_profile = AsyncMock(return_value={})
+            svc._update_character_place_from_text = AsyncMock()
+            svc._extract_long_term_memories = AsyncMock()
+            svc._judge_image_moment = AsyncMock(return_value=None)
+            svc._ulog = lambda session_id, kind, text="": None
+
+            reply = await svc.run_roleplay_chat(1, sid, "我回来了")
+
+            self.assertEqual(reply, "（她抬眼看你。）\n\n「来了？坐。」")
+            self.assertNotIn("<think>", reply)
+            self.assertNotIn("stay in character", reply)
+
+        asyncio.run(run())
+
+    def test_parse_image_plan_json_strips_think_tag(self):
+        from telegram_comfyui_selfie.image_planning import _parse_image_plan_json
+
+        raw = '<think>planning the scene now, need JSON output for the planner</think>{"scene": "kitchen, soft light", "view": "portrait"}'
+        parsed, _text, extracted = _parse_image_plan_json(raw)
+        self.assertFalse(extracted)
+        self.assertEqual(parsed.get("view"), "portrait")
+        self.assertIn("kitchen", parsed.get("scene"))
 
     def test_dsml_tool_call_content_is_executed_and_not_leaked(self):
         async def run():
