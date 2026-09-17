@@ -38,7 +38,7 @@ from .chat_context import ChatContextMixin
 from .commands import CommandHandlersMixin
 from .git_update import GitUpdateMixin
 from .life_plan import LifePlanMixin
-from .llm_runtime import LLMRuntimeMixin, _looks_like_llm_thinking
+from .llm_runtime import LLMRuntimeMixin, _looks_like_llm_thinking, _strip_llm_thinking_prefixes
 from .memory_policy import MemoryPolicyMixin
 from .process_restart import ProcessRestartMixin
 from .scheduler_runtime import SchedulerRuntimeMixin
@@ -1206,7 +1206,7 @@ class TelegramComfyUIService(
         ]
         data = await self._call_llm_messages(messages, tag="describe-image", temp=0.2, purpose="vision", session_id=session_id)
         msg = data.get("choices", [{}])[0].get("message", {})
-        text = (msg.get("content") or "").strip()
+        text = _strip_llm_thinking_prefixes((msg.get("content") or "").strip())
         text = re.sub(r"^```[a-zA-Z]*\n", "", text)
         text = re.sub(r"\n```$", "", text).strip()
         return text
@@ -1256,7 +1256,7 @@ class TelegramComfyUIService(
         ]
         data = await self._call_llm_messages(messages, tag="describe-images", temp=0.2, purpose="vision", session_id=session_id)
         msg = data.get("choices", [{}])[0].get("message", {})
-        text = (msg.get("content") or "").strip()
+        text = _strip_llm_thinking_prefixes((msg.get("content") or "").strip())
         text = re.sub(r"^```[a-zA-Z]*\n", "", text)
         text = re.sub(r"\n```$", "", text).strip()
         return text

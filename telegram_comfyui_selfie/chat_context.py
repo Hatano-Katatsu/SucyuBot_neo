@@ -12,6 +12,7 @@ from typing import Any
 
 from . import session_schema
 from .defaults import WEEKDAY_NAMES
+from .llm_runtime import _strip_llm_thinking_prefixes
 from .memory import format_memory_lines
 from .prompt_layout import CHAT_SYSTEM_STATIC_RULES
 
@@ -497,7 +498,8 @@ class ChatContextMixin:
             self._ulog(session_id, "USAGE", f"prompt={prompt_tokens} completion={completion_tokens} cached={cached_tokens}")
 
         assistant = result.get("choices", [{}])[0].get("message", {})
-        content = (assistant.get("content") or "").strip()
+        # 部分端点（如 MiniMax）把思考以 <think> 块混进 content，剥离后再走工具/正文处理。
+        content = _strip_llm_thinking_prefixes((assistant.get("content") or "").strip())
         tool_calls = assistant.get("tool_calls") or []
         if not tool_calls:
             dsml_tool_calls, cleaned_content = self._extract_dsml_tool_calls(content)
@@ -648,7 +650,7 @@ class ChatContextMixin:
                         error="chat-final returned tool_calls without content",
                     )
                     empty_error_logged = True
-                content = (final_msg.get("content") or content or "").strip()
+                content = _strip_llm_thinking_prefixes((final_msg.get("content") or content or "").strip())
                 content = self._strip_dsml_tool_markup(content)
             except Exception as exc:
                 logger.warning("final chat completion after tool call failed: %s", exc)
