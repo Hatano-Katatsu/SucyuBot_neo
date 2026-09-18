@@ -11507,7 +11507,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         tail = messages[-2]["content"]
         self.assertEqual(messages[-2]["role"], "system")
         self.assertIn("回复格式", static)
-        self.assertIn("允许只有台词、只有动作、或一句话的回复", static)
+        self.assertIn("像真人发消息一样", static)
         self.assertIn("示例二", static)
         self.assertIn("照片记录", static)
         self.assertNotIn("必须单独放在", static)

@@ -104,8 +104,9 @@ telegram_comfyui_selfie/
 - AnimaFlow 条件化字段规则、天气光线以及翻译视角约束通过 `_call_llm(system_tail=...)` 保持 system 权限并后置；固定模板不插入这些本次取值。方向决策的模式与精确时间放在角色/历史材料之后。
 - 天气半稳定槽使用天气描述与温度区间；精确温度只放动态尾部，避免小幅温度变化破坏稳定前缀。
 - 稳定前缀（system_static、stable_front）必须不含会话级插值（用户性别、空间关系、intimate 预判等），这些值统一放动态尾部；location-extract 等 prompt 的地点枚举从 `PLACE_TYPES` 运行时推导，不得硬编码两遍。
-- chat system_static（`CHAT_SYSTEM_STATIC_RULES`）只保留回复格式默认、工具一句话和照片记录说明，目标 ≤ 700 字；工具「何时调用」以 tools schema 的 description 为单一来源，不在 system 里再写一份。回复格式是「默认」不是「必须」，允许纯台词/纯动作/单句，避免四段模板。
-- 对话推进规则与事实来源优先级（`CHAT_FOCUS_RULES`）是关于如何取舍背景的元指令，固定放在动态尾部末段、紧贴本轮 user；性爱语言规则（`CHAT_INTIMATE_LANGUAGE_RULES`）只在裸体状态或本轮/最近两轮命中 `INTIMATE_SCENE_RE` 时注入尾部；语言理解规则只对 purity ≥ 5 的角色注入低频对话控制层；衣橱清单只在命中 `CLOSET_TRIGGER_RE` 或用户明确要图时注入尾部。发图频率/发图提醒不写进对话 prompt，节奏由 `_judge_image_moment` 单独判断（`selfie_frequency=关闭` 仍写一句硬约束）。
+- chat system_static（`CHAT_SYSTEM_STATIC_RULES`）只保留回复格式默认、语言习惯、工具一句话和照片记录说明，目标 ≤ 700 字；工具「何时调用」以 tools schema 的 description 为单一来源，不在 system 里再写一份。回复格式以纯台词/一两句短消息为主（像真人发消息），动作神态描写只在有实质动作时写一处，避免四段模板；语言习惯条款压 AI 腔：不浮夸比喻/感叹式开场、不固定开场白、附和说完就停、结尾不每条留话头、问事先说核心再展开、神态小动作词不机械复用。
+- 对话推进规则与事实来源优先级（`CHAT_FOCUS_RULES`）是关于如何取舍背景的元指令，固定放在动态尾部末段、紧贴本轮 user，含顺着用户话题不主动拐题约束；性爱语言规则（`CHAT_INTIMATE_LANGUAGE_RULES`）只在裸体状态或本轮/最近两轮命中 `INTIMATE_SCENE_RE` 时注入尾部；语言理解规则只对 purity ≥ 5 的角色注入低频对话控制层；衣橱清单只在命中 `CLOSET_TRIGGER_RE` 或用户明确要图时注入尾部。发图频率/发图提醒不写进对话 prompt，节奏由 `_judge_image_moment` 单独判断（`selfie_frequency=关闭` 仍写一句硬约束）。
+- `_recent_reply_cliche_reminder` 统计当前短期场景内最近 `RECENT_REPLY_CLICHE_WINDOW` 条 assistant 回复中 `RECENT_REPLY_CLICHE_TERMS` 的出现次数，达 `RECENT_REPLY_CLICHE_MIN_HITS` 次时在动态尾部点名避让（位于对话推进规则之前），打破逐字历史导致的自我腔调模仿；切场景后重新计数，无命中不注入。
 - 背景层不得放导演指令：角色历史提要只写「关系/剧情惯性」「角色心理与心情界定」「未解事件」三段，不生成「新一天演绎提示/可用钩子」；生活底色按 `texture_slots` 只注入当前时段一条 ≤ 20 字的事实句；聊天动态尾部不带生图规划器材料（自然光硬规则、场景约束/推荐视角）。
 - 长期记忆分两层：稳定层 = 用户画像（按分号拆句去重成块）+ 按重要度取 `long_memory_stable_limit`（默认 6）条其它记忆，按 id 固定顺序、不带 kind/重要度/#tag；动态尾部按 `long_memory_topic_limit`（默认 3）条与本轮输入/最近两轮字面重合的记忆。非画像记忆单条 ≤ 150 字、一条一个事实；用户画像 ≤ 600 字。checkpoint 去重参考用 `_long_term_memory_full_reference()` 完整清单。
 - checkpoint 摘要 system/user 模板为模块级常量，chat/image 两分支共用同一文本仅 purpose 不同。

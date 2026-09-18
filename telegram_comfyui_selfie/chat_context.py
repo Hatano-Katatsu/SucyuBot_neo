@@ -113,6 +113,8 @@ CHAT_INTIMATE_LANGUAGE_RULES = (
 # 对话推进与事实优先级：关于「如何取舍上面所有背景」的元指令，放在动态尾部末段、紧贴 user。
 CHAT_FOCUS_RULES = (
     "对话推进规则：优先回应用户本轮话题、情绪和问题，不要因为某条长期记忆或背景很重要就主动跳出用户正在聊的内容。"
+    "顺着用户当前的话题往下聊，不主动开启用户没提过的新话题，也不把回复拐到自己的日程、物件或旧事上；"
+    "用户只回了短短一句（嗯、哦、哈哈、表情包）时同样用短回应接住，不借题发挥。"
     "如果用户本轮发起的话题与前文、旧场景或旧动作明显无关，请直接接续用户的新话题，不要为了显得连续而强行呼应上一场景。"
     "用户一句话里可能包含寒暄、抱怨、解释、问题和转折；先判断核心意图和最需要被接住的情绪，再自然推进对话，不要逐句逐点机械回应。"
     "长期记忆和角色历史只在与本轮话题直接相关时自然融入，不要逐条复述。"
@@ -129,6 +131,16 @@ CHAT_INTERPRETATION_RULES = (
     "不要把「我是好人」「今天天气不错」「我吃饭了」等日常表述曲解为暗示或直球表白。"
 )
 CHAT_INTERPRETATION_RULES_MIN_PURITY = 5
+
+# 回复去腔退避：最近几轮 assistant 回复里高频复用的书面化小动作/神态词。
+# 逐字历史会让模型模仿自己上一轮的腔调，命中阈值后在动态尾部点名避让。
+RECENT_REPLY_CLICHE_TERMS = (
+    "顿了顿", "顿了两秒", "顿了一秒", "半晌", "软下来", "声音闷闷", "闷在被子里",
+    "轻笑一声", "笑了一声", "挑眉", "勾起嘴角", "嘴角", "眼底", "指尖",
+    "翻了个白眼", "翻了个身",
+)
+RECENT_REPLY_CLICHE_WINDOW = 6
+RECENT_REPLY_CLICHE_MIN_HITS = 2
 
 # checkpoint 摘要 prompt 模板（模块级单一来源，chat/image 两分支仅 purpose 不同）。
 _CHECKPOINT_DURABLE_RULES = (
@@ -924,10 +936,14 @@ class ChatContextMixin:
         )
         if intimate_scene:
             system_dynamic += f"\n{CHAT_INTIMATE_LANGUAGE_RULES.strip()}\n"
+        cliche_note = self._recent_reply_cliche_reminder(state)
+        if cliche_note:
+            system_dynamic += f"\n{cliche_note}\n"
         dynamic_signature = "\n".join([
             f"scene_stale={int(scene_stale)}",
             f"intimate={int(intimate_scene)}",
             f"world_dynamic={world_dynamic or 'off'}",
+            f"cliche={int(bool(cliche_note))}",
         ])
         if include_dynamic_tail:
             self._track_dynamic_context_change(session_id, dynamic_signature)
@@ -1285,6 +1301,36 @@ class ChatContextMixin:
         if freq == "关闭":
             return False
         return rounds_since >= FREQ_MAX_ROUNDS.get(freq, 5)
+
+    def _recent_reply_cliche_reminder(self, state: dict[str, Any]) -> str:
+        """最近几轮 assistant 回复里高频复用的腔调词提醒；无命中时返回空串。
+
+        只统计当前短期场景内的 assistant 消息（切场景后重新计数），
+        注入在动态尾部，不影响前缀缓存。
+        """
+        try:
+            active = self._active_chat_history(state)
+        except Exception:
+            active = session_schema.get_chat_history(state)
+        texts = [
+            str(m.get("content") or "")
+            for m in active
+            if m.get("role") == "assistant" and str(m.get("content") or "").strip()
+        ][-RECENT_REPLY_CLICHE_WINDOW:]
+        if not texts:
+            return ""
+        hits = [
+            term
+            for term in RECENT_REPLY_CLICHE_TERMS
+            if sum(text.count(term) for text in texts) >= RECENT_REPLY_CLICHE_MIN_HITS
+        ]
+        if not hits:
+            return ""
+        shown = "、".join(hits[:4])
+        return (
+            f"语气提醒：你最近几轮回复反复用到「{shown}」这类描写，本轮不要再用这些词，"
+            "换一种表达，或干脆不写神态小动作。"
+        )
 
     def _reply_length_directive(self) -> str:
         """按配置给聊天回复加长度约束（提示词层面，不截断）。空=不限制。"""
