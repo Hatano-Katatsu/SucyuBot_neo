@@ -321,6 +321,15 @@ class TelegramIOMixin:
             else:
                 augmented_text = ""
                 native_content = None
+                from .photo_sharing import record_photo_feedback
+                reply = msg.get("reply_to_message") or {}
+                if (msg.get("message_id") and not msg.get("external_reply")
+                        and (not msg.get("quote") or reply.get("message_id"))):
+                    feedback = record_photo_feedback(
+                        state, text, f"tg:{msg['message_id']}", reply_to_message_id=reply.get("message_id"),
+                    )
+                    if feedback:
+                        self._save_session_state(session_id, state)
                 if (
                     self._message_has_photo_context(msg)
                     and hasattr(self, "_chat_uses_native_multimodal")

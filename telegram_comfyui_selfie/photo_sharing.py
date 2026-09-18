@@ -13,6 +13,7 @@ SUBJECT_MODES = {"character", "detail", "environment"}
 PHOTO_FIELDS = (
     "topic_key", "source_ref", "actual_change", "sharing_motive", "main_subject",
     "activity", "place_key", "framing", "angle", "composition", "capture_source", "source_version",
+    "source_event_text", "source_mid_id",
 )
 PHOTO_RULES = """
 生活照片协议：分享此刻有依据、值得拍下的一件事。照片本身是中心，配文顺口一句，不设选择题、任务提示或催回复。
@@ -25,6 +26,8 @@ angle(eye_level|high|low|overhead|side)、composition(简短构图)、capture_so
 自拍必须物理可拍，不一律半身正脸；人物不在场的生活照不套自拍。有人帮拍必须已有依据，不能凭空编出摄影者。
 新鲜感来自可见主体、动作和构图，服从当下地点、时刻、衣柜和正在进行的对话。不可为避重改脸、换衣、瞬移。
 不必每次都有新故事，普通生活可分享；没人回复也继续自己的生活，不反复准备东西等用户。
+成功分享记录中的状态已经向用户表达过，跨日仍有效；没有相关变化证据不得回退或重演。用户建议只是建议，问题不是已完成结果。
+候选和旧事项相同必须沿用 source_ref；没有新证据不能靠改 topic_key 或自报 actual_change 制造进展。
 """.strip()
 
 
@@ -63,19 +66,104 @@ def _similar(left: str, right: str) -> float:
     return SequenceMatcher(None, left, right).ratio() if left and right else 0.0
 
 
+def same_photo_topic(left: str, right: str) -> bool:
+    """补足下划线主题键的同义状态后缀，不把任意单个公共词视作同题。"""
+    if _similar(left, right) > .72:
+        return True
+    a = set(re.findall(r"[a-z]{3,}", left.lower()))
+    b = set(re.findall(r"[a-z]{3,}", right.lower()))
+    common = a & b
+    return len(common) >= 2 and len(common) / max(1, min(len(a), len(b))) >= .75
+
+
+def photo_scene_summary(photo: dict[str, Any], limit: int | None = None) -> str:
+    """直接复用最终场景字段；仅避重材料可截短，聊天保留实际场景描述。"""
+    for value in (photo.get("nltag"), photo.get("visual_summary"), photo.get("scene")):
+        text = " ".join(str(value or "").split())
+        if not text:
+            continue
+        if limit is not None and len(text) > limit:
+            boundary = max(text.rfind(". ", 0, limit), text.rfind("。", 0, limit))
+            if boundary < limit // 2:
+                boundary = text.rfind(" ", 0, limit)
+            text = text[:boundary if boundary >= limit // 2 else limit].rstrip(" ,，。") + "…"
+        return text
+    return ""
+
+
+def record_photo_feedback(
+    state: dict[str, Any], user_text: str, user_message_id: str,
+    *, reply_to_message_id: int | None = None,
+) -> dict[str, Any] | None:
+    """关联真实输入与成功照片，保存证据；不自动认定建议被采纳或目标完成。"""
+    text = compact(user_text, 240)
+    if not text or not user_message_id or text.startswith("/"):
+        return None
+    recent = recent_photo_entries(state)
+    if reply_to_message_id is not None:
+        candidates = [p for p in reversed(recent) if p.get("message_id") == reply_to_message_id]
+    else:
+        # 增强输入含引用时由 Telegram 入口精确关联，不能用引用正文误造用户证据。
+        if "【引用内容】" in text or text in {"好", "好的", "嗯", "嗯嗯", "晚安", "早安", "收到", "谢谢"}:
+            return None
+        candidates = []
+        for p in reversed(recent):
+            if time.time() - float(p.get("ts") or p.get("timestamp") or 0) > 6 * 3600:
+                continue
+            subject = str((p.get("photo_brief") or {}).get("main_subject") or "").strip()
+            if len(subject) >= 2 and subject in text:
+                candidates.append(p)
+        if not candidates and recent and time.time() - float(recent[-1].get("ts") or recent[-1].get("timestamp") or 0) < 2 * 3600:
+            if re.search(r"刚才那张|这张(?:图|照片)?|那张(?:图|照片)|(?:那个|这个)颜色|先别.*(?:这个|这件事)", text):
+                candidates = [recent[-1]]
+            elif re.fullmatch(r"(?:先|暂时)?别(?:做|画|弄|改|继续)(?:了)?[。！! ]*", text):
+                history = session_schema.get_chat_history(state)
+                if history and history[-1].get("role") == "assistant" and history[-1].get("content") == recent[-1].get("caption"):
+                    candidates = [recent[-1]]
+    if not candidates:
+        return None
+    photo = candidates[0]
+    feedback = photo.setdefault("user_feedback", [])
+    if any(f.get("user_message_id") == user_message_id for f in feedback):
+        return None
+    if feedback and feedback[-1].get("text") == text and time.time() - float(feedback[-1].get("ts") or 0) < 120:
+        return None
+    item = {"user_message_id": user_message_id, "text": text, "ts": time.time(),
+            "reply_to_message_id": reply_to_message_id, "photo_message_id": photo.get("message_id")}
+    feedback.append(item)
+    photo["user_feedback"] = feedback[-3:]
+    if re.search(r"(?:先|暂时)?别(?:做|画|弄|改|继续)|不要再|放弃|不做了", text):
+        brief = photo.get("photo_brief") or {}
+        if brief.get("topic_key") or brief.get("source_ref"):
+            controls = state.setdefault("photo_topic_controls", [])
+            controls.append({"topic_key": brief.get("topic_key", ""), "source_ref": brief.get("source_ref", ""),
+                             "until": time.time() + 86400 if re.search(r"先|暂时|今天", text) else 0, "source": text})
+            state["photo_topic_controls"] = controls[-16:]
+    return item
+
+
 def recent_photo_entries(state: dict[str, Any], now: float | None = None) -> list[dict[str, Any]]:
     now = time.time() if now is None else now
     result = []
-    for entry in session_schema.get_recent_push_topics(state):
+    # 旧版本只有 sent_photos_history；合并读取，不能因压缩提示词丢掉旧曝光。
+    legacy = [p for p in session_schema.get_sent_photos_history(state) if isinstance(p, dict)
+              and p.get("source_kind") in {"scheduled_push", "followup_push", "manual_push"}]
+    seen = set()
+    for entry in session_schema.get_recent_push_topics(state) + legacy:
         if not isinstance(entry, dict):
             continue
         try:
-            fresh = now - float(entry.get("ts") or 0) <= 7 * 86400
+            timestamp = float(entry.get("ts") or entry.get("timestamp") or 0)
+            fresh = 0 <= now - timestamp <= 7 * 86400
         except (ValueError, TypeError):
             fresh = False
-        if fresh:
+        key = ("message", entry["message_id"]) if entry.get("message_id") else (
+            "content", int(timestamp) if fresh else 0, entry.get("caption"), entry.get("scene"),
+            (entry.get("photo_brief") or {}).get("topic_key") or entry.get("topic"))
+        if fresh and key not in seen:
             result.append(entry)
-    return result[-32:]
+            seen.add(key)
+    return sorted(result, key=lambda p: float(p.get("ts") or p.get("timestamp") or 0))[-32:]
 
 
 def photo_repeat_reason(plan: dict[str, Any], state: dict[str, Any]) -> str:
@@ -84,7 +172,9 @@ def photo_repeat_reason(plan: dict[str, Any], state: dict[str, Any]) -> str:
     for control in state.get("photo_topic_controls", []):
         if not isinstance(control, dict) or (control.get("until") and control["until"] <= time.time()):
             continue
-        if control.get("topic_key") == brief["topic_key"] or (control.get("needle") and control["needle"] in text):
+        if (same_photo_topic(str(control.get("topic_key") or ""), brief["topic_key"])
+                or (control.get("source_ref") and control["source_ref"] == brief["source_ref"])
+                or (control.get("needle") and control["needle"] in text)):
             return "用户已结束或暂缓这个话题"
     recent = recent_photo_entries(state)[-8:]
     for old in recent:
@@ -97,10 +187,12 @@ def photo_repeat_reason(plan: dict[str, Any], state: dict[str, Any]) -> str:
             return "配文与已发内容高度重复"
         if _similar(str(plan.get("scene") or ""), str(old.get("scene") or "")) > .9:
             return "画面与已发内容高度重复"
-        same_topic = _similar(brief["topic_key"], str(previous.get("topic_key") or old.get("topic") or "")) > .78
-        same_delta = _similar(brief["actual_change"], str(previous.get("actual_change") or "")) > .8
-        if same_topic and (not brief["actual_change"] or same_delta):
-            return "同一件事没有新的结果"
+        same_topic = same_photo_topic(brief["topic_key"], str(previous.get("topic_key") or old.get("topic") or ""))
+        evidenced_change = (brief["source_ref"] and brief["source_ref"] == previous.get("source_ref")
+                            and brief["source_version"] and previous.get("source_version")
+                            and brief["source_version"] != previous.get("source_version"))
+        if same_topic and not evidenced_change:
+            return "同一件事没有新的结果依据（同义改写不算变化）"
     if brief["sharing_motive"] == "waiting" and any(
         (old.get("photo_brief") or {}).get("sharing_motive") == "waiting" for old in recent
     ):
@@ -114,13 +206,27 @@ def photo_repeat_reason(plan: dict[str, Any], state: dict[str, Any]) -> str:
     return ""
 
 
-def photo_history_context(state: dict[str, Any]) -> str:
+def photo_history_context(state: dict[str, Any], *, include_visual: bool = True) -> str:
     records = []
     for entry in recent_photo_entries(state)[-8:]:
-        brief = entry.get("photo_brief")
-        records.append(brief if isinstance(brief, dict) else {"topic": compact(entry.get("caption"), 60)})
+        brief = entry.get("photo_brief") or {}
+        record = {"topic_key": compact(brief.get("topic_key") or entry.get("caption"), 60),
+                  "shown": (photo_scene_summary(entry, limit=180) if include_visual else "") or compact(entry.get("caption"), 60)}
+        caption = compact(entry.get("caption"), 60)
+        if caption and caption not in record["shown"]:
+            record["said"] = caption
+        if entry.get("message_id"):
+            record["photo_id"] = entry["message_id"]
+        if brief.get("source_ref"):
+            record["source_ref"] = brief["source_ref"]
+        framing = "/".join(str(brief[k]) for k in ("subject_mode", "framing", "angle") if brief.get(k))
+        if framing:
+            record["frame"] = framing
+        if entry.get("user_feedback"):
+            record["user_feedback"] = [compact(f.get("text"), 100) for f in entry["user_feedback"][-2:]]
+        records.append(record)
     controls = [c for c in state.get("photo_topic_controls", []) if not c.get("until") or c["until"] > time.time()]
-    return "近期成功分享的取景（仅避重，不是待续写素材）:\n" + json.dumps(records, ensure_ascii=False) + "\n用户话题边界:\n" + json.dumps(controls[-12:], ensure_ascii=False)
+    return "近期成功分享（事实连续性/避重；不是待续写素材，用户反馈不等于完成）:\n" + json.dumps(records, ensure_ascii=False, separators=(",", ":")) + "\n用户话题边界:\n" + json.dumps(controls[-12:], ensure_ascii=False, separators=(",", ":"))
 
 
 def record_topic_control(state: dict[str, Any], user_text: str) -> None:

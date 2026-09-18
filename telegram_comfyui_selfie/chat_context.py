@@ -195,7 +195,11 @@ class ChatContextMixin:
             if message["role"] == "user":
                 record_topic_control(state, message["content"])
         try:
-            self.app_store.append_messages(session_id, self._context_character_key(session_id), clean)
+            ids = self.app_store.append_messages(session_id, self._context_character_key(session_id), clean)
+            from .photo_sharing import record_photo_feedback
+            for message, message_id in zip(clean, ids):
+                if message["role"] == "user":
+                    record_photo_feedback(state, message["content"], f"db:{message_id}")
         except Exception:
             logger.warning("chat message sqlite append failed", exc_info=True)
         full_snapshot = list(history)
@@ -760,7 +764,10 @@ class ChatContextMixin:
         history.extend(new_messages)
         self._expire_short_context_notice(state)
         try:
-            self.app_store.append_messages(session_id, self._context_character_key(session_id), new_messages)
+            ids = self.app_store.append_messages(session_id, self._context_character_key(session_id), new_messages)
+            if ids:
+                from .photo_sharing import record_photo_feedback
+                record_photo_feedback(state, stored_user_text, f"db:{ids[0]}")
         except Exception:
             logger.warning("chat message sqlite append failed", exc_info=True)
         full_snapshot = list(history)
@@ -1776,10 +1783,10 @@ class ChatContextMixin:
 
     @staticmethod
     def _compact_system_history_message(msg: dict[str, Any]) -> dict[str, Any]:
-        """历史里的系统记录在进 prompt 时压成一行中文。
+        """历史里的系统记录在进 prompt 时压成一行。
 
         存储格式保持不变（衣橱记录的 state_json 还要给 checkpoint 同步解析），只在渲染时：
-        - 旧格式照片历史（英文 nltag 段落 + 键值对）→ 只留中文意图/配文；
+        - 旧格式照片历史 → 保留实际场景字段、意图和配文，去掉内部元数据；
         - 衣橱状态 state_json → "衣橱记录：现在穿 …；部件状态 …"。
         """
         content = str(msg.get("content") or "")
@@ -1789,7 +1796,9 @@ class ChatContextMixin:
                 key, sep, value = line.partition(":")
                 if sep:
                     fields[key.strip()] = value.strip()
-            parts = []
+            from .generation import _payload_nltag
+            scene_description = _payload_nltag(fields)
+            parts = [scene_description] if scene_description else []
             intent = fields.get("source_intent", "")
             if intent:
                 parts.append(intent[:120])

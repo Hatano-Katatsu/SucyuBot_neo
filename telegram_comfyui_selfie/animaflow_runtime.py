@@ -22,7 +22,7 @@ ANIMAFLOW_GENERATE_PATH = "/anima/generate"
 PREFERRED_ANIMAFLOW_WORKFLOW = "anima29_turbo"
 LEGACY_TURBO_V1_WORKFLOW = "turbo_v1"
 ANIMAFLOW_NEGATIVE_FIELDS = ("neg", "negative", "negative_prompt")
-ANIMAFLOW_NLTAG_FIELDS = ("nltag", "nl_tag", "nl_tags", "tags")
+ANIMAFLOW_NLTAG_FIELDS = ("nltag", "nl_tag", "nl_tags", "tags", "tag")
 
 # `/anima/workflows` 不可用时只保留改造前的 turbo_v1 兼容入口。这里是 Bot 的
 # HTTP 协议兜底，不包含或导入任何 ComfyUI 插件实现。

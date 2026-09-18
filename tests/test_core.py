@@ -1578,8 +1578,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         photo_history = session_schema.get_chat_history(svc._get_session_state(sid))[-1]
         self.assertEqual(photo_history["role"], "system")
         self.assertTrue(photo_history["content"].startswith("照片记录："))
-        # 英文场景描述不进聊天历史（只给规划器用），记录里只保留中文摘要位
-        self.assertNotIn("standing by a window", photo_history["content"])
+        # 旧记录没有 nltag 时仍保留实际 scene，不再因为英文而丢掉画面。
+        self.assertIn("standing by a window", photo_history["content"])
 
     def test_record_sent_photo_uses_nltag_for_history_context(self):
         svc = self.make_service()
@@ -1602,8 +1602,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(photo["nltag"], "A final natural-language nltag sentence beside the window. no text, no logo")
         history_message = session_schema.get_chat_history(state)[-1]["content"]
         self.assertTrue(history_message.startswith("照片记录："))
-        self.assertNotIn("nltag", history_message)
-        self.assertNotIn("natural-language", history_message)
+        self.assertIn(photo["nltag"], history_message)
         self.assertIn("自拍", history_message)
         self.assertIn("意图: 用户想看窗边照片", history_message)
         self.assertIn("配文：给你看一眼。", history_message)
@@ -2929,6 +2928,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             svc.send_photo.assert_awaited_once_with(123, b"image", "第一行 第二行")
             self.assertEqual(svc._llm_write_scene.await_args.kwargs["temporary_system_prompt"], temporary_prompt)
 
+            svc._llm_write_scene.return_value = {"scene": "fresh breakfast on the kitchen table", "caption": "今天煎蛋居然没破", "view": "scene", "subject_mode": "detail"}
             ok = await svc._sched_fire(sid, fixed_now, mode_override="morning", skip_active_check=True)
 
             self.assertTrue(ok)
@@ -3603,7 +3603,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("自拍", history_message)
         self.assertIn("配文：给你看一眼。", history_message)
         self.assertNotIn("source_kind", history_message)
-        self.assertNotIn("nltag", history_message)
+        self.assertIn(photo["nltag"], history_message)
 
     def test_followup_push_planner_uses_checkpoint_history_prefix_and_dynamic_push_context(self):
         async def run():
@@ -3789,8 +3789,8 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertEqual(plan["caption"], "早呀，梦到你在后厨给我扎双马尾，醒来头发还是散着。")
             self.assertEqual(svc._call_llm_messages.await_count, 1)
             joined = "\n".join(m.get("content", "") for m in svc._call_llm_messages.await_args.args[0])
-            self.assertIn("最近主动推送内容避重", joined)
-            self.assertIn("recent_push_1", joined)
+            self.assertIn("昨晚梦到你在面包店后厨给我扎双马尾", joined)
+            self.assertIn("sunlit kitchen", joined)
             self.assertNotIn("推送内容重复修正", joined)
 
         asyncio.run(run())
@@ -6594,8 +6594,10 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("衣服脱了", "\n".join(m.get("content", "") for m in messages[:-3]))
             self.assertNotIn("衣服脱了", system)
             self.assertNotIn("衣服脱了", user)
-            # 英文 nltag 不再进聊天历史；硬转场时规划器只拿到"避重"提示，不承接上一张的服装
-            self.assertNotIn("loose cotton knit cardigan", joined)
+            # 历史保留当时的实际画面；硬转场不能把旧穿搭重新投射到当前动态状态。
+            self.assertIn("loose cotton knit cardigan", "\n".join(m.get("content", "") for m in messages[:-3]))
+            self.assertNotIn("loose cotton knit cardigan", system)
+            self.assertNotIn("loose cotton knit cardigan", user)
             self.assertIn("照片记录：", joined)
             self.assertIn("最近图片仅用于避重", joined)
             self.assertNotIn("最近图片视觉参考（checkpoint 后，仅用于承接或避重", joined)
@@ -8369,6 +8371,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertEqual(set(ss.SESSION_GLOBAL_STATE_KEYS), {
             "last_interaction", "last_morning_greet_date",
             "daily_trigger_times", "daily_trigger_date", "daily_triggered_times",
+            "push_diagnostics",
             "post_chat_push_date", "post_chat_push_count", "last_post_chat_push_time",
             "web_search_date", "web_search_count",
             "push_topic_search_date", "push_topic_search_count",
@@ -11561,7 +11564,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("文爱/性爱语言规则", nude[-2]["content"])
 
     def test_history_system_records_are_compacted_for_prompt(self):
-        """旧格式照片历史 / 衣橱 state_json 进 prompt 时压成一行中文；相邻衣橱记录只留最后一条。"""
+        """旧照片保留实际场景，衣橱记录压成一行；相邻衣橱只留最后一条。"""
         svc = self.make_service()
         sid = "telegram:1"
         state = svc._get_session_state(sid)
@@ -11596,7 +11599,7 @@ class ServiceTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("用户夸绿萝好看", contents[2])
         self.assertIn("配文：喏~一个画面都齐了噢。", contents[2])
         self.assertNotIn("nltag", contents[2])
-        self.assertNotIn("lounges sideways", contents[2])
+        self.assertIn("lounges sideways", contents[2])
         self.assertTrue(contents[3].startswith("衣橱记录（"))
         self.assertIn("red blouse", contents[3])
         self.assertIn("bottom=half_off", contents[3])

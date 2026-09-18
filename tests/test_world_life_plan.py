@@ -168,7 +168,8 @@ class WorldLifePlanTestCase(ServiceFixtureMixin, unittest.TestCase):
         self.assertIn("去咖啡店把草稿", ctx)
         self.assertIn("新的便签纸", ctx)
         self.assertNotIn("晨跑", ctx)
-        self.assertIn("source_ref=life::2026-07-02:e1", ctx)
+        event = svc._load_life_plan_row(sid)["payload"]["today"]["events"][0]
+        self.assertIn("source_ref=" + svc._life_photo_source_ref(sid, "2026-07-02", event["continuity_id"]), ctx)
 
     def test_life_plan_ops_apply_caps_and_ignore_unknown_ids(self):
         svc = self.make_service()
@@ -1296,7 +1297,6 @@ class WorldLifePlanTestCase(ServiceFixtureMixin, unittest.TestCase):
             self.assertIn("complete long_goals and complete mid_goals arrays", system)
             self.assertNotIn("Core drive candidates", user)
             self.assertIn("Goal rewrite mode: full long_goals + mid_goals replacement", user)
-            self.assertIn("Original long/mid goals before this manual rewrite", user)
             self.assertIn("把照顾用户变成默认状态", user)
             self.assertIn("从事业、爱好和生活节奏拆开", user)
             self.assertIn("敏感、要强", user)

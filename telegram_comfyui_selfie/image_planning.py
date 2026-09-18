@@ -1125,9 +1125,6 @@ async def plan_roleplay_image(
     is_followup = mode == "followup"
     is_ntr = (mode or "").strip().lower() == "ntr"
     forbidden_captions = _recent_photo_captions_for_push(service, state, session_id) if is_push else []
-    recent_push_texts = _recent_push_texts_for_push(service, state, session_id) if is_push else []
-    # 话题级避重：跨场景重置保留，专门堵 /新场景 后避重历史被清空的缺口。
-    recent_push_topics = _recent_push_topics_for_push(service, state, limit=2) if is_push else []
     # 冷启动判定：推送时用户最近是否无互动（用于决定是否引入外部话题素材）。
     push_is_cold = False
     if is_push:
@@ -1173,14 +1170,6 @@ async def plan_roleplay_image(
     clear_undress_state_after_success = bool(
         hard_scene_transition and (mode or "").strip().lower() != "morning"
     )
-    if hard_scene_transition:
-        # 硬转场仍需知道最近推送来避重，但不能把上一张图的地点/动作继续喂回规划器。
-        recent_push_texts = _recent_push_texts_for_push(
-            service,
-            state,
-            session_id,
-            include_visual=False,
-        )
     # 非早安硬转场只提出清理临时裸体/半脱状态；实际提交必须等图片发送并写入照片历史成功。
     # 本轮规划通过 hard_scene_transition 分支丢弃上一幕连续性，且下方不会续用持久裸体。
     continuity_context = (
@@ -1480,6 +1469,8 @@ async def plan_roleplay_image(
         + stable_sex_tag_rules
         + json_contract_rules
     )
+    if is_push and not is_ntr:
+        stable_front += "\n" + PHOTO_RULES
     if needs_caption:
         if is_push:
             stable_front += (
@@ -1607,14 +1598,6 @@ async def plan_roleplay_image(
     forbidden_caption_context = _format_forbidden_caption_context(forbidden_captions)
     if forbidden_caption_context:
         push_dynamic_parts.append(forbidden_caption_context)
-    recent_push_context = _format_recent_push_dedup_context(recent_push_texts)
-    if recent_push_context:
-        push_dynamic_parts.append(recent_push_context)
-    # 话题级避重（跨场景重置保留）：即使 /新场景 把文本级避重历史清空，
-    # 这里仍能保证最近两次推送的主题方向不重复。
-    topic_dedup_context = _format_recent_push_topic_dedup_context(recent_push_topics)
-    if topic_dedup_context:
-        push_dynamic_parts.append(topic_dedup_context)
     # 当日网络话题池首次刷新时附带的搜索摘要，只用于给具体话题引导提供事实依据。
     if is_push and push_topic_seed:
         push_dynamic_parts.append(
@@ -1632,8 +1615,8 @@ async def plan_roleplay_image(
         )
     if life_push_context:
         push_dynamic_parts.append(life_push_context)
-    if is_push and not is_ntr:
-        push_dynamic_parts.extend((PHOTO_RULES, photo_history_context(state)))
+    if is_push:
+        push_dynamic_parts.append(photo_history_context(state, include_visual=not hard_scene_transition))
     if hasattr(service, "_imported_world_context"):
         push_dynamic_parts.append(service._imported_world_context(session_id, " ".join(push_topic_guides or [])))
     push_dynamic_context = "\n".join(part for part in push_dynamic_parts if part)

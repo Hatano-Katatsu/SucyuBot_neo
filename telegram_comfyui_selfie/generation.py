@@ -79,8 +79,6 @@ ANIMATOOL_PANEL_GUARD_TERMS = (
 
 def _remember_generated_nltag(service: Any, session_id: str, nltag: str):
     text = str(nltag or "").strip()
-    if not text:
-        return
     try:
         service._last_generated_nltag = text
         if session_id:
@@ -94,13 +92,18 @@ def _remember_generated_nltag(service: Any, session_id: str, nltag: str):
 
 
 def _payload_nltag(payload: dict[str, Any]) -> str:
+    """记录实际场景字段：tag/tags 与自然语言字段互补，别只取第一个。"""
     if not isinstance(payload, dict):
         return ""
-    for field in ANIMATOOL_NLTAG_FIELDS:
-        text = str(payload.get(field) or "").strip()
-        if text:
-            return text
-    return ""
+    parts = []
+    for field in dict.fromkeys(("tags", "tag", *ANIMATOOL_NLTAG_FIELDS)):
+        value = payload.get(field)
+        if isinstance(value, list):
+            value = ", ".join(v for v in value if isinstance(v, str))
+        text = " ".join(str(value or "").split()) if isinstance(value, (str, list)) else ""
+        if text and text not in parts:
+            parts.append(text)
+    return ", ".join(parts)
 
 
 def _preferred_animatool_nltag_field(properties: dict[str, Any], required: set[str] | None = None) -> str:

@@ -111,7 +111,7 @@ telegram_comfyui_selfie/
 - checkpoint 摘要 system/user 模板为模块级常量，chat/image 两分支共用同一文本仅 purpose 不同。
 - 短期注意规则（切场景后提醒模型不要续旧上下文）最多驻留 `SHORT_CONTEXT_NOTICE_MAX_TURNS`（2）轮角色回复，回复入库时由 `_expire_short_context_notice` 清除，不在稳定前缀永久驻留。
 - `_chat_prompt_history()` 使用 checkpoint 之后的全量历史；裁剪后第一条必须为 `user`。任何折叠路径（普通 checkpoint、推送前 `_checkpoint_context_before_push`）都只按 `context_window_message_limit` 超限才折、折完保留 `checkpoint_keep_message_limit` 条；推送前不得把窗口掏到只剩最后一轮。半稳定槽/世界条件/动态尾部变化只记录签名，不 `force` checkpoint。
-- 历史里的系统记录进 prompt 时压成一行中文（`_compact_system_history_message`）：旧格式照片历史只留意图/配文，衣橱 `state_json` 渲染为「衣橱记录：现在穿 …」且相邻记录只留最后一条；存储格式不变，`state_json` 仍供 checkpoint 同步解析。新写入的照片记录本身就是一行「照片记录：中文场景（视角；意图）｜配文」，英文 nltag 与视角元数据只留在 `sent_photos_history` 给规划器。推送文案同时以 `assistant` 消息入历史。
+- 历史里的系统记录进 prompt 时压成一行（`_compact_system_history_message`）：照片直接复用实际生图场景，原生使用 scene 的自然语言 tag，AnimaFlow 合并去重 tag/tags 与 nltag（兼容 nl_tag/nl_tags 和只有 tag 的工作流），不额外生成中文摘要。没有实际 nltag 的旧记录回退 scene；不能仅因英文而丢弃画面。衣橱 `state_json` 渲染为「衣橱记录：现在穿 …」且相邻记录只留最后一条，原始 `state_json` 仍供 checkpoint 同步解析。照片记录为「照片记录：实际场景（视角；意图）｜配文」，推送文案另以 `assistant` 消息入历史。
 - Telegram 输入增强只保留「【引用内容】」「【图片附件】/【图片描述】」分段，当前输入不加「【用户当前输入】」标题，与历史格式一致（历史入库仍兼容剥离旧标题）。
 - checkpoint 按最旧完整轮次和实际字符预算正序分页；超长单轮分块全部成功后才推进其消息 ID。所有入口共享 `session_id + character` 锁，SQLite 提交使用版本 CAS 且边界只允许单调前进。
 - 照片记录是一行中文的历史 `system` 消息。dream 与长期记忆提取只消费真实 `user/assistant` 对话。
@@ -148,7 +148,8 @@ telegram_comfyui_selfie/
 ## 生图与 PromptSlots
 
 - 自动生活分享的 `subject_mode=character/detail/environment` 与 view 分开。detail/environment 不添加人物人数、身份、稳定外貌或衣柜，不改角色穿搭；角色拍眼前事物使用 scene，不能冒充用户 POV。原生与 AnimaFlow 两条出口都遵守主体约束；远端 schema 限制无人图时与重复修正共享最多一次重规划。
-- `photo_brief` 和 Telegram message_id 只在图片确认发送后写入照片/推送历史。生活 source_ref 包含角色、日期、事件 ID，source_version 由当前事件和用户证据计算，不接受模型自报。图片不自动完成目标。最近 8 次成功推送参与避重，紧凑记录最多 32 条/7 天；内容不足抛 PhotoContentSkipped 消耗本窗口，不进入故障退避。
+- `photo_brief` 和 Telegram message_id 只在图片确认发送后写入照片/推送历史。生活 source_ref 绑定角色与跨日 continuity_id，兼容校验当日旧格式来源；source_version 只使用代码维护的结果版本及该事项的相关用户证据，不使用任意最近发言时间或模型自报。图片和用户建议不自动完成目标。所有自动模式（含早安、晚安引导、续场）都经过避重；最近 8 次成功推送参与检查，记录最多 32 条/7 天，旧 sent_photos_history 仍参与兼容读取。内容不足抛 PhotoContentSkipped 消耗本窗口，不进入故障退避。
+- 照片协议固定放规划稳定层；近期照片特征合并为一份紧凑材料。硬转场时只保留话题/配文/用户反馈，不能重新注入旧取景和穿搭。翻译任务显式关闭可选 thinking，不修改用户的聊天模型思考设置。
 
 - `PromptSlots` 是最终正向提示词来源，顺序为 `quality -> count -> identity -> style_artist -> effective_appearance -> style_general -> safety -> scene -> one_shot_appearance`。
 - `scene` 只描述镜头、地点、动作、光线、道具和氛围，不重复稳定外貌与穿搭。
@@ -164,6 +165,11 @@ telegram_comfyui_selfie/
 - AnimaFlow slots 规划（`plan_animaflow_slots`）在 LLM 输出后有确定性身份终裁（`_enforce_animaflow_identity`）：源槽位（effective/one_shot appearance）里的发/瞳标签必须逐字保留在 appearance 字段，输出中与源冲突的发色/瞳色（含 tags 自然语言）一律改回源颜色；`white hair ribbon` 等发饰不算发色，源无颜色信息时不做颜色裁决。
 
 ## 调度与世界状态
+
+- 生活线长/中期目标上限只统计 active；已完成/放弃的目标独立保留最近 32 条及仍被引用的记录，读取旧数据、增量更新和 WebUI 编辑遵守同一规则。自动全量更新不能复活已结束 ID；缺少活动目标时最多补建一次，仍缺失则更新失败，不假报成功。无模型回退也保留历史目标。
+- 成功照片上的用户反馈保留原话和消息 ID，Telegram 显式回复准确关联原照片，非引用短答不自动当作剧情进展。反馈随角色照片历史隔离，并进入生活线材料；建议不是完成证据，明确暂停相关事项须遵守话题边界。
+- 会话级 push_diagnostics 保存最近 7 天、最多 256 条推送尝试/重规划/发送/跳过/失败结果，记录角色、模式、原因码、来源版本及成功 message_id，不保存完整提示词、凭据或异常响应正文。
+- `scripts/push_quality_metrics.py --since <带时区的ISO时间> [--until <结束时间>]` 只读统计缓存、成功照片类型、推送诊断和相关用户反馈；统计受各记录的保留范围限制，不可当作全量回复率。
 
 - dream 的每日执行独立于推送开关和推送次数限制；到角色起床时间后可单独运行。NTR/纯洁度自动覆盖（purity<0、超阈值、purity==0 随机）只作用于未显式指定 morning 的推送；显式 morning 保持 morning 语义（含 dream）。NTR 推送在今日尚未 dream 时也会在正文生成前补跑一次 dream（`_dream_done_today` 按 context_meta.last_dream_at 去重），保证非激活角色（无 scheduler daily-wake 兜底）的日记/角色背景不因被覆盖而停更。
 - dream 在起床时间整理并归档前一天日记；每日推送次数是包含固定早安与固定晚安在内的总配额，1 次时仅发早安。晚间作息按下一自然日是否为休息日选择睡觉时间，固定晚安复用普通/NTR 推送并只注入临时晚安引导。

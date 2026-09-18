@@ -588,6 +588,7 @@ class TelegramComfyUIService(
                     text = str(cache.get(session_id) or "").strip()
                     if text:
                         return text
+                return ""
             return str(getattr(self, "_last_generated_nltag", "") or "").strip()
         except Exception:
             return ""
@@ -662,15 +663,12 @@ class TelegramComfyUIService(
         "pov": "用户视角",
         "third": "第三人称",
         "portrait": "他人帮拍",
+        "scene": "角色眼前的景物",
     }
 
     @staticmethod
     def _format_photo_history_system_message(photo: dict[str, Any]) -> dict[str, str]:
-        """聊天历史里的照片记录：一行中文，只给聊天模型承接"刚才那张"所需的信息。
-
-        英文 nltag、视角/来源等元数据留在 sent_photos_history 供生图规划器使用，不进聊天历史——
-        一段上千字的英文生图描述插在中文对话中间，比它前后三轮对话加起来还长，只会分散注意力。
-        """
+        """一行照片记录：复用实际场景字段，帮助聊天承接刚才那张。"""
         scene = re.sub(r"\s+", " ", str(photo.get("scene") or "")).strip()
         caption = str(photo.get("caption") or "").strip()
         source_intent = (
@@ -679,10 +677,8 @@ class TelegramComfyUIService(
         )
         view = str(photo.get("view") or "").strip().lower()
         view_label = TelegramComfyUIService._PHOTO_VIEW_LABELS.get(view, "")
-        has_cjk = bool(re.search(r"[一-鿿]", scene))
-        summary = scene if has_cjk else ""
-        if len(summary) > 80:
-            summary = summary[:80].rstrip("，,、；;。 ") + "……"
+        from .photo_sharing import photo_scene_summary
+        summary = photo_scene_summary(photo)
         details = []
         if view_label:
             details.append(view_label)
@@ -1398,6 +1394,8 @@ class TelegramComfyUIService(
                 tag="translate",
                 purpose="image",
                 session_id=session_id,
+                disable_thinking=True,
+                max_tokens=1536,
             )
         except Exception as exc:
             # 思考模型只输出 reasoning（通常 finish_reason=length）或接口异常时，

@@ -1039,8 +1039,22 @@ class SchedulerRuntimeMixin:
     ) -> None:
         """推送成功后追加话题日志（跨 /新场景 保留）。"""
         from .image_planning import _push_topic_signature
+        from .photo_sharing import photo_scene_summary
         state = self._get_session_state(session_id)
-        topics = recent_photo_entries(state)
+        topics = []
+        for entry in recent_photo_entries(state):
+            if message_id is not None and entry.get("message_id") == message_id:
+                continue
+            if (message_id is None and entry.get("caption") == caption and entry.get("scene") == scene
+                    and time.time() - float(entry.get("ts") or entry.get("timestamp") or 0) < 5):
+                continue
+            topics.append({k: entry[k] for k in ("ts", "caption", "scene", "topic", "direction", "search_query",
+                           "topic_guides", "photo_brief", "message_id", "user_feedback", "visual_summary") if k in entry})
+            topics[-1]["ts"] = float(entry.get("ts") or entry.get("timestamp") or 0)
+            topics[-1]["visual_summary"] = photo_scene_summary(entry)
+        sent = next((p for p in reversed(session_schema.get_sent_photos_history(state))
+                     if (message_id is not None and p.get("message_id") == message_id)
+                     or (message_id is None and p.get("scene") == scene and p.get("caption") == caption)), {})
         topic_sig = _push_topic_signature(caption, scene)
         topics.append({
             "ts": time.time(),
@@ -1048,6 +1062,7 @@ class SchedulerRuntimeMixin:
             "message_id": message_id,
             "caption": (caption or "").strip()[:200],
             "scene": (scene or "").strip()[:700],
+            "visual_summary": photo_scene_summary(sent or {"scene": scene}),
             "topic": topic_sig,
             "direction": (direction or "").strip().lower(),
             "search_query": (search_query or "").strip()[:120],
@@ -2959,6 +2974,27 @@ class SchedulerRuntimeMixin:
         session_schema.set_ntr_stage_reached(state, current)
         self._mark_dirty(session_id)
 
+    def _record_push_diagnostic(self, session_id: str, attempt_id: str, mode: str, outcome: str,
+                                reason: str = "", brief: dict[str, Any] | None = None, message_id=None) -> None:
+        """保存有限的推送结果指标，避免诊断依赖完整正文日志。"""
+        try:
+            state = self._get_session_state(session_id)
+            now = time.time()
+            entry = {"ts": now, "attempt_id": attempt_id, "character": self._context_character_key(session_id),
+                     "mode": mode, "outcome": outcome, "reason": reason[:120]}
+            if brief:
+                entry.update(subject_mode=brief.get("subject_mode"), source_ref=brief.get("source_ref"),
+                             source_version=brief.get("source_version"))
+            if message_id is not None:
+                entry["message_id"] = message_id
+            records = [r for r in session_schema.get_push_diagnostics(state)
+                       if isinstance(r, dict) and float(r.get("ts") or 0) >= now - 7 * 86400]
+            session_schema.set_push_diagnostics(state, (records + [entry])[-256:])
+            self._save_session_state(session_id, state)
+            self._ulog(session_id, "PUSH_METRICS", json.dumps(entry, ensure_ascii=False, separators=(",", ":")))
+        except Exception:
+            logger.warning("push diagnostic persistence failed", exc_info=True)
+
     async def _sched_fire(
         self,
         session_id: str,
@@ -2995,6 +3031,8 @@ class SchedulerRuntimeMixin:
     ) -> bool:
         if not session_id or (not skip_active_check and session_id in self._active_pushes):
             return False
+        attempt_id = f"{time.time_ns():x}"
+        mode = mode_override or "normal"
         op_lock = None
         lock_acquired = False
         if not character_lock_held:
@@ -3030,6 +3068,7 @@ class SchedulerRuntimeMixin:
                     mode = "ntr"
                 if mode == "normal" and purity == 0 and random.random() < 0.4:
                     mode = "ntr"
+            self._record_push_diagnostic(session_id, attempt_id, mode, "attempt")
             # dream 是角色每日整理（前一天日记 + 角色背景/历史总结），与推送叙事模式解耦：
             # morning 语义必然触发；purity=-1 等覆盖产生的 NTR 推送今日尚未整理时也补跑一次，
             # 避免非激活角色（无 scheduler daily-wake 兜底）的整理链路整体丢失。
@@ -3139,9 +3178,12 @@ class SchedulerRuntimeMixin:
             )
             if not plan or not plan.get("scene"):
                 self._ulog(session_id, "PUSH", f"推送规划为空 mode={mode}")
+                self._record_push_diagnostic(session_id, attempt_id, mode, "failed", "empty_plan")
                 return False
             # 重复和工作流能力共用最多一次重规划，不在生成失败后无限追加调用。
             for correction in range(2):
+                if local_interaction:
+                    plan = {**plan, "caption": self._single_line_push_caption(local_interaction.get("push_caption") or "")}
                 if hasattr(self, "_validate_life_photo_source"):
                     plan = self._validate_life_photo_source(session_id, plan)
                 constraint = ""
@@ -3154,12 +3196,14 @@ class SchedulerRuntimeMixin:
                             apply_photo_subject_contract({}, PromptSlots(subject_mode="environment"), schema)
                         except ValueError as exc:
                             constraint = str(exc) + "；改为同一地点合理的人物照片，subject_mode 必须为 character。"
-                repeat_reason = photo_repeat_reason(plan, state) if mode == "normal" and not local_interaction and not temporary_system_prompt else ""
+                repeat_reason = photo_repeat_reason(plan, state)
                 reason = constraint or repeat_reason
                 if not reason:
                     break
                 if correction:
                     raise PhotoContentSkipped("推送本窗口跳过：" + reason)
+                self._record_push_diagnostic(session_id, attempt_id, mode, "replan",
+                                             "workflow_subject" if constraint else "repeated_content", normalize_photo_brief(plan))
                 self._ulog(session_id, "PUSH", "照片候选修正：" + reason)
                 if reason:
                     plan = await self._llm_write_scene(
@@ -3169,6 +3213,7 @@ class SchedulerRuntimeMixin:
                         temporary_system_prompt=(effective_system_prompt or "") + "\n本次候选未发送。请在当前合理动线内换一个拍摄对象或取景：" + reason,
                     )
                     if not plan or not plan.get("scene"):
+                        self._record_push_diagnostic(session_id, attempt_id, mode, "failed", "empty_replan")
                         return False
             photo_brief = normalize_photo_brief(plan)
             subject_mode = photo_brief["subject_mode"]
@@ -3257,6 +3302,7 @@ class SchedulerRuntimeMixin:
                     photo_brief=photo_brief,
                     message_id=message_id,
                 )
+                self._record_push_diagnostic(session_id, attempt_id, mode, "sent", brief=photo_brief, message_id=message_id)
                 if mode == "normal" and post_push_search_query:
                     try:
                         await self._refresh_push_web_topics_after_push(
@@ -3278,11 +3324,17 @@ class SchedulerRuntimeMixin:
                 return True
             else:
                 self._ulog(session_id, "PUSH", f"生图失败 mode={mode}: {err}")
+                self._record_push_diagnostic(session_id, attempt_id, mode, "failed", "image_generation")
                 logger.error("scheduled generate failed: %s", err)
                 return False
         except PhotoContentSkipped:
+            self._record_push_diagnostic(session_id, attempt_id, mode, "skipped", "no_fresh_content")
+            raise
+        except asyncio.CancelledError:
+            self._record_push_diagnostic(session_id, attempt_id, mode, "cancelled")
             raise
         except Exception as exc:
+            self._record_push_diagnostic(session_id, attempt_id, mode, "failed", type(exc).__name__)
             self._ulog(session_id, "PUSH", f"推送异常 mode={mode_override or 'normal'}: {exc}")
             logger.error("scheduled push failed: %s", exc, exc_info=True)
             if fail_fast:

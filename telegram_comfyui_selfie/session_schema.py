@@ -77,6 +77,8 @@ STATE_SCHEMA: dict[str, Field] = {
     "daily_trigger_times": Field(G, default=[]),
     "daily_trigger_date": Field(G, default=""),
     "daily_triggered_times": Field(G, default=[]),
+    # 推送诊断只存结果/原因码和来源指纹，不存正文；跨角色记录显式携带角色键。
+    "push_diagnostics": Field(G, default=[]),
     "post_chat_push_date": Field(G, default=""),
     "post_chat_push_count": Field(G, default=0),
     "last_post_chat_push_time": Field(G, default=0.0),
@@ -1409,6 +1411,14 @@ def set_daily_trigger_date(state, value):
 
 def get_daily_triggered_times(state):
     return _session_get(state, "daily_triggered_times", is_list=True)
+
+
+def get_push_diagnostics(state):
+    return _session_get(state, "push_diagnostics", is_list=True)
+
+
+def set_push_diagnostics(state, value):
+    _session_set(state, "push_diagnostics", value)
 
 def set_daily_triggered_times(state, value):
     _session_set(state, "daily_triggered_times", list(value or []))
